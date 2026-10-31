@@ -30,31 +30,42 @@ static void vga_scroll(void)
     cur_y = VGA_HEIGHT - 1;
 }
 
+/* Writing to 0xB8000 moves the text but not the cursor: the blinking block
+ * is drawn by the CRTC, which knows nothing about our frame buffer writes.
+ * Without this it stays wherever the BIOS left it for the whole session. */
+static void vga_cursor(void)
+{
+    uint16_t pos = (uint16_t)(cur_y * VGA_WIDTH + cur_x);
+
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)(pos >> 8));
+}
+
 static void vga_putc(char c)
 {
     if (c == '\n') {
         cur_x = 0;
         if (++cur_y >= VGA_HEIGHT)
             vga_scroll();
-        return;
-    }
-    if (c == '\r') {
+    } else if (c == '\r') {
         cur_x = 0;
-        return;
-    }
-    if (c == '\b') {
+    } else if (c == '\b') {
         if (cur_x > 0)
             cur_x--;
         vga[cur_y * VGA_WIDTH + cur_x] = (uint16_t)(' ' | ((uint16_t)color << 8));
-        return;
+    } else {
+        vga[cur_y * VGA_WIDTH + cur_x] =
+            (uint16_t)((uint8_t)c | ((uint16_t)color << 8));
+        if (++cur_x >= VGA_WIDTH) {
+            cur_x = 0;
+            if (++cur_y >= VGA_HEIGHT)
+                vga_scroll();
+        }
     }
-    vga[cur_y * VGA_WIDTH + cur_x] =
-        (uint16_t)((uint8_t)c | ((uint16_t)color << 8));
-    if (++cur_x >= VGA_WIDTH) {
-        cur_x = 0;
-        if (++cur_y >= VGA_HEIGHT)
-            vga_scroll();
-    }
+
+    vga_cursor();
 }
 
 /* ---- boot ------------------------------------------------------------ */
@@ -87,6 +98,7 @@ void plat_console_init(void)
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
         vga[i] = (uint16_t)(' ' | ((uint16_t)color << 8));
     cur_x = cur_y = 0;
+    vga_cursor();
 }
 
 void plat_console_putc(char c)
