@@ -243,8 +243,17 @@ func ESPImageFromELF(path string, withSHA256 bool) ([]byte, []ESPSegment, error)
 		if p.Type != elf.PT_LOAD || p.Filesz == 0 {
 			continue
 		}
-		if p.Filesz%4 != 0 || p.Vaddr%4 != 0 {
+		if p.Vaddr%4 != 0 {
 			return nil, nil, fmt.Errorf("%s: segment at 0x%x is not 4-byte aligned", path, p.Vaddr)
+		}
+		if p.Filesz%4 != 0 {
+			/* The ROM copies segments a word at a time, so a short
+			   trailing partial word is rejected before it can silently
+			   read past the end of the file.  Padding the section is
+			   the fix; naming the length here keeps the address in the
+			   message from looking like the culprit. */
+			return nil, nil, fmt.Errorf("%s: segment at 0x%x is %d bytes, not a multiple of 4",
+				path, p.Vaddr, p.Filesz)
 		}
 		buf := make([]byte, p.Filesz)
 		if _, err := p.ReadAt(buf, 0); err != nil {
