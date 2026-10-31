@@ -2,12 +2,14 @@
 #include "rv32_memmap.h"
 #include "console.h"
 #include "string.h"
+#include "process.h"
 
 /* RV32 platform layer for QEMU virt (and later ESP32-C3).
  *
- * P1 scope: 16550 console, CLINT timer, machine-mode traps.  There is no
- * MMU on this target: all addresses are physical and task windows come from
- * the same bump allocator the x86 port uses (kernel/process.c). */
+ * 16550 console, CLINT timer, machine-mode traps, U-mode via PMP and a
+ * RAM disk that holds the littlefs partition.  There is no MMU on this
+ * target: all addresses are physical and task windows come from the same
+ * bump allocator the x86 port uses (kernel/process.c). */
 
 /* ---- 16550 UART (QEMU virt maps UART0 here) -------------------------- */
 
@@ -110,8 +112,7 @@ uint32_t plat_tick_hz(void)
 
 void plat_irq_enable(void)
 {
-    /* mstatus.MIE = bit 3 */
-    __asm__ volatile("csrsi mstatus, 8");
+    __asm__ volatile("csrsi mstatus, 8");   /* mstatus.MIE = bit 3 */
 }
 
 void plat_irq_disable(void)
@@ -121,17 +122,18 @@ void plat_irq_disable(void)
 
 void plat_cpu_idle(void)
 {
-    __asm__ volatile("wfi");
+    __asm__ volatile("csrsi mstatus, 8; wfi");
 }
 
 void plat_cpu_idle_poll(void)
 {
-    __asm__ volatile("nop");
+    /* Re-enable interrupts while polling so the tick keeps advancing; the
+       caller is already spinning on the UART. */
+    __asm__ volatile("csrsi mstatus, 8; nop");
 }
 
 uint32_t plat_uptime_ms(void)
 {
-    /* mtime runs at RV32_TIMER_HZ. */
     return (uint32_t)(clint_time() / (RV32_TIMER_HZ / 1000u));
 }
 
@@ -139,28 +141,70 @@ void plat_sleep_ms(uint32_t ms)
 {
     uint64_t target = clint_time() + (uint64_t)ms * (RV32_TIMER_HZ / 1000u);
     while (clint_time() < target)
-        __asm__ volatile("wfi");
+        __asm__ volatile("csrsi mstatus, 8; wfi");
 }
 
 /* ---- traps ----------------------------------------------------------- */
 
-#include "trap.h"
+static int from_user(const regs_t *f)
+{
+    return (f->mstatus & RV_MSTATUS_MPP_MASK) == RV_MSTATUS_MPP_U;
+}
 
-uint32_t trap_handler(rv32_frame_t *f)
+static const char *cause_name(uint32_t cause)
+{
+    switch (cause) {
+    case 0:  return "instruction address misaligned";
+    case 1:  return "instruction access fault";
+    case RV_MCAUSE_ILLEGAL:      return "illegal instruction";
+    case 3:  return "breakpoint";
+    case 4:  return "load address misaligned";
+    case RV_MCAUSE_LOAD_FAULT:   return "load access fault";
+    case 6:  return "store address misaligned";
+    case RV_MCAUSE_STORE_FAULT:  return "store access fault";
+    case RV_MCAUSE_ECALL_U:      return "ecall from U-mode";
+    case 11: return "ecall from M-mode";
+    default: return "unknown trap";
+    }
+}
+
+regs_t *trap_handler(regs_t *f)
 {
     uint32_t cause = f->mcause;
 
     if (cause == RV_MCAUSE_IRQ_M_TIMER) {
         g_ticks++;
         clint_set_cmp(clint_time() + g_interval);
-        return (uint32_t)f;
+        return f;
     }
 
-    /* Anything else is fatal for now: report and halt. */
+    if (cause == RV_MCAUSE_ECALL_U) {
+        /* Step over the ecall first, so the frame reads like the i386 one
+         * (where the CPU has already pushed the return address): exec and
+         * exit save/replace this frame, and the saved copy must resume
+         * after the syscall rather than re-execute it.  ecall is always a
+         * 4-byte instruction. */
+        f->mepc += 4;
+        syscall_dispatch(f);
+        return f;
+    }
+
+    if (from_user(f)) {
+        /* A user program trapped: kill it and keep the system alive. */
+        kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
+                cause_name(cause), f->mepc);
+        if (cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT)
+            kprintf(" (address 0x%08x)", f->mtval);
+        kprintf("\n");
+        process_kill_current(f, 139);
+        return f;
+    }
+
     kprintf("\n*** RV32 TRAP ***\n");
-    kprintf("mcause=0x%x mepc=0x%x mtval=0x%x\n", cause, f->mepc, f->mtval);
+    kprintf("%s: mcause=0x%x mepc=0x%x mtval=0x%x\n",
+            cause_name(cause), cause, f->mepc, f->mtval);
     plat_panic_halt();
-    return (uint32_t)f;
+    return f;
 }
 
 /* ---- physical memory ------------------------------------------------- */
@@ -168,30 +212,46 @@ uint32_t trap_handler(rv32_frame_t *f)
 /* The flat model needs no frame allocator: RAM is directly addressable.
  * Task windows are carved out by kernel/process.c. */
 
-/* ---- block device (RAM disk for now) --------------------------------- */
+/* ---- block device: RAM disk ------------------------------------------ */
 
-static uint32_t g_ramdisk_page;
+/* The build tool appends the littlefs image to the kernel ELF (see
+ * internal/build), so the partition is simply a writable buffer in RAM.
+ * PLAT_LFS_LBA is 0 here: block 0 of the device is block 0 of the
+ * filesystem. */
+extern uint8_t __ramdisk_start[];
+extern uint8_t __ramdisk_end[];
 
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
-    (void)lba;
-    (void)count;
-    (void)buf;
-    return -1;      /* not implemented in P1 */
+    uint32_t off = lba * 512u;
+    uint32_t len = count * 512u;
+    if (lba != 0 && off < lba)                       /* overflow */
+        return -1;
+    if (off + len < off || off + len > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memcpy(buf, __ramdisk_start + off, len);
+    return 0;
 }
 
 int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 {
-    (void)lba;
-    (void)count;
-    (void)buf;
-    return -1;
+    uint32_t off = lba * 512u;
+    uint32_t len = count * 512u;
+    if (lba != 0 && off < lba)
+        return -1;
+    if (off + len < off || off + len > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memcpy(__ramdisk_start + off, buf, len);
+    return 0;
 }
 
 int plat_block_erase(uint32_t lba)
 {
-    (void)lba;
-    return -1;
+    uint32_t off = lba * 512u;
+    if (off + 512u > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memset(__ramdisk_start + off, 0xFF, 512);
+    return 0;
 }
 
 uint32_t plat_block_size(void)
@@ -201,11 +261,21 @@ uint32_t plat_block_size(void)
 
 uint32_t plat_block_count(void)
 {
-    (void)g_ramdisk_page;
-    return 0;
+    return (uint32_t)(__ramdisk_end - __ramdisk_start) / 512u;
 }
 
 /* ---- boot ------------------------------------------------------------ */
+
+static void pmp_open_all(void)
+{
+    /* U-mode checks every access against PMP.  Without an entry covering
+       the address space, the first user instruction faults.  One NAPOT
+       region of 8 GiB starting at 0 grants RWX everywhere - the flat
+       model deliberately has no memory protection, so this matches the
+       capability of the MCUs we target (see docs/PLATFORM-DESIGN.md). */
+    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(0x3FFFFFFFu));
+    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(0x1Fu));   /* A=NAPOT, RWX */
+}
 
 void plat_early_init(void)
 {
@@ -215,54 +285,58 @@ void plat_early_init(void)
 void plat_init(void)
 {
     plat_console_init();
+    pmp_open_all();
 }
 
-/* ---- user mode (P2) -------------------------------------------------- */
+/* ---- user mode ------------------------------------------------------- */
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
     memset(frame, 0, sizeof(*frame));
-    frame->eip = entry;
-    frame->useresp = sp;
+    frame->sp = sp;
+    frame->mepc = entry;
+    /* Return to U-mode with interrupts "enabled" (MPIE), so mret leaves
+       the machine in the same state a fresh trap from user code finds. */
+    frame->mstatus = RV_MSTATUS_MPP_U | RV_MSTATUS_MPIE;
 }
 
-/* RV32 syscall convention: a7 = number, a0/a1/a2 = arguments.
- * TODO(P2): rv32 has its own trap frame (arch/rv32/trap.h); map those
- * registers here once ecall/U-mode lands. */
+/* RV32 syscall convention: a7 = number, a0/a1/a2 = arguments, a0 = result. */
 void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 {
-    sc->nr = r->eax;
-    sc->a0 = r->ebx;
-    sc->a1 = r->ecx;
-    sc->a2 = r->edx;
+    sc->nr = r->a7;
+    sc->a0 = r->a0;
+    sc->a1 = r->a1;
+    sc->a2 = r->a2;
 }
 
-void plat_frame_set_ret(regs_t *r, uint32_t val) { r->eax = val; }
-uint32_t plat_frame_get_ret(const regs_t *r)    { return r->eax; }
+void plat_frame_set_ret(regs_t *r, uint32_t val) { r->a0 = val; }
+uint32_t plat_frame_get_ret(const regs_t *r)    { return r->a0; }
 
-void plat_shutdown(void)
+int plat_fault_is_user(void *frame)
 {
-    /* QEMU virt: the SBI "shutdown" call would be used on real firmware;
-     * for now just halt. */
-    for (;;)
-        __asm__ volatile("wfi");
+    return from_user((const regs_t *)frame);
+}
+
+/* Implemented in start.S: restores the frame and mret's into it. */
+extern void rv32_enter_user(void *frame) __attribute__((noreturn));
+
+void plat_enter_user(void *frame)
+{
+    rv32_enter_user(frame);
 }
 
 void plat_set_kernel_stack(uint32_t top)
 {
+    /* The kernel stack lives in .bss and start.S computes it directly;
+       there is no TSS to update. */
     (void)top;
 }
 
-void plat_enter_user(void *frame)
+void plat_shutdown(void)
 {
-    (void)frame;
+    /* QEMU virt's SiFive test device: 0x5555 powers the machine off. */
+    mmio_write32(RV32_TEST_BASE, 0x5555u);
     plat_panic_halt();
-}
-
-int plat_fault_is_user(void *frame)
-{
-    (void)frame;
-    return 0;
 }
 
 void plat_panic_halt(void)
@@ -274,5 +348,7 @@ void plat_panic_halt(void)
 
 void plat_reboot(void)
 {
+    /* 0x7777 is the reset request of the same test device. */
+    mmio_write32(RV32_TEST_BASE, 0x7777u);
     plat_panic_halt();
 }

@@ -1,13 +1,15 @@
 /*
- * TinyOS RV32 entry point (machine mode only for now).
+ * TinyOS RV32 entry point and trap vector.
  *
  * QEMU virt memory map (rv32):
  *   0x80000000  RAM (128 MiB by default)
  *   0x10000000  16550 UART0
  *   0x02000000  CLINT (mtime at +0xBFF8, mtimecmp at +0x4000)
  *
- * P1 goal: get a banner on the serial port and a working periodic timer.
- * User mode (U-mode + PMP) comes next.
+ * The kernel runs in machine mode; user programs run in U-mode and enter
+ * the kernel through ecall.  There is no MMU, so U-mode is kept out of
+ * kernel memory by PMP (which, in the flat model, grants the whole address
+ * space: see plat_init in arch/rv32/platform.c).
  */
 
     .section .text.entry, "ax"
@@ -21,10 +23,10 @@ _start:
 
     .option push
     .option norelax
-    la      sp, __stack_top
+    la      sp, __kernel_stack_top
     .option pop
 
-    /* Clear .bss */
+    /* Clear .bss (covers the kernel stack: it is .bss space). */
     .option push
     .option norelax
     la      t0, __bss_start
@@ -49,95 +51,169 @@ park:
     j       park
 
 /* -------------------------------------------------------------------- */
-/* Trap frame layout shared with C (see arch/rv32/trap.h):              */
-/*   0..108   ra,t0-t6,a0-a7,s0-s11                                     */
-/*   112      mstatus                                                   */
-/*   116      mepc                                                      */
-/*   120      mcause                                                    */
-/*   124      mtval                                                     */
+/* Trap frame layout shared with C (arch/rv32/regs.h):                  */
+/*     0..124   x0..x31 (offset == 4 * register number)                 */
+/*   128        mepc                                                    */
+/*   132        mstatus                                                 */
+/*   136        mcause                                                  */
+/*   140        mtval                                                   */
+/*   = 144 bytes, 16-byte aligned                                       */
+/*                                                                      */
+/* Two stacks meet here.  A trap from U-mode switches to the kernel      */
+/* stack before pushing the frame; a trap from M-mode (timer interrupt   */
+/* while a syscall runs, or a kernel bug) pushes onto whichever kernel   */
+/* stack is already in use, which is what makes nesting safe.  A trap    */
+/* clears mstatus.MIE in hardware, so the entry sequence itself cannot   */
+/* be interrupted and may use t0 as scratch.                            */
+
+    .equ FRAME_SIZE, 144
 
     .section .text.trap, "ax"
     .align 4
     .globl trap_entry
 trap_entry:
-    addi    sp, sp, -128
-    sw      ra,   0(sp)
-    sw      t0,   4(sp)
-    sw      t1,   8(sp)
-    sw      t2,  12(sp)
-    sw      a0,  16(sp)
-    sw      a1,  20(sp)
-    sw      a2,  24(sp)
-    sw      a3,  28(sp)
-    sw      a4,  32(sp)
-    sw      a5,  36(sp)
-    sw      a6,  40(sp)
-    sw      a7,  44(sp)
-    sw      t3,  48(sp)
-    sw      t4,  52(sp)
-    sw      t5,  56(sp)
-    sw      t6,  60(sp)
-    sw      s0,  64(sp)
-    sw      s1,  68(sp)
-    sw      s2,  72(sp)
-    sw      s3,  76(sp)
-    sw      s4,  80(sp)
-    sw      s5,  84(sp)
-    sw      s6,  88(sp)
-    sw      s7,  92(sp)
-    sw      s8,  96(sp)
-    sw      s9, 100(sp)
-    sw      s10,104(sp)
-    sw      s11,108(sp)
-
+    csrw    mscratch, t0            /* park t0: needed as scratch below */
     csrr    t0, mstatus
-    sw      t0, 112(sp)
+    srli    t0, t0, 11
+    andi    t0, t0, 3               /* mstatus.MPP */
+    beqz    t0, .Lfrom_user
+
+    /* ---- trap from M-mode: stay on the current stack ---------------- */
+    csrr    t0, mscratch            /* original t0 */
+    addi    sp, sp, -FRAME_SIZE
+    sw      t0, 20(sp)              /* x5 = t0 */
+    addi    t0, sp, FRAME_SIZE
+    sw      t0, 8(sp)               /* frame->sp = kernel sp at trap */
+    j       .Lsave
+
+.Lfrom_user:
+    /* ---- trap from U-mode: switch to the kernel stack -------------- */
+    csrr    t0, mscratch            /* original t0 */
+    csrw    mscratch, sp            /* park the user sp */
+    .option push
+    .option norelax
+    la      sp, __kernel_stack_top
+    .option pop
+    addi    sp, sp, -FRAME_SIZE
+    sw      t0, 20(sp)              /* x5 = t0 */
+    csrr    t0, mscratch
+    sw      t0, 8(sp)               /* frame->sp = user sp */
+
+.Lsave:
+    sw      x1,    4(sp)
+    sw      x3,   12(sp)            /* gp (unused, but keep the frame whole) */
+    sw      x4,   16(sp)            /* tp */
+    sw      x6,   24(sp)
+    sw      x7,   28(sp)
+    sw      x8,   32(sp)
+    sw      x9,   36(sp)
+    sw      x10,  40(sp)
+    sw      x11,  44(sp)
+    sw      x12,  48(sp)
+    sw      x13,  52(sp)
+    sw      x14,  56(sp)
+    sw      x15,  60(sp)
+    sw      x16,  64(sp)
+    sw      x17,  68(sp)
+    sw      x18,  72(sp)
+    sw      x19,  76(sp)
+    sw      x20,  80(sp)
+    sw      x21,  84(sp)
+    sw      x22,  88(sp)
+    sw      x23,  92(sp)
+    sw      x24,  96(sp)
+    sw      x25, 100(sp)
+    sw      x26, 104(sp)
+    sw      x27, 108(sp)
+    sw      x28, 112(sp)
+    sw      x29, 116(sp)
+    sw      x30, 120(sp)
+    sw      x31, 124(sp)
+
     csrr    t0, mepc
-    sw      t0, 116(sp)
+    sw      t0, 128(sp)
+    csrr    t0, mstatus
+    sw      t0, 132(sp)
     csrr    t0, mcause
-    sw      t0, 120(sp)
+    sw      t0, 136(sp)
     csrr    t0, mtval
-    sw      t0, 124(sp)
+    sw      t0, 140(sp)
 
     mv      a0, sp
     call    trap_handler
 
-    /* trap_handler returns the stack pointer to resume on. */
+    /* trap_handler returns the frame to resume on (exec and exit can
+       replace it with a parent's saved frame). */
     mv      sp, a0
+    j       .Lrestore
 
-    lw      t0, 112(sp)
-    csrw    mstatus, t0
-    lw      t0, 116(sp)
+/* -------------------------------------------------------------------- */
+/* Resume a frame: restore CSRs and registers, then mret.  a0 hands the  */
+/* frame in (sp follows it).  Shared with plat_enter_user(), which is    */
+/* how the very first user program is started.                          */
+
+    .globl rv32_enter_user
+rv32_enter_user:
+    mv      sp, a0
+    /* fall through */
+
+.Lrestore:
+    lw      t0, 128(sp)
     csrw    mepc, t0
+    lw      t0, 132(sp)
+    csrw    mstatus, t0
 
-    lw      ra,   0(sp)
-    lw      t0,   4(sp)
-    lw      t1,   8(sp)
-    lw      t2,  12(sp)
-    lw      a0,  16(sp)
-    lw      a1,  20(sp)
-    lw      a2,  24(sp)
-    lw      a3,  28(sp)
-    lw      a4,  32(sp)
-    lw      a5,  36(sp)
-    lw      a6,  40(sp)
-    lw      a7,  44(sp)
-    lw      t3,  48(sp)
-    lw      t4,  52(sp)
-    lw      t5,  56(sp)
-    lw      t6,  60(sp)
-    lw      s0,  64(sp)
-    lw      s1,  68(sp)
-    lw      s2,  72(sp)
-    lw      s3,  76(sp)
-    lw      s4,  80(sp)
-    lw      s5,  84(sp)
-    lw      s6,  88(sp)
-    lw      s7,  92(sp)
-    lw      s8,  96(sp)
-    lw      s9, 100(sp)
-    lw      s10,104(sp)
-    lw      s11,108(sp)
+    /* Where does sp point after this?  Returning to U-mode restores the
+       user stack the trap interrupted (frame->sp); returning to M-mode
+       simply unwinds the frame. */
+    srli    t1, t0, 11
+    andi    t1, t1, 3
+    bnez    t1, .Lkernel_sp
+    j       .Lrestore_regs
+.Lkernel_sp:
+    addi    t0, sp, FRAME_SIZE
+    sw      t0, 8(sp)
 
-    addi    sp, sp, 128
+.Lrestore_regs:
+    lw      x1,    4(sp)
+    lw      x3,   12(sp)
+    lw      x4,   16(sp)
+    lw      x6,   24(sp)
+    lw      x7,   28(sp)
+    lw      x8,   32(sp)
+    lw      x9,   36(sp)
+    lw      x10,  40(sp)
+    lw      x11,  44(sp)
+    lw      x12,  48(sp)
+    lw      x13,  52(sp)
+    lw      x14,  56(sp)
+    lw      x15,  60(sp)
+    lw      x16,  64(sp)
+    lw      x17,  68(sp)
+    lw      x18,  72(sp)
+    lw      x19,  76(sp)
+    lw      x20,  80(sp)
+    lw      x21,  84(sp)
+    lw      x22,  88(sp)
+    lw      x23,  92(sp)
+    lw      x24,  96(sp)
+    lw      x25, 100(sp)
+    lw      x26, 104(sp)
+    lw      x27, 108(sp)
+    lw      x28, 112(sp)
+    lw      x29, 116(sp)
+    lw      x30, 120(sp)
+    lw      x31, 124(sp)
+    lw      x5,   20(sp)
+    lw      sp,    8(sp)
     mret
+
+/* -------------------------------------------------------------------- */
+
+    .section .bss
+    .balign 16
+    .globl __kernel_stack
+__kernel_stack:
+    .space 32768
+    .globl __kernel_stack_top
+__kernel_stack_top:

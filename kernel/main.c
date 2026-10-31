@@ -11,7 +11,7 @@
 static void banner(void)
 {
     kprintf("\nTinyOS - a tiny multi-platform operating system\n");
-    kprintf("ring3/unprivileged ELF loader | littlefs | PIE\n");
+    kprintf("user-mode ELF loader | littlefs | PIE\n");
     kprintf("kernel heap: %u KiB arena\n\n", heap_arena_bytes() / 1024u);
 }
 

@@ -6,6 +6,10 @@
 
 void     process_init(void);
 void     process_start_shell(const char *path) __attribute__((noreturn));
+
+/* Architecture independent syscall entry: each port calls this from its
+ * trap handler (i386 vector 0x80, RV32 ecall from U-mode). */
+void     syscall_dispatch(regs_t *r);
 int      process_exec(regs_t *r, const char *path, char *const argv[], int argc);
 void     process_kill_current(regs_t *r, int code);
 int      process_current_pid(void);

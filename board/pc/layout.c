@@ -15,3 +15,7 @@ const uint32_t PLAT_KERNEL_MAX  = 0x00400000;   /* image + .bss must stay below 
 const uint32_t PLAT_APP_BASE   = 0x01000000;
 const uint32_t PLAT_APP_MAX    = 0x08000000;
 const uint32_t PLAT_APP_WINDOW = 0x00400000;   /* 4 MiB per task */
+
+/* The boot sector loads the kernel from LBA 1 and the filesystem follows
+ * it (BootSectors + KernelSectors = 181, see internal/build). */
+const uint32_t PLAT_LFS_LBA = 181;

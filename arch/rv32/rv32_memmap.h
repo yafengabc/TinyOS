@@ -9,6 +9,12 @@
 #define RV32_UART_BASE     0x10000000u
 #define RV32_CLINT_BASE    0x02000000u
 
+/* SiFive test finisher: writing 0x5555 powers the machine off, 0x7777
+ * resets it.  QEMU virt implements it, which is how we can shut down
+ * without resorting to an SBI call (we boot with -bios none and run in
+ * machine mode ourselves). */
+#define RV32_TEST_BASE     0x00100000u
+
 #define RV32_CLINT_MSIP      0x0000u
 #define RV32_CLINT_MTIMECMP  0x4000u
 #define RV32_CLINT_MTIMECMPH 0x4004u

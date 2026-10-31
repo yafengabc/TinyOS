@@ -3,13 +3,12 @@
 
 #include "types.h"
 
-/* The filesystem is a littlefs partition on the ATA disk.  The build tool
-   writes it right after the kernel image, so its first sector LBA is
-   BootSectors + KernelSectors (1 + 180 = 181).  Keep this in sync with
-   internal/build/build.go.  The API below keeps the old ramdisk shape so
-   the rest of the kernel (and the user ABI) is unchanged. */
-
-#define LFS_PARTITION_LBA 181
+/* The filesystem is a littlefs partition that lives on the platform's
+   block device: on the PC it is written to the disk right after the kernel
+   image (LBA 181), on qemu-virt it is linked into the kernel as RAM.  The
+   first block of the partition is PLAT_LFS_LBA, supplied by the board (see
+   kernel/platform.h).  The API below keeps the old ramdisk shape so the
+   rest of the kernel (and the user ABI) is unchanged. */
 
 void ramdisk_init(void);
 int  ramdisk_ok(void);

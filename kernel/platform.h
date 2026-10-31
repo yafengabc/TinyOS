@@ -66,6 +66,11 @@ void     plat_sleep_ms(uint32_t ms);
 
 /* ---- block device (backing store for littlefs) ----------------------- */
 
+/* First block of the littlefs partition.  The PC port writes the
+ * filesystem right after the kernel image on the boot disk (181); boards
+ * that embed the image in RAM start at 0. */
+extern const uint32_t PLAT_LFS_LBA;
+
 int      plat_block_read(uint32_t lba, uint32_t count, void *buf);
 int      plat_block_write(uint32_t lba, uint32_t count, const void *buf);
 int      plat_block_erase(uint32_t lba);   /* writes the erased value */
@@ -85,13 +90,9 @@ uint32_t plat_block_count(void);
  * (process_user_ok), and reads/writes them directly. */
 
 /* Register frame captured when trapping from user mode.  The layout is
- * architecture specific; this matches the i386 port. */
-typedef struct regs {
-    uint32_t gs, fs, es, ds;
-    uint32_t edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
-    uint32_t vector, err;
-    uint32_t eip, cs, eflags, useresp, ss;
-} regs_t;
+ * architecture specific, so each port supplies it (arch/<arch>/regs.h);
+ * core code only ever touches it through the plat_frame_* helpers below. */
+#include "regs.h"
 
 /* Architecture-neutral view of a syscall trap.  Core code never reads
  * eax/ebx/ecx/edx itself: the arch maps its own convention onto these

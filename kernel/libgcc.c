@@ -89,4 +89,67 @@ uint64_t __muldi3(uint64_t a, uint64_t b)
     return r;
 }
 
+/* 64-bit shifts.  RV32 has no shift wider than XLEN, so clang turns every
+ * 64-bit shift into a call - including the ones inside the routines above,
+ * which is why these have to work on the two 32-bit halves directly. */
+typedef union {
+    uint64_t u;
+    uint32_t w[2];              /* w[0] = low half (little endian) */
+    int32_t  i[2];
+} dword_t;
+
+uint64_t __lshrdi3(uint64_t v, int n)
+{
+    dword_t d;
+    d.u = v;
+    if (n <= 0)
+        return v;
+    if (n >= 64)
+        return 0;
+    if (n >= 32) {
+        d.w[0] = d.w[1] >> (n - 32);
+        d.w[1] = 0;
+    } else {
+        d.w[0] = (d.w[0] >> n) | (d.w[1] << (32 - n));
+        d.w[1] >>= n;
+    }
+    return d.u;
+}
+
+uint64_t __ashldi3(uint64_t v, int n)
+{
+    dword_t d;
+    d.u = v;
+    if (n <= 0)
+        return v;
+    if (n >= 64)
+        return 0;
+    if (n >= 32) {
+        d.w[1] = d.w[0] << (n - 32);
+        d.w[0] = 0;
+    } else {
+        d.w[1] = (d.w[1] << n) | (d.w[0] >> (32 - n));
+        d.w[0] <<= n;
+    }
+    return d.u;
+}
+
+uint64_t __ashrdi3(uint64_t v, int n)
+{
+    dword_t d;
+    d.u = v;
+    if (n <= 0)
+        return v;
+    if (n >= 64)
+        return (uint64_t)(d.i[1] < 0 ? -1 : 0);
+    if (n >= 32) {
+        d.i[0] = d.i[1] >> (n - 32);
+        d.i[1] = d.i[1] < 0 ? -1 : 0;
+    } else {
+        d.i[0] = (int32_t)((d.w[0] >> n) | (d.w[1] << (32 - n)));
+        d.i[1] >>= n;
+    }
+    return d.u;
+}
+
 #endif

@@ -107,6 +107,9 @@ static uint32_t build_initial_stack(proc_t *p, char *const argv[], int argc)
     uint32_t sp = p->stack_top - 256;
     uint32_t uargv[MAX_ARGS];
 
+    /* Strings first, at the top: the program's stack grows down from the
+       [argc][argv] block below them, so it can never clobber its own
+       arguments. */
     for (int i = argc - 1; i >= 0; i--) {
         uint32_t len = (uint32_t)strlen(argv[i]) + 1;
         if (sp < stack_low + 64 + len)
@@ -116,18 +119,20 @@ static uint32_t build_initial_stack(proc_t *p, char *const argv[], int argc)
         uargv[i] = sp;
     }
 
-    sp &= ~0xFu;
-    sp -= (uint32_t)(argc + 1) * 4;
+    /* [argc][argv[0..argc-1]][NULL], with argc 16-byte aligned: the RISC-V
+       psABI (and the i386 one for SSE users) requires the stack to be
+       aligned at a call boundary, and crt0 makes its first call right after
+       reading these words.  Rounding down keeps the block below the
+       strings. */
+    sp = (sp - (uint32_t)(argc + 2) * 4) & ~0xFu;
     if (sp < stack_low)
         return 0;
-    for (int i = 0; i < argc; i++)
-        memcpy((void *)(sp + (uint32_t)i * 4), &uargv[i], 4);
-    uint32_t zero = 0;
-    memcpy((void *)(sp + (uint32_t)argc * 4), &zero, 4);
 
-    sp -= 4;
-    if (sp < stack_low)
-        return 0;
+    for (int i = 0; i < argc; i++)
+        memcpy((void *)(sp + 4u + (uint32_t)i * 4), &uargv[i], 4);
+    uint32_t zero = 0;
+    memcpy((void *)(sp + 4u + (uint32_t)argc * 4), &zero, 4);
+
     uint32_t argc_word = (uint32_t)argc;
     memcpy((void *)sp, &argc_word, 4);
 

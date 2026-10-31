@@ -6,11 +6,11 @@
 #include "lfs_config.h"   /* must come before lfs.h: defines LFS_NO_* + LFS_MALLOC */
 #include "lfs.h"
 
-/* The littlefs partition lives on the ATA disk at a fixed LBA offset (it is
-   written there by the build tool, right after the kernel image).  The
-   kernel reads it on demand through the ATA PIO driver - no ramdisk blob is
-   copied into memory at boot.  Writes (prog/erase) go back to the disk, so
-   the filesystem is genuinely writable. */
+/* The littlefs partition lives on whatever block device the platform
+   provides, starting at PLAT_LFS_LBA: on the PC that is the ATA disk right
+   after the kernel image, on qemu-virt it is a RAM disk linked into the
+   kernel.  Either way writes go back to the device, so the filesystem is
+   genuinely writable. */
 
 #define FS_BLOCK_SIZE  4096
 #define FS_BLOCK_COUNT 75              /* 75 * 4 KiB == 300 KiB == 600 sectors */
@@ -55,7 +55,7 @@ static ofile_t openfiles[MAX_OPEN];
 static uint32_t block_lba(lfs_block_t block, lfs_off_t off)
 {
     uint32_t byte = (uint32_t)block * FS_BLOCK_SIZE + (uint32_t)off;
-    return LFS_PARTITION_LBA + (byte >> 9);
+    return PLAT_LFS_LBA + (byte >> 9);
 }
 
 static int bd_read(const struct lfs_config *c, lfs_block_t block,
@@ -72,10 +72,10 @@ static int bd_read(const struct lfs_config *c, lfs_block_t block,
         return LFS_ERR_IO;
     }
 
-    if (plat_block_read(LFS_PARTITION_LBA + first, count, bounce) != 0) {
+    if (plat_block_read(PLAT_LFS_LBA + first, count, bounce) != 0) {
         kprintf("[lfs] read FAIL block=%u off=%u size=%u abs_lba=%u count=%u\n",
                 (uint32_t)block, (uint32_t)off, (uint32_t)size,
-                LFS_PARTITION_LBA + first, count);
+                PLAT_LFS_LBA + first, count);
         return LFS_ERR_IO;
     }
 
@@ -95,10 +95,10 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block,
         return LFS_ERR_IO;
 
     /* Read-modify-write: a littlefs prog is rarely sector aligned. */
-    if (plat_block_read(LFS_PARTITION_LBA + first, count, bounce) != 0)
+    if (plat_block_read(PLAT_LFS_LBA + first, count, bounce) != 0)
         return LFS_ERR_IO;
     memcpy(bounce + (byte & 0x1FF), buffer, size);
-    if (plat_block_write(LFS_PARTITION_LBA + first, count, bounce) != 0)
+    if (plat_block_write(PLAT_LFS_LBA + first, count, bounce) != 0)
         return LFS_ERR_IO;
     return 0;
 }
@@ -110,7 +110,7 @@ static int bd_erase(const struct lfs_config *c, lfs_block_t block)
        the whole block so stale data can never be mistaken for new.
        Reuse the shared bounce buffer instead of a second 4 KiB array. */
     memset(bounce, 0xFF, sizeof(bounce));
-    uint32_t lba = LFS_PARTITION_LBA + ((uint32_t)block * FS_BLOCK_SIZE >> 9);
+    uint32_t lba = PLAT_LFS_LBA + ((uint32_t)block * FS_BLOCK_SIZE >> 9);
     if (plat_block_write(lba, FS_BLOCK_SIZE / 512, bounce) != 0)
         return LFS_ERR_IO;
     return 0;
@@ -127,7 +127,7 @@ static int bd_sync(const struct lfs_config *c)
 static void write_selftest(void)
 {
     const char *path = "selftest.tmp";
-    const char *msg = "ATA PIO write OK\n";
+    const char *msg = "block device write OK\n";
     uint8_t out[FS_CACHE_SIZE];          /* littlefs cache buffer: >= cache_size */
     uint8_t tmp[64];
     lfs_file_t f;
@@ -153,9 +153,9 @@ static void write_selftest(void)
     lfs_remove(&lfs, path);
 
     if (n > 0 && strcmp((char *)tmp, msg) == 0)
-        kprintf("[ramdisk] ATA write test passed\n");
+        kprintf("[ramdisk] block device write test passed\n");
     else
-        kprintf("[ramdisk] ATA write test FAILED\n");
+        kprintf("[ramdisk] block device write test FAILED\n");
 }
 
 /* Recursively walk the directory tree so "bin/hello" is visible even though
@@ -246,14 +246,14 @@ void ramdisk_init(void)
     enum_start();
     memset(openfiles, 0, sizeof(openfiles));
 
-    if (plat_block_count() == 0 && plat_block_read(LFS_PARTITION_LBA, 1, bounce) != 0) {
+    if (plat_block_count() == 0 && plat_block_read(PLAT_LFS_LBA, 1, bounce) != 0) {
         kprintf("[ramdisk] no block device, filesystem unavailable\n");
         return;
     }
 
     if (lfs_mount(&lfs, &cfg) < 0) {
         kprintf("[ramdisk] littlefs mount failed (partition at LBA %u?)\n",
-                LFS_PARTITION_LBA);
+                PLAT_LFS_LBA);
         return;
     }
 
