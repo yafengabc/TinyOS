@@ -145,7 +145,7 @@ func DetectToolchain(target Target) (Toolchain, error) {
 		return tc, nil
 	}
 
-	if target.Name == "rv32" {
+	if strings.HasPrefix(triple, "riscv32") {
 		// riscv32 has no zig here: drive clang for compilation and lld
 		// directly for linking.  A compiler driver would add its own
 		// compiler_rt, built with the hard-float ABI that refuses to mix

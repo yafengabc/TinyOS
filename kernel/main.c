@@ -41,6 +41,23 @@ void kmain(void)
     banner();
     list_files();
 
+    /* Bring-up self-check: bounded wait for the first scheduler tick.  A
+       dead timer otherwise boots fine here and fails confusingly later
+       (preemption never happens, sleepers never wake); this turns it into
+       a one-line diagnosis.  It is how the ESP32-C3 tick was finally
+       verified on real hardware.
+       MIE is normally deferred to the first idle, but the check needs it:
+       turn it on here and leave it on - the runtime state after this point
+       is exactly this, and the process tables are live already. */
+    plat_irq_enable();
+    {
+        uint32_t spins = 20000000;
+        while (plat_ticks() == 0 && --spins)
+            ;
+        kprintf("tick self-check: %u tick(s) after boot\n",
+                (unsigned)plat_ticks());
+    }
+
     kprintf("\nstarting /bin/sh ...\n\n");
     process_start_shell("bin/sh");
     panic("shell returned");

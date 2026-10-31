@@ -33,17 +33,24 @@ const (
 
 // Target describes which architecture/board to build for.
 type Target struct {
-	Name    string // "x86" or "rv32"
+	Name    string // "x86", "rv32" or "esp32c3"
 	Arch    string // arch subdirectory
 	Board   string // board subdirectory
 	Triple  string // clang target triple
 	March   string // -march value ("" = whatever the compiler defaults to)
 	Machine string // zig -mcpu value ("" = default)
+
+	// How the filesystem reaches the kernel:
+	//   disk      PC: written into the boot disk after the kernel
+	//   embedded  rv32: linked into the kernel image as a RAM disk
+	//   flash     esp32c3: burned to SPI flash, read through the data window
+	FSBacking string // "disk", "embedded" or "flash"
 }
 
 var Targets = map[string]Target{
-	"x86":  {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding"},
-	"rv32": {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc"},
+	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk"},
+	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded"},
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash"},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.
@@ -112,7 +119,7 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	// Architecture specific flags.  Everything else is shared so both ports
 	// see the same C dialect, optimiser and warning set.
 	var archFlags []string
-	if b.Target.Name == "rv32" {
+	if b.Target.Arch == "rv32" {
 		// ilp32 = soft float, matching every RV32 MCU we target and keeping
 		// the kernel free of compiler_rt's hard-float helpers.
 		archFlags = []string{"-mabi=ilp32", "-mcmodel=medany"}
@@ -366,8 +373,9 @@ func (b *Builder) Build() error {
 	}
 
 	// The filesystem image has to exist before the kernel is linked on
-	// targets that embed it (RV32), so user programs and mklfs come first.
-	// The PC target writes the same image into the boot disk instead.
+	// targets that embed it (rv32), so user programs and mklfs come first.
+	// The esp32c3 target also builds the image - it gets burned to flash
+	// next to the kernel - it just is not linked into the kernel.
 	if b.Target.Name != "x86" {
 		bins, err := b.buildUser()
 		if err != nil {
@@ -376,8 +384,10 @@ func (b *Builder) Build() error {
 		if err := b.buildMklfs(); err != nil {
 			return err
 		}
-		if err := b.buildFSImage(bins); err != nil {
-			return err
+		if b.Target.FSBacking != "disk" {
+			if err := b.buildFSImage(bins); err != nil {
+				return err
+			}
 		}
 		if err := b.buildKernel(); err != nil {
 			return err
@@ -521,8 +531,9 @@ func (b *Builder) buildKernel() error {
 
 	// Targets without a disk carry the filesystem inside the kernel image:
 	// a generated assembly file .incbin's build/ramdisk.bin into a writable
-	// section, which plat_block_* then serves as a RAM disk.
-	if b.Target.Name != "x86" {
+	// section, which plat_block_* then serves as a RAM disk.  The esp32c3
+	// target reads the partition from flash instead (board/esp32c3).
+	if b.Target.FSBacking == "embedded" {
 		blob, err := b.writeRamdiskBlob()
 		if err != nil {
 			return err
@@ -540,15 +551,37 @@ func (b *Builder) buildKernel() error {
 	}
 
 	// RV32 has no boot sector and no flat binary: QEMU and the board
-	// bootloader both load the ELF directly.
+	// bootloader both load the ELF directly.  A board may supply its own
+	// linker script (different RAM base); the arch default is the fallback.
 	if b.Target.Name != "x86" {
+		// A board may supply its own linker script (different RAM base);
+		// the arch default is the fallback.
 		elfPath := filepath.Join(b.BuildDir, "kernel-"+b.Target.Name+".elf")
 		script := filepath.Join(b.Root, "arch", b.Target.Arch, "kernel.ld")
+		boardScript := filepath.Join(b.Root, "board", b.Target.Board, "kernel.ld")
+		if _, err := os.Stat(boardScript); err == nil {
+			script = boardScript
+		}
 		if err := b.link(objs, script, elfPath); err != nil {
 			return err
 		}
 		if end, err := ELFEndAddress(elfPath); err == nil {
 			b.logf("      kernel ends at 0x%x\n", end)
+		}
+
+		// The esp32c3 ROM wants its own image format, not an ELF.
+		if b.Target.FSBacking == "flash" {
+			img, segs, err := ESPImageFromELF(elfPath, true)
+			if err != nil {
+				return err
+			}
+			out := filepath.Join(b.BuildDir, "esp32c3.bin")
+			if err := os.WriteFile(out, img, 0o644); err != nil {
+				return err
+			}
+			b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
+			b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x100000 build/ramdisk.bin\n",
+				relName(b.Root, out))
 		}
 		return nil
 	}
@@ -653,7 +686,9 @@ func (b *Builder) buildUser() ([]string, error) {
 	// absolute references against local symbols in a shared-style link.
 	userPIEFlags := []string{"-fPIC"}
 
-	common := []string{"crt0_" + b.Target.Name + ".S", "lib.c", "syscall.c"}
+	// crt0 is per architecture, not per board: an esp32c3 user binary is
+	// bit-identical to an rv32 one (same ISA, same syscall ABI).
+	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c"}
 	var commonObjs []string
 	var tasks []task
 	for _, name := range common {

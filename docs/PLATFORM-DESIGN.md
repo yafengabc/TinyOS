@@ -430,6 +430,47 @@ M-mode、U-mode、PMP、mtvec、ecall 五条通路全部打通，C3 移植的可
 是规范的边角条款，用显式 1 GiB NAPOT 编码更稳；`putc` 用 `t1` 存 UART 基址，会把调用
 前读进 `t1` 的 CSR 值抹掉，探针里读回的 CSR 必须放 `s` 寄存器。
 
+#### 8.6 tick 链路（已验证，2026-10-31）
+
+TIMG0 → INTMTX 线 2 → vectored 槽 2，全链在实板上跑通，内核
+`tick self-check` 通过、三个看门狗全关后 12 s 内零复位。板级序列在
+`board/esp32c3/platform.c`，探针全过程在 `scripts/esp-c3/tick.S` 头注释。
+
+- INTMTX：`MAP[32]=2`（源 32 = TG0_T0）、`PRI_2=1`（0x11C，不是 0x118）、
+  `THRESH=1`、`ENABLE |= 1<<2`。**mcause = 0x80000000 | 线号**（tick 到达为
+  0x80000002），不是规范 MEIP 的 11。
+- 向量表：每槽**必须 4 字节**。不加 `.option norvc` 汇编器把 `j` 压成 2 字节
+  `c.j`，`base + 4×cause` 落进表中间，中断被重新路由进槽 0 的同步异常处理器。
+  同一修复必须应用到内核的 `trap_vectors`（qemu-virt 的 direct 模式掩盖此坑）。
+- TIMG0：`REGCLK`(0xFC) 首先写 `0xE0000000`——bit31 默认 0（"寄存器不可读写"），
+  bit30/29 默认 1；**单独写 bit31 会把两个默认 1 抹掉，反而关掉定时器功能时钟**。
+  ALARMLO=10000、`CONFIG = EN|INCREASE|AUTORELOAD|ALARM_EN|79<<13`、INT_ENA=1。
+  **寄存器读回是诚实的**（ALARMLO 读回 0x2710，CONFIG 逐位一致）。
+- handler：每次 tick 都要 `INT_CLR` + **重写 CONFIG 的 ALARM_EN**（触发即自清零，
+  AUTORELOAD 不恢复它，否则只来一拍）。完全静默的 handler（无任何 UART 访问）
+  可以无限维持。
+- handler **必须保存/恢复它碰过的所有寄存器**：100 Hz 的 tick 落进主循环
+  `putc` 内部毁掉 t1/t2/t3 就能把主循环冻住。内核 `trap_entry` 全量保存帧，
+  天然满足。
+- C3 的 ROM 交接时 `mstatus.MIE = 1`（qemu 复位后是 0），`_start` 里显式
+  `csrci mstatus, 8` 归一化。
+
+看门狗（全在 `plat_board_init` 里关，写保护键同为 `0x50D83AA1`，super WDT 除外）：
+TG0WDT（ROM 遗留，~1 s，`0x48` 整字写 0）、RTC WDT（esptool `--after no-reset`
+遗留，RTC_CNTL `0x90`）、**super watchdog**（~3 s，`rst SUPER_WDT_RST`，SWD_CONF
+0xAC bit30，键 `0x8F1D312A`）。esptool 烧录用的 `run.py` 走 `--after no-reset` +
+手动 EN 脉冲，所以三个都得关。
+
+##### 探针大坑：hex 打印循环吃掉待打印值
+
+排查 tick 时绕了数小时的大弯路，根因是一个**打印 bug**：`put_hex8` 的循环里
+`mv a0, t5`（数字字符）+ `slli a0, 4`，把待打印的值本身覆盖掉了——**只有第一个
+nibble 是真的**。于是 entries < 0x10000000 时永远打出 `00000000`，被误读成
+"零中断"；由此虚构出"handler 必须以 UART FIFO 写结尾"的假规律，连带把 SYSTIMER
+备胎、UPDATE 踢、REGCLK 重写、GPIO 写等一整轮二分实验全部带偏。"TIMG 读回撒谎"
+（ALARMLO/T0LO/CONFIG 恒 0）也是同一 bug 的伪证。教训：**探针的输出原语必须先于
+实验被验证**——拿 `put_hex8(0x12345678)` 这种自证用例当第一课。
+
 ### RP2040
 
 ```
