@@ -77,6 +77,8 @@ uint32_t plat_block_count(void);
 void plat_set_kernel_stack(vaddr_t top);
 void plat_enter_user(trapframe_t *tf) __attribute__((noreturn));
 int  plat_fault_is_user(trapframe_t *tf);
+void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
+                       uint32_t stack_low, uint32_t stack_top);
 void plat_panic_halt(void) __attribute__((noreturn));
 
 /* ---- trap frame 视图（架构无关） ---- */
@@ -88,6 +90,10 @@ void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 `trapframe_t` 由 `arch/*` 定义，core 只持有不透明结构；syscall 号与参数通过
 `syscall_t {nr, a0, a1, a2}` 暴露，core 不直接读 `eax/ebx/ecx/edx`。
 用户指针校验也不再是平台函数，而是 `process_user_ok(addr, len)`——只做窗口范围检查。
+
+`plat_task_protect()` 是唯一带“内存保护”味道的接口，但语义仍然很薄：它只说
+“现在要跑的这个任务，它的三段地址在哪里”，具体怎么表达交给端口——rv32 写成
+PMP 条目，x86 什么也不做（见 5.1）。
 
 ## 4. 平坦内存模型
 
@@ -116,16 +122,45 @@ void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 
 ## 5. 特权级
 
-三个架构都提供“不能执行特权指令”，但都不提供内存保护：
+三个架构都提供“不能执行特权指令”，但内存保护的能力不同：
 
-| | 用户态 | 陷入方式 | 内核栈 |
-|---|---|---|---|
-| x86 | ring 3（分段平坦，**CR0.PG=0**） | `int 0x80` | TSS `esp0`（共用一层 16 KiB 内核栈） |
-| RV32 | U-mode | `ecall`（M 模式陷入） | 单一 32 KiB 内核栈，U 模式陷入时切换（P2 已实现） |
-| ARM | Thread/unprivileged | `svc` | PSP（硬件自动切换），每任务 |
+| | 用户态 | 陷入方式 | 内核栈 | 内存保护 |
+|---|---|---|---|---|
+| x86 | ring 3（分段平坦，**CR0.PG=0**） | `int 0x80` | TSS `esp0`（共用一层 16 KiB 内核栈） | 无（关分页后无从表达） |
+| RV32 | U-mode | `ecall`（M 模式陷入） | 单一 32 KiB 内核栈，U 模式陷入时切换 | **PMP 分段**（P2.6 已实现） |
+| ARM | Thread/unprivileged | `svc` | PSP（硬件自动切换），每任务 | MPU（计划） |
 
 x86 关闭分页后：内核与用户共享 4 GiB 平坦空间，ring 3 仍能阻止 `cli/hlt/out` 等特权指令，
 系统调用仍然走中断门。这与 C3/RP2040 的能力边界一致。
+
+### 5.1 RV32 的 PMP 分段
+
+RISC-V 对每次 U 模式访问都查 PMP，M 模式在没置 lock 位时不受约束——所以内核仍然
+是那个平坦模型，只有用户侧被切开。`plat_task_protect()` 为**当前要跑的任务**写
+4 个条目（`pmpcfg0`），切换时重写、`sbrk` 时也跟着更新：
+
+| 条目 | 权限 | 范围 | 用途 |
+|---|---|---|---|
+| 0 | off | `win_base` | 只提供下界，本身不匹配任何地址 |
+| 1 | RX | `[win_base, wx)` | 代码（`wx` = 第一个可写段的起点） |
+| 2 | RW | `[wx, brk)` | 数据 + 堆，随 `sbrk` 生长 |
+| 3 | RW | `[stack_low, stack_top)` | 栈，NAPOT 编码 |
+
+两个要点：
+
+- **TOR 是位置相关的**：条目 i 的下界是 `pmpaddr[i-1]<<2`，而且**上一条即使
+  `A=OFF` 也照样提供下界**。条目 0 只能从地址 0 开始，所以“窗口以下全拒绝”
+  就是靠这个空条目表达。实测确认（QEMU rv32 认这个语义）。
+- **`brk` 与 `stack_low` 之间没有任何条目覆盖**，形成一段既不可读也不可写、
+  更不可执行的空洞：堆写飞了、栈压穿了，都是当场 `store access fault`（`mtval`
+  直接给出越界地址），内核只杀这一个任务。这比金丝雀强——金丝雀是事后发现，
+  PMP 是当场拦下。金丝雀仍留在内核栈上，因为 M 模式不受 PMP 约束。
+- 栈用 **NAPOT** 而不是 TOR：NAPOT 是绝对地址匹配，TOR 是位置相关——如果在栈那里
+  用 TOR，下界就是 `brk`，中间那段空洞会被填上。NAPOT 要求“大小是 2 的幂、
+  起始地址按大小对齐”，所以栈被放在窗口最顶端（`stack_top = base + WINDOW`，
+  8 页 = 32 KiB，窗口是 1 MiB 对齐的）。
+
+代价：每个任务 4 个条目（PMP 有 16 个），切换时 5 次 CSR 写。
 
 ## 6. 任务模型
 
@@ -237,6 +272,11 @@ trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fau
   这是“同一份二进制跨板分发”的前提——已否决 MiniELF（TOSX）方案：
   它丢掉 ELF 结构与重定位表，二进制退化为板级绑定，不满足分发需求。
   现状：x86 加载器 `kernel/elf.c` 已实现 REL/RELA；RV32 侧复用同一路径。
+- 段校验（`elf_probe`，加载前的唯一闸口）：段必须落在窗口内、不得回绕、
+  `p_offset+p_filesz` 不得越出文件、**不得同时置 `PF_W|PF_X`**、`e_entry`
+  必须落在某个可执行段内。两项新增检查的目的是让坏镜像在 `exec` 时就报错，
+  而不是等它跑飞；注意窗口被切成 RX/RW 两带之后，w^X 在映射层面已经是结构性
+  保证（一个段即使声明 RWX 也拿不到可写可执行的区间），这里是第二道闸。
 
 ## 8. 启动链
 
@@ -273,9 +313,9 @@ P2 落地的实现要点（`arch/rv32/`）：
 - **`ecall`**：`a7` = 系统调用号，`a0/a1/a2` = 参数，返回写 `a0`。内核在派发**之前**
   把 `mepc += 4`，这样 `exec/exit` 保存的父任务现场和 i386 的 `iret` 语义一致
   （否则父任务会重放它的 `ecall`）。
-- **PMP**：U 模式每个访问都要过 PMP，未配置则第一条用户指令就 fault。P2 用一条
-  NAPOT 全空间 RWX 条目（`pmpaddr0=0x3FFFFFFF`, `pmpcfg0=0x1F`），与"平坦模型
-  不做内存保护"的取舍一致。
+- **PMP**：U 模式每个访问都要过 PMP，未配置则第一条用户指令就 fault。P2 先用一条
+  NAPOT 全空间 RWX 条目（`pmpaddr0=0x3FFFFFFF`, `pmpcfg0=0x1F`）打通 U 模式，
+  P2.6 换成了 5.1 的四条目分段。
 - **内核栈**放在 `start.S` 的 `.bss` 里（32 KiB），`start.S` 清零 `[__bss_start,
   __bss_end)` 时一并清零，和 x86 的做法一致。
 - **缺的软除法**：RV32 没有 64 位移位指令，clang 会为 `>>`/`<<` 生成
@@ -324,6 +364,7 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | ELF 错误文案 | 相同 |
 | exec | spawn，返回子任务 pid；`wait(pid)` 取退出码 |
 | 调度 | 时间片轮转，50 ms；只在用户态帧上抢占 |
+| 内存保护 | x86 无（平坦）；rv32 PMP：code RX / data+heap RW / stack RW / 其余拒绝；内核读用户内存不受影响 |
 | 异常隔离 | 只杀当前任务，其余继续跑 |
 
 **`crash` 测试已经改写（P0 完成）。** 原先它靠写 `0xdeadb000` 触发缺页；关闭分页后没有缺页，
@@ -341,6 +382,7 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | **P1** ✅ | `arch/rv32` + `board/qemu-virt`：串口、定时器、trap | 打印 banner——已完成 |
 | **P2** ✅ | RV32 ELF 直接加载 + ecall/U-mode + 内存盘 littlefs + 工具链探测 | smoke 全绿——已完成 |
 | **P2.5** ✅ | 抢占式调度：任务状态机、时间片轮转、`exec`/`wait`、tty 行规程 | `ps` 里看到 `rdy`，后台 `spin` 与 shell 并行——已完成 |
+| **P2.6** ✅ | RV32 PMP 分段 + 窗口重排（栈顶对齐、堆栈之间留洞）+ ELF w^X/入口校验 | `prot rodata/heap/stack/null` 四条都被拦下且只杀任务——已完成 |
 | P3 | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick | 跑 `hello` |
 | P4 | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello` |
 | P5 | RP2040：boot2 + UF2 + SRAM 运行 | 真机 `hello` |
@@ -353,8 +395,8 @@ P0 是最容易被低估的一步：**它会让 x86 失去现有的进程隔离*
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 无内存保护 | 用户程序可破坏内核 | 文档明确；`process_user_ok` 只做窗口范围检查 |
-| 用户二进制跨板分发 | 依赖加载器重定位正确性 | ELF32 ET_DYN + `.rel/.rela`，elf.c 校验目标窗口 |
+| x86 无内存保护 | 用户程序可破坏内核 | 文档明确；`process_user_ok` 只做窗口范围检查；rv32 已用 PMP 补上 |
+| 用户二进制跨板分发 | 依赖加载器重定位正确性 | ELF32 ET_DYN + `.rel/.rela`，elf.c 校验目标窗口与 w^X |
 | x86 关闭分页后 APP_BASE 需在 RAM 内 | 现有 `0x08048000` 超界 | 改链接地址，QEMU 内存覆盖 |
 | C3 启动镜像格式 | 无法启动 | 先用 QEMU virt；或 ESP-IDF 二级引导 |
 | C3 SPI flash 驱动 | 文件系统不可用 | 先 RAM 盘，后替换块设备 |

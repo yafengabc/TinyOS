@@ -11,7 +11,7 @@ x86 : BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
        -> GDT/IDT/TSS（平坦模型，不启用分页）+ 定时器 + 键盘
        -> 挂载 littlefs（ATA 分区），加载 /bin/sh (ELF32) -> 进入 ring 3
 RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
-       -> trap 向量 + CLINT 定时器 + 16550 串口 + PMP 全空间放行
+       -> trap 向量 + CLINT 定时器 + 16550 串口 + PMP 分段（每任务 code/data/stack）
        -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/sh -> mret 到 U-mode
 ```
 
@@ -45,8 +45,11 @@ RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
   （`open/read/readdir` 全部走 littlefs，`prog/erase` 回写磁盘）
 - 输出同时走 VGA 文本模式和 COM1，可用 `-headless` 直接在终端里玩
 - 其余：PIT 定时器、PS/2 键盘、PIC 重映射、串口
-- **RV32 移植**（`-target rv32`）：M 模式起步、U-mode + `ecall`、PMP 放行、CLINT
+- **RV32 移植**（`-target rv32`）：M 模式起步、U-mode + `ecall`、CLINT
   定时器、16550 串口、内嵌 littlefs 的 RAM 盘；同一批用户程序原样运行
+- **RV32 的 PMP 分段**：每个任务只有 code(RX) / data+heap(RW) / stack(RW) 三段可达，
+  堆与栈之间留一段无人认领的空洞；越界写当场 `store access fault`，只杀当前任务
+  （x86 关分页后没有这个能力，只有 ring 3 的特权级隔离）
 
 ## 目录
 
@@ -172,6 +175,7 @@ tos> uptime
 tos> ps             # 看看当前有哪些任务、各自状态
 tos> run echo hi
 tos> run spin &     # 后台跑一个死循环程序，shell 仍然可用
+tos> run prot heap  # 故意写越界的堆：RV32 上当场被 PMP 拦下，x86 上什么也不会发生
 tos> exit
 ```
 
@@ -192,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
 ```
 
 脚本会启动 QEMU、依次执行 `ls / cat / hello / reloc / run spin & / ps / wfile / mem /
-crash / uptime / exit`，检查提示符和内核 panic，最后打印完整记录。
+run prot heap / crash / uptime / exit`，检查提示符和内核 panic，最后打印完整记录。
 `ps` 那一步等于一次调度器验收：`spin` 必须还活着并处于 `rdy`。
 RV32 用同一个脚本加 `-Target rv32`：
 
@@ -237,7 +241,7 @@ qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.e
 | trap 帧 | 144 字节：x0–x31（偏移 = 4×寄存器号）+ `mepc/mstatus/mcause/mtval` |
 | 栈切换 | 入口读 `mstatus.MPP`：从 U 模式陷入才换到 32 KiB 内核栈，M 模式原地压栈（可嵌套） |
 | 系统调用 | `a7` = 号，`a0/a1/a2` = 参数；内核在派发**前** `mepc += 4`，与 i386 iret 语义一致 |
-| PMP | 一条 NAPOT 全空间 RWX 条目，否则 U 模式第一条指令就 fault（平坦模型不做内存保护） |
+| PMP | 每任务 4 条：空条目（下界）+ code RX + data/heap RW + stack NAPOT RW，切换时重写；条目 0 只能从地址 0 起，所以下界靠“上一条的 `pmpaddr` 即使 OFF 也生效”来表达 |
 | 用户态入口 | `rv32_enter_user()` 复用 trap 返回路径，`mret` 进 U-mode |
 | 缺的运行时 | `kernel/libgcc.c` 补 `__lshrdi3/__ashldi3/__ashrdi3`（RV32 无 64 位移位指令） |
 | 块设备 | `build/ramdisk.bin` 由生成的 `.S` 用 `.incbin` 嵌进 `.data.ramdisk`，`plat_block_*` 直接内存拷贝 |
@@ -346,18 +350,24 @@ RAM 只为真正打开的文件付。
 
 | | `-O2` | `-Os` | `-Oz`（默认） |
 | --- | --- | --- | --- |
-| 内核镜像 | 44,872 B | 36,888 B | **34,936 B** |
-| 用户程序（13 个） | 19,456 B | 17,348 B | **16,516 B** |
-| 压缩后分区占用 | 13,661 B | 12,631 B | **12,046 B** |
+| 内核镜像 | 45,272 B | 37,288 B | **35,320 B** |
+| 用户程序（14 个） | — | — | **17,752 B** |
+| 压缩后分区占用 | — | — | **12,141 B** |
 
 调度器（P2.5）让内核镜像比上一版大 1,684 B（+5.1%），`.bss` 大 800 B（任务表变宽）：
 其中 ~1.3 KB 是 `sched_switch`/阻塞路径/tty 行规程的代码，剩下的主要是 `ps`
 的输出格式串和一个后台演示程序。这是本项目唯一一处主动接受体积增长的地方——
 没有抢占，"一个死循环程序 = 整机失去响应"。
 
-之后的两项加固又加了 320 B（+0.9%）：回显队列与内核栈守卫，见「诊断」一节。
+之后的两项加固又加了 320 B（+0.9%）：回显队列与内核栈守卫，见「调试」一节。
 
-RV32 内核（`.text` 26,262 + `.rodata` 2,400 = 28,662 B 代码/常量，`.bss` 79,376 B
+PMP 分段再加 384 B（+1.1%）：`plat_task_protect()`、窗口重排、`elf_probe` 的
+w^X 与入口校验。其中约一半是两条新的错误文案（`elf: segment %u is both
+writable and executable` / `entry 0x%x is not in an executable segment`），
+逻辑本身不到 200 B。这块和调度器不同：它换来的不是"能用"，而是
+"用户程序撞墙时只死自己"。
+
+RV32 内核（`.text` 26,564 + `.rodata` 2,500 = 29,064 B 代码/常量，`.bss` 79,504 B
 含 32 KiB 内核栈；`.data` 里的 300 KiB 是内嵌的 littlefs 镜像，真机上对应 SPI flash）。
 
 老版本 gcc（< 12）不认 `-Oz`，用 `TOS_OPT=-Os` 回退；调试时用 `TOS_OPT=-Og` 或 `-O0`。
@@ -419,7 +429,7 @@ RV32 没有磁盘，构建工具把同一份 `build/ramdisk.bin` 用生成的 `.
 `tos build` 会检查并打印余量：
 
 ```
-image 34568 / 92160 bytes, footprint ends at 0x28354 (limit 0x400000, 3935 KiB headroom)
+image 35320 / 92160 bytes, footprint ends at 0x286d4 (limit 0x400000, 3934 KiB headroom)
 ```
 
 没有 ramdisk 了，所以也就不存在实模式 DMA 空洞（`0xA0000`）的限制——文件系统在磁盘上，
@@ -430,13 +440,33 @@ image 34568 / 92160 bytes, footprint ends at 0x28354 (limit 0x400000, 3935 KiB h
 | 地址 | 内容 |
 | --- | --- |
 | `0x01000000`–`0x08000000` | 任务窗口区，每个任务独占 4 MiB（`PLAT_APP_WINDOW`） |
-| 窗口 + 0 | ELF 代码/数据（PIE 重定位到这里） |
-| 窗口 + 镜像大小 向上 | `sbrk` 堆（上限到栈底） |
-| 窗口顶部 − 32 KiB 到顶 | 8 页用户栈，栈顶留 256 B 余量给 argv |
+| 窗口 + 0 | ELF 代码（RX，可读可执行，不可写） |
+| 窗口 + 代码长度 向上 | ELF 数据 + `.bss` + `sbrk` 堆（RW），堆上限到栈下 4 KiB |
+| 堆顶到栈底之间 4 KiB | **空洞**：不归属任何区域，写越界当场 fault |
+| 窗口顶部 − 32 KiB 到顶 | 8 页用户栈（RW），栈顶即窗口顶，argv 从顶部往下 256 B 开始 |
 
 没有分页、没有 CR3 切换：`exec` 只是把镜像拷到窗口里再把栈指针指好，退出时把
-bump 指针退回窗口起点。**代价是没有任何内存保护**——用户程序能读写内核内存，
-这是 MCU 级 OS 的刻意取舍，见 `docs/PLATFORM-DESIGN.md`。
+窗口槽位还回位图。x86 上**没有任何内存保护**——用户程序能读写内核内存，
+这是 MCU 级 OS 的刻意取舍。RV32 不是：RISC-V 的 PMP 把上面这张表变成了硬件强制
+（见下一节），x86 只能靠约定。
+
+### RV32 的 PMP 分段
+
+`plat_task_protect()` 在每次切换时（以及 `sbrk` 之后）为当前任务写 4 个 PMP 条目：
+一条空条目提供窗口下界、`[win_base, wx)` 是 RX、`[wx, brk)` 是 RW、
+栈是 32 KiB 的 NAPOT 区间。堆与栈之间的空洞没有条目覆盖，所以：
+
+- 写 .rodata 或代码 → `store access fault`；
+- 写越过 `brk`（没 `sbrk` 就要用）→ `store access fault`，`mtval` 是那个地址；
+- 栈压穿 → `store access fault`；
+- 读写内核、MMIO、窗口外 → fault。
+
+内核只杀这一个任务，窗口槽位收回，shell 照常。M 模式不受 PMP 约束（没置 lock 位），
+所以内核仍是那个平坦模型，`memcpy` 用户缓冲区不需要额外机制。
+`run prot rodata|heap|stack|null` 就是逐条撞这些墙的演示程序；
+在 x86 上它会老实打印 `survived: this machine cannot stop us`。
+
+细节（为什么栈用 NAPOT、为什么空条目能当边界）见 `docs/PLATFORM-DESIGN.md` 5.1。
 
 ## 系统调用 ABI
 
@@ -495,9 +525,11 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 - 同时打开的文件数上限是 8（内核句柄池 8、每进程 fd 表 8；fd 3 起）。句柄本身是静态的，
   但每个打开文件那 512 B littlefs 缓存从内核堆动态分配，`close` 时归还，
   所以空闲时几乎不占 RAM。
-- 内核不做用户指针的完整拷贝校验，只用范围检查 `process_user_ok()`（够用，但不是安全边界）。
-  ELF 加载器侧有目标地址窗口校验（段与重定位写入必须落在当前任务的窗口内），
-  防止坏镜像覆写内核。**无内存保护是刻意设计**：用户程序可以直接读写内核内存。
+- x86 上没有任何内存保护：ring 3 只挡住特权指令，用户程序可以直接读写内核内存。
+  内核不做用户指针的拷贝校验，只用范围检查 `process_user_ok()`（够用，但不是安全边界）。
+  **RV32 不同**：PMP 把 code/data/stack 三段变成硬件强制（见上），
+  ELF 加载器侧另有目标窗口校验与 w^X 校验（段同时置 `PF_W|PF_X` 直接拒绝），
+  防止坏镜像覆写内核或拿到可写可执行的区间。
 - 同一时刻最多 28 个嵌套任务窗口（x86：112 MiB / 4 MiB）或 16 个（RV32：16 MiB / 1 MiB），
   同时活着的任务超过这个数会报 `out of task windows`。
 - 内核堆是 **32 KiB** 静态 arena（`.bss`），first-fit **且合并相邻空闲块**；littlefs 的缓存和临时缓冲区都走它
