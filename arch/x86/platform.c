@@ -76,8 +76,8 @@ void plat_init(void)
     pic_mask_all_except(0x03);      /* IRQ0 timer, IRQ1 keyboard */
 
     /* No paging: the flat model needs no page tables and no frame
-     * allocator.  RAM is used directly, exactly like on the MCUs. */
-    timer_init();
+     * allocator.  RAM is used directly, exactly like on the MCUs.  The
+     * periodic tick is programmed by kmain through plat_timer_init(). */
 }
 
 /* ---- console --------------------------------------------------------- */
@@ -117,14 +117,7 @@ void plat_irq_enable(void)  { sti(); }
 void plat_irq_disable(void) { cli(); }
 void plat_cpu_idle(void)    { hlt(); }
 
-void plat_cpu_idle_poll(void)
-{
-    /* Keep draining the UART while waiting; the timer tick also polls. */
-    __asm__ volatile("sti; pause");
-}
-
 uint32_t plat_uptime_ms(void)      { return timer_uptime_ms(); }
-void     plat_sleep_ms(uint32_t ms) { timer_sleep_ms(ms); }
 
 /* ---- block device ---------------------------------------------------- */
 
@@ -194,7 +187,13 @@ void plat_shutdown(void)
 }
 
 void plat_set_kernel_stack(uint32_t top) { tss_set_kernel_stack(top); }
-int  plat_fault_is_user(void *frame)     { (void)frame; return 1; }
+
+/* Only a ring 3 frame may be switched away from: a trap taken in ring 0
+ * has kernel call frames under it that cannot be resumed later. */
+int plat_fault_is_user(void *frame)
+{
+    return (((const regs_t *)frame)->cs & 3) == 3;
+}
 
 /* The trap frame layout belongs to the arch, so core hands us an opaque
  * pointer and we cast it to the i386 register frame here. */

@@ -100,29 +100,24 @@ isr_common:
     call isr_dispatch
     addl $4, %esp
 
-    popl %eax
-    movw %ax, %gs
-    popl %eax
-    movw %ax, %fs
-    popl %eax
-    movw %ax, %es
-    popl %eax
-    movw %ax, %ds
-
-    popa
-    addl $8, %esp
-    iret
+    /* isr_dispatch returns the frame to resume.  Usually that is the one we
+       just pushed, but a scheduler switch (or a syscall that blocked)
+       hands back another task's frame, which lives in the process table.
+       Everything below us on the kernel stack is dead either way: a trap
+       from ring 3 always starts at the top of the kernel stack again. */
+    movl %eax, %esp
+    jmp .Lrestore
 
 /*
  * void enter_user_frame(regs_t *frame)
  *
- * Completes the interrupt epilogue by hand, transferring control to ring 3.
- * Never returns.
+ * Turns a saved frame into a return to ring 3.  Never returns.
  */
     .globl enter_user_frame
 enter_user_frame:
     movl 4(%esp), %esp
 
+.Lrestore:
     popl %eax
     movw %ax, %gs
     popl %eax

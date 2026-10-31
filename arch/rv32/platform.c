@@ -125,23 +125,9 @@ void plat_cpu_idle(void)
     __asm__ volatile("csrsi mstatus, 8; wfi");
 }
 
-void plat_cpu_idle_poll(void)
-{
-    /* Re-enable interrupts while polling so the tick keeps advancing; the
-       caller is already spinning on the UART. */
-    __asm__ volatile("csrsi mstatus, 8; nop");
-}
-
 uint32_t plat_uptime_ms(void)
 {
     return (uint32_t)(clint_time() / (RV32_TIMER_HZ / 1000u));
-}
-
-void plat_sleep_ms(uint32_t ms)
-{
-    uint64_t target = clint_time() + (uint64_t)ms * (RV32_TIMER_HZ / 1000u);
-    while (clint_time() < target)
-        __asm__ volatile("csrsi mstatus, 8; wfi");
 }
 
 /* ---- traps ----------------------------------------------------------- */
@@ -175,7 +161,8 @@ regs_t *trap_handler(regs_t *f)
     if (cause == RV_MCAUSE_IRQ_M_TIMER) {
         g_ticks++;
         clint_set_cmp(clint_time() + g_interval);
-        return f;
+        process_tick(f);
+        return process_resched(f);
     }
 
     if (cause == RV_MCAUSE_ECALL_U) {
@@ -185,8 +172,7 @@ regs_t *trap_handler(regs_t *f)
          * after the syscall rather than re-execute it.  ecall is always a
          * 4-byte instruction. */
         f->mepc += 4;
-        syscall_dispatch(f);
-        return f;
+        return syscall_dispatch(f);
     }
 
     if (from_user(f)) {
@@ -196,8 +182,7 @@ regs_t *trap_handler(regs_t *f)
         if (cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT)
             kprintf(" (address 0x%08x)", f->mtval);
         kprintf("\n");
-        process_kill_current(f, 139);
-        return f;
+        return process_exit(f, 139);
     }
 
     kprintf("\n*** RV32 TRAP ***\n");

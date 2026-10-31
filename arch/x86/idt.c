@@ -127,7 +127,7 @@ void idt_init(void)
     __asm__ volatile("lidt %0" : : "m"(idtp));
 }
 
-void exception_dispatch(regs_t *r)
+regs_t *exception_dispatch(regs_t *r)
 {
     uint32_t cr2 = 0;
     if (r->vector == 14)
@@ -140,8 +140,7 @@ void exception_dispatch(regs_t *r)
                 r->vector == 14 ? "" : "");
         if (r->vector == 14)
             kprintf("         faulting address 0x%08x\n", cr2);
-        process_kill_current(r, 139);
-        return;
+        return process_exit(r, 139);
     }
 
     cli();
@@ -156,29 +155,27 @@ void exception_dispatch(regs_t *r)
         hlt();
 }
 
-void isr_dispatch(regs_t *r)
+regs_t *isr_dispatch(regs_t *r)
 {
-    if (r->vector < 32) {
-        exception_dispatch(r);
-        return;
-    }
-    if (r->vector >= 32 && r->vector < 48) {
+    if (r->vector < 32)
+        return exception_dispatch(r);
+    if (r->vector < 48) {
         irq_dispatch(r);
         pic_eoi((int)r->vector - 32);
-        return;
+        return process_resched(r);
     }
-    if (r->vector == 0x80) {
-        syscall_dispatch(r);
-        return;
-    }
+    if (r->vector == 0x80)
+        return syscall_dispatch(r);
     kprintf("\nUnexpected interrupt %d\n", r->vector);
+    return r;
 }
 
-void irq_dispatch(regs_t *r)
+regs_t *irq_dispatch(regs_t *r)
 {
     switch (r->vector - 32) {
     case 0:
         timer_tick();
+        process_tick(r);
         break;
     case 1:
         keyboard_irq();
@@ -189,4 +186,5 @@ void irq_dispatch(regs_t *r)
     default:
         break;
     }
+    return r;
 }

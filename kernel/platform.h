@@ -53,16 +53,11 @@ uint32_t plat_tick_hz(void);
 
 void plat_irq_enable(void);
 void plat_irq_disable(void);
-void plat_cpu_idle(void);             /* hlt / wfi */
-
-/* Used while waiting for console input: enable interrupts briefly and let
- * the CPU rest, but do not block for a whole tick. */
-void plat_cpu_idle_poll(void);
+void plat_cpu_idle(void);             /* hlt / wfi, interrupts enabled */
 
 /* ---- time ------------------------------------------------------------ */
 
 uint32_t plat_uptime_ms(void);
-void     plat_sleep_ms(uint32_t ms);
 
 /* ---- block device (backing store for littlefs) ----------------------- */
 
@@ -122,7 +117,9 @@ void plat_set_kernel_stack(uint32_t top);
 /* Drop to user mode with the supplied register frame. */
 void plat_enter_user(void *frame) __attribute__((noreturn));
 
-/* Did this trap come from user mode? */
+/* Did this trap come from user mode?  The scheduler only switches on a
+ * user frame: a trap that landed inside a kernel call has to let that call
+ * finish, because the kernel stack below it is not resumable. */
 int plat_fault_is_user(void *frame);
 
 /* Stop the machine. */

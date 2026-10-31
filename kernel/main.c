@@ -30,6 +30,10 @@ void kmain(void)
     plat_early_init();
     plat_init();
 
+    /* The scheduler runs off this tick: it is what preempts a task, wakes
+       sleepers and hands console input to whoever is reading. */
+    plat_timer_init(100);
+
     heap_init();
     ramdisk_init();
     process_init();

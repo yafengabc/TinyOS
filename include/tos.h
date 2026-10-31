@@ -15,5 +15,8 @@
 #define SYS_UPTIME   9   /* uptime() -> ms                      */
 #define SYS_SBRK     10  /* sbrk(bytes) -> old break or -1      */
 #define SYS_CREATE   11  /* create(path) -> fd (truncates)      */
+#define SYS_WAIT     12  /* wait(pid) -> exit code, blocks      */
+#define SYS_YIELD    13  /* yield() -> 0, give up the CPU       */
+#define SYS_PS       14  /* ps() -> task count, prints a table  */
 
 #endif
