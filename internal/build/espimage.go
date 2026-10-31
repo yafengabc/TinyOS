@@ -25,10 +25,16 @@ import (
  *   24  segments                { load address, length, data } repeated
  *   ..  padding                 zeros, so that the checksum lands at a
  *                               16-byte boundary
- *   ..  checksum                1 byte, XOR of everything before it, seeded
+ *   ..  checksum                1 byte, XOR of the segment payloads, seeded
  *                               with 0xEF
  *   ..  digest                  32 bytes SHA-256 of everything above, only
  *                               when the hash-appended flag is set
+ *
+ * The checksum is over the payloads alone - not "everything before the
+ * byte", which is how the format is usually described.  An image whose
+ * header and segment headers were also folded in is well formed by every
+ * other measure and is rejected by the ROM with "Checksum failure.
+ * Calculated 0x.. stored 0x.."; that is how this was found.
  */
 
 const (
@@ -65,7 +71,12 @@ type ESPImage struct {
 	ChipID        uint16
 	MinRev        uint16
 	MaxRev        uint16
-	AppendSHA256  bool
+	/* The C3 ROM verifies this digest whether or not the flag in the header
+	   says one is there: with the flag clear it compares against the 0xFF
+	   that follows the checksum, prints "SHA-256 comparison failed" and
+	   boots anyway.  So append it - 32 bytes buys a quiet boot and a real
+	   integrity check. */
+	AppendSHA256 bool
 }
 
 // addrRange is a region the ROM is allowed to copy a segment into.  It exists
@@ -177,13 +188,19 @@ func BuildESPImage(img ESPImage) ([]byte, error) {
 		out = append(out, s.Data...)
 	}
 
+	/* The checksum covers the segment payloads and nothing else.  The
+	   segment headers carry the load addresses, so folding them in would
+	   make the value depend on where the image is linked - which is why the
+	   ROM cannot be doing that, and does not. */
+	ck := espChecksum(segs)
+
 	/* The checksum byte is the last byte of a 16-byte block, so the padding
 	   goes first.  Zeros do not change an XOR, which is why the order of
 	   these two steps does not matter for the value - only for the length. */
 	for (len(out)+1)%16 != 0 {
 		out = append(out, 0)
 	}
-	out = append(out, espChecksum(out))
+	out = append(out, ck)
 
 	if img.AppendSHA256 {
 		sum := sha256.Sum256(out)
@@ -192,10 +209,16 @@ func BuildESPImage(img ESPImage) ([]byte, error) {
 	return out, nil
 }
 
-func espChecksum(b []byte) byte {
+// espChecksum folds every payload byte into an XOR seeded with 0xEF.
+//
+// The order of the segments does not matter and neither does their number:
+// only the bytes the ROM actually copies into RAM are covered.
+func espChecksum(segs []ESPSegment) byte {
 	ck := byte(espChecksumSeed)
-	for _, v := range b {
-		ck ^= v
+	for _, s := range segs {
+		for _, v := range s.Data {
+			ck ^= v
+		}
 	}
 	return ck
 }

@@ -72,13 +72,53 @@ func TestESPImageHeaderAndChecksum(t *testing.T) {
 	}
 
 	/* Recompute the XOR here rather than calling espChecksum, so the test
-	   would notice a broken implementation instead of agreeing with it. */
+	   would notice a broken implementation instead of agreeing with it.
+	   Payload bytes only - see TestESPImageChecksumIgnoresHeaders for why. */
 	ck := byte(0xEF)
-	for _, b := range img[:len(img)-1] {
-		ck ^= b
+	for _, s := range twoSegments().Segments {
+		for _, b := range s.Data {
+			ck ^= b
+		}
 	}
 	if img[len(img)-1] != ck {
 		t.Errorf("checksum = 0x%x, want 0x%x", img[len(img)-1], ck)
+	}
+}
+
+/* The ROM XORs the segment payloads and nothing else.  Linking the same
+ * bytes at a different address therefore keeps the checksum, which is the
+ * cheapest way to state the rule: the alternative reading ("XOR everything
+ * before the checksum byte") would change it. */
+func TestESPImageChecksumIgnoresHeaders(t *testing.T) {
+	a := ESPImage{Entry: 0x40380000, Segments: []ESPSegment{
+		{Addr: 0x40380000, Data: []byte{0xAA, 0xBB, 0xCC, 0xDD}},
+	}}
+	b := ESPImage{Entry: 0x40380004, Segments: []ESPSegment{
+		{Addr: 0x40380004, Data: []byte{0xAA, 0xBB, 0xCC, 0xDD}},
+	}}
+
+	ia, err := BuildESPImage(a)
+	if err != nil {
+		t.Fatalf("BuildESPImage(a): %v", err)
+	}
+	ib, err := BuildESPImage(b)
+	if err != nil {
+		t.Fatalf("BuildESPImage(b): %v", err)
+	}
+	if ia[len(ia)-1] != ib[len(ib)-1] {
+		t.Errorf("checksum changed with the load address (0x%x vs 0x%x); the headers must not be covered",
+			ia[len(ia)-1], ib[len(ib)-1])
+	}
+
+	/* Sanity check in the other direction: different payload, different
+	   checksum.  A constant would satisfy the test above. */
+	b.Segments[0].Data = []byte{0xAA, 0xBB, 0xCC, 0xDE}
+	ib, err = BuildESPImage(b)
+	if err != nil {
+		t.Fatalf("BuildESPImage(b'): %v", err)
+	}
+	if ia[len(ia)-1] == ib[len(ib)-1] {
+		t.Errorf("checksum did not follow the payload")
 	}
 }
 
