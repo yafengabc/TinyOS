@@ -49,23 +49,28 @@ void serial_poll(void)
     drain_rx();
 }
 
-void serial_putc(char c)
+/* One byte out, nothing added: output at 38400 baud takes ~0.26 ms per
+   character, and QEMU does not throttle input to the baud rate, so a whole
+   line can fill the 16 byte RX FIFO while we are printing an echo.  Keep
+   draining it. */
+static void serial_putc_raw(char c)
 {
-    /* Make the output look sane on a normal terminal. */
-    if (c == '\n')
-        serial_putc('\r');
-    if (c == '\b') {
-        serial_putc('\b');
-        serial_putc(' ');
-        serial_putc('\b');
-        return;
-    }
-    /* Output at 38400 baud takes ~0.26 ms per character.  QEMU does not
-       throttle input to the baud rate, so a whole line can fill the 16
-       byte RX FIFO while we are printing an echo.  Keep draining it. */
     while (!(inb(COM1 + 5) & 0x20))
         drain_rx();
     outb(COM1, (uint8_t)c);
+}
+
+void serial_putc(char c)
+{
+    /* Only CR before LF is a device detail.  Erasing is NOT: this used to
+       expand '\b' into backspace-space-backspace by calling itself, which
+       recursed until the kernel stack wrapped through zero and the next
+       return jumped into nothing - one backspace was enough to wedge the
+       machine.  The line discipline already writes the three characters it
+       wants (kernel/tty.c), so a backspace simply goes out as one byte. */
+    if (c == '\n')
+        serial_putc_raw('\r');
+    serial_putc_raw(c);
 }
 
 void serial_write(const char *s, size_t n)
