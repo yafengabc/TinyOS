@@ -33,4 +33,13 @@ int    getline(char *buf, int max);
 void  *malloc(size_t n);
 void   free(void *p);
 
+/* Execute an instruction the CPU does not define.  The flat model has no
+ * page faults, so this is how a program crashes on purpose: the trap kills
+ * the process instead of the machine. */
+#if defined(__riscv)
+#define TOS_ILLEGAL_INSN() __asm__ volatile(".word 0")
+#else
+#define TOS_ILLEGAL_INSN() __asm__ volatile("ud2")
+#endif
+
 #endif

@@ -32,7 +32,7 @@ static void cmd_help(void)
     puts("  echo [args...]    print arguments\n");
     puts("  hello             demo program\n");
     puts("  mem               heap / page allocation demo\n");
-    puts("  crash             trigger a page fault (kills only that process)\n");
+    puts("  crash             run an illegal instruction (kills that process)\n");
     puts("  uptime            time since boot\n");
     puts("  run <prog> [args] run a program from /bin\n");
     puts("  help              this text\n");
