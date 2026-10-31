@@ -1,6 +1,7 @@
 package build_test
 
 import (
+	goelf "debug/elf"
 	"os"
 	"testing"
 
@@ -16,12 +17,20 @@ func TestCorruptDetected(t *testing.T) {
 	if err != nil {
 		t.Skip("not in the source tree")
 	}
-	elf := root + "/build/user/bin/hello"
-	if _, err := os.Stat(elf); err != nil {
+	elfPath := root + "/build/user/bin/hello"
+	if _, err := os.Stat(elfPath); err != nil {
 		t.Skip("run 'tos build' first")
 	}
+	// ELFToMini only handles i386 ELF32; skip when the build directory
+	// holds another target's output.
+	if f, err := goelf.Open(elfPath); err != nil ||
+		f.Class != goelf.ELFCLASS32 || f.Machine != goelf.EM_386 {
+		t.Skip("build/user/bin holds another target's output (run 'tos build')")
+	} else {
+		f.Close()
+	}
 
-	img, err := build.ELFToMini(elf, true)
+	img, err := build.ELFToMini(elfPath, true)
 	if err != nil {
 		t.Fatal(err)
 	}

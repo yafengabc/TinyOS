@@ -1,6 +1,6 @@
 #requires -version 5
 <#
-    Boot build/tinyos.img in QEMU, feed it a few commands through a TCP
+    Boot a TinyOS build in QEMU, feed it a few commands through a TCP
     serial port and print the transcript.  Useful for CI / quick sanity
     tests on Windows.
 
@@ -8,12 +8,13 @@
     bytes when a whole command line arrives in one burst, which makes
     scripted input unreliable.  TCP has proper flow control.
 
-    usage:  powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
+    usage:  powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 [-Target rv32]
 #>
 param(
+    [string]$Target = "x86",
     [string]$Image = "",
     [string]$Qemu = "",
-    [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "wfile demo.txt hello from ATA disk", "cat demo.txt", "mem", "crash", "uptime", "exit"),
+    [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "wfile demo.txt hello from the filesystem", "cat demo.txt", "mem", "crash", "uptime", "exit"),
     [int]$Port = 5566,
     [int]$BootWaitMs = 3000,
     [int]$CommandWaitMs = 700
@@ -21,43 +22,67 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $Image) { $Image = Join-Path $root "build\tinyos.img" }
-if (-not (Test-Path $Image)) { throw "disk image not found: $Image (run 'tos build')" }
+
+$qemuName = if ($Target -eq "rv32") { "qemu-system-riscv32.exe" } else { "qemu-system-i386.exe" }
+if (-not $Image) {
+    if ($Target -eq "rv32") {
+        $Image = Join-Path $root "build\kernel-rv32.elf"
+    } else {
+        $Image = Join-Path $root "build\tinyos.img"
+    }
+}
+if (-not (Test-Path $Image)) { throw "build artifact not found: $Image (run 'tos build -target $Target')" }
 
 if (-not $Qemu) {
     if ($env:TOS_QEMU) { $Qemu = $env:TOS_QEMU }
 }
 if (-not $Qemu) {
     $candidates = @(
-        (Join-Path $env:ProgramFiles "qemu\qemu-system-i386.exe"),
-        (Join-Path $env:LOCALAPPDATA "qemu\qemu-system-i386.exe"),
-        (Join-Path $env:LOCALAPPDATA "Programs\qemu\qemu-system-i386.exe"),
-        "C:\msys64\ucrt64\bin\qemu-system-i386.exe",
-        "C:\msys64\mingw64\bin\qemu-system-i386.exe"
+        (Join-Path $env:ProgramFiles "qemu\$qemuName"),
+        (Join-Path $env:LOCALAPPDATA "qemu\$qemuName"),
+        (Join-Path $env:LOCALAPPDATA "Programs\qemu\$qemuName"),
+        "C:\msys64\ucrt64\bin\$qemuName",
+        "C:\msys64\mingw64\bin\$qemuName"
     )
     if ($env:TOS_BIN) {
         foreach ($d in $env:TOS_BIN.Split([IO.Path]::PathSeparator)) {
-            $candidates += (Join-Path $d "qemu-system-i386.exe")
+            $candidates += (Join-Path $d $qemuName)
         }
     }
     foreach ($c in $candidates) { if (Test-Path $c) { $Qemu = $c; break } }
 }
 if (-not $Qemu) {
-    $cmd = Get-Command qemu-system-i386.exe -ErrorAction SilentlyContinue
+    $cmd = Get-Command $qemuName -ErrorAction SilentlyContinue
     if ($cmd) { $Qemu = $cmd.Source }
 }
-if (-not $Qemu) { throw "qemu-system-i386 not found (set TOS_QEMU or TOS_BIN)" }
+if (-not $Qemu) { throw "$qemuName not found (set TOS_QEMU or TOS_BIN)" }
 
-$qemuArgs = @(
-    "-m", "128M",
-    "-drive", "file=$Image,format=raw,if=ide",
-    "-boot", "c",
-    "-display", "none",
-    # QEMU 9+ dropped the "tcp:" chardev shorthand, use an explicit socket.
-    "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=off",
-    "-serial", "chardev:tosserial",
-    "-monitor", "none"
-)
+if ($Target -eq "rv32") {
+    # No firmware: the kernel ELF is loaded at 0x80000000 and starts in
+    # machine mode, so it brings its own trap vector and device setup.
+    $qemuArgs = @(
+        "-machine", "virt",
+        "-m", "256M",
+        "-bios", "none",
+        "-kernel", $Image,
+        "-display", "none",
+        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=off",
+        "-serial", "chardev:tosserial",
+        "-monitor", "none",
+        "-no-reboot"
+    )
+} else {
+    $qemuArgs = @(
+        "-m", "128M",
+        "-drive", "file=$Image,format=raw,if=ide",
+        "-boot", "c",
+        "-display", "none",
+        # QEMU 9+ dropped the "tcp:" chardev shorthand, use an explicit socket.
+        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=off",
+        "-serial", "chardev:tosserial",
+        "-monitor", "none"
+    )
+}
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $Qemu
@@ -69,7 +94,7 @@ $psi.CreateNoWindow = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 
-Write-Host "booting $Image"
+Write-Host "booting $Image ($Target)"
 $proc = [System.Diagnostics.Process]::Start($psi)
 $errTask = $proc.StandardError.ReadToEndAsync()
 
@@ -136,10 +161,12 @@ Read-Available 300
 if (-not $proc.HasExited) { $proc.Kill() }
 $proc.WaitForExit()
 
-Write-Host $sb.ToString()
+Write-Host ($sb.ToString() -replace "`r", "")
 $err = $errTask.Result
 if ($err) { Write-Host "--- qemu stderr ---"; Write-Host $err }
 
+# Compare on the raw transcript: QEMU's Windows socket chardev turns a bare
+# LF into CRLF, so the guest's own CR shows up as a doubled "\r".
 $out = $sb.ToString()
 if ($out -match "KERNEL PANIC" -or $out -match "KERNEL EXCEPTION") {
     Write-Host "SMOKE TEST FAILED" -ForegroundColor Red

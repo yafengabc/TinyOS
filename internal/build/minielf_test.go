@@ -16,14 +16,16 @@ func findUserELF(t *testing.T) string {
 	if err != nil {
 		t.Skip("not in the source tree")
 	}
-	// Prefer an already-built binary from a previous `tos build`.
+	// Prefer an already-built binary from a previous `tos build`.  The
+	// converter only understands i386 ELF32, so skip when the build
+	// directory holds another target's output.
 	for _, name := range []string{"hello", "sh", "ls"} {
 		p := filepath.Join(root, "build", "user", "bin", name)
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(p); err == nil && isI386ELF(p) {
 			return p
 		}
 	}
-	t.Skip("no built user program (run 'tos build' first)")
+	t.Skip("no built i386 user program (run 'tos build')")
 	return ""
 }
 

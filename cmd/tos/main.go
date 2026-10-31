@@ -14,18 +14,20 @@ func usage() {
 	fmt.Print(`TinyOS build tool
 
 usage:
-  tos build [-v]            build build/tinyos.img
-  tos run   [-headless] [-debug] [-no-build]
+  tos build [-v] [-target x86|rv32]
+                            build build/tinyos.img (x86) or
+                            build/kernel-rv32.elf (rv32)
+  tos run   [-headless] [-debug] [-no-build] [-target x86|rv32]
                             build (unless -no-build) and boot in QEMU
-  tos doctor                show detected toolchain and QEMU
+  tos doctor                show detected toolchains and QEMU
   tos clean                 remove the build directory
 
 environment:
   TOS_BIN   extra bin directories (separated by ;)
   TOS_CC    custom C compiler command line
   TOS_LD    custom linker command line
-  TOS_QEMU  path to qemu-system-i386
-  TOS_OPT   optimisation level, default -Os (try -O2 or -Og when debugging)
+  TOS_QEMU  path to the QEMU binary for the selected target
+  TOS_OPT   optimisation level, default -Oz (try -O2 or -Og when debugging)
 `)
 }
 
@@ -95,25 +97,25 @@ func main() {
 
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
-		tc, err := build.DetectToolchain(build.Targets["x86"])
-		if err != nil {
-			fmt.Println("toolchain   : NOT FOUND")
-			fmt.Println()
-			fmt.Println(err)
-		} else {
-			fmt.Printf("toolchain   : %s\n", tc)
+		for _, name := range []string{"x86", "rv32"} {
+			t := build.Targets[name]
+			tc, err := build.DetectToolchain(t)
+			if err != nil {
+				fmt.Printf("%-4s  : NOT FOUND\n", name)
+				continue
+			}
+			fmt.Printf("%-4s  : %s\n", name, tc)
 			version(tc.CC[0], "--version")
-			version(tc.LD[0], "--version")
 		}
-		qemu := os.Getenv("TOS_QEMU")
-		if qemu == "" {
-			qemu = findQemu()
-		}
-		if qemu == "" {
-			fmt.Println("qemu        : NOT FOUND (pacman -S mingw-w64-ucrt-x86_64-qemu)")
-		} else {
-			fmt.Printf("qemu        : %s\n", qemu)
-			version(qemu, "--version")
+		for _, name := range []string{"x86", "rv32"} {
+			b := build.New(root)
+			b.Target = build.Targets[name]
+			qemu := b.FindQEMU()
+			if qemu == "" {
+				fmt.Printf("qemu %-4s: NOT FOUND (pacman -S mingw-w64-ucrt-x86_64-qemu)\n", name)
+			} else {
+				fmt.Printf("qemu %-4s: %s\n", name, qemu)
+			}
 		}
 
 	case "clean":
@@ -146,10 +148,4 @@ func version(tool, arg string) {
 		line += string(c)
 	}
 	fmt.Printf("              %s\n", line)
-}
-
-func findQemu() string {
-	// reuse the package's search logic through a tiny wrapper
-	b := build.New(".")
-	return b.FindQEMU()
 }

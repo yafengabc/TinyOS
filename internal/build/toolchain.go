@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// Toolchain describes how to compile and link i386 freestanding code.
+// Toolchain describes how to compile and link freestanding code.
 type Toolchain struct {
 	CC []string
 	LD []string
@@ -67,9 +67,8 @@ func findTool(names ...string) string {
 	return ""
 }
 
-func findQEMU() string {
-	return findTool("qemu-system-i386", "qemu-system-i386w")
-}
+// toolchain.go no longer looks up QEMU: qemu.go owns the target-aware
+// search (qemu-system-i386 for x86, qemu-system-riscv32 for rv32).
 
 // findZig locates a plain Zig installation.  Zig ships a clang driver
 // ("zig cc") that can cross-compile to i386-freestanding and link ELF with
@@ -144,6 +143,23 @@ func DetectToolchain(target Target) (Toolchain, error) {
 		tc.LD = []string{zig, "cc", "--target=" + triple}
 		tc.UsesZig = true
 		return tc, nil
+	}
+
+	if target.Name == "rv32" {
+		// riscv32 has no zig here: drive clang for compilation and lld
+		// directly for linking.  A compiler driver would add its own
+		// compiler_rt, built with the hard-float ABI that refuses to mix
+		// with our soft-float (ilp32) objects.
+		clang := findTool("clang", "clang-19", "clang-18", "clang-17", "clang-16")
+		lld := findTool("ld.lld", "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16")
+		if clang != "" && lld != "" {
+			tc.CC = []string{clang, "--target=" + triple}
+			// Link with lld itself: a compiler driver would add its own
+			// compiler_rt, built with the hard-float ABI that refuses to
+			// mix with our soft-float (ilp32) objects.
+			tc.LD = []string{lld, "-m", "elf32lriscv"}
+			return tc, nil
+		}
 	}
 
 	if target.Name == "x86" {

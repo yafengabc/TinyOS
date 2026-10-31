@@ -37,12 +37,13 @@ type Target struct {
 	Arch    string // arch subdirectory
 	Board   string // board subdirectory
 	Triple  string // clang target triple
+	March   string // -march value ("" = whatever the compiler defaults to)
 	Machine string // zig -mcpu value ("" = default)
 }
 
 var Targets = map[string]Target{
 	"x86":  {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding"},
-	"rv32": {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-freestanding", Machine: "generic_rv32"},
+	"rv32": {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc"},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.
@@ -112,9 +113,14 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	// see the same C dialect, optimiser and warning set.
 	var archFlags []string
 	if b.Target.Name == "rv32" {
+		// ilp32 = soft float, matching every RV32 MCU we target and keeping
+		// the kernel free of compiler_rt's hard-float helpers.
 		archFlags = []string{"-mabi=ilp32", "-mcmodel=medany"}
+		if b.Target.March != "" {
+			archFlags = append(archFlags, "-march="+b.Target.March)
+		}
 		if b.Target.Machine != "" {
-			archFlags = append(archFlags, "-mcpu="+b.Target.Machine+"+c")
+			archFlags = append(archFlags, "-mcpu="+b.Target.Machine)
 		}
 	} else {
 		archFlags = []string{
@@ -198,36 +204,42 @@ func (b *Builder) link(objs []string, script, out string, extra ...string) error
 	var args []string
 	var tool string
 
-	if b.Target.Name != "x86" {
-		// zig cc insists on pulling in its compiler_rt, which is built with
-		// the hard-float ABI and refuses to mix with our soft-float
-		// objects.  Drive the bundled lld directly instead.
+	// ld.lld takes -m and the -T/--gc-sections style flags directly; a
+	// compiler driver needs them wrapped in -Wl, and would add its own
+	// runtime libraries.  zig is driven as "zig ld.lld" (a driver, but one
+	// that then accepts raw linker flags).
+	driver := false
+	switch {
+	case b.TC.UsesZig:
 		tool = b.TC.CC[0]
 		args = []string{"ld.lld", "-m", "elf32lriscv"}
-	} else {
+	case !linkViaDriver(b.TC.LD):
+		// a bare ld.lld takes linker flags directly
+		tool = b.TC.LD[0]
+		args = append([]string{}, b.TC.LD[1:]...) // "-m", "elf32lriscv"
+	default:
 		tool = b.TC.LD[0]
 		args = append([]string{}, b.TC.LD[1:]...)
+		driver = true
 	}
 
-	args = append(args, "-T", script, "-nostdlib", "-static")
+	w := func(flag string) string {
+		if driver {
+			return "-Wl," + flag
+		}
+		return flag
+	}
+
+	args = append(args, "-T", script, "-nostdlib", w("-static"))
 	// Drop unreferenced sections.  Everything is compiled with
 	// -ffunction-sections/-fdata-sections, so this prunes e.g. the
 	// littlefs entry points the kernel never calls (lfs_rename & co),
 	// exactly like the user program links already do.
-	if b.Target.Name != "x86" {
-		args = append(args, "--gc-sections")
-	} else if linkViaDriver(b.TC.LD) {
-		args = append(args, "-Wl,--gc-sections")
-	} else {
-		args = append(args, "--gc-sections")
-	}
+	args = append(args, w("--gc-sections"))
 	args = append(args, extra...)
-	if b.Target.Name != "x86" {
-		// no symbol table in the final image: it is only needed for
-		// debugging, and `zm` strips it without touching the loadable
-		// segments
-		args = append(args, "-s")
-	}
+	// no symbol table in the final image: it is only needed for debugging,
+	// and `strip` would not touch the loadable segments anyway
+	args = append(args, w("-s"))
 	args = append(args, "-o", out)
 	args = append(args, objs...)
 	return b.runTool(tool, args, "LD")
@@ -254,28 +266,43 @@ func ldLldPath(zig string) string {
 // The kernel relocates it to the board's APP_BASE at load time, so the same
 // binary works on every board regardless of where its RAM sits.
 func (b *Builder) linkPIE(objs []string, script, out string) error {
-	args := append([]string{}, b.TC.LD[1:]...)
-	args = append(args,
-		"-T", script,
-		"-nostdlib",
-	)
-	// zig cc parses -Wl arguments itself and rejects -pie, while clang only
-	// forwards -pie to lld through the -Wl form (a bare -pie is dropped as
-	// an unused compile flag).  Pick the spelling the driver understands.
-	if b.TC.UsesZig {
+	var tool string
+	var args []string
+	driver := false
+
+	switch {
+	case b.TC.UsesZig:
+		// zig cc parses -Wl arguments itself and rejects -pie, while a
+		// plain clang driver only forwards -pie through the -Wl form.
+		tool = b.TC.LD[0]
+		args = append([]string{}, b.TC.LD[1:]...)
 		args = append(args, "-pie")
-	} else {
-		args = append(args, "-Wl,-pie")
+	case linkViaDriver(b.TC.LD):
+		tool = b.TC.LD[0]
+		args = append([]string{}, b.TC.LD[1:]...)
+		driver = true
+	default:
+		tool = b.TC.LD[0]
+		args = append([]string{}, b.TC.LD[1:]...)
 	}
+
+	w := func(flag string) string {
+		if driver {
+			return "-Wl," + flag
+		}
+		return flag
+	}
+
+	args = append(args, "-T", script, "-nostdlib", w("-pie"))
 	args = append(args,
-		"-Wl,--gc-sections",
-		"-Wl,-z,max-page-size=16",
-		"-Wl,-z,now",
-		"-s",
+		w("--gc-sections"),
+		w("-z"), w("max-page-size=16"),
+		w("-z"), w("now"),
+		w("-s"),
 		"-o", out,
 	)
 	args = append(args, objs...)
-	return b.runTool(b.TC.LD[0], args, "LD")
+	return b.runTool(tool, args, "LD")
 }
 
 func globFiles(dir, pattern string) ([]string, error) {
@@ -338,9 +365,20 @@ func (b *Builder) Build() error {
 		}
 	}
 
-	// RV32/ARM boot straight from the loader or ROM, so there is no boot
-	// sector, no ATA image and (for now) no filesystem partition.
+	// The filesystem image has to exist before the kernel is linked on
+	// targets that embed it (RV32), so user programs and mklfs come first.
+	// The PC target writes the same image into the boot disk instead.
 	if b.Target.Name != "x86" {
+		bins, err := b.buildUser()
+		if err != nil {
+			return err
+		}
+		if err := b.buildMklfs(); err != nil {
+			return err
+		}
+		if err := b.buildFSImage(bins); err != nil {
+			return err
+		}
 		if err := b.buildKernel(); err != nil {
 			return err
 		}
@@ -361,14 +399,17 @@ func (b *Builder) Build() error {
 	if err := b.buildMklfs(); err != nil {
 		return err
 	}
-	if err := b.buildImage(bins); err != nil {
+	if err := b.buildFSImage(bins); err != nil {
+		return err
+	}
+	if err := b.buildDiskImage(); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (b *Builder) buildBoot() error {
-	b.logf("[1/5] boot sector\n")
+	b.logf("boot sector\n")
 	src := filepath.Join(b.Root, "boot", "stage1.S")
 	obj := filepath.Join(b.BuildDir, "boot", "stage1.o")
 	elfPath := filepath.Join(b.BuildDir, "boot", "stage1.elf")
@@ -408,10 +449,17 @@ func (b *Builder) buildBoot() error {
 }
 
 func (b *Builder) buildKernel() error {
-	b.logf("[2/5] kernel\n")
+	b.logf("kernel\n")
 	kdir := filepath.Join(b.Root, "kernel")
 	lfsDir := filepath.Join(b.Root, "third_party", "littlefs")
-	incs := []string{filepath.Join(b.Root, "include"), kdir, lfsDir}
+	// arch/<arch> is on the include path so platform.h can pull the port's
+	// register frame (arch/<arch>/regs.h).
+	incs := []string{
+		filepath.Join(b.Root, "include"),
+		kdir,
+		lfsDir,
+		filepath.Join(b.Root, "arch", b.Target.Arch),
+	}
 
 	// Sources come from three places: the arch-independent core, the
 	// architecture port, and the board support package.  Which arch and
@@ -459,6 +507,22 @@ func (b *Builder) buildKernel() error {
 			b.logf("      CC  third_party/littlefs/%s\n", srcCopy)
 			return b.compile(full, objCopy, incs,
 				"-include", lfsCfg)
+		}})
+	}
+
+	// Targets without a disk carry the filesystem inside the kernel image:
+	// a generated assembly file .incbin's build/ramdisk.bin into a writable
+	// section, which plat_block_* then serves as a RAM disk.
+	if b.Target.Name != "x86" {
+		blob, err := b.writeRamdiskBlob()
+		if err != nil {
+			return err
+		}
+		obj := filepath.Join(b.BuildDir, "kernel", "ramdisk_blob.o")
+		objs = append(objs, obj)
+		tasks = append(tasks, task{label: "ramdisk_blob", fn: func() error {
+			b.logf("      CC  kernel/ramdisk_blob.S\n")
+			return b.compile(blob, obj, nil)
 		}})
 	}
 
@@ -512,12 +576,33 @@ func (b *Builder) buildKernel() error {
 	return os.WriteFile(filepath.Join(b.BuildDir, "kernel.bin"), flat, 0o644)
 }
 
+// writeRamdiskBlob emits the tiny assembly stub that links the littlefs
+// image into the kernel as a writable buffer.  It is regenerated on every
+// build because the image contents change with the user programs.
+func (b *Builder) writeRamdiskBlob() (string, error) {
+	img := relName(b.Root, filepath.Join(b.BuildDir, "ramdisk.bin"))
+	path := filepath.Join(b.BuildDir, "kernel", "ramdisk_blob.S")
+	src := "/* generated by 'tos build': embeds the littlefs image in the kernel */\n" +
+		"    .section .data.ramdisk, \"aw\"\n" +
+		"    .balign 16\n" +
+		"    .globl __ramdisk_start\n" +
+		"__ramdisk_start:\n" +
+		"    .incbin \"" + img + "\"\n" +
+		"    .globl __ramdisk_end\n" +
+		"__ramdisk_end:\n" +
+		"    .balign 16\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // buildMklfs compiles the host-side littlefs image builder.  It links the
 // vendored littlefs against the host libc so the on-disk format is exactly
 // the one the kernel mounts.  We deliberately do not pass the project's
 // freestanding include/ shims here: this is a normal host program.
 func (b *Builder) buildMklfs() error {
-	b.logf("[4/5] mklfs (host tool)\n")
+	b.logf("mklfs (host tool)\n")
 	lfsDir := filepath.Join(b.Root, "third_party", "littlefs")
 	args := []string{
 		"-Os",
@@ -543,9 +628,15 @@ func (b *Builder) buildMklfs() error {
 }
 
 func (b *Builder) buildUser() ([]string, error) {
-	b.logf("[3/5] user programs\n")
+	b.logf("user programs\n")
 	udir := filepath.Join(b.Root, "user")
-	incs := []string{udir, filepath.Join(b.Root, "include"), filepath.Join(b.Root, "kernel")}
+	// arch/<arch> supplies usys.h, the syscall instruction + register ABI.
+	incs := []string{
+		udir,
+		filepath.Join(b.Root, "include"),
+		filepath.Join(b.Root, "kernel"),
+		filepath.Join(b.Root, "arch", b.Target.Arch),
+	}
 
 	// User programs are position independent: the kernel relocates them to
 	// the board's APP_BASE, so one binary runs on QEMU and on real hardware.
@@ -553,7 +644,7 @@ func (b *Builder) buildUser() ([]string, error) {
 	// absolute references against local symbols in a shared-style link.
 	userPIEFlags := []string{"-fPIC"}
 
-	common := []string{"crt0.S", "lib.c", "syscall.c"}
+	common := []string{"crt0_" + b.Target.Name + ".S", "lib.c", "syscall.c"}
 	var commonObjs []string
 	var tasks []task
 	for _, name := range common {
@@ -617,8 +708,8 @@ func (b *Builder) buildUser() ([]string, error) {
 	return bins, nil
 }
 
-func (b *Builder) buildImage(bins []string) error {
-	b.logf("[5/5] littlefs image\n")
+func (b *Builder) buildFSImage(bins []string) error {
+	b.logf("littlefs image\n")
 
 	var files []RamFile
 	for _, prog := range bins {
@@ -669,7 +760,20 @@ func (b *Builder) buildImage(bins []string) error {
 	if err != nil {
 		return err
 	}
+	b.logf("      %s (%d KiB, %d files)\n",
+		relName(b.Root, ramdiskPath), len(ramdisk)/1024, len(files))
+	return nil
+}
 
+// buildDiskImage stitches boot sector + kernel + filesystem into the raw
+// disk image the PC target boots from.
+func (b *Builder) buildDiskImage() error {
+	b.logf("disk image\n")
+
+	ramdisk, err := os.ReadFile(filepath.Join(b.BuildDir, "ramdisk.bin"))
+	if err != nil {
+		return err
+	}
 	boot, err := os.ReadFile(filepath.Join(b.BuildDir, "boot", "stage1.bin"))
 	if err != nil {
 		return err
@@ -688,7 +792,7 @@ func (b *Builder) buildImage(bins []string) error {
 	if err := os.WriteFile(imgPath, img, 0o644); err != nil {
 		return err
 	}
-	b.logf("      %s (%d KiB, %d files)\n", relName(b.Root, imgPath), len(img)/1024, len(files))
+	b.logf("      %s (%d KiB)\n", relName(b.Root, imgPath), len(img)/1024)
 	return nil
 }
 
