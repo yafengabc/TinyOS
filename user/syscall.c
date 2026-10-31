@@ -55,6 +55,21 @@ int uptime(void)
     return tos_sys0(SYS_UPTIME);
 }
 
+int wait(int pid)
+{
+    return tos_sys1(SYS_WAIT, pid);
+}
+
+int yield(void)
+{
+    return tos_sys0(SYS_YIELD);
+}
+
+int ps(void)
+{
+    return tos_sys0(SYS_PS);
+}
+
 void *sbrk(int bytes)
 {
     int r = tos_sys1(SYS_SBRK, bytes);

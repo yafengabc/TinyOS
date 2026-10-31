@@ -27,19 +27,22 @@ static int split(char *s, char *out[], int max)
 static void cmd_help(void)
 {
     puts("TinyOS shell commands:\n");
-    puts("  ls                list files in the ramdisk\n");
-    puts("  cat <file>        print a file\n");
-    puts("  echo [args...]    print arguments\n");
-    puts("  hello             demo program\n");
-    puts("  mem               heap / page allocation demo\n");
-    puts("  crash             run an illegal instruction (kills that process)\n");
-    puts("  uptime            time since boot\n");
-    puts("  run <prog> [args] run a program from /bin\n");
-    puts("  help              this text\n");
-    puts("  exit              shut TinyOS down\n");
+    puts("  ls                 list files in the ramdisk\n");
+    puts("  cat <file>         print a file\n");
+    puts("  echo [args...]     print arguments\n");
+    puts("  hello              demo program\n");
+    puts("  mem                heap / sbrk demo\n");
+    puts("  crash              run an illegal instruction (kills that process)\n");
+    puts("  uptime             time since boot\n");
+    puts("  ps                 list tasks\n");
+    puts("  run <prog> [args]  run a program from /bin\n");
+    puts("  run <prog> ... &   run it in the background\n");
+    puts("  help               this text\n");
+    puts("  exit               shut TinyOS down\n");
 }
 
-static int run_program(char *argv[], int argc)
+/* exec only spawns a child; the caller decides whether to wait for it. */
+static int run_program(char *argv[], int argc, int bg)
 {
     char path[64];
     path[0] = '\0';
@@ -49,7 +52,18 @@ static int run_program(char *argv[], int argc)
         return -1;
     }
     strcpy(path + 4, argv[0]);
-    return exec(path, argv, argc);
+
+    int pid = exec(path, argv, argc);
+    if (pid < 0)
+        return pid;     /* the kernel already said why */
+
+    if (bg) {
+        puts("[");
+        putint(pid);
+        puts("]\n");
+        return 0;
+    }
+    return wait(pid);
 }
 
 int main(int argc, char *argv[])
@@ -71,8 +85,16 @@ int main(int argc, char *argv[])
         if (ac == 0)
             continue;
 
+        int bg = 0;
+        if (ac > 1 && !strcmp(args[ac - 1], "&")) {
+            bg = 1;
+            ac--;
+        }
+
         if (!strcmp(args[0], "help")) {
             cmd_help();
+        } else if (!strcmp(args[0], "ps")) {
+            ps();
         } else if (!strcmp(args[0], "exit")) {
             puts("bye.\n");
             exit(0);
@@ -80,12 +102,12 @@ int main(int argc, char *argv[])
             if (ac < 2) {
                 puts("usage: run <program> [args...]\n");
             } else {
-                run_program(&args[1], ac - 1);
+                run_program(&args[1], ac - 1, bg);
             }
         } else {
             /* exec failure details (not found / corrupt / ...) are reported
                by the kernel; do not print a second message here. */
-            run_program(args, ac);
+            run_program(args, ac, bg);
         }
     }
 }

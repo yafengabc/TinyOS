@@ -14,6 +14,9 @@ int  readdir(int index, char *name, int len);
 int  getpid(void);
 int  sleep(int ms);
 int  uptime(void);
+int  wait(int pid);
+int  yield(void);
+int  ps(void);
 void *sbrk(int bytes);
 void exit(int code) __attribute__((noreturn));
 
