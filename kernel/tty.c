@@ -11,7 +11,9 @@ static int  ready;
 
 /* Cook one character: echo it, handle backspace, and mark the line
  * complete on newline.  Called from the tick, i.e. never from inside a
- * syscall, so a reader can block on "line ready" without racing us. */
+ * syscall, so a reader can block on "line ready" without racing us.
+ * Echo goes through console_echo(), which holds it back while a task is
+ * printing so that typing never splits a program's output line. */
 static void tty_char(char c)
 {
     /* Somebody has to collect the finished line before we start a new
@@ -23,7 +25,7 @@ static void tty_char(char c)
         c = '\n';
 
     if (c == '\n') {
-        console_putc('\n');
+        console_echo("\n", 1);
         if (len < LINE_MAX)
             line[len++] = '\n';
         ready = 1;
@@ -33,14 +35,14 @@ static void tty_char(char c)
     if (c == 8 || c == 127) {
         if (len > 0) {
             len--;
-            console_write("\b \b", 3);
+            console_echo("\b \b", 3);
         }
         return;
     }
 
     if (c >= 32 && c < 127 && len < LINE_MAX - 2) {
         line[len++] = c;
-        console_putc(c);
+        console_echo(&c, 1);
     }
 }
 

@@ -182,8 +182,10 @@ void process_tick(regs_t *r)
         current->cpu_ticks++;
 
     /* Console input first: a line finished this tick should reach its
-       reader in the same tick. */
+       reader in the same tick.  Echo leaves through the console only if
+       nothing was printed during this tick (see console_echo_tick). */
     tty_poll();
+    console_echo_tick();
     if (tty_line_ready()) {
         for (int i = 0; i < MAX_PROCS; i++) {
             proc_t *p = &procs[i];

@@ -7,6 +7,9 @@ void console_init(void);
 void console_clear(void);
 void console_putc(char c);
 void console_write(const char *s, size_t n);
+/* Echo from the input side: printed whole, never inside a program's line. */
+void console_echo(const char *s, size_t n);
+void console_echo_tick(void);
 void console_set_color(uint8_t fg, uint8_t bg);
 
 void kprintf(const char *fmt, ...);
