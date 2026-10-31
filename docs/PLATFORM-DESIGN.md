@@ -131,27 +131,90 @@ x86 关闭分页后：内核与用户共享 4 GiB 平坦空间，ring 3 仍能�
 
 ```c
 typedef struct task {
-    int         used;
+    int         state;        /* FREE / READY / RUNNING / WAIT_* */
     int         pid;
-    int         state;
-    trapframe_t frame;        /* 用户寄存器现场 */
+    int         slot;         /* 窗口槽位，-1 表示尚未分配 */
+    int         wait_pid;     /* WAIT_CHILD：等哪个子任务 */
+    int         exit_code;
+    int         laggards;     /* 已退出但没被 wait 的子任务数 */
+    vaddr_t     in_buf, in_len;  /* WAIT_INPUT：行读到哪个用户缓冲 */
+    uint64_t    wake_tick;    /* WAIT_SLEEP */
+    uint32_t    cpu_ticks;    /* ps 用 */
     vaddr_t     win_base;     /* 本任务窗口起点（无分页的下限保护） */
     vaddr_t     stack_top;    /* 窗口顶部留白后的栈顶 */
     vaddr_t     heap_base;    /* sbrk 起点：镜像之后 */
     vaddr_t     heap_end;     /* 栈底，sbrk 上限 */
     vaddr_t     brk;
-    fd_t        fds[MAX_FDS];
+    char        name[10];
     struct task *parent;
+    trapframe_t frame;        /* 不在 CPU 上时的完整用户现场 */
+    fd_t        fds[MAX_FDS];
 } task_t;
 ```
 
 - 没有地址空间字段：所有任务共享同一平坦内存。
-- **每任务窗口**：`exec` 时从 `[APP_BASE, APP_MAX)` 按 `PLAT_APP_WINDOW` 切一块，
-  镜像在底、sbrk 堆在中、栈在顶。没有这一层，同步 `exec` 会把父进程（shell）的
-  镜像覆盖掉——这是"平坦模型 + 同步 exec"必须补的一环。
-- 回收用 bump 指针复位即可：`exec` 嵌套严格 LIFO，子任务总在父任务之上。
-- 语义与现在一致：`exec` 同步，父任务阻塞，退出码返回父任务；用户态异常只杀当前任务。
-- 调度：当前为调用栈式；接口预留 `task_switch()`，后续可加抢占。
+- **每任务窗口**：从 `[APP_BASE, APP_MAX)` 按 `PLAT_APP_WINDOW` 切一块，
+  镜像在底、sbrk 堆在中、栈在顶，用位图分配槽位。没有这一层，父子任务会互相
+  覆盖对方的镜像——这是"平坦模型 + 多任务"必须补的一环。
+- 用户态异常只杀当前任务，其余照跑。
+
+### 6.1 调度：把 trap 收尾当成切换点
+
+**只有一个内核栈**，但它天生是无状态的：从用户态来的 trap 一律先切到栈顶再压帧，
+返回时把压进去的东西全部弹掉，两次 trap 之间栈上不留任何东西。于是任务的全部
+状态就是 `task_t.frame`，而"切换"不过是让 trap 收尾去恢复**另一个任务的帧**：
+
+```
+trap_entry / isr_common          sched_switch(r)
+  压用户现场 r  ───────────────►   current->frame = *r
+                                   current->state = READY
+  选下一个 READY                   next = 轮转（从 rr 游标往后找）
+  ◄──────────────────────────────  return &next->frame
+  按返回的帧恢复 → iret / mret       next->state = RUNNING
+```
+
+两个 arch 的收尾代码本来就接受"任意帧指针"：x86 的 `isr_common` 把
+`isr_dispatch` 的返回值 `movl %eax,%esp` 后跳进共用的恢复段（与
+`enter_user_frame` 同一段），rv32 的 `trap_handler` 返回 `regs_t *`，
+`start.S` 里 `mv sp, a0` 后直接走 `.Lrestore`。所以切换不需要第二套汇编。
+
+**为什么共用内核栈就够**：切换只发生在"trap 收尾、内核栈已空"的时刻。
+trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fault_is_user()`
+会拦下来，那次内核调用必须跑完，因为栈上压着它的调用帧，之后无法续跑。
+
+### 6.2 阻塞：完成，而不是重放
+
+没有可续跑的内核栈，就不可能"睡在 syscall 中间再醒过来接着跑"。这里的做法是
+让 syscall **把请求记在任务里**，然后交出 CPU；谁来满足请求，谁就往任务的
+`frame` 里写返回值，任务被恢复时已经在用户态拿到结果：
+
+| 阻塞原因 | 记在任务里 | 谁来叫醒 | 恢复后 |
+| --- | --- | --- | --- |
+| `read(0)` 无整行 | `in_buf` / `in_len` | 定时器 tick 里 tty 行规程凑满一行 | `ret = 行长` |
+| `wait(pid)` | `wait_pid` | 子任务 `exit` | `ret = 退出码` |
+| `sleep(ms)` | `wake_tick` | tick 比较时钟 | `ret = 0` |
+
+不需要"重启系统调用"（rewind `eip` 再执行一遍），所以不会有副作用重放问题。
+所有阻塞态都是可抢占点。
+
+### 6.3 抢占与抢占边界
+
+- PIT / CLINT 每 10 ms 一次 tick；`process_tick()` 记 CPU 时间、唤醒睡够的、
+  把凑满的输入行交给等待者，然后给当前任务扣一个配额。
+- 配额 `QUANTUM = 5`（50 ms）用完置 `need_resched`，trap 收尾时切换。
+- **只在用户态帧上抢占**：内核不抢占自己，理由见 6.1。
+- 全部阻塞时进 `sched_idle()`：`sti/ei` + `hlt/wfi` 等中断，tick 负责唤醒。
+
+### 6.4 语义与已知简化
+
+- `exec` 是 **spawn**：返回子任务 pid，父任务继续跑；要结果就 `wait(pid)`。
+  shell 的 `run` 就是 `exec` + `wait`，前台行为与以前一致；末尾加 `&` 变成后台。
+- 没有僵尸：子任务退出立即释放窗口与表项。父任务正在 `wait` 就把退出码写进它的
+  帧；否则记在父任务的 `exit_code`/`laggards` 里。**简化点**：并发多个子任务时
+  `wait` 拿到的退出码不保证与 pid 对应（没有 per-child 状态队列），够用就好。
+- 父任务先死时，孤儿子任务改挂到祖父任务（没有祖父就挂到 init）。
+- init（第一个任务）退出即关机。
+- 没有优先级、没有时间片捐赠、没有信号。
 
 ## 7. ELF 与重定位
 
@@ -242,14 +305,15 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 
 | 项 | 约定 |
 |---|---|
-| 系统调用号 | `include/tos.h`，0–11 |
+| 系统调用号 | `include/tos.h`，0–14 |
 | 参数寄存器 | x86 `ebx/ecx/edx`；rv32 `a0/a1/a2`；arm `r0/r1/r2`，由 trap 入口统一映射 |
 | 返回值 | 同上，负数表示错误 |
 | 控制台 | `\n` 自动转 `\r\n`；退格回显 `\b \b` |
 | 文件系统 | littlefs，块大小 4096，相同文件树 |
 | ELF 错误文案 | 相同 |
-| exec | 同步，退出码返回父任务 |
-| 异常隔离 | 只杀当前任务 |
+| exec | spawn，返回子任务 pid；`wait(pid)` 取退出码 |
+| 调度 | 时间片轮转，50 ms；只在用户态帧上抢占 |
+| 异常隔离 | 只杀当前任务，其余继续跑 |
 
 **`crash` 测试已经改写（P0 完成）。** 原先它靠写 `0xdeadb000` 触发缺页；关闭分页后没有缺页，
 三平台行为无法一致。现在改为执行**非法指令**（x86 `ud2`、rv32 `.word 0`、arm `udf #0`），
@@ -265,10 +329,11 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | **P0** ✅ | x86 去分页 + 抽 `platform.h`；`crash` 改非法指令 | smoke 原样通过（除 crash 提示）——已完成 |
 | **P1** ✅ | `arch/rv32` + `board/qemu-virt`：串口、定时器、trap | 打印 banner——已完成 |
 | **P2** ✅ | RV32 ELF 直接加载 + ecall/U-mode + 内存盘 littlefs + 工具链探测 | smoke 全绿——已完成 |
+| **P2.5** ✅ | 抢占式调度：任务状态机、时间片轮转、`exec`/`wait`、tty 行规程 | `ps` 里看到 `rdy`，后台 `spin` 与 shell 并行——已完成 |
 | P3 | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick | 跑 `hello` |
 | P4 | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello` |
 | P5 | RP2040：boot2 + UF2 + SRAM 运行 | 真机 `hello` |
-| P6 | 可选：抢占调度、PIE/重定位 | — |
+| P6 | 可选：PIE/重定位加固、优先级、每子任务退出码队列 | — |
 
 P0 是最容易被低估的一步：**它会让 x86 失去现有的进程隔离**，
 `crash` 的行为也会改变。这是刻意的取舍，不是回归。

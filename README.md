@@ -26,9 +26,9 @@ RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
 - **平坦地址空间、不启用分页**（CR0.PG=0）：内核与用户程序共享一条 4 GiB 直线地址
   空间，`ring 3` + TSS 只提供特权级隔离、不提供内存保护——这与 MCU 目标
   （ESP32-C3 / RP2040）的能力边界一致
-- **每任务窗口**：`exec` 时从 `[APP_BASE, APP_MAX)` 里按窗口大小（x86 为 4 MiB）
-  分配一块，镜像在底部、`sbrk` 堆在中部、栈在顶部；子进程退出时 LIFO 回收，
-  因此同步 `exec` 不会覆盖父进程（shell 自己的代码始终完好）
+- **每任务窗口**：创建任务时从 `[APP_BASE, APP_MAX)` 里按窗口大小（x86 为 4 MiB）
+  用位图分配一块，镜像在底部、`sbrk` 堆在中部、栈在顶部，因此父子任务各占一块、
+  互不覆盖（shell 自己的代码始终完好）
 - ELF32 加载器：解析 `PT_LOAD`、`p_filesz/p_memsz`，把镜像拷进任务窗口并清零 `.bss`
 - **位置无关程序（PIE）**：用户程序链接为 `ET_DYN`（基址 0），内核加载时整体搬到
   该任务的窗口基址并应用 `.rel.dyn`/`.rela.dyn` 重定位。这样**同一份二进制可以在
@@ -36,9 +36,10 @@ RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
 - **LZ4 压缩的程序**：用户 ELF 在构建时压缩，内核内嵌约 420 字节的解压器在
   `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
-  `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create`
-- 同步 `exec` 模型：shell 调用 `exec()` 后阻塞，子程序退出时把退出码还给 shell
-- 用户态异常（非法指令、GPF）只终止当前进程
+  `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps`
+- **抢占式调度**：时间片轮转（50 ms）、`exec` 创建子任务、`wait` 收退出码、
+  `read/wait/sleep` 阻塞而不忙等；只在用户态帧上抢占，内核调用不会被撕裂
+- 用户态异常（非法指令、GPF）只终止当前进程，其他任务继续跑
 - **littlefs v2.9.3** 文件系统：构建期用 `mklfs`（同一份 littlefs 源码）打包到磁盘上的
   独立分区，运行时由内核通过 ATA 驱动挂载，支持子目录（`bin/`）、**真实写入**
   （`open/read/readdir` 全部走 littlefs，`prog/erase` 回写磁盘）
@@ -168,7 +169,9 @@ tos> hello one two three
 tos> mem
 tos> crash          # 故意执行非法指令，只会杀掉 crash 自己
 tos> uptime
+tos> ps             # 看看当前有哪些任务、各自状态
 tos> run echo hi
+tos> run spin &     # 后台跑一个死循环程序，shell 仍然可用
 tos> exit
 ```
 
@@ -188,8 +191,10 @@ go build -o tos.exe ./cmd/tos
 powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
 ```
 
-脚本会启动 QEMU、执行 `ls / cat / hello / mem / crash / uptime / exit`，
-检查提示符和内核 panic，最后打印完整记录。RV32 用同一个脚本加 `-Target rv32`：
+脚本会启动 QEMU、依次执行 `ls / cat / hello / reloc / run spin & / ps / wfile / mem /
+crash / uptime / exit`，检查提示符和内核 panic，最后打印完整记录。
+`ps` 那一步等于一次调度器验收：`spin` 必须还活着并处于 `rdy`。
+RV32 用同一个脚本加 `-Target rv32`：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target rv32
@@ -261,6 +266,49 @@ int main(int argc, char *argv[])
 普通数据文件放到 `files/` 下（可以带子目录），会以同样的相对路径出现在 littlefs 里，
 用 `cat` 读取。
 
+## 进程与调度
+
+`exec` 只负责**创建**子任务并返回它的 pid，父任务继续跑；要退出码就 `wait(pid)`。
+shell 的 `run` 就是 `exec` + `wait`，所以前台表现和你熟悉的一样：
+
+```
+tos> run hello deep      # 前台：shell 阻塞在 wait 里，直到 hello 退出
+tos> run spin &          # 后台：立刻回到提示符，[pid] 是子任务
+```
+
+调度是时间片轮转，50 ms 一片，由定时器 tick 驱动，**只在用户态帧上抢占**：
+trap 落进内核态时（比如 syscall 执行中），那次内核调用一定跑完——内核栈上压着
+它的调用帧，中途换走就再也接不回来了。
+
+`ps` 显示 pid、状态、窗口起点、占用 tick 数和程序名：
+
+```
+tos> run spin &
+[2]
+tos> ps
+ pid state window      ticks  name
+   1 run   0x01000000      1  sh
+   2 rdy   0x01400000     70  spin
+```
+
+`rdy` 的意思是"可运行、这一瞬间不在 CPU 上"。`spin` 是个只烧 CPU、从不主动让出的
+演示程序（`user/spin.c`）：没有抢占，它会霸占 CPU 直到自己结束，shell 完全没反应。
+
+**阻塞而不是忙等**：`read(0)` 没凑满一行、`wait(pid)` 的子任务还没退出、`sleep(ms)`
+时间没到，这三种情况任务直接把 CPU 交出去，由定时器 tick 或子任务退出把它叫醒。
+所以 `sleep` 不再空转，后台任务也不会饿死前台。
+
+| 状态 | 含义 |
+| --- | --- |
+| `run` | 正在 CPU 上 |
+| `rdy` | 可运行，等轮到自己 |
+| `wait` | 等子任务退出 |
+| `tty` | 等一整行输入 |
+| `sleep` | 睡到某个 tick |
+
+内核只有一个栈，切换就是"让 trap 收尾去恢复另一个任务的寄存器帧"，
+细节见 `docs/PLATFORM-DESIGN.md` 第 6 节。
+
 ## 文件系统
 
 文件系统是 [littlefs](https://github.com/littlefs-project/littlefs) v2.9.3，
@@ -292,11 +340,16 @@ RAM 只为真正打开的文件付。
 
 | | `-O2` | `-Os` | `-Oz`（默认） |
 | --- | --- | --- | --- |
-| 内核镜像 | 42,132 B | 34,916 B | **32,884 B** |
-| 用户程序（11 个） | 16,760 B | 15,084 B | **14,476 B** |
-| 压缩后分区占用 | 11,533 B | 10,714 B | **10,305 B** |
+| 内核镜像 | 44,440 B | 36,520 B | **34,568 B** |
+| 用户程序（13 个） | 19,456 B | 17,348 B | **16,516 B** |
+| 压缩后分区占用 | 13,661 B | 12,631 B | **12,046 B** |
 
-RV32 内核（`.text` 24,528 + `.rodata` 2,200 = 26,728 B 代码/常量，`.bss` 78,512 B
+调度器（P2.5）让内核镜像比上一版大 1,684 B（+5.1%），`.bss` 大 800 B（任务表变宽）：
+其中 ~1.3 KB 是 `sched_switch`/阻塞路径/tty 行规程的代码，剩下的主要是 `ps`
+的输出格式串和一个后台演示程序。这是本项目唯一一处主动接受体积增长的地方——
+没有抢占，"一个死循环程序 = 整机失去响应"。
+
+RV32 内核（`.text` 25,942 + `.rodata` 2,344 = 28,286 B 代码/常量，`.bss` 79,296 B
 含 32 KiB 内核栈；`.data` 里的 300 KiB 是内嵌的 littlefs 镜像，真机上对应 SPI flash）。
 
 老版本 gcc（< 12）不认 `-Oz`，用 `TOS_OPT=-Os` 回退；调试时用 `TOS_OPT=-Og` 或 `-O0`。
@@ -318,7 +371,7 @@ RV32 内核（`.text` 24,528 + `.rodata` 2,200 = 26,728 B 代码/常量，`.bss`
 解压器在 `kernel/lz4.c`，约 420 字节内核代码，带完整边界检查，损坏的块返回错误
 而不是越界访问。
 
-实测用户程序（11 个）从 14,476 字节压到 9,807 字节（约 68%），单次 `exec` 多花一次
+实测用户程序（13 个）从 16,516 字节压到 11,297 字节（约 68%），单次 `exec` 多花一次
 内存分配和 memcpy 级别的时间。
 
 手动检查镜像内容：
@@ -350,7 +403,7 @@ RV32 没有磁盘，构建工具把同一份 `build/ramdisk.bin` 用生成的 `.
 | 地址 | 内容 |
 | --- | --- |
 | `0x00007C00` | 引导扇区 |
-| `0x00010000` | 内核镜像（最多 90 KiB）+ `.bss`（约 62 KiB，不占磁盘） |
+| `0x00010000` | 内核镜像（最多 90 KiB）+ `.bss`（约 63 KiB，不占磁盘） |
 | `0x0009F000` | 引导期栈 |
 
 镜像里**只存 `.text/.rodata/.data`**，`.bss` 的零字节不落盘，由 `kernel/entry.S`
@@ -358,7 +411,7 @@ RV32 没有磁盘，构建工具把同一份 `build/ramdisk.bin` 用生成的 `.
 `tos build` 会检查并打印余量：
 
 ```
-image 32884 / 92160 bytes, footprint ends at 0x279a4 (limit 0x400000, 3937 KiB headroom)
+image 34568 / 92160 bytes, footprint ends at 0x28354 (limit 0x400000, 3935 KiB headroom)
 ```
 
 没有 ramdisk 了，所以也就不存在实模式 DMA 空洞（`0xA0000`）的限制——文件系统在磁盘上，
@@ -392,16 +445,19 @@ bump 指针退回窗口起点。**代价是没有任何内存保护**——用�
 | --- | --- | --- |
 | 0 | exit | 终止当前进程，退出码放 `ebx` |
 | 1 | write | `write(fd, buf, len)`，fd 1/2 = 控制台，fd ≥ 3 写文件 |
-| 2 | read | `read(0,...)` 按行读取（带回显），fd ≥ 3 读文件 |
-| 3 | exec | `exec(path, argv, argc)`，同步执行并返回子进程退出码 |
+| 2 | read | `read(0,...)` 按行读取（带回显，没凑满一行就阻塞），fd ≥ 3 读文件 |
+| 3 | exec | `exec(path, argv, argc)` 创建子任务并返回 pid（不等待） |
 | 4 | open | 打开 littlefs 文件（只读），返回 fd（≥ 3） |
 | 5 | close | 关闭 fd |
 | 6 | readdir | `readdir(index, buf, len)`，枚举磁盘上的文件（含 `bin/` 前缀） |
 | 7 | getpid | 当前 pid |
-| 8 | sleep | 毫秒 |
+| 8 | sleep | 毫秒（阻塞，不忙等） |
 | 9 | uptime | 开机毫秒数 |
 | 10 | sbrk | 扩展堆，返回旧 brk（0 表示失败） |
 | 11 | create | `create(path)` 创建/截断文件并返回可写 fd（≥ 3） |
+| 12 | wait | `wait(pid)` 等子任务退出并返回其退出码（阻塞）；`-1` 表示任意子任务 |
+| 13 | yield | 主动让出 CPU，返回 0 |
+| 14 | ps | 打印任务表，返回任务数 |
 
 用户程序可以直接往文件系统写文件了，例如：
 
@@ -417,8 +473,12 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 
 ## 已知限制（有意保持简单）
 
-- 单核、无抢占：同一时刻只有一个用户进程在跑，`exec` 是同步的（shell 等待子程序）。
-  定时器中断已就绪，想加抢占式调度可以从 `process.c` 的进程表开始。
+- 单核、无优先级：时间片轮转（50 ms），没有 nice / 实时优先级，也没有 SMP。
+- 进程表固定 16 项，窗口槽位按板子算（x86 28 个）。`wait()` 只回传退出码，
+  多个子任务并发退出时，退出码不保证和 pid 一一对应（没有 per-child 状态队列，
+  也没有僵尸队列）。
+- 控制台输入由 tick 轮询（100 Hz）而不是 UART 中断：16550 的 16 字节 FIFO 够打字和
+  行级粘贴，但高速灌数据会丢；行编辑只有一行的 type-ahead。
 - 文件系统（littlefs）可读可写，分区 300 KiB / 75 个 4 KiB 块，文件名 ≤ 63 字符。
   写入经过内核侧自检（创建→读回→删除 `selftest.tmp`）和用户态 `wfile` 演示程序验证；
   还没有 `delete`/`rename`/`seek` 系统调用，`read` 也只能顺序读。
@@ -429,7 +489,7 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   ELF 加载器侧有目标地址窗口校验（段与重定位写入必须落在当前任务的窗口内），
   防止坏镜像覆写内核。**无内存保护是刻意设计**：用户程序可以直接读写内核内存。
 - 同一时刻最多 28 个嵌套任务窗口（x86：112 MiB / 4 MiB）或 16 个（RV32：16 MiB / 1 MiB），
-  同步 `exec` 嵌套超过这个深度会报 `out of task windows`。
+  同时活着的任务超过这个数会报 `out of task windows`。
 - 内核堆是 **32 KiB** 静态 arena（`.bss`），first-fit **且合并相邻空闲块**；littlefs 的缓存和临时缓冲区都走它
   （每次 `exec` 会临时分配一个文件大小的加载缓冲，随后立即释放）。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。

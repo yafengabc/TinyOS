@@ -20,6 +20,12 @@ Try:
   mem
   crash
   run uptime
+  run spin &          run a program in the background
+  ps                  show the task table
+
+exec only starts a task; the shell waits for it, so a foreground command
+behaves as before.  Programs that never give up the CPU are preempted
+every 50 ms, which is what makes "run spin &" keep the shell usable.
 
 Every command other than the shell builtins is a separate ELF binary that
 the kernel loads from the filesystem when you type its name.
