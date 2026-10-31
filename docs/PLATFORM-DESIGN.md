@@ -204,6 +204,17 @@ trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fau
 - 配额 `QUANTUM = 5`（50 ms）用完置 `need_resched`，trap 收尾时切换。
 - **只在用户态帧上抢占**：内核不抢占自己，理由见 6.1。
 - 全部阻塞时进 `sched_idle()`：`sti/ei` + `hlt/wfi` 等中断，tick 负责唤醒。
+- **内核栈守卫**：没有 MMU 就没有 guard page，栈写穿之后不会 fault，只会继续
+  改写 `.bss`，最后从空洞里取指——一次和起因无关的野跳（串口驱动的 `'\b'`
+  自递归就是这样崩在 `EIP=4b976946`）。现在栈底有一个 32 位哨兵，tick 里检查
+  ① trap 帧在 `[__kernel_stack, __kernel_stack_top)` 内、② 哨兵未被改写，
+  否则 `KERNEL PANIC: kernel stack overflow`。它不能阻止溢出，只能把结果从
+  "随机野跳"变成一条可读的诊断，代价是每 tick 一次比较。
+- **控制台是唯一的共享输出**：tick 里的回显和任务的 `write()` 抢同一个设备，
+  而 tick 落在 `write()` 中间是常态（`cat` 分块写、后台程序同时在打印）。
+  所以回显先进 `console_echo()` 的队列，只在"这一 tick 里没有任何任务输出"时
+  才由 `console_echo_tick()` 放出；连续输出超过 50 tick（0.5 s）则强制放出，
+  保证后台不停打印时输入也不会永远看不见。
 
 ### 6.4 语义与已知简化
 
