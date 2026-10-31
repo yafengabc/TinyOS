@@ -745,6 +745,12 @@ func (b *Builder) buildFSImage(bins []string) error {
 	}
 
 	ramdiskPath := filepath.Join(b.BuildDir, "ramdisk.bin")
+	/* Start from a fresh image: mklfs adds to whatever is already there, so
+	   a file the guest wrote in a previous run would survive into the next
+	   build and quietly change what the image contains. */
+	if err := os.Remove(ramdiskPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	args := []string{
 		ramdiskPath,
 		fmt.Sprintf("%d", RamdiskSectors*512),
