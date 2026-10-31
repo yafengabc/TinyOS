@@ -24,8 +24,13 @@ typedef struct regs {
     uint32_t mepc, mstatus, mcause, mtval;
 } regs_t;
 
-/* mcause values we care about.  The top bit marks an interrupt. */
+/* mcause values we care about.  The top bit marks an interrupt; the low
+ * bits are the cause (qemu-virt CLINT timer = 7, machine external = 11)
+ * or, on the ESP32-C3, the routed INTMTX CPU LINE (the tick arrives as
+ * 0x80000000|2 - verified on the real chip). */
 #define RV_MCAUSE_IRQ_M_TIMER 0x80000007u
+#define RV_MCAUSE_IRQ_M_EXT   0x8000000bu
+#define RV_MCAUSE_IRQ_BIT     0x80000000u
 #define RV_MCAUSE_ECALL_U     8u
 #define RV_MCAUSE_ILLEGAL     2u
 #define RV_MCAUSE_LOAD_FAULT  5u

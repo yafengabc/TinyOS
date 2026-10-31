@@ -15,11 +15,23 @@
     .section .text.entry, "ax"
     .globl _start
 _start:
-    /* Mask all interrupts until the C side is ready. */
-    csrw    mie, zero
+    /* Force MIE off.  Reset does mask it, but the ESP32-C3's ROM hands
+       over with mstatus.MIE = 1 (seen on the real chip: ticks arrived
+       during early kmain), so this is not redundant - it normalizes both
+       boards to a known state.  MIE comes back in sched_idle().  Writing
+       the mie CSR itself would be the obvious belt-and-braces, but the
+       ESP32-C3 has no mie CSR at all - the esp-riscv core routes every
+       peripheral line through INTMTX and gates it with mstatus alone,
+       and touching 0x304 is an illegal instruction (verified on the real
+       chip, scripts/esp-c3/csr.S). */
+    csrci   mstatus, 8
 
-    /* Only hart 0 continues; park the rest. */
-    bnez    a0, park
+    /* Park a secondary hart.  QEMU virt passes the hart id in a0 (0 on
+       the one that matters); the C3's ROM hands over a0 = 17 - it is not
+       a hart id at all - so this must not be the only thing deciding
+       whether to continue.  Both our boards are single-core; if a
+       multi-core board ever shows up it needs a real probe (CLINT hart
+       id or mhartid CSR), not an argument check. */
 
     .option push
     .option norelax
@@ -79,7 +91,12 @@ park:
  * 256-byte boundary.  QEMU virt accepts vectored mode as well, so both
  * boards share this table: cause 0 (all synchronous exceptions) enters
  * through the base, interrupts enter at base + 4*cause.  Every slot
- * jumps to the same handler because the C side dispatches on mcause. */
+ * jumps to the same handler because the C side dispatches on mcause.
+ * Entries are forced to 4 bytes with norvc: the assembler would shrink
+ * `j` to 2-byte c.j, and base + 4*cause then lands mid-table (seen on
+ * the real C3: an arriving tick was re-routed into the sync handler). */
+    .option push
+    .option norvc
     .balign 256
     .globl trap_vectors
 trap_vectors:
@@ -87,6 +104,7 @@ trap_vectors:
     .rept 31
     j       trap_entry
     .endr
+    .option pop
 
 trap_entry:
     csrw    mscratch, t0            /* park t0: needed as scratch below */

@@ -42,7 +42,14 @@ regs_t *trap_handler(regs_t *f)
 {
     uint32_t cause = f->mcause;
 
-    if (cause == RV_MCAUSE_IRQ_M_TIMER) {
+    /* qemu-virt routes the tick through the CLINT (cause 7); the C3 has no
+     * CLINT and its INTMTX reports the routed CPU LINE directly:
+     * mcause = 0x80000000 | line, so the tick on line 2 arrives as
+     * 0x80000002 - NOT machine-external cause 11 (verified on the real
+     * chip).  Both boards have exactly one interrupt source, so any
+     * interrupt-bit cause is the tick; which one fired is a board
+     * property, so the rearm/count lives behind plat_timer_tick(). */
+    if (cause & RV_MCAUSE_IRQ_BIT) {
         plat_timer_tick();
         process_tick(f);
         return process_resched(f);
