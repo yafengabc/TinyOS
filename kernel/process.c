@@ -13,6 +13,16 @@
 #define STACK_PAGES 8
 #define MAX_FDS     8
 
+/* The stack region must be a power of two and aligned to it, because the
+ * rv32 port maps it with a single NAPOT PMP entry.  Eight pages at the
+ * top of a page-aligned window satisfies both. */
+#define STACK_BYTES (STACK_PAGES * PLAT_PAGE_SIZE)
+
+/* Left unmapped between the heap and the stack: a heap that runs off its
+ * end and a stack that runs off its bottom then fault instead of eating
+ * each other. */
+#define HEAP_GUARD  4096u
+
 /* Ticks a task may run before the timer takes the CPU away.  At 100 Hz a
    slice is 50 ms: long enough that switches are noise, short enough that a
    spinning program is invisible. */
@@ -48,8 +58,10 @@ typedef struct proc {
     uint32_t cpu_ticks;     /* ticks spent running, for ps */
 
     /* This task's slice of the flat address space: image at the bottom,
-     * sbrk heap above it, stack at the top. */
+     * sbrk heap above it, stack at the top.  wx_start splits the image
+     * into non-writable code below and writable data above. */
     uint32_t win_base;
+    uint32_t wx_start;
     uint32_t stack_top;
     uint32_t heap_base;
     uint32_t heap_end;
@@ -150,6 +162,15 @@ static void sched_idle(void)
     plat_cpu_idle();
 }
 
+/* Hand the hardware the current shape of a task's window.  Called on every
+ * switch (protection belongs to whoever is on the CPU) and again when sbrk
+ * moves the heap bound. */
+static void apply_protection(proc_t *p)
+{
+    plat_task_protect(p->win_base, p->wx_start, p->brk,
+                      p->stack_top - STACK_BYTES, p->stack_top);
+}
+
 /* Save the outgoing frame and return the frame to resume.  Callers hold the
  * CPU at the top of a trap, so abandoning the kernel stack below us costs
  * nothing: the next trap starts at the top again. */
@@ -168,6 +189,7 @@ static regs_t *sched_switch(regs_t *r)
             next->state = ST_RUNNING;
             current = next;
             quantum = QUANTUM;
+            apply_protection(next);
             return &next->saved;
         }
         if (proc_waiting()) {
@@ -424,16 +446,16 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         return NULL;
     }
 
-    /* How much of the window will the image itself occupy? */
-    uint32_t link_lo = 0, link_hi = 0, link_entry = 0;
-    if (elf_probe(data, size, &link_lo, &link_hi, &link_entry) != 0) {
+    /* How much of the window will the image itself occupy, and where does
+     * its writable half begin? */
+    uint32_t link_lo = 0, link_hi = 0, link_entry = 0, link_wx = 0;
+    if (elf_probe(data, size, &link_lo, &link_hi, &link_entry, &link_wx) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         ramdisk_release(data);
         return NULL;
     }
     uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
-    uint32_t stack_bytes = STACK_PAGES * PLAT_PAGE_SIZE;
-    if (span + stack_bytes + 4096u > PLAT_APP_WINDOW) {
+    if (span + STACK_BYTES + HEAP_GUARD > PLAT_APP_WINDOW) {
         kprintf("exec: '%s' does not fit a %u KiB task window\n",
                 path, PLAT_APP_WINDOW / 1024u);
         ramdisk_release(data);
@@ -467,9 +489,12 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     p->slot = slot;
     p->pid = next_pid++;
     p->win_base = base;
-    p->stack_top = base + PLAT_APP_WINDOW - 256;
+    p->wx_start = base + (link_wx - link_lo);
+    /* The stack occupies the very top of the window, so that its region is
+       naturally aligned; the initial frame starts a little below. */
+    p->stack_top = base + PLAT_APP_WINDOW;
     p->heap_base = base + span;
-    p->heap_end = p->stack_top - stack_bytes;
+    p->heap_end = p->stack_top - STACK_BYTES - HEAP_GUARD;
     p->entry = entry;
     p->brk = p->heap_base;
     set_name(p, path);
@@ -623,6 +648,9 @@ uint32_t process_sbrk(uint32_t bytes)
         return 0;
 
     current->brk = newbrk;
+    /* The heap bound is part of the protection: without this the new pages
+       would stay unreachable for the task that just asked for them. */
+    apply_protection(current);
     return old;
 }
 
@@ -760,6 +788,7 @@ void process_start_shell(const char *path)
     p->state = ST_RUNNING;
     current = p;
     plat_set_kernel_stack(KSTACK_TOP);
+    apply_protection(p);
 
     /* Straight into the frame proc_create prepared. */
     plat_enter_user(&p->saved);

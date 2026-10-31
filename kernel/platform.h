@@ -80,9 +80,29 @@ uint32_t plat_block_count(void);
 /* ---- user mode ------------------------------------------------------- */
 
 /* There is no address-space abstraction: the unified model is a single flat
- * address space with no memory protection, matching the MCUs this OS targets.
+ * address space, and the kernel reads and writes user memory directly.
  * Kernel code validates user pointers against the current task's window
- * (process_user_ok), and reads/writes them directly. */
+ * (process_user_ok).
+ *
+ * Hardware may still be able to wall user mode off from the rest of the
+ * machine, and where it can, it should: rv32 uses PMP to give each task
+ * code / data / stack and nothing else.  x86-32 with paging disabled can
+ * do nothing here (see docs/PLATFORM-DESIGN.md). */
+
+/* Program the protection for the task that is about to run, then forget
+ * about it: memory protection is a property of the running task, not of
+ * the kernel.
+ *
+ *   [win_base, wx)          code            execute + read
+ *   [wx, brk)               data + heap     read + write, brk grows via sbrk
+ *   [stack_low, stack_top)  stack           read + write
+ *
+ * Everything else - the kernel's own memory, MMIO, the rest of the app
+ * window - is out of reach for user mode, including the hole between brk
+ * and stack_low that neither region claims.  `stack_top - stack_low` must
+ * be a power of two and stack_low aligned to it. */
+void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
+                       uint32_t stack_low, uint32_t stack_top);
 
 /* Register frame captured when trapping from user mode.  The layout is
  * architecture specific, so each port supplies it (arch/<arch>/regs.h);

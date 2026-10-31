@@ -207,6 +207,16 @@ int plat_fault_is_user(void *frame)
     return (((const regs_t *)frame)->cs & 3) == 3;
 }
 
+/* Ring 3 is the only isolation this port has: paging is off on purpose
+ * (docs/PLATFORM-DESIGN.md), and without it segments cannot express a
+ * per-task boundary.  So nothing to program - the rv32 port is where
+ * plat_task_protect does real work. */
+void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
+                       uint32_t stack_low, uint32_t stack_top)
+{
+    (void)win_base; (void)wx; (void)brk; (void)stack_low; (void)stack_top;
+}
+
 /* The trap frame layout belongs to the arch, so core hands us an opaque
  * pointer and we cast it to the i386 register frame here. */
 extern void enter_user_frame(void *frame) __attribute__((noreturn));

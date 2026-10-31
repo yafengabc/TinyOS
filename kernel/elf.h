@@ -17,10 +17,13 @@
 int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
              uint32_t *entry_out);
 
-/* Same, but reports the lowest and highest addresses the image touches.
- * Callers use this to reserve or check the region beforehand. */
+/* Same, but reports the lowest and highest addresses the image touches,
+ * plus the lowest address of any writable segment (the code/data split the
+ * hardware needs).  Callers use this to reserve or check the region
+ * beforehand. */
 int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
-              uint32_t *mem_end_out, uint32_t *entry_out);
+              uint32_t *mem_end_out, uint32_t *entry_out,
+              uint32_t *writable_from_out);
 
 /* Select the task window [lo, hi) the loader may write into.  process.c
  * sets this before every load; the loader never writes outside it. */

@@ -251,15 +251,21 @@ uint32_t plat_block_count(void)
 
 /* ---- boot ------------------------------------------------------------ */
 
-static void pmp_open_all(void)
+/* U-mode reaches memory only through PMP.  Entries 4..15 stay off, so
+ * until the first task is programmed the user side can touch nothing at
+ * all - M-mode is not subject to PMP as long as no entry sets the lock
+ * bit, which is what keeps the flat kernel model working.
+ *
+ * All four config registers exist on qemu-virt and on the ESP32-C3 (16
+ * entries).  A core with fewer would need the count probed first, and a
+ * bootloader that locked its entries cannot be overruled at all - both are
+ * problems for the board port, not for this one. */
+static void pmp_deny_user(void)
 {
-    /* U-mode checks every access against PMP.  Without an entry covering
-       the address space, the first user instruction faults.  One NAPOT
-       region of 8 GiB starting at 0 grants RWX everywhere - the flat
-       model deliberately has no memory protection, so this matches the
-       capability of the MCUs we target (see docs/PLATFORM-DESIGN.md). */
-    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(0x3FFFFFFFu));
-    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(0x1Fu));   /* A=NAPOT, RWX */
+    __asm__ volatile("csrw pmpcfg0, zero");
+    __asm__ volatile("csrw pmpcfg1, zero");
+    __asm__ volatile("csrw pmpcfg2, zero");
+    __asm__ volatile("csrw pmpcfg3, zero");
 }
 
 void plat_early_init(void)
@@ -270,10 +276,49 @@ void plat_early_init(void)
 void plat_init(void)
 {
     plat_console_init();
-    pmp_open_all();
+    pmp_deny_user();
 }
 
 /* ---- user mode ------------------------------------------------------- */
+
+/* Per-task PMP.  TOR is positional - entry i covers [pmpaddr[i-1]<<2,
+ * pmpaddr[i]<<2) - and the lower bound comes from the previous address
+ * register even when that entry is disabled.  Since entry 0 can only
+ * start at address 0, that is how a region below the window is denied:
+ * entry 0 is off and holds nothing but the lower bound.
+ *
+ *   0  off    win_base                     lower bound only
+ *   1  RX     [win_base, wx)               code
+ *   2  RW     [wx, brk)                    data and heap
+ *   3  RW     [stack_low, stack_top)       stack, NAPOT
+ *
+ * Nothing claims the hole between brk and stack_low, so a heap that runs
+ * off its end and a stack that runs off its bottom both fault instead of
+ * quietly eating the other.  The stack uses NAPOT because it is absolute:
+ * a TOR entry there would have to start at brk and would fill that hole. */
+#define PMP_R     0x01u
+#define PMP_W     0x02u
+#define PMP_X     0x04u
+#define PMP_TOR   0x08u
+#define PMP_NAPOT 0x18u
+
+void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
+                       uint32_t stack_low, uint32_t stack_top)
+{
+    uint32_t size = stack_top - stack_low;
+
+    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(win_base >> 2));
+    __asm__ volatile("csrw pmpaddr1, %0" : : "r"((wx  & ~3u) >> 2));
+    __asm__ volatile("csrw pmpaddr2, %0" : : "r"((brk & ~3u) >> 2));
+    /* NAPOT: all ones above the size bit, so 32 KiB is (32K>>3)-1 = 0xFFF. */
+    __asm__ volatile("csrw pmpaddr3, %0" : :
+                     "r"((stack_low >> 2) | ((size >> 3) - 1u)));
+
+    uint32_t cfg = ((PMP_TOR   | PMP_R | PMP_X) << 8)    /* entry 1 */
+                 | ((PMP_TOR   | PMP_R | PMP_W) << 16)   /* entry 2 */
+                 | ((PMP_NAPOT | PMP_R | PMP_W) << 24);  /* entry 3 */
+    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg));
+}
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
