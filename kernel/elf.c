@@ -17,6 +17,7 @@ void elf_set_window(uint32_t lo, uint32_t hi)
 
 #define PT_LOAD    1
 #define PT_DYNAMIC 2
+#define PF_X       1
 #define PF_W       2
 #define EM_386     3
 #define EM_RISCV   243
@@ -178,6 +179,7 @@ int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
 
     uint32_t lo = 0xFFFFFFFFu, hi = 0;
     uint32_t wlo = 0xFFFFFFFFu;
+    int entry_in_code = 0;
     for (uint32_t i = 0; i < eh->e_phnum; i++) {
         const Elf32_Phdr *ph = phdr_at(data, eh, i);
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
@@ -188,9 +190,25 @@ int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
             hi = ph->p_vaddr + ph->p_memsz;
         if ((ph->p_flags & PF_W) && ph->p_vaddr < wlo)
             wlo = ph->p_vaddr;
+        if (ph->p_flags & PF_X) {
+            /* The loader splits the window into one read-execute band and
+               one read-write band, so a segment asking for both cannot be
+               honoured: reject it rather than quietly pick one. */
+            if (ph->p_flags & PF_W) {
+                kprintf("elf: segment %u is both writable and executable\n", i);
+                return -1;
+            }
+            if (eh->e_entry >= ph->p_vaddr &&
+                eh->e_entry < ph->p_vaddr + ph->p_memsz)
+                entry_in_code = 1;
+        }
     }
     if (lo == 0xFFFFFFFFu || hi <= lo)
         return -1;
+    if (!entry_in_code) {
+        kprintf("elf: entry 0x%x is not in an executable segment\n", eh->e_entry);
+        return -1;
+    }
 
     if (load_base_out)
         *load_base_out = lo;
