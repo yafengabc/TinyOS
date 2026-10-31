@@ -83,12 +83,9 @@ int main(int argc, char *argv[])
                 run_program(&args[1], ac - 1);
             }
         } else {
-            int rc = run_program(args, ac);
-            if (rc == -1) {
-                puts("sh: ");
-                puts(args[0]);
-                puts(": command not found\n");
-            }
+            /* exec failure details (not found / corrupt / ...) are reported
+               by the kernel; do not print a second message here. */
+            run_program(args, ac);
         }
     }
 }

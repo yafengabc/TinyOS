@@ -15,19 +15,17 @@
 #define FS_BLOCK_SIZE  4096
 #define FS_BLOCK_COUNT 75              /* 75 * 4 KiB == 300 KiB == 600 sectors */
 #define FS_CACHE_SIZE  512
-#define MAX_ENTRIES    64
-#define MAX_OPEN       8               /* concurrent file handles */
+#define MAX_OPEN       8               /* concurrent file handles (== MAX_FDS) */
 
-typedef struct {
-    char     name[64];
-    uint32_t size;
-} entry_t;
-
+/* The per-file 512 byte littlefs cache is allocated on open instead of
+   living in .bss: an idle handle then costs ~120 bytes, and RAM is paid
+   only for files that are actually open.  This keeps MAX_OPEN aligned with
+   the per-process fd table without adding 4 KiB of static buffers. */
 typedef struct {
     int      used;
     lfs_file_t f;
-    struct lfs_file_config fc;   /* provides cache buffer under LFS_NO_MALLOC */
-    uint8_t  buffer[FS_CACHE_SIZE];
+    struct lfs_file_config fc;   /* points at `cache` under LFS_NO_MALLOC */
+    uint8_t *cache;
     uint32_t size;
 } ofile_t;
 
@@ -42,9 +40,15 @@ static uint8_t lookbuf[FS_CACHE_SIZE] __attribute__((aligned(8)));
    (= 8 sectors). */
 static uint8_t bounce[FS_BLOCK_SIZE];
 
-static entry_t entries[MAX_ENTRIES];
-static int     nentries;
-static int     ok;
+/* readdir is index based, but no snapshot table is kept: each call walks
+   the (tiny) directory tree and stops at the requested entry.  Costs a few
+   directory reads per call and saves a 4 KiB array in .bss. */
+static int      enum_target;
+static int      enum_index;
+static int      enum_hit;
+static uint32_t enum_size;
+static char     enum_name[96];
+static int      ok;
 
 static ofile_t openfiles[MAX_OPEN];
 
@@ -155,15 +159,17 @@ static void write_selftest(void)
 }
 
 /* Recursively walk the directory tree so "bin/hello" is visible even though
-   the shell and the exec path use full paths.  Depth is shallow. */
-static void scan_dir(const char *dirpath)
+   the shell and the exec path use full paths.  Depth is shallow.
+   Returns 1 as soon as the entry at enum_target has been recorded; with
+   enum_target < 0 it walks everything, leaving the total in enum_index. */
+static int enum_dir(const char *dirpath)
 {
     lfs_dir_t dir;
     if (lfs_dir_open(&lfs, &dir, dirpath) < 0)
-        return;
+        return 0;
 
     struct lfs_info info;
-    while (nentries < MAX_ENTRIES && lfs_dir_read(&lfs, &dir, &info) > 0) {
+    while (lfs_dir_read(&lfs, &dir, &info) > 0) {
         if (info.name[0] == '.')
             continue;
 
@@ -182,18 +188,35 @@ static void scan_dir(const char *dirpath)
         }
 
         if (info.type == LFS_TYPE_DIR) {
-            scan_dir(full);
+            if (enum_dir(full)) {
+                lfs_dir_close(&lfs, &dir);
+                return 1;
+            }
             continue;
         }
         if (info.type != LFS_TYPE_REG)
             continue;
 
-        strncpy(entries[nentries].name, full, sizeof(entries[nentries].name) - 1);
-        entries[nentries].name[sizeof(entries[nentries].name) - 1] = '\0';
-        entries[nentries].size = info.size;
-        nentries++;
+        if (enum_index == enum_target) {
+            strncpy(enum_name, full, sizeof(enum_name) - 1);
+            enum_name[sizeof(enum_name) - 1] = '\0';
+            enum_size = info.size;
+            enum_hit = 1;
+            lfs_dir_close(&lfs, &dir);
+            return 1;
+        }
+        enum_index++;
     }
     lfs_dir_close(&lfs, &dir);
+    return 0;
+}
+
+static void enum_start(void)
+{
+    enum_index = 0;
+    enum_hit = 0;
+    enum_size = 0;
+    enum_name[0] = '\0';
 }
 
 void ramdisk_init(void)
@@ -220,7 +243,7 @@ void ramdisk_init(void)
     cfg.lookahead_buffer = lookbuf;
 
     ok = 0;
-    nentries = 0;
+    enum_start();
     memset(openfiles, 0, sizeof(openfiles));
 
     if (plat_block_count() == 0 && plat_block_read(LFS_PARTITION_LBA, 1, bounce) != 0) {
@@ -234,8 +257,7 @@ void ramdisk_init(void)
         return;
     }
 
-    /* Snapshot the directory tree so readdir/count stay index based. */
-    scan_dir("/");
+    /* Readdir walks the tree on demand, so there is nothing to snapshot. */
     ok = 1;
 
     write_selftest();
@@ -248,16 +270,26 @@ int ramdisk_ok(void)
 
 uint32_t ramdisk_count(void)
 {
-    return ok ? (uint32_t)nentries : 0;
+    if (!ok)
+        return 0;
+    enum_start();
+    enum_target = -1;              /* never matches: walk everything */
+    enum_dir("/");
+    return (uint32_t)enum_index;
 }
 
 const char *ramdisk_name(uint32_t index, uint32_t *size)
 {
-    if (!ok || index >= (uint32_t)nentries)
+    if (!ok)
+        return NULL;
+    enum_start();
+    enum_target = (int)index;
+    enum_dir("/");
+    if (!enum_hit)
         return NULL;
     if (size)
-        *size = entries[index].size;
-    return entries[index].name;
+        *size = enum_size;
+    return enum_name;
 }
 
 /* Load a whole file into a freshly kmalloc'd buffer.  Caller must call
@@ -273,10 +305,8 @@ int ramdisk_find(const char *name, uint8_t **data, uint32_t *size)
 
     memset(&fc, 0, sizeof(fc));
     fc.buffer = filebuf;
-    if (lfs_file_opencfg(&lfs, &f, name, LFS_O_RDONLY, &fc) < 0) {
-        kprintf("find %s: open failed\n", name);
-        return 0;
-    }
+    if (lfs_file_opencfg(&lfs, &f, name, LFS_O_RDONLY, &fc) < 0)
+        return 0; /* normal miss (ENOENT): caller reports it */
 
     uint32_t sz = (uint32_t)lfs_file_size(&lfs, &f);
     uint8_t *buf = kmalloc(sz ? sz : 1);
@@ -289,10 +319,8 @@ int ramdisk_find(const char *name, uint8_t **data, uint32_t *size)
     uint32_t got = 0;
     while (got < sz) {
         lfs_ssize_t n = lfs_file_read(&lfs, &f, buf + got, sz - got);
-        if (n <= 0) {
-            kprintf("find %s: read stopped at %u/%u (n=%d)\n", name, got, sz, (int)n);
+        if (n <= 0)
             break;
-        }
         got += (uint32_t)n;
     }
     lfs_file_close(&lfs, &f);
@@ -328,10 +356,18 @@ int ramdisk_open(const char *path)
         return -1;
 
     memset(&openfiles[h].fc, 0, sizeof(struct lfs_file_config));
-    openfiles[h].fc.buffer = openfiles[h].buffer;
-    if (lfs_file_opencfg(&lfs, &openfiles[h].f, path, LFS_O_RDONLY,
-                         &openfiles[h].fc) < 0)
+    openfiles[h].cache = kmalloc(FS_CACHE_SIZE);
+    if (!openfiles[h].cache) {
+        kprintf("open %s: out of memory for file cache\n", path);
         return -1;
+    }
+    openfiles[h].fc.buffer = openfiles[h].cache;
+    if (lfs_file_opencfg(&lfs, &openfiles[h].f, path, LFS_O_RDONLY,
+                         &openfiles[h].fc) < 0) {
+        kfree(openfiles[h].cache);
+        openfiles[h].cache = NULL;
+        return -1;
+    }
 
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
@@ -356,11 +392,19 @@ int ramdisk_create(const char *path)
         return -1;
 
     memset(&openfiles[h].fc, 0, sizeof(struct lfs_file_config));
-    openfiles[h].fc.buffer = openfiles[h].buffer;
+    openfiles[h].cache = kmalloc(FS_CACHE_SIZE);
+    if (!openfiles[h].cache) {
+        kprintf("create %s: out of memory for file cache\n", path);
+        return -1;
+    }
+    openfiles[h].fc.buffer = openfiles[h].cache;
     if (lfs_file_opencfg(&lfs, &openfiles[h].f, path,
                          LFS_O_CREAT | LFS_O_TRUNC | LFS_O_RDWR,
-                         &openfiles[h].fc) < 0)
+                         &openfiles[h].fc) < 0) {
+        kfree(openfiles[h].cache);
+        openfiles[h].cache = NULL;
         return -1;
+    }
 
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
@@ -397,5 +441,6 @@ void ramdisk_close(int h)
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
         return;
     lfs_file_close(&lfs, &openfiles[h].f);
+    kfree(openfiles[h].cache);
     memset(&openfiles[h], 0, sizeof(ofile_t));
 }
