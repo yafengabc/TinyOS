@@ -12,11 +12,7 @@ static void banner(void)
 {
     kprintf("\nTinyOS - a tiny multi-platform operating system\n");
     kprintf("ring3/unprivileged ELF loader | littlefs | PIE\n");
-    kprintf("kernel heap: %u MiB managed RAM\n\n",
-            (PLAT_HEAP_BASE < PLAT_HEAP_END
-                 ? (PLAT_HEAP_END - PLAT_HEAP_BASE)
-                 : (PLAT_HEAP_BASE - PLAT_HEAP_END)) /
-                (1024u * 1024u));
+    kprintf("kernel heap: %u KiB arena\n\n", heap_arena_bytes() / 1024u);
 }
 
 static void list_files(void)

@@ -1,7 +1,5 @@
 #include "platform.h"
 #include "io.h"
-#include "paging.h"
-#include "pmm.h"
 #include "serial.h"
 #include "timer.h"
 #include "ata.h"
@@ -77,8 +75,8 @@ void plat_init(void)
     pic_remap();
     pic_mask_all_except(0x03);      /* IRQ0 timer, IRQ1 keyboard */
 
-    plat_mem_init();
-    paging_init();
+    /* No paging: the flat model needs no page tables and no frame
+     * allocator.  RAM is used directly, exactly like on the MCUs. */
     timer_init();
 }
 
@@ -128,11 +126,6 @@ void plat_cpu_idle_poll(void)
 uint32_t plat_uptime_ms(void)      { return timer_uptime_ms(); }
 void     plat_sleep_ms(uint32_t ms) { timer_sleep_ms(ms); }
 
-int plat_user_ok(uint32_t as, uint32_t addr, uint32_t len)
-{
-    return paging_user_ok(as, addr, len);
-}
-
 /* ---- block device ---------------------------------------------------- */
 
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
@@ -160,73 +153,7 @@ int plat_block_erase(uint32_t lba)
 uint32_t plat_block_size(void)  { return 512; }
 uint32_t plat_block_count(void) { return 0; }
 
-/* ---- address translation (for the ELF loader) ------------------------ */
-
-uint32_t plat_translate(uint32_t as, uint32_t va)
-{
-    return paging_translate(as, va);
-}
-
-int plat_map_range(uint32_t as, uint32_t va, uint32_t len)
-{
-    if (len == 0)
-        return 0;
-    uint32_t start = va & ~0xFFFu;
-    uint32_t end = (va + len + 0xFFFu) & ~0xFFFu;
-
-    for (uint32_t v = start; v < end; v += PAGE_SIZE) {
-        if (paging_translate(as, v))
-            continue;
-        uint32_t frame = pmm_alloc();
-        if (!frame)
-            return -1;
-        if (paging_map(as, v, frame, PTE_PRESENT | PTE_WRITE | PTE_USER) != 0)
-            return -1;
-    }
-    return 0;
-}
-
-/* ---- physical memory ------------------------------------------------- */
-
-void plat_mem_init(void)  { pmm_init(); }uint32_t plat_alloc_page(void) { return pmm_alloc(); }
-void plat_free_page(uint32_t p) { pmm_free(p); }
-
 /* ---- user mode ------------------------------------------------------- */
-
-uint32_t plat_as_create(void)
-{
-    return paging_create_as();
-}
-
-void plat_as_destroy(uint32_t as)
-{
-    paging_destroy_as(as);
-}
-
-uint32_t plat_current_as(void)
-{
-    return read_cr3();
-}
-
-int plat_user_page(uint32_t as, uint32_t va)
-{
-    if (paging_translate(as, va))
-        return 0;
-    uint32_t frame = pmm_alloc();
-    if (!frame)
-        return -1;
-    return paging_map(as, va, frame, PTE_PRESENT | PTE_WRITE | PTE_USER);
-}
-
-void plat_activate_as(uint32_t as)
-{
-    write_cr3(as);
-}
-
-void plat_flush_tlb(uint32_t va)
-{
-    invlpg(va);
-}
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
@@ -242,10 +169,18 @@ void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
     frame->ss = USER_DS;
 }
 
-void plat_write_user(uint32_t as, uint32_t va, const void *src, uint32_t len)
+/* i386 syscall convention: eax = number, ebx/ecx/edx = arguments,
+ * eax = return value. */
+void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 {
-    paging_write(as, va, src, len);
+    sc->nr = r->eax;
+    sc->a0 = r->ebx;
+    sc->a1 = r->ecx;
+    sc->a2 = r->edx;
 }
+
+void plat_frame_set_ret(regs_t *r, uint32_t val) { r->eax = val; }
+uint32_t plat_frame_get_ret(const regs_t *r)    { return r->eax; }
 
 void plat_shutdown(void)
 {

@@ -12,24 +12,22 @@
 
 /* ---- memory layout (provided by the board) --------------------------- */
 
-/* Where the kernel image was linked and may occupy. */
+/* Where the kernel image was linked and may occupy.  The kernel's .bss
+ * (including the 32 KiB heap arena) must end below PLAT_KERNEL_MAX; there
+ * is no frame allocator, so this is purely a sanity bound. */
 extern const uint32_t PLAT_KERNEL_BASE;
 extern const uint32_t PLAT_KERNEL_MAX;
-
-/* First and last address managed by the page/frame allocator. */
-extern const uint32_t PLAT_HEAP_BASE;
-extern const uint32_t PLAT_HEAP_END;
 
 /* Where user programs are loaded (position independent images are
  * relocated here).  Identical binaries work on every board. */
 extern const uint32_t PLAT_APP_BASE;
 extern const uint32_t PLAT_APP_MAX;
 
-/* Top of the user stack; grows downward from here. */
-extern const uint32_t PLAT_APP_STACK_TOP;
-
-/* Base of the sbrk heap; grows upward from here. */
-extern const uint32_t PLAT_APP_HEAP_BASE;
+/* Bytes reserved per task inside [APP_BASE, APP_MAX).  Each task gets its
+ * own window - image at the bottom, sbrk heap above it, stack at the top -
+ * so a synchronous exec never overwrites its parent.  The flat model has no
+ * page tables, so these windows are carved out by the kernel itself. */
+extern const uint32_t PLAT_APP_WINDOW;
 
 /* ---- boot ------------------------------------------------------------ */
 
@@ -66,10 +64,6 @@ void plat_cpu_idle_poll(void);
 uint32_t plat_uptime_ms(void);
 void     plat_sleep_ms(uint32_t ms);
 
-/* ---- user memory validation ------------------------------------------ */
-
-int      plat_user_ok(uint32_t as, uint32_t addr, uint32_t len);
-
 /* ---- block device (backing store for littlefs) ----------------------- */
 
 int      plat_block_read(uint32_t lba, uint32_t count, void *buf);
@@ -80,22 +74,15 @@ uint32_t plat_block_count(void);
 
 /* ---- physical memory ------------------------------------------------- */
 
-void     plat_mem_init(void);
-uint32_t plat_alloc_page(void);       /* 4 KiB aligned, 0 on failure */
-void     plat_free_page(uint32_t p);
-
-/* ---- address translation (for the ELF loader) ------------------------ */
-
-/* Translate a virtual address to a pointer the kernel can write through.
- * `as` is the address space handle (0 = the active one).  On a flat
- * platform (no MMU) this is the identity. */
-uint32_t plat_translate(uint32_t as, uint32_t va);
-
-/* Make [va, va+len) writable in `as`, allocating backing memory if needed.
- * Returns 0 on success. */
-int      plat_map_range(uint32_t as, uint32_t va, uint32_t len);
+/* The flat model needs no frame allocator or page tables: every byte of RAM
+ * is directly addressable. */
 
 /* ---- user mode ------------------------------------------------------- */
+
+/* There is no address-space abstraction: the unified model is a single flat
+ * address space with no memory protection, matching the MCUs this OS targets.
+ * Kernel code validates user pointers against the current task's window
+ * (process_user_ok), and reads/writes them directly. */
 
 /* Register frame captured when trapping from user mode.  The layout is
  * architecture specific; this matches the i386 port. */
@@ -106,27 +93,21 @@ typedef struct regs {
     uint32_t eip, cs, eflags, useresp, ss;
 } regs_t;
 
-/* Address space handle.  On x86 this is a page directory, on a flat
- * platform it is unused (0). */
-uint32_t plat_as_create(void);
-void     plat_as_destroy(uint32_t as);
-uint32_t plat_current_as(void);
+/* Architecture-neutral view of a syscall trap.  Core code never reads
+ * eax/ebx/ecx/edx itself: the arch maps its own convention onto these
+ * fields (i386 ebx/ecx/edx, rv32 a0/a1/a2, arm r0/r1/r2). */
+typedef struct {
+    uint32_t nr;          /* syscall number */
+    uint32_t a0, a1, a2;  /* arguments */
+} syscall_t;
 
-/* Back a user page at `va` with fresh writable memory. */
-int      plat_user_page(uint32_t as, uint32_t va);
-
-/* Switch to the given address space. */
-void     plat_activate_as(uint32_t as);
-
-/* Flush a TLB entry after changing a mapping. */
-void     plat_flush_tlb(uint32_t va);
+void     plat_frame_get_syscall(const regs_t *r, syscall_t *sc);
+void     plat_frame_set_ret(regs_t *r, uint32_t val);
+uint32_t plat_frame_get_ret(const regs_t *r);
 
 /* Prepare a trap frame that starts a user program at `entry` with stack
  * `sp`.  Owns all architecture specific segment/CSR setup. */
 void     plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp);
-
-/* Write to user memory through the address translation. */
-void     plat_write_user(uint32_t as, uint32_t va, const void *src, uint32_t len);
 
 /* Power the machine off (best effort). */
 void     plat_shutdown(void) __attribute__((noreturn));

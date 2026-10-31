@@ -6,8 +6,8 @@
 /* RV32 platform layer for QEMU virt (and later ESP32-C3).
  *
  * P1 scope: 16550 console, CLINT timer, machine-mode traps.  There is no
- * MMU on this target, so plat_alloc_page() is a simple bump allocator over
- * the RAM region and all addresses are physical. */
+ * MMU on this target: all addresses are physical and task windows come from
+ * the same bump allocator the x86 port uses (kernel/process.c). */
 
 /* ---- 16550 UART (QEMU virt maps UART0 here) -------------------------- */
 
@@ -142,18 +142,6 @@ void plat_sleep_ms(uint32_t ms)
         __asm__ volatile("wfi");
 }
 
-int plat_user_ok(uint32_t as, uint32_t addr, uint32_t len)
-{
-    (void)as;
-    if (addr < PLAT_APP_BASE || addr >= PLAT_APP_MAX)
-        return 0;
-    if (len == 0)
-        return 1;
-    if (addr + len < addr || addr + len > PLAT_APP_MAX)
-        return 0;
-    return 1;
-}
-
 /* ---- traps ----------------------------------------------------------- */
 
 #include "trap.h"
@@ -177,43 +165,8 @@ uint32_t trap_handler(rv32_frame_t *f)
 
 /* ---- physical memory ------------------------------------------------- */
 
-static uint32_t g_next_page;
-
-void plat_mem_init(void)
-{
-    /* Start above the kernel image. */
-    g_next_page = (PLAT_APP_BASE + 0xFFFu) & ~0xFFFu;
-}
-
-uint32_t plat_alloc_page(void)
-{
-    if (g_next_page + 4096 > PLAT_HEAP_END)
-        return 0;
-    uint32_t p = g_next_page;
-    g_next_page += 4096;
-    return p;
-}
-
-void plat_free_page(uint32_t p)
-{
-    (void)p;   /* bump allocator: nothing to reclaim yet */
-}
-
-/* ---- address translation (flat memory, no MMU) ----------------------- */
-
-uint32_t plat_translate(uint32_t as, uint32_t va)
-{
-    (void)as;
-    return va;
-}
-
-int plat_map_range(uint32_t as, uint32_t va, uint32_t len)
-{
-    (void)as;
-    (void)va;
-    (void)len;
-    return 0;   /* RAM is already writable */
-}
+/* The flat model needs no frame allocator: RAM is directly addressable.
+ * Task windows are carved out by kernel/process.c. */
 
 /* ---- block device (RAM disk for now) --------------------------------- */
 
@@ -262,24 +215,9 @@ void plat_early_init(void)
 void plat_init(void)
 {
     plat_console_init();
-    plat_mem_init();
 }
 
 /* ---- user mode (P2) -------------------------------------------------- */
-
-uint32_t plat_as_create(void)  { return 0; }
-void     plat_as_destroy(uint32_t as) { (void)as; }
-uint32_t plat_current_as(void) { return 0; }
-
-int plat_user_page(uint32_t as, uint32_t va)
-{
-    (void)as;
-    (void)va;
-    return 0;   /* flat memory: pages are always present */
-}
-
-void plat_activate_as(uint32_t as)   { (void)as; }
-void plat_flush_tlb(uint32_t va)     { (void)va; }
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
@@ -288,11 +226,19 @@ void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
     frame->useresp = sp;
 }
 
-void plat_write_user(uint32_t as, uint32_t va, const void *src, uint32_t len)
+/* RV32 syscall convention: a7 = number, a0/a1/a2 = arguments.
+ * TODO(P2): rv32 has its own trap frame (arch/rv32/trap.h); map those
+ * registers here once ecall/U-mode lands. */
+void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 {
-    (void)as;
-    memcpy((void *)va, src, len);
+    sc->nr = r->eax;
+    sc->a0 = r->ebx;
+    sc->a1 = r->ecx;
+    sc->a2 = r->edx;
 }
+
+void plat_frame_set_ret(regs_t *r, uint32_t val) { r->eax = val; }
+uint32_t plat_frame_get_ret(const regs_t *r)    { return r->eax; }
 
 void plat_shutdown(void)
 {

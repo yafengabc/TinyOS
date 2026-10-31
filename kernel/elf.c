@@ -3,27 +3,16 @@
 #include "string.h"
 #include "console.h"
 
-/* Address space the loader writes through (opaque to the core). */
-static uint32_t g_as;
+/* Task window the loader may write into (set by process.c before every
+ * load).  The flat model has no page tables, so "mapping" is a no-op and
+ * every write is a plain store. */
+static uint32_t g_win_lo;
+static uint32_t g_win_hi;
 
-void elf_set_address_space(uint32_t pd)
+void elf_set_window(uint32_t lo, uint32_t hi)
 {
-    g_as = pd;
-}
-
-/* Address translation for the loader: on a platform with paging these go
- * through the page tables, on a flat platform they are the identity.
- * Having both here keeps the loader itself architecture independent. */
-static uint8_t *v2p(uint32_t va)
-{
-    return (uint8_t *)plat_translate(g_as, va);
-}
-
-static int map_pages(uint32_t va, uint32_t len)
-{
-    uint32_t start = va & ~0xFFFu;
-    uint32_t end = (va + len + 0xFFFu) & ~0xFFFu;
-    return plat_map_range(g_as, start, end - start);
+    g_win_lo = lo;
+    g_win_hi = hi;
 }
 
 #define PT_LOAD    1
@@ -97,71 +86,52 @@ typedef struct {
 #define R_TYPE(info) ((info) & 0xFF)
 
 /* ------------------------------------------------------------------ */
-/* writes go through the platform's address translation               */
+/* writes are plain stores: the flat model has no address translation  */
 /* ------------------------------------------------------------------ */
 
-static int ensure_writable(uint32_t va, uint32_t len)
+/* The loader may only touch the task window selected with elf_set_window().
+ * Without an MMU a corrupt or hostile image could otherwise overwrite the
+ * kernel through p_vaddr / r_offset. */
+static int user_range_ok(uint32_t va, uint32_t len)
 {
-    return map_pages(va, len);
+    if (len == 0)
+        return 1;
+    if (va < g_win_lo)
+        return 0;
+    if (va + len < va) /* overflow */
+        return 0;
+    return va + len <= g_win_hi;
 }
 
 static int copy_to_user(uint32_t va, const void *src, uint32_t len)
 {
-    if (ensure_writable(va, len) != 0)
+    if (!user_range_ok(va, len))
         return -1;
-
-    const uint8_t *s = src;
-    while (len) {
-        uint8_t *p = v2p(va);
-        if (!p)
-            return -1;
-        uint32_t chunk = 4096u - (va & 0xFFF);
-        if (chunk > len)
-            chunk = len;
-        memcpy(p, s, chunk);
-        va += chunk;
-        s += chunk;
-        len -= chunk;
-    }
+    memcpy((void *)va, src, len);
     return 0;
 }
 
 static int zero_user(uint32_t va, uint32_t len)
 {
-    if (len == 0)
-        return 0;
-    if (ensure_writable(va, len) != 0)
+    if (!user_range_ok(va, len))
         return -1;
-
-    while (len) {
-        uint8_t *p = v2p(va);
-        if (!p)
-            return -1;
-        uint32_t chunk = 4096u - (va & 0xFFF);
-        if (chunk > len)
-            chunk = len;
-        memset(p, 0, chunk);
-        va += chunk;
-        len -= chunk;
-    }
+    memset((void *)va, 0, len);
     return 0;
 }
 
 static int read_u32(uint32_t va, uint32_t *out)
 {
-    uint8_t *p = v2p(va);
-    if (!p)
+    if (!user_range_ok(va, 4))
         return -1;
-    memcpy(out, p, 4);
+    memcpy(out, (const void *)va, 4);
     return 0;
 }
 
 static int write_u32(uint32_t va, uint32_t val)
 {
-    uint8_t *p = v2p(va);
-    if (!p)
+    if (!user_range_ok(va, 4))
         return -1;
-    memcpy(p, &val, 4);
+    memcpy((void *)va, &val, 4);
     return 0;
 }
 
@@ -303,18 +273,19 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
 
                 uint32_t where = r.r_offset + bias;
                 uint32_t val;
-                if (read_u32(where, &val) != 0)
-                    return -1;
+
+                /* RELA carries the addend explicitly; the value stored at
+                   the target is meaningless (unlike REL).  With no dynamic
+                   symbol table, symbols stay unresolved (S = 0), so every
+                   supported type reduces to addend + load bias. */
 
                 switch (type) {
                 case R_RISCV_RELATIVE:
                 case R_386_RELATIVE:
-                    val = (uint32_t)r.r_addend + bias;
-                    break;
                 case R_RISCV_32:      /* same numeric value as R_386_32 */
                 case R_RISCV_JUMP_SLOT:
                 case R_386_JMP_SLOT:
-                    val += bias;
+                    val = (uint32_t)r.r_addend + bias;
                     break;
                 default:
                     kprintf("exec: unsupported relocation %u\n", type);
@@ -425,6 +396,11 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
         }
 
         uint32_t dst = ph->p_vaddr + bias;
+        if (!user_range_ok(dst, ph->p_memsz)) {
+            kprintf("elf: segment %u outside app window (0x%x+0x%x)\n",
+                    i, dst, ph->p_memsz);
+            return -1;
+        }
         if (copy_to_user(dst, data + ph->p_offset, ph->p_filesz) != 0)
             return -1;
         if (ph->p_memsz > ph->p_filesz) {
@@ -436,6 +412,11 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
     if (apply_relocations(data, size, eh, bias) != 0)
         return -1;
 
-    *entry_out = eh->e_entry + bias;
+    uint32_t entry = eh->e_entry + bias;
+    if (!user_range_ok(entry, 1)) {
+        kprintf("elf: entry 0x%x outside app window\n", entry);
+        return -1;
+    }
+    *entry_out = entry;
     return 0;
 }

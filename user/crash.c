@@ -2,9 +2,10 @@
 
 int main(void)
 {
-    puts("about to write to an unmapped address...\n");
-    volatile unsigned int *p = (volatile unsigned int *)0xDEADB000u;
-    *p = 0x12345678;
+    puts("about to execute an illegal instruction...\n");
+    /* The flat model has no page faults, so crash on something every
+       architecture provides: an undefined instruction. */
+    __asm__ volatile("ud2");
     puts("this line should never be printed\n");
     return 0;
 }
