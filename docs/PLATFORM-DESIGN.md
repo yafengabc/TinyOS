@@ -322,6 +322,27 @@ P2 落地的实现要点（`arch/rv32/`）：
   `__lshrdi3/__ashldi3/__ashrdi3` 调用，`kernel/libgcc.c` 补齐了这三个（用两个
   32 位半字实现，避免递归调用自己）。
 
+#### 已知问题：rv32 在 QEMU 下启动极慢（2026-11-01）
+
+现象：banner 能打印，但列目录时约 4 秒才出一个文件（正常应为毫秒级），
+`scripts/smoke.ps1 -Target rv32` 因此报 `shell prompt never appeared`。
+
+已排除的因素：
+
+- 定时器中断风暴——全程 `plat_ticks()` 为 0（此时中断尚未打开）
+- UART 轮询——去掉 THRE 等待后速度不变
+- 内存大小（`-m 64M/128M/256M`）、TB 缓存（`-accel tcg,tb-size=32/128`）
+- 单/多线程 TCG、`-cpu rv32`、C 扩展（`-march=rv32im`）
+- 中断/异常（无 trap 输出）、PMP 写入（全程仅 6 次，集中在启动期）
+
+证据：`-d in_asm` 下 4 秒产生约 64 万个翻译块，其中 64 万个落在
+`0x80002000` 这一页（`memcpy/memset/strlen` 所在页）；`memset` 的
+`sb/addi` 循环每次迭代都被重新翻译。CPU 本身不慢（1e6 次加法 2–5 ms），
+但 `string.c` 的函数吞吐只有约 70 KB/s。
+
+未解：guest 并未写入该页（页内只有代码），TB 却持续失效。同样的内核
+在 x86 目标上速度正常，在 ESP32-C3 真机上也正常。
+
 ### QEMU mps2（ARM 参考）
 
 ```

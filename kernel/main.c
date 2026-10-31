@@ -17,8 +17,9 @@ static void banner(void)
 
 static void list_files(void)
 {
-    kprintf("littlefs: %u files\n", ramdisk_count());
-    for (uint32_t i = 0; i < ramdisk_count(); i++) {
+    uint32_t n = ramdisk_count();
+    kprintf("littlefs: %u files\n", n);
+    for (uint32_t i = 0; i < n; i++) {
         uint32_t size = 0;
         const char *name = ramdisk_name(i, &size);
         kprintf("  %s (%u bytes)\n", name, size);

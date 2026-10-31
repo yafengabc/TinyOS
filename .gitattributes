@@ -1,3 +1,8 @@
+# Everything is stored as LF and checked out as LF.  Without this, an editor
+# that saves CRLF makes git report whole files as rewritten even though only
+# the line endings changed, which buries real diffs.
+* text=auto eol=lf
+
 # Shell scripts are run by bash, and core.autocrlf=true would otherwise hand
 # them a CRLF shebang that fails with "bad interpreter".  Everything else can
 # stay on whatever the checkout gives it.
