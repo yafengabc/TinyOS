@@ -85,8 +85,32 @@ static volatile int need_resched;
  * same one traps from user mode land on.  A trap from user mode always
  * starts at its top and everything it pushes is unwound before the next
  * trap, so the kernel stack carries no state between traps. */
+extern uint8_t __kernel_stack[];
 extern uint8_t __kernel_stack_top[];
 #define KSTACK_TOP ((uint32_t)__kernel_stack_top)
+
+/* There is no guard page to fault on - no MMU - so running off the end of
+ * the kernel stack used to end up as a jump into empty memory: a serial
+ * driver that recursed on backspace wrapped 16 KiB and died at
+ * EIP=4b976946 with the stack pointer outside RAM.  One word at the bottom
+ * is enough to recognise the situation: the stack grows down, so anything
+ * that overflows must overwrite it first. */
+#define KSTACK_GUARD 0x5354414Bu              /* "STAK" */
+
+static void kstack_guard_init(void)
+{
+    ((volatile uint32_t *)__kernel_stack)[0] = KSTACK_GUARD;
+}
+
+static void kstack_check(regs_t *r)
+{
+    uint32_t sp = (uint32_t)r;
+
+    if (sp < (uint32_t)__kernel_stack || sp >= KSTACK_TOP)
+        panic("kernel stack out of bounds: sp=%x", sp);
+    if (*(volatile uint32_t *)__kernel_stack != KSTACK_GUARD)
+        panic("kernel stack overflow");
+}
 
 static uint32_t align_up(uint32_t v, uint32_t a)
 {
@@ -178,6 +202,11 @@ void process_tick(regs_t *r)
 {
     uint64_t now;
 
+    /* Cheapest moment to notice a blown kernel stack: the tick runs no
+       matter what the task is doing, and r points at the trap frame on
+       that very stack. */
+    kstack_check(r);
+
     if (current && current->state == ST_RUNNING)
         current->cpu_ticks++;
 
@@ -235,6 +264,9 @@ void process_init(void)
     rr = 0;
     quantum = QUANTUM;
     need_resched = 0;
+
+    /* Before the first tick: kmain runs with interrupts off up to here. */
+    kstack_guard_init();
 
     win_used = 0;
     win_slots = (int)((PLAT_APP_MAX - PLAT_APP_BASE) / PLAT_APP_WINDOW);
