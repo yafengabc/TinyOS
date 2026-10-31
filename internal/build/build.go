@@ -486,7 +486,16 @@ func (b *Builder) buildKernel() error {
 	var objs []string
 	var tasks []task
 	for _, src := range srcs {
-		name := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src)) + ".o"
+		// Object names carry the directory (rv32_platform.o,
+		// qemu-virt_platform.o): several source trees legitimately have
+		// same-named files (arch and every board have a platform.c), and
+		// a bare basename would make them overwrite each other.
+		rel, err := filepath.Rel(b.Root, src)
+		if err != nil {
+			rel = filepath.Base(src)
+		}
+		name := filepath.Base(filepath.Dir(rel)) + "_" +
+			strings.TrimSuffix(filepath.Base(src), filepath.Ext(src)) + ".o"
 		obj := filepath.Join(b.BuildDir, "kernel", name)
 		objs = append(objs, obj)
 		srcCopy, objCopy := src, obj

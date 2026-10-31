@@ -40,7 +40,7 @@ _start:
 2:
     .option push
     .option norelax
-    la      t0, trap_entry
+    la      t0, trap_vectors
     .option pop
     csrw    mtvec, t0
 
@@ -71,6 +71,23 @@ park:
     .section .text.trap, "ax"
     .align 4
     .globl trap_entry
+
+/* Vectored trap table.  The ESP32-C3 hard-wires mtvec to vectored mode
+ * (verified on the real chip: writing 0x403800c0 reads back 0x40380001)
+ * and its base must be 256-byte aligned - anything below that gets
+ * zeroed, which silently redirects every synchronous exception to the
+ * 256-byte boundary.  QEMU virt accepts vectored mode as well, so both
+ * boards share this table: cause 0 (all synchronous exceptions) enters
+ * through the base, interrupts enter at base + 4*cause.  Every slot
+ * jumps to the same handler because the C side dispatches on mcause. */
+    .balign 256
+    .globl trap_vectors
+trap_vectors:
+    j       trap_entry              /* 0: synchronous exceptions land here */
+    .rept 31
+    j       trap_entry
+    .endr
+
 trap_entry:
     csrw    mscratch, t0            /* park t0: needed as scratch below */
     csrr    t0, mstatus
