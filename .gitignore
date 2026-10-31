@@ -14,3 +14,8 @@
 
 # Local agent workspace notes (not part of the project)
 /.workbuddy/
+
+# Reference source, not vendored: Zephyr is a separate (nested) git repo kept
+# only to read from.  It is ~15 MB of sparse checkout and must never be
+# committed into TinyOS.  See docs/ZEPHYR-REFERENCE.md for how to fetch it.
+/third_party/zephyr/
