@@ -149,7 +149,7 @@ go run ./cmd/tos build
 # 在 QEMU 窗口里启动（VGA 文本 + PS/2 键盘）
 go run ./cmd/tos run
 
-# 无窗口，直接用终端当串口控制台（推荐，能复制粘贴命令）
+# 无窗口，直接把终端当串口控制台（推荐；敲键盘完全没问题，粘贴见下方注意）
 go run ./cmd/tos run -headless
 
 # 调试：把中断/CPU 复位记录到 build/qemu.log
