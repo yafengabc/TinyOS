@@ -1,0 +1,13 @@
+# Build output (root only -- internal/build/ is source code)
+/build/
+
+# Compiled artifacts
+/*.img
+*.o
+*.elf
+*.log
+*.pdb
+
+# The tos CLI binary at the repo root (cmd/tos/ is source)
+/tos
+/tos.exe
