@@ -19,6 +19,11 @@ usage:
                             build/kernel-rv32.elf (rv32)
   tos run   [-headless] [-debug] [-no-build] [-target x86|rv32]
                             build (unless -no-build) and boot in QEMU
+  tos espimg <elf> <out.bin>
+                            package a linked ELF as an ESP32-C3 boot image,
+                            ready to be written at flash offset 0 (-sha=false
+                            drops the digest, which only makes the ROM
+                            complain)
   tos doctor                show detected toolchains and QEMU
   tos clean                 remove the build directory
 
@@ -95,6 +100,26 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "espimg":
+		fs := flag.NewFlagSet("espimg", flag.ExitOnError)
+		sha := fs.Bool("sha", true, "append the SHA-256 digest the ROM checks")
+		fs.Parse(os.Args[2:])
+		if fs.NArg() != 2 {
+			fmt.Fprintln(os.Stderr, "usage: tos espimg [-sha] <elf> <out.bin>")
+			os.Exit(2)
+		}
+		img, segs, err := build.ESPImageFromELF(fs.Arg(0), *sha)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tos:", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(fs.Arg(1), img, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "tos:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%d bytes, %d segment(s), entry 0x%x\n", len(img), len(segs), entryOf(img))
+		fmt.Printf("write at flash offset 0: esptool.py --chip esp32c3 write_flash 0x0 %s\n", fs.Arg(1))
+
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
 		for _, name := range []string{"x86", "rv32"} {
@@ -133,6 +158,16 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+/* The entry point is the fourth field of the image header; reading it back
+ * from the bytes we just built says more than echoing the ELF, because it is
+ * what the ROM will actually jump to. */
+func entryOf(img []byte) uint32 {
+	if len(img) < 8 {
+		return 0
+	}
+	return uint32(img[4]) | uint32(img[5])<<8 | uint32(img[6])<<16 | uint32(img[7])<<24
 }
 
 func version(tool, arg string) {
