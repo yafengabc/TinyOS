@@ -107,10 +107,48 @@ void plat_early_init(void)
     plat_board_early();
 }
 
+extern char trap_vectors[];
+
+static void pmp_open_trap_vector(void);
+
 void plat_init(void)
 {
     pmp_deny_user();
     plat_board_init();
+    pmp_open_trap_vector();
+}
+
+/* PMP access bits, shared by the boot-time vector opening and the
+ * per-task programming in plat_task_protect. */
+#define PMP_R     0x01u
+#define PMP_W     0x02u
+#define PMP_X     0x04u
+#define PMP_TOR   0x08u
+#define PMP_NAPOT 0x18u
+
+/* The trap entry must be reachable from U-mode.  The RISC-V spec has the
+ * first instruction fetch of a trap run at the NEW privilege level (so
+ * M-mode fetches ignore PMP and any mtvec target works), and qemu-virt
+ * behaves that way.  The esp-riscv core in the ESP32-C3 does not: a tick
+ * interrupt taken while a user program was running faulted with
+ * mcause=1 (instruction access fault) at mtvec+4*2, i.e. the vector slot
+ * itself was PMP-checked with the OLD (U-mode) rights (ls on the real
+ * chip died at 0x40382c08 = trap_vectors slot 2).  Give U-mode execute
+ * permission on the 256-byte vector table via spare entry 4; the handler
+ * bodies those jumps reach stay inside the PMP-denied kernel region, and
+ * by the time they run the core is in M-mode anyway.  plat_task_protect
+ * only touches entries 0..3 and pmpcfg0, so this entry survives every
+ * task switch. */
+extern char trap_vectors[];
+
+static void pmp_open_trap_vector(void)
+{
+    uint32_t base = (uint32_t)(uintptr_t)trap_vectors;
+    uint32_t addr = (base >> 2) | ((256u >> 3) - 1u);   /* NAPOT, 256 B */
+    uint32_t cfg = PMP_NAPOT | PMP_R | PMP_X;           /* entry 4 bits 7:0 */
+
+    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(addr));
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg));
 }
 
 /* ---- interrupts ------------------------------------------------------ */
@@ -142,11 +180,13 @@ void plat_cpu_idle(void)
  *   1  RX     [win_base, wx)               code
  *   2  RW     [wx, brk)                    data and heap
  *   3  RW     [stack_low, stack_top)       stack, NAPOT
+ *   (4  RX     trap_vectors, 256 B          boot time, see below)
  *
  * Nothing claims the hole between brk and stack_low, so a heap that runs
  * off its end and a stack that runs off its bottom both fault instead of
  * quietly eating the other.  The stack uses NAPOT because it is absolute:
- * a TOR entry there would have to start at brk and would fill that hole. */
+ * a TOR entry there would have to start at brk and would fill that hole.
+ * Entry 4 (vector table, see pmp_open_trap_vector) is boot-time only. */
 #define PMP_R     0x01u
 #define PMP_W     0x02u
 #define PMP_X     0x04u
