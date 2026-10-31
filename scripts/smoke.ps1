@@ -14,7 +14,9 @@ param(
     [string]$Target = "x86",
     [string]$Image = "",
     [string]$Qemu = "",
-    [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "wfile demo.txt hello from the filesystem", "cat demo.txt", "mem", "crash", "uptime", "exit"),
+    # "run spin &" plus the ps that follows it is the scheduler check: the
+    # background task must still be alive (state rdy) when ps runs.
+    [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "run spin &", "ps", "wfile demo.txt hello from the filesystem", "cat demo.txt", "mem", "crash", "uptime", "exit"),
     [int]$Port = 5566,
     [int]$BootWaitMs = 3000,
     [int]$CommandWaitMs = 700
@@ -66,7 +68,7 @@ if ($Target -eq "rv32") {
         "-bios", "none",
         "-kernel", $Image,
         "-display", "none",
-        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=off",
+        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=on",
         "-serial", "chardev:tosserial",
         "-monitor", "none",
         "-no-reboot"
@@ -78,7 +80,7 @@ if ($Target -eq "rv32") {
         "-boot", "c",
         "-display", "none",
         # QEMU 9+ dropped the "tcp:" chardev shorthand, use an explicit socket.
-        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=off",
+        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=on",
         "-serial", "chardev:tosserial",
         "-monitor", "none"
     )
@@ -99,6 +101,10 @@ $proc = [System.Diagnostics.Process]::Start($psi)
 $errTask = $proc.StandardError.ReadToEndAsync()
 
 $client = New-Object System.Net.Sockets.TcpClient
+# Nagle holds a small write back until the previous one is acked, and a
+# guest that is busy (or not draining its UART) delays that ack.  Command
+# lines are tiny, so send them immediately.
+$client.NoDelay = $true
 $connected = $false
 for ($i = 0; $i -lt 50; $i++) {
     try {
@@ -115,28 +121,33 @@ if (-not $connected) {
 }
 
 $stream = $client.GetStream()
-$writer = New-Object System.IO.StreamWriter($stream)
-$writer.AutoFlush = $true
 $sb = New-Object System.Text.StringBuilder
 
-# Kick the chardev; some QEMU TCP backends only report readability after
-# the first write from the client.
-$writer.Write("`n")
+# Write raw bytes: a StreamWriter buffered commands until something else
+# happened, which made scripted input arrive seconds late.  QEMU is started
+# with wait=on, so the VM only boots once we are connected and no early
+# output is lost.
+function Send-Line([string]$text) {
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($text + "`n")
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+}
 
-function Read-Available([int]$SettleMs) {
-    $idle = 0
-    while ($idle -lt $SettleMs) {
+# Collects output for a fixed window.  It used to wait for a gap in the
+# output instead, which never comes while a background program is printing:
+# the next command was only sent once that program exited.
+function Read-Available([int]$WindowMs) {
+    $until = [DateTime]::Now.AddMilliseconds($WindowMs)
+    while ([DateTime]::Now -lt $until) {
         if ($stream.DataAvailable) {
             $buf = New-Object byte[] 4096
             $n = $stream.Read($buf, 0, $buf.Length)
             if ($n -gt 0) {
                 [void]$sb.Append([System.Text.Encoding]::ASCII.GetString($buf, 0, $n))
-                $idle = 0
                 continue
             }
         }
-        Start-Sleep -Milliseconds 100
-        $idle += 100
+        Start-Sleep -Milliseconds 50
     }
 }
 
@@ -152,7 +163,7 @@ if ($sb.ToString() -notmatch "tos>") {
 }
 
 foreach ($c in $Commands) {
-    $writer.Write($c + "`n")
+    Send-Line $c
     Read-Available $CommandWaitMs
 }
 
