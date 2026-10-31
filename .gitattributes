@@ -1,0 +1,4 @@
+# Shell scripts are run by bash, and core.autocrlf=true would otherwise hand
+# them a CRLF shebang that fails with "bad interpreter".  Everything else can
+# stay on whatever the checkout gives it.
+*.sh text eol=lf
