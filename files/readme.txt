@@ -1,12 +1,16 @@
 TinyOS
 ======
 
-Welcome to a very small 32-bit x86 operating system.
+Welcome to a very small multi-platform operating system.
 
-The kernel boots from a raw disk image with its own boot sector, sets up
-paging (4 MiB identity pages for the kernel, 4 KiB pages for user
-programs), enters ring 3 and runs /bin/sh as an ELF32 executable that was
-loaded from the in-memory ramdisk.
+There is no MMU and no paging: the kernel runs in a single flat address
+space, gives every task its own window of RAM and validates user pointers
+against it.  The same ELF32 binaries run on the PC port (boot sector, ATA
+disk) and on the RV32 port (QEMU virt, RAM disk) because programs are
+linked as position independent executables and relocated on load.
+
+/bin/sh is itself an ELF32 executable loaded from littlefs, and it starts
+every program below on demand.
 
 Try:
 
@@ -18,4 +22,4 @@ Try:
   run uptime
 
 Every command other than the shell builtins is a separate ELF binary that
-the kernel loads on demand.
+the kernel loads from the filesystem when you type its name.

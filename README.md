@@ -1,15 +1,22 @@
 # TinyOS
 
-一个用 **C + 汇编** 写的极简 32 位 x86 操作系统，配套的构建/运行工具用 **Go** 写。
-它的核心能力是：从 **littlefs** 镜像里**动态加载 ELF 可执行文件**，在 **ring 3** 里运行，
-程序可以 `exec` 另一个程序、读写文件、申请堆内存；程序崩溃只会杀掉自己，不会拖垮内核。
+一个用 **C + 汇编** 写的极简 32 位操作系统，目前有 **x86（PC/QEMU i386）** 与
+**RV32（QEMU virt）** 两个可运行目标，配套的构建/运行工具用 **Go** 写。
+它的核心能力是：从 **littlefs** 镜像里**动态加载 ELF 可执行文件**，在**非特权态**
+（x86 ring 3 / RV32 U-mode）里运行，程序可以 `exec` 另一个程序、读写文件、申请堆内存；
+程序崩溃只会杀掉自己，不会拖垮内核。
 
 ```
-BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
-     -> GDT/IDT/TSS（平坦模型，不启用分页）+ 定时器 + 键盘
-     -> 挂载 littlefs，加载 /bin/sh (ELF32) -> 进入 ring 3
-     -> shell 里每条命令都是一个按需加载的 ELF 程序
+x86 : BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
+       -> GDT/IDT/TSS（平坦模型，不启用分页）+ 定时器 + 键盘
+       -> 挂载 littlefs（ATA 分区），加载 /bin/sh (ELF32) -> 进入 ring 3
+RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
+       -> trap 向量 + CLINT 定时器 + 16550 串口 + PMP 全空间放行
+       -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/sh -> mret 到 U-mode
 ```
+
+两条链跑的是**同一套内核代码**（`kernel/`）和**同一批用户程序**：程序是 PIE，
+加载时按板级 `APP_BASE` 重定位，所以同一份 `bin/hello` 在两边都能跑。
 
 ## 功能
 
@@ -28,7 +35,8 @@ BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
   不同 `APP_BASE` 的板子上运行**（QEMU 与真实 MCU 共用）
 - **LZ4 压缩的程序**：用户 ELF 在构建时压缩，内核内嵌约 420 字节的解压器在
   `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）
-- 系统调用（`int 0x80`）：`write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit`
+- 系统调用（x86 `int 0x80` / RV32 `ecall`）：
+  `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create`
 - 同步 `exec` 模型：shell 调用 `exec()` 后阻塞，子程序退出时把退出码还给 shell
 - 用户态异常（非法指令、GPF）只终止当前进程
 - **littlefs v2.9.3** 文件系统：构建期用 `mklfs`（同一份 littlefs 源码）打包到磁盘上的
@@ -36,6 +44,8 @@ BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
   （`open/read/readdir` 全部走 littlefs，`prog/erase` 回写磁盘）
 - 输出同时走 VGA 文本模式和 COM1，可用 `-headless` 直接在终端里玩
 - 其余：PIT 定时器、PS/2 键盘、PIC 重映射、串口
+- **RV32 移植**（`-target rv32`）：M 模式起步、U-mode + `ecall`、PMP 放行、CLINT
+  定时器、16550 串口、内嵌 littlefs 的 RAM 盘；同一批用户程序原样运行
 
 ## 目录
 
@@ -50,15 +60,18 @@ kernel/              架构无关内核（C）
   heap.c lz4.c libgcc.c console.c string.c
   lfs_config.h        littlefs 的裁剪与配置
 arch/x86/            x86 实现：entry.S isr.S gdt idt ata serial timer keyboard platform.c
-arch/rv32/           RV32 实现（P1 桩：start.S + 平坦平台骨架，尚不能跑用户程序）
-board/pc/            x86 板级内存布局（layout.c）
-board/qemu-virt/     QEMU virt (rv32) 板级布局（P2，布局待重排）
+  regs.h usys.h      i386 的 trap 帧布局 / 用户态系统调用入口（int 0x80）
+arch/rv32/           RV32 实现：start.S（入口 + trap 向量）platform.c（UART/CLINT/PMP/RAM 盘）
+  regs.h usys.h      RV32 的 trap 帧布局（144 B）/ ecall 入口
+board/pc/            x86 板级内存布局（layout.c，含 littlefs 分区 LBA）
+board/qemu-virt/     QEMU virt (rv32) 板级布局（layout.c）
 docs/PLATFORM-DESIGN.md  无 MMU 平坦模型的设计与路线图
 third_party/littlefs/  上游 littlefs v2.9.3（lfs.c/lfs.h/lfs_util.*）
 tools/mklfs.c        host 端 littlefs 打包/校验工具
 tools/lz4.c          host 端 LZ4 压缩器（只用于打包）
 user/                用户态程序（freestanding C）
-  crt0.S lib.c syscall.c
+  crt0_x86.S crt0_rv32.S  按目标选择的启动桩
+  lib.c syscall.c         与架构无关；系统调用入口来自 arch/<arch>/usys.h
   sh.c hello.c hello_printf.c echo.c ls.c cat.c crash.c mem.c uptime.c wfile.c reloc.c
   user.ld            PIE 链接脚本（基址 0，由内核重定位）
 cmd/tos/             Go 构建工具（build / run / doctor / clean）
@@ -129,7 +142,7 @@ go run ./cmd/tos doctor
 ## 使用
 
 ```powershell
-# 编译内核 + 用户程序 + littlefs 分区，生成 build/tinyos.img
+# x86：编译内核 + 用户程序 + littlefs 分区，生成 build/tinyos.img
 go run ./cmd/tos build
 
 # 在 QEMU 窗口里启动（VGA 文本 + PS/2 键盘）
@@ -140,6 +153,10 @@ go run ./cmd/tos run -headless
 
 # 调试：把中断/CPU 复位记录到 build/qemu.log
 go run ./cmd/tos run -headless -debug
+
+# RV32：编译出 build/kernel-rv32.elf，并在 qemu-system-riscv32 里启动
+go run ./cmd/tos build -target rv32
+go run ./cmd/tos run   -target rv32
 ```
 
 进去以后：
@@ -172,7 +189,57 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
 ```
 
 脚本会启动 QEMU、执行 `ls / cat / hello / mem / crash / uptime / exit`，
-检查提示符和内核 panic，最后打印完整记录。
+检查提示符和内核 panic，最后打印完整记录。RV32 用同一个脚本加 `-Target rv32`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target rv32
+```
+
+## RV32 目标（qemu-virt）
+
+`-target rv32` 会构建一套 **RISC-V 32 位（rv32imc / ilp32 软浮点）** 的完整系统：
+内核、用户程序、littlefs 镜像，全部用同一份源码，不需要第二套实现。
+
+```powershell
+go run ./cmd/tos build -target rv32   # -> build/kernel-rv32.elf (+ build/ramdisk.bin)
+go run ./cmd/tos run   -target rv32
+```
+
+QEMU 启动命令等价于：
+
+```
+qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.elf
+```
+
+`-bios none` 表示不用 OpenSBI：内核自己从 M 模式起步，配置自己的 trap 向量、
+16550 串口、CLINT 定时器和 PMP，然后 `mret` 到 U-mode 运行 `/bin/sh`。
+
+已经跑通的东西（与 x86 完全相同的一批用户程序）：
+
+- `ls / cat / echo / hello / hello_printf / reloc / mem / crash / uptime / wfile / sh`
+- 参数传递（`hello alpha beta` → `argc=3`）、`exec` 嵌套、`sbrk` 堆
+- PIE 重定位：`reloc` 里的函数指针表和字符串表在 RV32 上同样被正确修正
+- 文件系统真实可写：`wfile demo.txt hello` 之后 `cat demo.txt` 能读回
+  （写进内核镜像里那块 RAM 盘，QEMU 退出即丢失；真机换成 SPI flash 即可持久化）
+- 用户程序崩溃只杀自己：`crash` 打出 `[pid 10] illegal instruction at 0x80500054`
+  后 shell 继续活着
+- `exit` 通过 SiFive test 设备真正关机（QEMU 进程退出，不是空转）
+
+实现上值得记一笔的几处（详见 `docs/PLATFORM-DESIGN.md` §8）：
+
+| 主题 | 做法 |
+| --- | --- |
+| trap 帧 | 144 字节：x0–x31（偏移 = 4×寄存器号）+ `mepc/mstatus/mcause/mtval` |
+| 栈切换 | 入口读 `mstatus.MPP`：从 U 模式陷入才换到 32 KiB 内核栈，M 模式原地压栈（可嵌套） |
+| 系统调用 | `a7` = 号，`a0/a1/a2` = 参数；内核在派发**前** `mepc += 4`，与 i386 iret 语义一致 |
+| PMP | 一条 NAPOT 全空间 RWX 条目，否则 U 模式第一条指令就 fault（平坦模型不做内存保护） |
+| 用户态入口 | `rv32_enter_user()` 复用 trap 返回路径，`mret` 进 U-mode |
+| 缺的运行时 | `kernel/libgcc.c` 补 `__lshrdi3/__ashldi3/__ashrdi3`（RV32 无 64 位移位指令） |
+| 块设备 | `build/ramdisk.bin` 由生成的 `.S` 用 `.incbin` 嵌进 `.data.ramdisk`，`plat_block_*` 直接内存拷贝 |
+
+工具链：`clang --target=riscv32-unknown-elf` 编译，`ld.lld -m elf32lriscv` 直接链接
+（走 clang 驱动会强行拉入硬浮点 ABI 的 `compiler_rt`，和我们的 ilp32 对象冲突）。
+需要 `qemu-system-riscv32`：MSYS2 的 `mingw-w64-ucrt-x86_64-qemu` 已经带上。
 
 ## 加一个自己的程序
 
@@ -225,9 +292,12 @@ RAM 只为真正打开的文件付。
 
 | | `-O2` | `-Os` | `-Oz`（默认） |
 | --- | --- | --- | --- |
-| 内核镜像 | 42,132 B | 34,916 B | **32,852 B** |
+| 内核镜像 | 42,132 B | 34,916 B | **32,884 B** |
 | 用户程序（11 个） | 16,760 B | 15,084 B | **14,476 B** |
 | 压缩后分区占用 | 11,533 B | 10,714 B | **10,305 B** |
+
+RV32 内核（`.text` 24,528 + `.rodata` 2,200 = 26,728 B 代码/常量，`.bss` 78,512 B
+含 32 KiB 内核栈；`.data` 里的 300 KiB 是内嵌的 littlefs 镜像，真机上对应 SPI flash）。
 
 老版本 gcc（< 12）不认 `-Oz`，用 `TOS_OPT=-Os` 回退；调试时用 `TOS_OPT=-Og` 或 `-O0`。
 
@@ -266,8 +336,12 @@ RAM 只为真正打开的文件付。
 | 181 – 780 | littlefs 分区（600 扇区 = 300 KiB） |
 
 引导扇区只读内核（`int 13h`），**不再加载文件系统**；内核起来后由 ATA 驱动按需读盘。
-LBA 常量在 `boot/stage1.S`、`internal/build/build.go`、`kernel/ramdisk.h`
-三处同步，构建时对内核镜像大小和 `.bss` 结尾都有检查。
+LBA 常量由板级提供（`board/pc/layout.c` 的 `PLAT_LFS_LBA = 181`），
+`boot/stage1.S` 与 `internal/build/build.go` 的 `KernelSectors` 需保持同步；
+构建时对内核镜像大小和 `.bss` 结尾都有检查。
+
+RV32 没有磁盘，构建工具把同一份 `build/ramdisk.bin` 用生成的 `.S`（`.incbin`）
+嵌进内核的 `.data.ramdisk`，板级给 `PLAT_LFS_LBA = 0`，`plat_block_*` 就是内存拷贝。
 
 ## 内存布局
 
@@ -284,7 +358,7 @@ LBA 常量在 `boot/stage1.S`、`internal/build/build.go`、`kernel/ramdisk.h`
 `tos build` 会检查并打印余量：
 
 ```
-image 32852 / 92160 bytes, footprint ends at 0x27984 (limit 0x400000, 3937 KiB headroom)
+image 32884 / 92160 bytes, footprint ends at 0x279a4 (limit 0x400000, 3937 KiB headroom)
 ```
 
 没有 ramdisk 了，所以也就不存在实模式 DMA 空洞（`0xA0000`）的限制——文件系统在磁盘上，
@@ -305,7 +379,14 @@ bump 指针退回窗口起点。**代价是没有任何内存保护**——用�
 
 ## 系统调用 ABI
 
-`eax` = 调用号，`ebx/ecx/edx` = 参数 1–3，返回值在 `eax`，`int 0x80`。
+| | 陷入指令 | 调用号 | 参数 1–3 | 返回值 |
+| --- | --- | --- | --- | --- |
+| x86 | `int 0x80` | `eax` | `ebx/ecx/edx` | `eax` |
+| RV32 | `ecall`（U-mode） | `a7` | `a0/a1/a2` | `a0` |
+
+内核侧不直接读这些寄存器：`plat_frame_get_syscall()` / `plat_frame_set_ret()`
+把各架构的约定映射成 `syscall_t{nr, a0, a1, a2}`（见 `arch/*/regs.h`）。
+下面的编号与参数顺序两个架构完全一致。
 
 | # | 名称 | 说明 |
 | --- | --- | --- |
@@ -322,16 +403,17 @@ bump 指针退回窗口起点。**代价是没有任何内存保护**——用�
 | 10 | sbrk | 扩展堆，返回旧 brk（0 表示失败） |
 | 11 | create | `create(path)` 创建/截断文件并返回可写 fd（≥ 3） |
 
-用户程序可以直接往磁盘写文件了，例如：
+用户程序可以直接往文件系统写文件了，例如：
 
 ```
-tos> wfile demo.txt hello from ATA disk
+tos> wfile demo.txt hello from the filesystem
 wrote demo.txt
 tos> cat demo.txt
-hello from ATA disk
+hello from the filesystem
 ```
 
-写入是**持久的**：重启后 `demo.txt` 依然存在。
+x86 上写入落在 ATA 分区，**重启后仍然存在**；RV32 上落在内核内嵌的 RAM 盘，
+QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 
 ## 已知限制（有意保持简单）
 
@@ -346,14 +428,14 @@ hello from ATA disk
 - 内核不做用户指针的完整拷贝校验，只用范围检查 `process_user_ok()`（够用，但不是安全边界）。
   ELF 加载器侧有目标地址窗口校验（段与重定位写入必须落在当前任务的窗口内），
   防止坏镜像覆写内核。**无内存保护是刻意设计**：用户程序可以直接读写内核内存。
-- 同一时刻最多 28 个嵌套任务窗口（112 MiB / 4 MiB），同步 `exec` 嵌套超过这个深度会
-  报 `out of task windows`。
+- 同一时刻最多 28 个嵌套任务窗口（x86：112 MiB / 4 MiB）或 16 个（RV32：16 MiB / 1 MiB），
+  同步 `exec` 嵌套超过这个深度会报 `out of task windows`。
 - 内核堆是 **32 KiB** 静态 arena（`.bss`），first-fit **且合并相邻空闲块**；littlefs 的缓存和临时缓冲区都走它
   （每次 `exec` 会临时分配一个文件大小的加载缓冲，随后立即释放）。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。
-- 引导扇区固定读取 180 个扇区；改内核大小时同步改 `boot/stage1.S`、
-  `internal/build/build.go`、`kernel/ramdisk.h` 三处（`KERNEL_SECTORS` /
-  `KernelSectors` / `LFS_PARTITION_LBA`），并保持内核含 `.bss` 的结束地址低于 `0x400000`。
+- 引导扇区固定读取 180 个扇区；改内核大小时同步改 `boot/stage1.S` 的
+  `KERNEL_SECTORS`、`internal/build/build.go` 的 `KernelSectors` 和
+  `board/pc/layout.c` 的 `PLAT_LFS_LBA`，并保持内核含 `.bss` 的结束地址低于 `0x400000`。
 - ATA 驱动是 PIO 轮询、28-bit LBA：单次传输最多 255 扇区，适合 QEMU 和真实 IDE；
   没有 48-bit LBA，>128 GiB 的盘不支持。
 

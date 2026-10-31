@@ -120,8 +120,8 @@ void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 
 | | 用户态 | 陷入方式 | 内核栈 |
 |---|---|---|---|
-| x86 | ring 3（分段平坦，**CR0.PG=0**） | `int 0x80` | TSS `esp0`，每任务 |
-| RV32 | U-mode | `ecall` | 每任务（可选单栈） |
+| x86 | ring 3（分段平坦，**CR0.PG=0**） | `int 0x80` | TSS `esp0`（共用一层 16 KiB 内核栈） |
+| RV32 | U-mode | `ecall`（M 模式陷入） | 单一 32 KiB 内核栈，U 模式陷入时切换（P2 已实现） |
 | ARM | Thread/unprivileged | `svc` | PSP（硬件自动切换），每任务 |
 
 x86 关闭分页后：内核与用户共享 4 GiB 平坦空间，ring 3 仍能阻止 `cli/hlt/out` 等特权指令，
@@ -176,13 +176,37 @@ BIOS -> MBR(stage1.S) -> 内核 @0x10000 -> kmain
 ### QEMU virt（rv32，参考实现）
 
 ```
-qemu-system-riscv32 -machine virt -bios none -kernel tinyos.elf
-  入口 0x80000000（M 模式）
+qemu-system-riscv32 -machine virt -bios none -kernel build/kernel-rv32.elf
+  入口 0x80000000（M 模式），自带 trap 向量与设备初始化
   UART 16550 @0x10000000
   CLINT @0x02000000
   RAM 128 MiB @0x80000000
-  块设备：内存盘（先）-> virtio-blk（后）
+  块设备：内核内嵌的 littlefs 镜像（.data.ramdisk，RAM 盘）✅
+  关机：SiFive test 设备 @0x00100000（0x5555 关机 / 0x7777 重启）
 ```
+
+P2 落地的实现要点（`arch/rv32/`）：
+
+- **trap 帧**（`regs.h`，144 字节）：x0–x31 按寄存器号顺序排列（偏移 = 4×寄存器号），
+  后接 `mepc/mstatus/mcause/mtval`。帧里保存的 `sp` 是**被中断的栈**：U 模式陷入时
+  内核先换到内核栈再压帧，`frame->sp` 就是 `mret` 要恢复的用户栈。
+- **栈切换**：trap 入口读 `mstatus.MPP`；`MPP=U` 换到 `__kernel_stack_top`，`MPP=M`
+  原地压栈。硬件在陷入时清 `mstatus.MIE`，所以入口序列不会被嵌套打断，可以拿
+  `t0`/`mscratch` 当临时寄存器。内核里再触发的中断（如 `wfi` 期间的定时器）走
+  "原地压栈" 分支，因此天然支持嵌套。
+- **返回路径**按 `MPP` 决定恢复哪个 `sp`：U 模式回 `frame->sp`，M 模式回
+  `frame + 144`。同一段代码被 `rv32_enter_user()` 复用，用来启动第一个用户程序。
+- **`ecall`**：`a7` = 系统调用号，`a0/a1/a2` = 参数，返回写 `a0`。内核在派发**之前**
+  把 `mepc += 4`，这样 `exec/exit` 保存的父任务现场和 i386 的 `iret` 语义一致
+  （否则父任务会重放它的 `ecall`）。
+- **PMP**：U 模式每个访问都要过 PMP，未配置则第一条用户指令就 fault。P2 用一条
+  NAPOT 全空间 RWX 条目（`pmpaddr0=0x3FFFFFFF`, `pmpcfg0=0x1F`），与"平坦模型
+  不做内存保护"的取舍一致。
+- **内核栈**放在 `start.S` 的 `.bss` 里（32 KiB），`start.S` 清零 `[__bss_start,
+  __bss_end)` 时一并清零，和 x86 的做法一致。
+- **缺的软除法**：RV32 没有 64 位移位指令，clang 会为 `>>`/`<<` 生成
+  `__lshrdi3/__ashldi3/__ashrdi3` 调用，`kernel/libgcc.c` 补齐了这三个（用两个
+  32 位半字实现，避免递归调用自己）。
 
 ### QEMU mps2（ARM 参考）
 
@@ -239,8 +263,8 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **P0** ✅ | x86 去分页 + 抽 `platform.h`；`crash` 改非法指令 | smoke 原样通过（除 crash 提示）——已完成 |
-| P1 | `arch/rv32` + `board/qemu-virt`：串口、定时器、trap | 打印 banner |
-| P2 | RV32 ELF 直接加载 + syscall + 内存盘 littlefs | 跑 `hello` |
+| **P1** ✅ | `arch/rv32` + `board/qemu-virt`：串口、定时器、trap | 打印 banner——已完成 |
+| **P2** ✅ | RV32 ELF 直接加载 + ecall/U-mode + 内存盘 littlefs + 工具链探测 | smoke 全绿——已完成 |
 | P3 | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick | 跑 `hello` |
 | P4 | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello` |
 | P5 | RP2040：boot2 + UF2 + SRAM 运行 | 真机 `hello` |
