@@ -11,3 +11,6 @@
 # The tos CLI binary at the repo root (cmd/tos/ is source)
 /tos
 /tos.exe
+
+# Local agent workspace notes (not part of the project)
+/.workbuddy/

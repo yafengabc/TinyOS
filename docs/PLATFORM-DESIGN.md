@@ -71,20 +71,23 @@ uint32_t plat_block_size(void);
 uint32_t plat_block_count(void);
 
 /* ---- 物理内存（平坦模型：分配即可直接使用） ---- */
-void     plat_mem_init(void);
-paddr_t  plat_page_alloc(void);      /* 4 KiB，失败返回 0 */
-void     plat_page_free(paddr_t p);
-int      plat_user_range_ok(vaddr_t va, size_t len);
+/* 没有帧分配器：RAM 直接可寻址，任务窗口由 kernel/process.c 切分 */
 
 /* ---- 用户态进出 ---- */
 void plat_set_kernel_stack(vaddr_t top);
 void plat_enter_user(trapframe_t *tf) __attribute__((noreturn));
 int  plat_fault_is_user(trapframe_t *tf);
 void plat_panic_halt(void) __attribute__((noreturn));
+
+/* ---- trap frame 视图（架构无关） ---- */
+void     plat_frame_get_syscall(const trapframe_t *tf, syscall_t *sc);
+void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 ```
 
 **没有 `plat_as_*`** —— 平坦地址空间下地址空间抽象是纯开销。
-`trapframe_t` 由 `arch/*` 定义，core 只持有不透明结构。
+`trapframe_t` 由 `arch/*` 定义，core 只持有不透明结构；syscall 号与参数通过
+`syscall_t {nr, a0, a1, a2}` 暴露，core 不直接读 `eax/ebx/ecx/edx`。
+用户指针校验也不再是平台函数，而是 `process_user_ok(addr, len)`——只做窗口范围检查。
 
 ## 4. 平坦内存模型
 
@@ -107,9 +110,9 @@ void plat_panic_halt(void) __attribute__((noreturn));
 | ESP32-C3 | 400 KiB @0x3FC80000 | `0x3FC90000` | 应用窗口 ≤ ~200 KiB |
 | RP2040 | 264 KiB @0x20000000 | `0x20010000` | 应用窗口 ≤ ~120 KiB |
 
-**关键后果：用户程序必须按目标板的 `APP_BASE` 链接。**
-无 MMU + 无重定位时，二进制是板级相关的。构建系统需要按 board 生成用户程序，
-而不是一套二进制通吃。将来若要多板共用，再引入 PIE + 重定位。
+**关键后果：用户程序以 PIE（ET_DYN）+ 运行时重定位加载，跨板分发同一份二进制。**
+加载器把镜像放到各板的 `APP_BASE`，重定位表（`.rel/.rela`）修正内部绝对地址，
+同一份用户二进制可在 QEMU 与不同 `APP_BASE` 的真机间通用，无需按板重新链接。
 
 ## 5. 特权级
 
@@ -132,15 +135,21 @@ typedef struct task {
     int         pid;
     int         state;
     trapframe_t frame;        /* 用户寄存器现场 */
-    vaddr_t     user_sp;
-    vaddr_t     kstack_top;   /* 每任务内核栈（x86 必需，ARM 用 PSP） */
-    vaddr_t     brk, brk_end;
+    vaddr_t     win_base;     /* 本任务窗口起点（无分页的下限保护） */
+    vaddr_t     stack_top;    /* 窗口顶部留白后的栈顶 */
+    vaddr_t     heap_base;    /* sbrk 起点：镜像之后 */
+    vaddr_t     heap_end;     /* 栈底，sbrk 上限 */
+    vaddr_t     brk;
     fd_t        fds[MAX_FDS];
     struct task *parent;
 } task_t;
 ```
 
 - 没有地址空间字段：所有任务共享同一平坦内存。
+- **每任务窗口**：`exec` 时从 `[APP_BASE, APP_MAX)` 按 `PLAT_APP_WINDOW` 切一块，
+  镜像在底、sbrk 堆在中、栈在顶。没有这一层，同步 `exec` 会把父进程（shell）的
+  镜像覆盖掉——这是"平坦模型 + 同步 exec"必须补的一环。
+- 回收用 bump 指针复位即可：`exec` 嵌套严格 LIFO，子任务总在父任务之上。
 - 语义与现在一致：`exec` 同步，父任务阻塞，退出码返回父任务；用户态异常只杀当前任务。
 - 调度：当前为调用栈式；接口预留 `task_switch()`，后续可加抢占。
 
@@ -150,8 +159,10 @@ typedef struct task {
 - 加载器工作变成“把 `PT_LOAD` 拷到 `p_vaddr`，清零 `.bss`”，不再有页映射。
 - 链接地址 = `APP_BASE`，由板级链接脚本传入。
 - 可选 LZ4TOS 信封：解压后仍是标准 ELF，三平台共用。
-- 重定位：暂不做。若将来需要多程序共存或跨板二进制，再打开 `-fPIE -pie`，
-  实现 `.rela.dyn`（RV32）/ `.rel.dyn`（ARM）。接口预留 `elf_apply_relocs()`。
+- 重定位：保留 PIE（ET_DYN）+ `.rel.dyn`（x86）/ `.rela.dyn`（RV32）运行时重定位。
+  这是“同一份二进制跨板分发”的前提——已否决 MiniELF（TOSX）方案：
+  它丢掉 ELF 结构与重定位表，二进制退化为板级绑定，不满足分发需求。
+  现状：x86 加载器 `kernel/elf.c` 已实现 REL/RELA；RV32 侧复用同一路径。
 
 ## 8. 启动链
 
@@ -216,9 +227,9 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | exec | 同步，退出码返回父任务 |
 | 异常隔离 | 只杀当前任务 |
 
-**`crash` 测试必须改写。** 现在它靠写 `0xdeadb000` 触发缺页；关闭分页后没有缺页，
-三平台行为无法一致。改为执行**非法指令**（x86 `ud2`、rv32 `.word 0`、arm `udf #0`），
-这样在三个架构上都产生“非法指令”异常，由内核终止当前任务。
+**`crash` 测试已经改写（P0 完成）。** 原先它靠写 `0xdeadb000` 触发缺页；关闭分页后没有缺页，
+三平台行为无法一致。现在改为执行**非法指令**（x86 `ud2`、rv32 `.word 0`、arm `udf #0`），
+三个架构上都产生“非法指令”异常，由内核终止当前任务。
 
 验证方式：`scripts/compat.ps1` 对每个目标启动对应 QEMU，喂相同命令序列，
 比较归一化输出（去掉时间戳和 pid）。
@@ -227,7 +238,7 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P0** | x86 去分页 + 抽 `platform.h`；`crash` 改非法指令 | smoke 原样通过（除 crash 提示） |
+| **P0** ✅ | x86 去分页 + 抽 `platform.h`；`crash` 改非法指令 | smoke 原样通过（除 crash 提示）——已完成 |
 | P1 | `arch/rv32` + `board/qemu-virt`：串口、定时器、trap | 打印 banner |
 | P2 | RV32 ELF 直接加载 + syscall + 内存盘 littlefs | 跑 `hello` |
 | P3 | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick | 跑 `hello` |
@@ -242,8 +253,8 @@ P0 是最容易被低估的一步：**它会让 x86 失去现有的进程隔离*
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 无内存保护 | 用户程序可破坏内核 | 文档明确；`plat_user_range_ok` 只做边界检查 |
-| 用户二进制与板级绑定 | 跨板需重新链接 | 构建系统按 board 输出；将来 PIE |
+| 无内存保护 | 用户程序可破坏内核 | 文档明确；`process_user_ok` 只做窗口范围检查 |
+| 用户二进制跨板分发 | 依赖加载器重定位正确性 | ELF32 ET_DYN + `.rel/.rela`，elf.c 校验目标窗口 |
 | x86 关闭分页后 APP_BASE 需在 RAM 内 | 现有 `0x08048000` 超界 | 改链接地址，QEMU 内存覆盖 |
 | C3 启动镜像格式 | 无法启动 | 先用 QEMU virt；或 ESP-IDF 二级引导 |
 | C3 SPI flash 驱动 | 文件系统不可用 | 先 RAM 盘，后替换块设备 |
