@@ -68,7 +68,11 @@ extern const uint32_t PLAT_LFS_LBA;
 
 int      plat_block_read(uint32_t lba, uint32_t count, void *buf);
 int      plat_block_write(uint32_t lba, uint32_t count, const void *buf);
-int      plat_block_erase(uint32_t lba);   /* writes the erased value */
+int      plat_block_erase(uint32_t lba, uint32_t count);
+                                     /* make count sectors read the erased
+                                      * value: a real NOR erase where the
+                                      * medium needs one, an 0xFF fill
+                                      * where plain writes are safe */
 uint32_t plat_block_size(void);            /* bytes per sector */
 uint32_t plat_block_count(void);
 

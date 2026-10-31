@@ -471,6 +471,45 @@ nibble 是真的**。于是 entries < 0x10000000 时永远打出 `00000000`，�
 （ALARMLO/T0LO/CONFIG 恒 0）也是同一 bug 的伪证。教训：**探针的输出原语必须先于
 实验被验证**——拿 `put_hex8(0x12345678)` 这种自证用例当第一课。
 
+#### 8.7 SPI flash 块设备（已验证，2026-11-01）
+
+littlefs 分区烧在 flash 偏移 0x100000（`PLAT_LFS_LBA=2048`，300 KiB=600 扇区），
+`esptool write-flash 0x100000 build/ramdisk.bin`。块设备三层组合，全部真机验证：
+
+- **读 = ROM `esp_rom_spiflash_read`（0x40000130）**。ROM bootloader 已探测好芯片，
+  零初始化即可用；dest 需 4 字节对齐。
+- **写 = ROM `esp_rom_spiflash_write`（0x4000012c）**，外加最小变更比对：跳过与
+  flash 现值相同的字（NOR 编程只能 1→0，重复编程同地址属非法）；需要 1→0 翻转
+  说明漏了擦除，返回错误。
+- **擦 = SPI1 控制器（SPI_MEM #1 @0x60002000）硬件命令位** `FLASH_WREN`（bit30）
+  + `FLASH_SE`（bit24，地址在 ADDR_REG，4 KiB/扇区）。**ROM 的三个擦除入口全部
+  不可用**：`esp_rom_spiflash_erase_sector` 与高层 `spi_flash_erase_sector` 返回
+  0 但不擦（写过的 pattern 跨复位幸存），旧 API `SPI_sector_erase` 直接返回
+  FAIL。硬件命令位是 R/W/SC：写 1 触发、完成自清，控制器自动轮询芯片 busy。
+
+ROM 的芯片记录 boot 后是 **2 MiB**，所有 ROM flash 调用按它做范围检查
+（`addr+len > chip_size` 即 FAIL，二分定位见 flashsz 探针）；boot 时必须调
+`esp_rom_spiflash_config_param`（0x40000134）改成真实 4 MiB。实测芯片
+JEDEC ID `0xC22016` = Macronix 4 MiB。
+
+**双重偏移 bug 备忘**：`plat_block_*` 的 LBA 是**全局扇区号**（调用方传
+`PLAT_LFS_LBA + first`），flash 地址 = `lba * 512`；板层若再加一次
+`LFS_FLASH_OFF` 就会读到 0x200000 的陈旧数据——第一版实现正是这样把
+旧 2 MiB 布局超级块当成分区内容，表现为 mount LFS_ERR_INVAL。定位手段：
+对读回的 4 KiB 分 8 段做 checksum 与 host 镜像对比，7 段全对 1 段错。
+
+**esp-riscv 核的 trap 取指不走 M-mode 权限**：U-mode 期间到达的中断跳
+`mtvec + 4*cause`，**第一次取指按 U-mode 查 PMP**——向量表槽在 PMP 拒绝区时
+表现为 mcause=1（instruction access fault）@ 槽地址。这与 RISC-V 规范相反
+（规范：trap 首取指按新特权级；qemu-virt 即如此）。修复：boot 时用 PMP
+entry 4 给 256 B 向量表开 U-mode RX（`pmp_open_trap_vector`，NAPOT）；
+handler 本体仍在拒绝区，进入 M-mode 后执行。
+
+真机端到端（C3 v0.3）：littlefs 挂载 14 文件、`wfile` 写 `/test.txt` →
+复位后 `cat` 读回一致（真 NOR 持久化）、`ls/hello/uptime/echo/spin &`
+（400 ms 抢占一跳）、`crash` 隔离、`prot rodata/null` 越界被 PMP 击杀。
+`mem` 需 195 KiB 堆，超出 C3 的 64 KiB 窗口，malloc 失败是预期。
+
 ### RP2040
 
 ```

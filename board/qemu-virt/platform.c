@@ -131,12 +131,15 @@ int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     return 0;
 }
 
-int plat_block_erase(uint32_t lba)
+int plat_block_erase(uint32_t lba, uint32_t count)
 {
-    uint32_t off = lba * 512u;
-    if (off + 512u > (uint32_t)(__ramdisk_end - __ramdisk_start))
-        return -1;
-    memset(__ramdisk_start + off, 0xFF, 512);
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+        uint32_t off = (lba + i) * 512u;
+        if (off + 512u > (uint32_t)(__ramdisk_end - __ramdisk_start))
+            return -1;
+        memset(__ramdisk_start + off, 0xFF, 512);
+    }
     return 0;
 }
 

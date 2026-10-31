@@ -27,8 +27,7 @@ const uint32_t PLAT_APP_BASE   = 0x403AC000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
 const uint32_t PLAT_APP_WINDOW = 0x00010000;   /* 64 KiB per task */
 
-/* The littlefs partition is meant for SPI flash at offset 0x100000 once
- * the P4 flash driver exists; the chip's cache window does not work for
- * guest reads (see board/esp32c3/platform.c).  The constant keeps the
- * layout of that future partition fixed. */
+/* The littlefs partition lives on SPI flash at offset 0x100000, served by
+ * plat_block_read/write/erase in platform.c (ROM reader + writer, SPI1
+ * hardware erase; see docs/PLATFORM-DESIGN.md §8.7). */
 const uint32_t PLAT_LFS_LBA = 0x100000 / 512;

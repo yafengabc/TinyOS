@@ -38,7 +38,7 @@ static uint8_t lookbuf[FS_CACHE_SIZE] __attribute__((aligned(8)));
 /* Bounce buffer for sector-unaligned littlefs reads/writes.  littlefs may
    request a whole block (4096 bytes) at once, so this must hold one block
    (= 8 sectors). */
-static uint8_t bounce[FS_BLOCK_SIZE];
+static uint8_t bounce[FS_BLOCK_SIZE] __attribute__((aligned(4)));
 
 /* readdir is index based, but no snapshot table is kept: each call walks
    the (tiny) directory tree and stops at the requested entry.  Costs a few
@@ -106,12 +106,12 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block,
 static int bd_erase(const struct lfs_config *c, lfs_block_t block)
 {
     (void)c;
-    /* littlefs treats 0xFF as the erased value (NOR flash semantics); fill
-       the whole block so stale data can never be mistaken for new.
-       Reuse the shared bounce buffer instead of a second 4 KiB array. */
-    memset(bounce, 0xFF, sizeof(bounce));
+    /* The platform turns the whole 4 KiB block back to the erased value:
+       a real NOR erase on flash-backed boards (writing 0xFF over
+       programmed bits would be a no-op there), an 0xFF fill on RAM or
+       plain-write media. */
     uint32_t lba = PLAT_LFS_LBA + ((uint32_t)block * FS_BLOCK_SIZE >> 9);
-    if (plat_block_write(lba, FS_BLOCK_SIZE / 512, bounce) != 0)
+    if (plat_block_erase(lba, FS_BLOCK_SIZE / 512) != 0)
         return LFS_ERR_IO;
     return 0;
 }

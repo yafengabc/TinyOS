@@ -197,39 +197,164 @@ uint32_t plat_uptime_ms(void)
 
 /* ---- flash block device ---------------------------------------------- */
 
-/* The chip exposes SPI flash through a cache window at 0x3C000000 (data) /
- * 0x42000000 (instruction).  We probed it on the real chip
- * (scripts/esp-c3/drom.S) and it does NOT work for guest code: the first
- * byte reads as 0x00 where flash 0x0 holds the image magic 0xE9, and the
- * second byte access faults (the probe loops through its own reset window,
- * which is how "one byte per boot" showed up).  Whatever the ROM sets up
- * for its own XIP either does not cover guest reads or is not cache-safe
- * behind them.  Programming the SPI controller directly is the P4 task.
+/* The cache window at 0x3C000000 does not answer guest reads (verified by
+ * scripts/esp-c3/drom.S), so the partition is served through the ROM's SPI
+ * flash routines instead.  The second-stage bootloader has already probed
+ * the chip and loaded this image with them, so no controller setup is
+ * needed on our side (verified on the real chip by
+ * scripts/esp-c3/flashread.S: flash 0x0 reads back the 0xE9 image header
+ * and 0x100000 the littlefs superblock).
  *
- * Until then there is no block device: ramdisk_init() reports the failed
- * mount and the shell has nothing to load.  plat_block_read returning an
- * error keeps littlefs out of the way instead of feeding it garbage. */
+ * Addresses are the ROM entry points from esp-idf's esp32c3.rom.ld:
+ *   esp_rom_spiflash_read(src_addr, dest, len)   = 0x40000130
+ *   esp_rom_spiflash_write(dest_addr, src, len)  = 0x4000012c
+ * len is in bytes, dest/src must be word aligned, 0 == success.
+ *
+ * NOR constraints shape the write path: programming can only clear bits,
+ * so a prog is a minimal-change write (words that already hold the wanted
+ * value are skipped, a word needing 1->0 conversion is an error).
+ *
+ * Erase CANNOT use the ROM: all three ROM variants
+ * (esp_rom_spiflash_erase_sector 0x40000128, high-level
+ * spi_flash_erase_sector 0x40000188, old SPI_sector_erase 0x4000020c)
+ * either return 0 without erasing or fail outright - verified on the real
+ * chip by a written pattern surviving both calls and a reset
+ * (scripts/esp-c3/flasher2.S, flasher3.S, flashcfg.S).  The erase goes
+ * through the SPI1 flash controller (SPI_MEM #1, 0x60002000) hardware
+ * command bits instead: write 1 to fire, the bit reads back 0 when done,
+ * and the controller polls the chip busy flag before finishing
+ * (scripts/esp-c3/flashspi.S proved a real erase this way). */
+
+#define ROM_SPIFLASH_WRITE        0x4000012cu
+#define ROM_SPIFLASH_READ         0x40000130u
+
+#define SPI1_BASE                 0x60002000u
+#define SPI1_CMD_REG              0x00u   /* R/W/SC command bits */
+#define SPI1_CMD_FLASH_WREN       (1u << 30)
+#define SPI1_CMD_FLASH_SE         (1u << 24)
+#define SPI1_ADDR_REG             0x04u   /* address for SE/PP */
+
+typedef int (*rom_spiflash_read_t)(uint32_t addr, uint32_t *dest, int len);
+typedef int (*rom_spiflash_write_t)(uint32_t addr, const uint32_t *src, int len);
+typedef int (*rom_config_param_t)(uint32_t device_id, uint32_t chip_size,
+                                  uint32_t block_size, uint32_t sector_size,
+                                  uint32_t page_size, uint32_t status_mask);
+
+#define ROM_SPIFLASH_CONFIG_PARAM 0x40000134u
+#define FLASH_CHIP_SIZE   0x400000u   /* 4 MiB */
+#define FLASH_BLOCK_SIZE  0x10000u    /* 64 KiB */
+#define FLASH_SECTOR_SIZE 0x1000u     /* 4 KiB */
+#define FLASH_PAGE_SIZE   0x100u      /* 256 B */
+typedef int (*rom_spiflash_erase_t)(uint32_t sector);
+
+#define LFS_LBA_START  PLAT_LFS_LBA           /* 2048 = flash 0x100000 */
+#define NOR_SECTOR     4096u
+#define LFS_SECTORS    600u                   /* 300 KiB, see RamdiskSectors
+                                               * in internal/build/build.go */
+
+static rom_spiflash_read_t   rom_flash_read   = (rom_spiflash_read_t)ROM_SPIFLASH_READ;
+static rom_spiflash_write_t  rom_flash_write  = (rom_spiflash_write_t)ROM_SPIFLASH_WRITE;
+static rom_config_param_t    rom_config_param = (rom_config_param_t)ROM_SPIFLASH_CONFIG_PARAM;
+
+/* The ROM's chip record says 2 MiB after boot, and every ROM flash call
+ * range-checks against it (reads past 0x200000 fail: flashsz.S).  Tell
+ * the truth: this board has 4 MiB.  Must happen before any ROM flash
+ * call; verified by flashcfg.S (config returns 0, 0x3FC000 readable). */
+static void rom_flash_set_chip_size(void)
+{
+    rom_config_param(0, FLASH_CHIP_SIZE, FLASH_BLOCK_SIZE,
+                     FLASH_SECTOR_SIZE, FLASH_PAGE_SIZE, 0xFFFFu);
+}
+
+/* Fire one SPI1 hardware command bit and wait for it to self-clear. */
+static void spi1_command(uint32_t bit)
+{
+    mmio_write32(SPI1_BASE + SPI1_CMD_REG, bit);
+    while (mmio_read32(SPI1_BASE + SPI1_CMD_REG) & bit)
+        ;
+}
+
+/* Erase one 4 KiB NOR sector by byte offset from the flash base. */
+static int spi1_erase_sector_at(uint32_t flash_addr)
+{
+    mmio_write32(SPI1_BASE + SPI1_ADDR_REG, flash_addr);
+    spi1_command(SPI1_CMD_FLASH_WREN);
+    spi1_command(SPI1_CMD_FLASH_SE);
+    return 0;
+}
 
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
-    (void)lba;
-    (void)count;
-    (void)buf;
-    return -1;
+    uint8_t *dst = buf;
+    uint32_t addr = lba * 512u;   /* lba is GLOBAL (the partition starts at
+                                   * PLAT_LFS_LBA = flash 0x100000); callers
+                                   * pass PLAT_LFS_LBA + first, so the flash
+                                   * address is simply lba * sector_size */
+
+    /* The ROM wants a word-aligned destination.  Sector-sized staging
+     * keeps the special case small. */
+    for (; count > 0; count--, addr += 512u, dst += 512u) {
+        if (((uint32_t)dst & 3u) == 0) {
+            if (rom_flash_read(addr, (uint32_t *)dst, 512) != 0)
+                return -1;
+        } else {
+            static uint32_t stage[512 / 4];
+            uint32_t i;
+            if (rom_flash_read(addr, stage, 512) != 0)
+                return -1;
+            for (i = 0; i < 512 / 4; i++)
+                ((uint32_t *)dst)[i] = stage[i];
+        }
+    }
+    return 0;
 }
 
 int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 {
-    (void)lba;
-    (void)count;
-    (void)buf;
-    return -1;
+    const uint8_t *src = buf;
+    uint32_t addr = lba * 512u;
+
+    for (; count > 0; count--, addr += 512u, src += 512u) {
+        static uint32_t cur[512 / 4];
+        uint32_t i = 0;
+        if (rom_flash_read(addr, cur, 512) != 0)
+            return -1;
+        /* Minimal-change prog: batch runs of words that differ. */
+        while (i < 512 / 4) {
+            uint32_t want = ((const uint32_t *)src)[i];
+            uint32_t run;
+            if (cur[i] == want) {
+                i++;
+                continue;
+            }
+            if ((cur[i] & want) != want)
+                return -1;        /* needs 1->0: erase first */
+            run = 1;
+            while (i + run < 512 / 4) {
+                uint32_t w = ((const uint32_t *)src)[i + run];
+                if (cur[i + run] == w)
+                    break;
+                if ((cur[i + run] & w) != w)
+                    return -1;
+                run++;
+            }
+            if (rom_flash_write(addr + 4 * i, &((const uint32_t *)src)[i],
+                                4 * run) != 0)
+                return -1;
+            i += run;
+        }
+    }
+    return 0;
 }
 
-int plat_block_erase(uint32_t lba)
+int plat_block_erase(uint32_t lba, uint32_t count)
 {
-    (void)lba;
-    return -1;
+    uint32_t first = (lba * 512u) / NOR_SECTOR;
+    uint32_t last = (lba * 512u + count * 512u - 1) / NOR_SECTOR;
+    for (; first <= last; first++)
+        if (spi1_erase_sector_at(first * NOR_SECTOR) != 0)
+            return -1;
+    return 0;
 }
 
 uint32_t plat_block_size(void)
@@ -239,7 +364,7 @@ uint32_t plat_block_size(void)
 
 uint32_t plat_block_count(void)
 {
-    return 0;                             /* no usable device yet */
+    return LFS_SECTORS;
 }
 
 /* ---- boot ------------------------------------------------------------ */
@@ -265,6 +390,11 @@ void plat_board_init(void)
     /* And the super watchdog on top of them (own key, own config). */
     mmio_write32(RTC_WDT_BASE + RTC_SWD_WPROTECT_REG, RTC_SWD_WKEY);
     mmio_write32(RTC_WDT_BASE + RTC_SWD_CONF_REG, RTC_SWD_DISABLE);
+
+    /* Fix the ROM's 2 MiB chip-size record before any ROM flash call
+     * (the littlefs partition at 0x100000 fits in 2 MiB, but the record
+     * should describe the real 4 MiB chip). */
+    rom_flash_set_chip_size();
 }
 
 /* ---- power ------------------------------------------------------------ */

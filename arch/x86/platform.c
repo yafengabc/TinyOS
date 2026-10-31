@@ -149,9 +149,17 @@ int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
                              (uint16_t)count, buf);
 }
 
-int plat_block_erase(uint32_t lba)
+int plat_block_erase(uint32_t lba, uint32_t count)
 {
-    (void)lba;
+    /* ATA has no erase concept, but littlefs wants its blocks to read
+     * 0xFF before first prog - emulate with a fill through the normal
+     * write path. */
+    uint8_t ff[512];
+    uint32_t i;
+    memset(ff, 0xFF, sizeof(ff));
+    for (i = 0; i < count; i++)
+        if (plat_block_write(lba + i, 1, ff) != 0)
+            return -1;
     return 0;
 }
 
