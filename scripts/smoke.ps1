@@ -16,7 +16,7 @@ param(
     [string]$Qemu = "",
     # "run spin &" plus the ps that follows it is the scheduler check: the
     # background task must still be alive (state rdy) when ps runs.
-    [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "run spin &", "ps", "wfile demo.txt hello from the filesystem", "cat demo.txt", "mem", "crash", "uptime", "exit"),
+    [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "run spin &", "ps", "wfile demo.txt hello from the filesystem", "cat demo.txt", "mem", "run prot heap", "crash", "uptime", "exit"),
     [int]$Port = 5566,
     [int]$BootWaitMs = 3000,
     [int]$CommandWaitMs = 700

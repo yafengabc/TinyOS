@@ -12,6 +12,12 @@ linked as position independent executables and relocated on load.
 /bin/sh is itself an ELF32 executable loaded from littlefs, and it starts
 every program below on demand.
 
+Naming a task's RAM is all the isolation there is: no paging, no MMU.  The
+RV32 port can add one more layer because RISC-V checks every user access
+against PMP, so a task's code, data and stack are the only memory it can
+reach - see "prot rodata|heap|stack|null", which breaks one rule per run
+and gets the task killed instead of the machine.
+
 Try:
 
   ls
