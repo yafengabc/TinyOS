@@ -7,11 +7,19 @@ import (
 	"os"
 )
 
+// NOT ADOPTED (2026-10-31): MiniELF is kept for reference only and is not
+// part of the build pipeline.  It strips the ELF structure and the
+// relocation tables, which kills binary distribution: the same image can
+// not run at different APP_BASE values (QEMU vs. real boards).  User
+// programs therefore stay standard ELF32 ET_DYN (PIE) + .rel/.rela +
+// the LZ4TOS envelope; see kernel/elf.c.  Do not wire this format into
+// the kernel or the toolchain.
+//
 // MiniELF is the on-disk container TinyOS uses for user programs.
 //
 // It replaces the ~1.5 KB of ELF headers (Ehdr + Phdrs + section header
 // table) with a single 28 byte header, and carries the image LZ4-compressed.
-// The kernel's loader (kernel/minielf.c) only understands this format.
+// (The kernel-side loader kernel/minielf.c was never implemented.)
 //
 // Layout (little endian):
 //

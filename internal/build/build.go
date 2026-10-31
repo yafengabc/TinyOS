@@ -24,9 +24,10 @@ const (
 	// LFS_PARTITION_LBA in kernel/ramdisk.h.
 	LFSPartitionLBA = BootSectors + KernelSectors // = 181
 
-	// The kernel (image + .bss) must end below the first page the physical
-	// allocator manages (PHYS_START = 0x400000 in kernel/pmm.h), otherwise
-	// the allocator would hand out pages that overlap the kernel.
+	// Sanity bound: the kernel (image + .bss, including the heap arena) must
+	// end below 0x400000.  There is no frame allocator any more, so this is
+	// just a guard against .bss growing into the region reserved for boards
+	// that may map RAM differently.
 	KernelMaxEnd = 0x400000
 )
 
@@ -104,7 +105,7 @@ func (b *Builder) runTool(name string, args []string, label string) error {
 func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	opt := os.Getenv("TOS_OPT")
 	if opt == "" {
-		opt = "-Os"
+		opt = "-Oz"
 	}
 
 	// Architecture specific flags.  Everything else is shared so both ports
@@ -140,17 +141,22 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		"-ffunction-sections",
 		"-fdata-sections",
 		"-nostdinc",
-		// Size first: this is a tiny OS, and -Os is measurably smaller than
-		// -O2 for every part without slowing the boot measurably.  Measured
-		// with clang 23.1.4 / lld 23.1.4 (x86, 10 programs, Sep 2026):
+		// Size first: this is a tiny OS, so the default is -Oz (clang's
+		// most aggressive size level).  Measured with clang 23.1.4 /
+		// lld 23.1.4 (x86, 11 programs, Oct 2026, --gc-sections on):
 		//
-		//   kernel image      50,132 -> 40,708 bytes  (-19%)
-		//   user programs     22,360 -> 19,896 bytes  (-11%)
-		//   hello              2,216 ->  2,008 bytes  ( -9%)
+		//                     -O2      -Os      -Oz
+		//   kernel image    42,132   34,916   32,852 bytes
+		//   user programs   16,760   15,084   14,476 bytes
+		//   LZ4TOS payload  11,533   10,714   10,305 bytes
 		//
+		// -Oz costs a little speed in hot loops; the shell and the loader
+		// are I/O bound, and boot time is unchanged within noise.
 		// Most of each user program is printf (~960 bytes of .text), which
-		// every binary that formats output links in.  Set TOS_OPT=-O2 (or
-		// -Og) when debugging.
+		// every binary that formats output links in.
+		//
+		// Toolchains that reject -Oz (gcc < 12) can fall back with
+		// TOS_OPT=-Os; use TOS_OPT=-O2 or -Og when debugging.
 		opt,
 		"-Wall",
 		"-Wextra",
@@ -178,6 +184,16 @@ func (b *Builder) compile(src, obj string, includes []string, extra ...string) e
 	return nil
 }
 
+// linkViaDriver reports whether the link tool is a compiler driver (clang,
+// gcc, zig cc) that needs -Wl, to forward flags to the real linker, rather
+// than a bare linker that takes them directly.
+func linkViaDriver(ld []string) bool {
+	base := strings.ToLower(filepath.Base(ld[0]))
+	base = strings.TrimSuffix(base, ".exe")
+	return base == "zig" || base == "gcc" || base == "cc" ||
+		strings.HasPrefix(base, "clang") || strings.HasSuffix(base, "-gcc")
+}
+
 func (b *Builder) link(objs []string, script, out string, extra ...string) error {
 	var args []string
 	var tool string
@@ -194,6 +210,17 @@ func (b *Builder) link(objs []string, script, out string, extra ...string) error
 	}
 
 	args = append(args, "-T", script, "-nostdlib", "-static")
+	// Drop unreferenced sections.  Everything is compiled with
+	// -ffunction-sections/-fdata-sections, so this prunes e.g. the
+	// littlefs entry points the kernel never calls (lfs_rename & co),
+	// exactly like the user program links already do.
+	if b.Target.Name != "x86" {
+		args = append(args, "--gc-sections")
+	} else if linkViaDriver(b.TC.LD) {
+		args = append(args, "-Wl,--gc-sections")
+	} else {
+		args = append(args, "--gc-sections")
+	}
 	args = append(args, extra...)
 	if b.Target.Name != "x86" {
 		// no symbol table in the final image: it is only needed for
@@ -470,18 +497,17 @@ func (b *Builder) buildKernel() error {
 		return fmt.Errorf("kernel image is %d bytes, the boot loader only loads %d (raise KERNEL_SECTORS in boot/stage1.S and KernelSectors here, then move the littlefs LBA)",
 			len(flat), maxBytes)
 	}
-	// .bss is not part of the image, but it still occupies RAM at the end
-	// of the kernel and must end below the managed heap area (0x400000),
-	// otherwise pmm_alloc could hand out pages that overlap the kernel.
+	// .bss is not part of the image, but it still occupies RAM at the end of
+	// the kernel, so it has to be counted against the 0x400000 bound too.
 	end, err := ELFEndAddress(elfPath)
 	if err != nil {
 		return err
 	}
 	if end > KernelMaxEnd {
-		return fmt.Errorf("kernel ends at 0x%x (.bss included), which exceeds the managed RAM start at 0x%x",
+		return fmt.Errorf("kernel ends at 0x%x (.bss included), which exceeds the 0x%x bound",
 			end, KernelMaxEnd)
 	}
-	b.logf("      image %d / %d bytes, footprint ends at 0x%x (heap at 0x%x, %d KiB headroom)\n",
+	b.logf("      image %d / %d bytes, footprint ends at 0x%x (limit 0x%x, %d KiB headroom)\n",
 		len(flat), maxBytes, end, KernelMaxEnd, (KernelMaxEnd-end)/1024)
 	return os.WriteFile(filepath.Join(b.BuildDir, "kernel.bin"), flat, 0o644)
 }

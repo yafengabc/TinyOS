@@ -1,5 +1,11 @@
 package main
 
+// NOT ADOPTED (2026-10-31): the TOSX mini container format is not used.
+// It drops the ELF structure and relocation tables, which prevents binary
+// distribution across boards with different APP_BASE values.  User programs
+// stay standard ELF32 ET_DYN + relocations inside the LZ4TOS envelope.
+// This tool is kept for reference only; see internal/build/minielf.go.
+//
 // mkmini is a standalone converter: it turns a linked ELF32 executable into
 // TinyOS's mini container format (optionally LZ4 compressed) and can dump
 // the header of an existing container.
