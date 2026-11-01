@@ -398,6 +398,16 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
     return 0; /* no PT_DYNAMIC: nothing to relocate */
 }
 
+static const char *machine_name(uint16_t m)
+{
+    switch (m) {
+    case EM_386:   return "x86";
+    case EM_ARM:   return "arm";
+    case EM_RISCV: return "rv32";
+    default:       return "unknown";
+    }
+}
+
 int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
              uint32_t *entry_out)
 {
@@ -414,8 +424,15 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
 #else
     const uint16_t expected_machine = eh->e_machine;
 #endif
-    if (eh->e_machine != expected_machine)
+    if (eh->e_machine != expected_machine) {
+        /* Worth a message: the symptom is a working kernel that refuses every
+           program on a filesystem built for another architecture, and
+           "not a valid ELF32 program" sends you looking at the image. */
+        kprintf("elf: program is machine %u (%s), this kernel runs machine %u (%s)\n",
+                eh->e_machine, machine_name(eh->e_machine),
+                expected_machine, machine_name(expected_machine));
         return -1;
+    }
 
     if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN)
         return -1;

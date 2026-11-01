@@ -122,8 +122,30 @@ void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
  * stack_low - PLAT_HEAP_GUARD, and ports with a real protection unit deny
  * user access to the whole hole.  Big enough to catch a runaway recursion
  * deeper than one page, small enough to leave most of the window to the
- * heap. */
-#define PLAT_HEAP_GUARD 16384u
+ * heap.
+ *
+ * Per board, like the stack size: a 4 MiB window on the PC and a 32 KiB one
+ * on the RP2040 cannot share one answer. */
+extern const uint32_t PLAT_HEAP_GUARD;
+
+/* Bytes of stack at the top of each task window.
+ *
+ * A board must pick a value for which ALL of these hold, or the task layout
+ * check in process_init() panics at boot:
+ *
+ *   - it is a power of two,
+ *   - PLAT_APP_WINDOW is a multiple of it,
+ *   - PLAT_APP_WINDOW - PLAT_STACK_BYTES leaves room for the image, the heap
+ *     and PLAT_HEAP_GUARD,
+ *   - PLAT_APP_BASE + PLAT_APP_WINDOW - PLAT_STACK_BYTES is aligned to it.
+ *
+ * The last one is what makes a single NAPOT PMP entry describe the stack
+ * exactly.  The C3's windows start at 0x403AC000 - 16 KiB aligned, because
+ * the kernel ends there - so a 32 KiB stack would encode as the 32 KiB
+ * region *containing* the stack instead: the guard page below it becomes
+ * writable and the upper half of the real stack does not (found on the real
+ * chip by leaving one PMP rule out of a test program). */
+extern const uint32_t PLAT_STACK_BYTES;
 
 /* Register frame captured when trapping from user mode.  The layout is
  * architecture specific, so each port supplies it (arch/<arch>/regs.h);

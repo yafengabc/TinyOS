@@ -19,6 +19,11 @@ const uint32_t PLAT_KERNEL_MAX  = 0x20080000;   /* 512 KiB of SRAM for image + .
 const uint32_t PLAT_APP_BASE   = 0x20080000;
 const uint32_t PLAT_APP_MAX    = 0x20400000;   /* end of the 4 MiB of SRAM */
 const uint32_t PLAT_APP_WINDOW = 0x00040000;   /* 256 KiB per task: 14 windows */
+/* Stack at the top of every task window, and the hole left under it.  See
+ * kernel/platform.h for the four conditions this pair has to satisfy. */
+const uint32_t PLAT_STACK_BYTES = 32u * 1024u;
+const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
+
 
 /* The filesystem image is linked into the kernel (.data.ramdisk). */
 const uint32_t PLAT_LFS_LBA = 0;

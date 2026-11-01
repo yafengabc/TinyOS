@@ -15,6 +15,11 @@ const uint32_t PLAT_KERNEL_MAX  = 0x80400000;   /* image + .bss stay in 4 MiB */
 const uint32_t PLAT_APP_BASE   = 0x80400000;
 const uint32_t PLAT_APP_MAX    = 0x81400000;
 const uint32_t PLAT_APP_WINDOW = 0x00100000;   /* 1 MiB per task */
+/* Stack at the top of every task window, and the hole left under it.  See
+ * kernel/platform.h for the four conditions this pair has to satisfy. */
+const uint32_t PLAT_STACK_BYTES = 32u * 1024u;
+const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
+
 
 /* The filesystem image is linked into the kernel (.data.ramdisk), so the
  * partition starts at block 0 of the device. */

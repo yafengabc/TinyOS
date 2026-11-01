@@ -11,13 +11,12 @@
 
 #define MAX_PROCS   16
 #define MAX_ARGS    12
-#define STACK_PAGES 8
 #define MAX_FDS     8
 
-/* The stack region must be a power of two and aligned to it, because the
- * rv32 port maps it with a single NAPOT PMP entry.  Eight pages at the
- * top of a page-aligned window satisfies both. */
-#define STACK_BYTES (STACK_PAGES * PLAT_PAGE_SIZE)
+/* Both live in the board's layout.c: the size of the window decides what
+ * fits, and the port that maps them (rv32 PMP, ARM MPU) needs the same
+ * numbers.  process_init() checks the combination. */
+#define STACK_BYTES PLAT_STACK_BYTES
 
 /* Left unmapped between the heap and the stack: a heap that runs off its
  * end and a stack that runs off its bottom then fault instead of eating
@@ -307,6 +306,29 @@ regs_t *process_suspend(regs_t *r)
     return r;
 }
 
+/* Cheap sanity check of the task layout, run once at boot.  See the comment
+ * on PLAT_STACK_BYTES in platform.h for why each condition is there. */
+static void layout_check(void)
+{
+    uint32_t win = PLAT_APP_WINDOW;
+    uint32_t stk = PLAT_STACK_BYTES;
+    uint32_t guard = PLAT_HEAP_GUARD;
+    uint32_t stack_low;
+
+    if (stk == 0 || (stk & (stk - 1)) != 0)
+        panic("task layout: stack is %u bytes, which is not a power of two", stk);
+    if (win % stk != 0)
+        panic("task layout: %u KiB window is not a multiple of the %u KiB stack",
+              win / 1024u, stk / 1024u);
+    if (win <= stk + guard)
+        panic("task layout: %u KiB window cannot hold a %u KiB stack, a %u KiB guard "
+              "and an image", win / 1024u, stk / 1024u, guard / 1024u);
+    stack_low = PLAT_APP_BASE + win - stk;
+    if (stack_low % stk != 0)
+        panic("task layout: stack at 0x%x is not aligned to its %u KiB size, so one "
+              "NAPOT entry cannot describe it", stack_low, stk / 1024u);
+}
+
 void process_init(void)
 {
     memset(procs, 0, sizeof(procs));
@@ -319,6 +341,13 @@ void process_init(void)
 
     /* Before the first tick: kmain runs with interrupts off up to here. */
     kstack_guard_init();
+
+    /* The task layout is four constants from the board's layout.c, and a
+     * board that gets one of them wrong produces symptoms that look like
+     * anything but a layout mistake: a stack that faults halfway up, a guard
+     * page that is writable, every exec refused as "does not fit".  Check the
+     * combination once, here, where it costs nothing. */
+    layout_check();
 
     win_used = 0;
     win_slots = (int)((PLAT_APP_MAX - PLAT_APP_BASE) / PLAT_APP_WINDOW);
@@ -405,7 +434,7 @@ static uint32_t build_initial_stack(proc_t *p, char *const argv[], int argc)
     if (argc > MAX_ARGS)
         return 0;
 
-    uint32_t stack_low = p->stack_top - STACK_PAGES * PLAT_PAGE_SIZE;
+    uint32_t stack_low = p->stack_top - STACK_BYTES;
     /* Leave a little headroom at the very top: some programs treat argv[]
        as writable storage and grow it upwards through the initial frame. */
     uint32_t sp = p->stack_top - 256;
