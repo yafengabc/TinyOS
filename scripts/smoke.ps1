@@ -197,6 +197,17 @@ if ($sb.ToString() -notmatch "tos>") {
 foreach ($c in $Commands) {
     Send-Line $c
     Read-Available $CommandWaitMs
+    # A dead shell used to read as a pass: the prompt had appeared once, no
+    # "KERNEL PANIC" was printed, and every later command simply went to a
+    # machine that was no longer listening.  The arm target did exactly that
+    # (its first exec killed init) while this script said OK.  `exit` is the
+    # one command whose job is to end init, so it is exempt.
+    if ($c -ne "exit" -and $sb.ToString() -match "init process exited") {
+        if (-not $proc.HasExited) { $proc.Kill() }
+        Write-Host ($sb.ToString() -replace "`r", "")
+        Write-Host "SMOKE TEST FAILED: the shell died during '$c'" -ForegroundColor Red
+        exit 1
+    }
 }
 
 Start-Sleep -Milliseconds 800
