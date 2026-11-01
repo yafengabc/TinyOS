@@ -39,6 +39,13 @@ int plat_console_getchar(void)
     return mmio_read8(RV32_UART_BASE + UART_REG_DATA);
 }
 
+/* The 16550 holds 16 bytes; report what is free instead of letting echo block
+ * the tick (see the comment on console_echo). */
+int plat_console_tx_room(void)
+{
+    return (mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_THRE) ? 16 : 0;
+}
+
 /* ---- CLINT timer ----------------------------------------------------- */
 
 static volatile uint64_t g_ticks;
@@ -96,6 +103,18 @@ void plat_timer_tick(void)
 {
     g_ticks++;
     clint_set_cmp(clint_time() + g_interval);
+}
+
+/* The CLINT machine timer is the only interrupt this board routes, and the
+ * arch dispatcher reports it as cause 7 (RV_MCAUSE_M_TIMER). */
+int plat_irq_is_tick(uint32_t line)
+{
+    return line == 7u;
+}
+
+void plat_irq_service(uint32_t line)
+{
+    (void)line;          /* nothing else is routed on this board */
 }
 
 /* ---- block device: RAM disk ------------------------------------------ */

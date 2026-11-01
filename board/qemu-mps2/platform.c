@@ -46,6 +46,13 @@ int plat_console_getchar(void)
     return (int)(mmio_read32(ARM_UART0_DATA) & 0xFFu);
 }
 
+/* CMSDK UART0 keeps a single-byte holding register: either it is free or it
+ * is not.  Echo asks first so it never spins the tick away. */
+int plat_console_tx_room(void)
+{
+    return (mmio_read32(ARM_UART0_STATE) & 1u) ? 0 : 1;
+}
+
 /* ---- SysTick ---------------------------------------------------------- */
 
 /* The CMSDK in mps2-an385 runs SysTick from the 25 MHz reference clock.  A

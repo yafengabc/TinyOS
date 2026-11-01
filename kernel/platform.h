@@ -42,6 +42,13 @@ void plat_init(void);
 
 void plat_console_init(void);
 void plat_console_putc(char c);
+/* How many characters plat_console_putc() will take right now without
+ * waiting for the transmitter.  Keystroke echo uses this to stay out of the
+ * way: echo is produced inside the tick, and a blocking write there delays
+ * the next read of the input FIFO - a burst longer than one tick's worth of
+ * line time (about 115 bytes at 115200) then overruns a 128-byte receive
+ * FIFO and characters are lost.  Return 0 when nothing fits. */
+int  plat_console_tx_room(void);
 /* Wait until everything written has actually been transmitted.  Called once
  * on the way down: the device may buffer, and the CPU is about to stop. */
 void plat_console_flush(void);
@@ -57,6 +64,18 @@ uint32_t plat_tick_hz(void);
 void plat_irq_enable(void);
 void plat_irq_disable(void);
 void plat_cpu_idle(void);             /* hlt / wfi, interrupts enabled */
+
+/* The arch dispatcher reports an external interrupt as a CPU line number.
+ * Exactly one of them is the clock; the rest belong to the board (the C3
+ * routes console input to its own line so a byte is drained the moment it
+ * arrives instead of at the next tick - ten milliseconds is 115 bytes at
+ * 115200, which leaves almost no room in a 128-byte receive FIFO). */
+int  plat_irq_is_tick(uint32_t line);
+/* Acknowledge a non-tick line after its work is done.  Some sources latch:
+ * the UART's receive-timeout bit stays set until written back, and leaving
+ * it set means the interrupt fires again the moment we return - the CPU
+ * spends all its time in the handler and no task ever runs. */
+void plat_irq_service(uint32_t line);
 
 /* ---- time ------------------------------------------------------------ */
 

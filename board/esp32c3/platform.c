@@ -74,6 +74,17 @@ void plat_console_flush(void)
         ;
 }
 
+/* Echo paces itself against this instead of blocking in putc(): the drain
+ * loop above would otherwise stop us from reading the 128-byte receive FIFO
+ * for as long as the echo takes, which is longer than a tick for any burst
+ * over ~100 characters. */
+int plat_console_tx_room(void)
+{
+    int used = uart_tx_count();
+
+    return used >= 100 ? 0 : 100 - used;
+}
+
 int plat_console_getchar(void)
 {
     if (uart_rx_count() > 0)
@@ -136,11 +147,35 @@ int plat_console_getchar(void)
  * core reports the routed CPU LINE, not machine-external cause 11 (the tick
  * on line 2 arrives as 0x80000002, verified on the real chip). */
 #define TG0_T0_SRC       32u
+#define UART0_SRC        21u   /* ETS_UART0_INTR_SOURCE */
 #define CPU_LINE_TICK    2u
+#define CPU_LINE_UART    3u
 #define INT_ENABLE_REG   (INTMTX_BASE + 0x104)
 #define INT_PRI_REG(n)   (INTMTX_BASE + 0x114 + 4 * (n))
 #define INT_THRESH_REG   (INTMTX_BASE + 0x194)
 #define TG_T0_MAP_REG    (INTMTX_BASE + 4 * TG0_T0_SRC)
+#define UART0_MAP_REG    (INTMTX_BASE + 4 * UART0_SRC)
+
+/* UART0 receive interrupts.  Polling the 128-byte receive FIFO from the tick
+ * is not enough: a tick is 10 ms, which at 115200 baud is 115 bytes, so a
+ * burst has only 13 bytes of headroom before the FIFO overruns and drops
+ * characters (measured on the board: a 132-byte line arrives intact, 137
+ * loses its tail).  Typing by hand never gets close; pasting a command does.
+ *
+ * Two sources, exactly like the vendor examples: "the FIFO is 30 bytes
+ * full" for a stream, and "the receiver went quiet for 10 bit times" so a
+ * single hand-typed character is picked up immediately rather than at the
+ * next tick. */
+#define UART_INT_ENA_REG     (UART0_BASE + 0x0C)
+#define UART_INT_CLR_REG     (UART0_BASE + 0x10)
+#define UART_CONF1_REG       (UART0_BASE + 0x24)
+#define UART_MEM_CONF_REG    (UART0_BASE + 0x60)
+
+#define UART_INT_RXFIFO_FULL  (1u << 0)
+#define UART_INT_RXFIFO_TOUT  (1u << 8)
+#define UART_CONF1_RX_TOUT_EN (1u << 21)
+#define UART_RX_FULL_THRHD    30u
+#define UART_RX_TOUT_THRHD    10u
 
 static uint32_t tick_reload;
 static uint32_t tick_config;
@@ -163,6 +198,22 @@ void plat_timer_init(uint32_t hz)
     mmio_write32(INT_PRI_REG(CPU_LINE_TICK), 1);
     mmio_write32(INT_THRESH_REG, 1);
     mmio_write32(INT_ENABLE_REG, mmio_read32(INT_ENABLE_REG) | (1u << CPU_LINE_TICK));
+
+    /* Console input on its own line, see the UART_INT_* comment above. */
+    mmio_write32(UART0_MAP_REG, CPU_LINE_UART);
+    mmio_write32(INT_PRI_REG(CPU_LINE_UART), 1);
+    mmio_write32(INT_ENABLE_REG, mmio_read32(INT_ENABLE_REG) | (1u << CPU_LINE_UART));
+
+    mmio_write32(UART_CONF1_REG,
+                 (mmio_read32(UART_CONF1_REG) & ~0x1FFu) | UART_RX_FULL_THRHD);
+    mmio_write32(UART_CONF1_REG,
+                 mmio_read32(UART_CONF1_REG) | UART_CONF1_RX_TOUT_EN);
+    mmio_write32(UART_MEM_CONF_REG,
+                 (mmio_read32(UART_MEM_CONF_REG) & ~(0x3FFu << 16))
+                 | (UART_RX_TOUT_THRHD << 16));
+    mmio_write32(UART_INT_ENA_REG,
+                 mmio_read32(UART_INT_ENA_REG)
+                 | UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT);
 
     /* Timer: APB / 80 = 1 MHz, counts up from 0 to the reload value
      * (10000 counts = 10 ms), alarm fires, counter reloads.  The divider
@@ -207,6 +258,24 @@ uint64_t plat_ticks(void)
 uint32_t plat_tick_hz(void)
 {
     return TICK_HZ;
+}
+
+/* Which routed line is the clock.  Everything else the board wires up is
+ * housekeeping and must not run the scheduler's tick path (that would spend
+ * a time slice and advance the clock once per received byte). */
+int plat_irq_is_tick(uint32_t line)
+{
+    return line == CPU_LINE_TICK;
+}
+
+/* The receive-timeout bit is a latch, not a level: it stays set until it is
+ * written back, so the interrupt would re-fire immediately on return and
+ * starve every task (symptom: keystrokes echo but nothing executes). */
+void plat_irq_service(uint32_t line)
+{
+    if (line == CPU_LINE_UART)
+        mmio_write32(UART_INT_CLR_REG,
+                     UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT);
 }
 
 uint32_t plat_uptime_ms(void)

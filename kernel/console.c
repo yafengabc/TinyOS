@@ -62,25 +62,56 @@ void console_shutdown(void)
     plat_irq_disable();
 }
 
-/* Nothing is queued any more, so there is nothing to release here.  Kept as
- * the tick's hook: a port that needs to pace output can drain it here. */
-void console_echo_tick(void)
-{
-}
+/* Show a keystroke at once, on its own line if a program has one open.
+ *
+ * Echo is queued, not written through.  tty_poll() runs inside the tick and
+ * echoes every byte it cooked; writing those synchronously means waiting for
+ * the transmitter, and at 115200 baud 180 characters take 15.6 ms - longer
+ * than the 10 ms tick itself.  Nothing drains the receive FIFO during that
+ * wait, so an input burst longer than the FIFO depth (128 bytes on the C3)
+ * is truncated in the middle: a 180-character pasted command reached the
+ * shell as two fragments and failed with "sh: name too long", and the file
+ * it was meant to write came out 63 characters long.  Hand typing never
+ * shows it because a human produces a byte every ~100 ms.
+ *
+ * console_echo() queues, and console_echo_tick() - which process_tick already
+ * calls right after tty_poll() - moves only what the device will take without
+ * blocking.  A full queue drops the newest echo: the characters are already
+ * in the line buffer, and losing sight of what you typed is recoverable in a
+ * way that losing the input is not.
+ */
+#define ECHO_Q 256
 
-/* Show a keystroke at once, on its own line if a program has one open. */
+static char echo_q[ECHO_Q];
+static int  echo_head, echo_tail;      /* ring: head == tail means empty */
+
 void console_echo(const char *s, size_t n)
 {
-    in_echo = 1;
     for (size_t i = 0; i < n; i++) {
-        char c = s[i];
+        int next = (echo_tail + 1) % ECHO_Q;
+        if (next == echo_head)
+            return;                    /* full: drop, the input itself is safe */
+        echo_q[echo_tail] = s[i];
+        echo_tail = next;
+    }
+}
+
+void console_echo_tick(void)
+{
+    int room = plat_console_tx_room();
+
+    while (room > 0 && echo_head != echo_tail) {
+        char c = echo_q[echo_head];
+        echo_head = (echo_head + 1) % ECHO_Q;
+        room--;
+        /* Echo owns the console line while it writes: a task printing at the
+           same time gets its line closed first (see out_char). */
         out_owner = CONSOLE_ECHO_OWNER;
         out_mid = (c != '\n');
         if (c == '\n')
             plat_console_putc('\r');
         plat_console_putc(c);
     }
-    in_echo = 0;
 }
 
 struct outbuf {

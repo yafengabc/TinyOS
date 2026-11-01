@@ -543,6 +543,18 @@ int usb_cdc_configured(void)
     return g_configured;
 }
 
+int usb_cdc_tx_room(void)
+{
+    uint32_t m, room;
+
+    __asm__ volatile("mrs %0, primask" : "=r"(m));
+    __asm__ volatile("cpsid i" ::: "memory");
+    room = (tx_r - tx_w - 1u) & (CDC_RING - 1u);
+    if (!(m & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
+    return (int)room;
+}
+
 void usb_cdc_putc(char c)
 {
     uint32_t m;

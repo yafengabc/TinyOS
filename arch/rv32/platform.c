@@ -4,6 +4,7 @@
 #include "console.h"
 #include "string.h"
 #include "process.h"
+#include "tty.h"
 
 /* Generic RV32 platform layer, shared by every RV32 board.
  *
@@ -50,6 +51,20 @@ regs_t *trap_handler(regs_t *f)
      * interrupt-bit cause is the tick; which one fired is a board
      * property, so the rearm/count lives behind plat_timer_tick(). */
     if (cause & RV_MCAUSE_IRQ_BIT) {
+        uint32_t line = cause & ~RV_MCAUSE_IRQ_BIT;
+
+        if (!plat_irq_is_tick(line)) {
+            /* A board interrupt that is not the clock - on the C3 that is
+             * console input.  Drain it and go straight back to whatever we
+             * interrupted: running the tick path here would spend a time
+             * slice and advance the clock once per received byte.  Drain
+             * first, acknowledge second: the timeout bit latches, and
+             * acking before the FIFO is empty lets it set again. */
+            tty_poll();
+            plat_irq_service(line);
+            return f;
+        }
+
         plat_timer_tick();
         process_tick(f);
         return process_resched(f);

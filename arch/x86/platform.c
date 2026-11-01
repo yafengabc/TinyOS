@@ -112,6 +112,14 @@ void plat_console_flush(void)
     serial_flush();
 }
 
+/* serial_putc() already drains the receive FIFO while it waits for THRE
+ * (see serial_putc_raw), but reporting room keeps echo out of that wait
+ * altogether and costs one port read. */
+int plat_console_tx_room(void)
+{
+    return (inb(COM1 + 5) & 0x20) ? 16 : 0;   /* LSR: THRE */
+}
+
 int plat_console_getchar(void)
 {
     /* Input comes from the PS/2 keyboard or the serial console. */

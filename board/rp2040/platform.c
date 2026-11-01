@@ -94,6 +94,11 @@ void plat_console_flush(void)
     usb_cdc_flush();
 }
 
+int plat_console_tx_room(void)
+{
+    return usb_cdc_tx_room();
+}
+
 int plat_console_getchar(void)
 {
     return usb_cdc_getchar();
