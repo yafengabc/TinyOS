@@ -113,7 +113,7 @@ func (b *Builder) runTool(name string, args []string, label string) error {
 func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	opt := os.Getenv("TOS_OPT")
 	if opt == "" {
-		opt = "-Oz"
+		opt = "-O2"
 	}
 
 	// Architecture specific flags.  Everything else is shared so both ports
@@ -154,22 +154,19 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		"-ffunction-sections",
 		"-fdata-sections",
 		"-nostdinc",
-		// Size first: this is a tiny OS, so the default is -Oz (clang's
-		// most aggressive size level).  Measured with clang 23.1.4 /
-		// lld 23.1.4 (x86, 11 programs, Oct 2026, --gc-sections on):
+		// Size used to be the driver, but clang's size levels -Oz / -Os
+		// produce RV32 code that QEMU's TCG re-translates on every loop
+		// iteration (each instruction becomes its own TB): the whole kernel
+		// then runs ~100x slower and the smoke test never sees a shell
+		// prompt.  -O2 is fast under TCG and stays small (measured with
+		// clang 23.1.4 / lld 23.1.4, rv32 kernel, Oct 2026):
 		//
-		//                     -O2      -Os      -Oz
-		//   kernel image    42,132   34,916   32,852 bytes
-		//   user programs   16,760   15,084   14,476 bytes
-		//   LZ4TOS payload  11,533   10,714   10,305 bytes
+		//                     -Oz      -O1      -O2
+		//   rv32 .text     27,040   36,086   31,654 bytes
+		//   QEMU boot       slow      fast     fast
 		//
-		// -Oz costs a little speed in hot loops; the shell and the loader
-		// are I/O bound, and boot time is unchanged within noise.
-		// Most of each user program is printf (~960 bytes of .text), which
-		// every binary that formats output links in.
-		//
-		// Toolchains that reject -Oz (gcc < 12) can fall back with
-		// TOS_OPT=-Os; use TOS_OPT=-O2 or -Og when debugging.
+		// Use TOS_OPT=-Oz when building for real hardware (it is fine there)
+		// or -Og when debugging.
 		opt,
 		"-Wall",
 		"-Wextra",

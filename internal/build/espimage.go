@@ -246,6 +246,20 @@ func ESPImageFromELF(path string, withSHA256 bool) ([]byte, []ESPSegment, error)
 		if p.Vaddr%4 != 0 {
 			return nil, nil, fmt.Errorf("%s: segment at 0x%x is not 4-byte aligned", path, p.Vaddr)
 		}
+		/* A foreign-board kernel (e.g. the qemu-virt one at 0x80000000)
+		   must be refused for its address space, not for some incidental
+		   length problem: the message should say where the address is. */
+		inC3 := false
+		for _, r := range espC3Loadable {
+			if r.contains(uint32(p.Vaddr), uint32(p.Filesz)) {
+				inC3 = true
+				break
+			}
+		}
+		if !inC3 {
+			return nil, nil, fmt.Errorf("%s: segment at 0x%x (%d bytes) is not in ESP32-C3 memory",
+				path, p.Vaddr, p.Filesz)
+		}
 		if p.Filesz%4 != 0 {
 			/* The ROM copies segments a word at a time, so a short
 			   trailing partial word is rejected before it can silently

@@ -322,26 +322,23 @@ P2 落地的实现要点（`arch/rv32/`）：
   `__lshrdi3/__ashldi3/__ashrdi3` 调用，`kernel/libgcc.c` 补齐了这三个（用两个
   32 位半字实现，避免递归调用自己）。
 
-#### 已知问题：rv32 在 QEMU 下启动极慢（2026-11-01）
+#### rv32 在 QEMU 下极慢：已解决（2026-11-01）
 
-现象：banner 能打印，但列目录时约 4 秒才出一个文件（正常应为毫秒级），
-`scripts/smoke.ps1 -Target rv32` 因此报 `shell prompt never appeared`。
+症状：banner 能打印，但列目录时约 4 秒才出一个文件（正常应为毫秒级），
+`scripts/smoke.ps1 -Target rv32` 报 `shell prompt never appeared`。
 
-已排除的因素：
+**根因**：clang 的尺寸优化 `-Oz`（以及 `-Os`）生成的 RV32 代码在 QEMU TCG 下
+每次循环迭代都被重新翻译（`-d in_asm` 显示同一循环体被翻译数十万次、每条指令
+一个 TB），整个内核慢约 100 倍。`-O1`/`-O2` 生成的代码 TCG 可以正常缓存，
+秒级启动。
 
-- 定时器中断风暴——全程 `plat_ticks()` 为 0（此时中断尚未打开）
-- UART 轮询——去掉 THRE 等待后速度不变
-- 内存大小（`-m 64M/128M/256M`）、TB 缓存（`-accel tcg,tb-size=32/128`）
-- 单/多线程 TCG、`-cpu rv32`、C 扩展（`-march=rv32im`）
-- 中断/异常（无 trap 输出）、PMP 写入（全程仅 6 次，集中在启动期）
+**修复**：默认优化级别从 `-Oz` 改为 `-O2`（`build.go` 的 `ccFlags`）。
+`-O2` 的 rv32 `.text` 为 31,654 字节（`-Oz` 为 27,040），只大 4.6 KB。
+真机构建可用 `TOS_OPT=-Oz` 覆盖（真机上 `-Oz` 正常）。
 
-证据：`-d in_asm` 下 4 秒产生约 64 万个翻译块，其中 64 万个落在
-`0x80002000` 这一页（`memcpy/memset/strlen` 所在页）；`memset` 的
-`sb/addi` 循环每次迭代都被重新翻译。CPU 本身不慢（1e6 次加法 2–5 ms），
-但 `string.c` 的函数吞吐只有约 70 KB/s。
-
-未解：guest 并未写入该页（页内只有代码），TB 却持续失效。同样的内核
-在 x86 目标上速度正常，在 ESP32-C3 真机上也正常。
+排查过程记录（供参考）：排除过定时器中断风暴、UART 轮询、内存大小、
+TB 缓存容量、单/多线程 TCG、CPU 型号、C 扩展、PMP 写入、guest 写代码页；
+用带栈的裸机拷贝循环确认 QEMU TCG 本身对字节拷贝是快的（400 KB 约 1 ms）。
 
 ### QEMU mps2（ARM 参考）
 
