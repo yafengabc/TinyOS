@@ -61,7 +61,13 @@
 #define DP_SETUP          0x00u
 
 /* Per-endpoint control registers at 0x08 + (n-1)*8 + dir*4 (n >= 1):
- * ENABLE = bit 31, BUFFER_ADDRESS = bits 15:0. */
+ * ENABLE is bit 31, TYPE is bits 27:26 (0 control, 2 bulk), the buffer
+ * address sits at bits 15:6 with the low six bits ignored (64-byte
+ * alignment).  INTERRUPT_PER_BUFFER (bit 29) is what makes a completion
+ * visible in BUFF_STATUS for a driver that polls instead of interrupt. */
+#define EP_CTRL_ENABLE      0x80000000u
+#define EP_CTRL_INT_PER_BUF 0x20000000u
+#define EP_CTRL_TYPE_BULK   (2u << 26)
 #define DP_EPCTRL(ep, in) (0x08u + ((ep) - 1u) * 8u + ((in) ? 4u : 0u))
 
 /* Per-endpoint buffer-control registers at 0x80 + ep*8 + dir*4, where
@@ -101,8 +107,13 @@
 #define PLL_POSTDIV1      5u
 #define PLL_POSTDIV2      5u
 
+/* The divider is part of the same write as ENABLE: INT resets to 0, and a
+ * divisor of 0 is not "pass through" - clk_usb would not run and the
+ * controller would never see a 48 MHz clock.  INT = 1 with the PLL already
+ * at 48 MHz gives the 48 MHz the PHY needs.  AUXSRC = 0 is clksrc_pll_usb. */
 #define CLOCKS_CLK_USB_CTRL (*(volatile uint32_t *)(0x40008000u + 0x54u))
 #define CLK_USB_ENABLE      0x00000800u
+#define CLK_USB_DIV_INT_1   (1u << 16)
 #define CLK_USB_AUX_PLL_USB 0x00000000u /* AUXSRC: clksrc_pll_usb           */
 
 /* ---- descriptors -------------------------------------------------------- */
@@ -205,8 +216,9 @@ static void ep_arm_out(uint8_t slot, uint32_t len, int pid1)
  * through EP_STALL_ARM first. */
 static void ep0_stall(void)
 {
-    USB_EP_STALL_ARM = 1u;          /* EP0_IN */
+    USB_EP_STALL_ARM = 3u;          /* EP0_IN | EP0_OUT: both directions */
     bc_write(DP_BUFCTRL(0, 1), BC_STALL);
+    bc_write(DP_BUFCTRL(0, 0), BC_STALL);
 }
 
 /* Send one EP0 IN packet (<= 64 B) from ep0_tx/ep0_tx_len. */
@@ -472,29 +484,47 @@ void usb_cdc_init(void)
     while (!(PLL_CS_REG & 0x80000000u))
         ;                           /* wait for lock                       */
 
-    CLOCKS_CLK_USB_CTRL = CLK_USB_ENABLE | CLK_USB_AUX_PLL_USB;
+    CLOCKS_CLK_USB_CTRL = CLK_USB_DIV_INT_1 | CLK_USB_ENABLE | CLK_USB_AUX_PLL_USB;
 
-    /* Device mode, PHY to internal pads, VBUS forced present. */
+    /* Device mode, PHY to internal pads, VBUS forced present.
+     *
+     * VBUS_DETECT_OVR_EN + VBUS_DETECT tell the controller "the host is
+     * supplying VBUS" without sampling the pin.  VBUS_EN deliberately stays
+     * clear: on a Pico the VBUS net is the host's own 5 V, and driving it
+     * back into the cable is wrong (the SDK does not set it either). */
     USB_USB_MUXING = 0x01u | 0x08u;             /* TO_PHY | SOFTCON      */
-    USB_USB_PWR = 0x01u | 0x02u | 0x04u | 0x08u;
+    USB_USB_PWR = 0x04u | 0x08u;                /* VBUS_DETECT | OVR_EN  */
     USB_MAIN_CTRL = 0x01u;                      /* CONTROLLER_EN         */
 
-    /* Data endpoints: EP1 OUT (rx) and EP2 IN (tx), 64-byte buffers. */
+    /* Data endpoints: EP1 OUT (rx) and EP2 IN (tx), 64-byte buffers.
+     *
+     * TYPE has to be BULK (2) at bits 27:26 - a freshly reset endpoint is
+     * type CONTROL, and a bulk transfer through a control-type endpoint is
+     * not handshaken the way the host expects.  INTERRUPT_PER_BUFFER (bit
+     * 29) makes the SIE report each buffer completion in BUFF_STATUS, which
+     * is the only event source this polled driver has.
+     *
+     * BUFFER_ADDRESS is the buffer's DPRAM offset: the field holds bits
+     * 15:6 and the low six address bits are ignored, so writing the
+     * (64-byte aligned) offset itself is correct. */
     *(volatile uint32_t *)(0x50100000u + DP_EPCTRL(1, 0)) =
-        0x80000000u | DP_EP1_OUT_DATA;
+        EP_CTRL_ENABLE | EP_CTRL_INT_PER_BUF | EP_CTRL_TYPE_BULK | DP_EP1_OUT_DATA;
     *(volatile uint32_t *)(0x50100000u + DP_EPCTRL(2, 1)) =
-        0x80000000u | DP_EP2_IN_DATA;
+        EP_CTRL_ENABLE | EP_CTRL_INT_PER_BUF | EP_CTRL_TYPE_BULK | DP_EP2_IN_DATA;
 
     USB_ADDR_ENDP = 0;
     USB_SIE_CTRL = 0x00010000u;     /* PULLUP_EN: host sees us now        */
 }
 
 /* Wait briefly for the host to enumerate, so early output (banner, prompt)
- * is not dropped.  Bounded: never stalls boot for more than ~4 s. */
+ * is not dropped.  Bounded: at 12 MHz one spin is about 130 cycles, so
+ * 150000 spins is roughly 1.6 s - the host is supposed to start talking
+ * within 100 ms of the pull-up, and a longer wait only delays a board that
+ * will never be enumerated (no cable, or a host that is asleep). */
 void usb_cdc_wait(void)
 {
     uint32_t spins = 0;
-    while (!g_configured && spins < 4000000u) {
+    while (!g_configured && spins < 150000u) {
         usb_poll();
         spins++;
         for (volatile int i = 0; i < 40; i++)
@@ -506,6 +536,11 @@ void usb_cdc_console_init(void)
 {
     usb_cdc_init();
     usb_cdc_wait();
+}
+
+int usb_cdc_configured(void)
+{
+    return g_configured;
 }
 
 void usb_cdc_putc(char c)

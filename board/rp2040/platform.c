@@ -72,9 +72,16 @@ static void *rp_rom_func(uint32_t code)
  * extra hardware.  The polled EP0/bulk model matches the kernel's tick-driven
  * console exactly (no USB interrupt is registered). */
 
+/* Defined in the boot section below; the console turns it off once the
+ * host has enumerated. */
+static void led_set(int on);
+
 void plat_console_init(void)
 {
     usb_cdc_console_init();
+    /* Enumerated: the LED has done its job (see led_init). */
+    if (usb_cdc_configured())
+        led_set(0);
 }
 
 void plat_console_putc(char c)
@@ -214,8 +221,41 @@ uint32_t plat_block_count(void)
 
 /* ---- boot -------------------------------------------------------------- */
 
+/* The on-board LED (GPIO25 through SIO on a plain Pico) is the only
+ * diagnostic a board with no console can offer, so it is used as a boot
+ * flag: it comes on the moment our image starts executing and goes off once
+ * the host has enumerated the CDC device.  That splits "nothing flashed or
+ * the CRC failed" (LED dark) from "kernel runs but USB is silent" (LED
+ * stays on) without a debugger - the console cannot report its own
+ * absence. */
+#define RP_LED_GPIO 25u
+
+static void led_init(void)
+{
+    uint32_t pad = mmio_read32(PADS_BANK0_BASE + 4u * RP_LED_GPIO);
+
+    /* Pad: input enable on (bit 6), output disable off (bit 7).  The bank
+     * itself is already out of reset - the boot ROM's stage-2 uses QSPI
+     * pins from the same bank. */
+    mmio_write32(PADS_BANK0_BASE + 4u * RP_LED_GPIO, (pad | (1u << 6)) & ~(1u << 7));
+    /* IO_BANK0 GPIO25_CTRL: status at +0x00, control at +0x04.  FUNCSEL 5
+     * is SIO on every RP2040 pin. */
+    mmio_write32(IO_BANK0_BASE + 0x04u + 8u * RP_LED_GPIO, 5u);
+
+    mmio_write32(SIO_BASE + 0x010u, 0);              /* GPIO_OUT: off     */
+    mmio_write32(SIO_BASE + 0x024u, 1u << RP_LED_GPIO); /* GPIO_OE_SET     */
+}
+
+static void led_set(int on)
+{
+    mmio_write32(SIO_BASE + (on ? 0x014u : 0x018u), 1u << RP_LED_GPIO);
+}
+
 void plat_board_early(void)
 {
+    led_init();
+    led_set(1);
+
     /* Repoint exceptions at our vector table (the stage-2 leaves VTOR at the
      * boot ROM).  Must happen before any interrupt/fault can be taken. */
     mmio_write32(ARM_VTOR, XIP_BASE + 0x100u);
