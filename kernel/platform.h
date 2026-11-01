@@ -104,9 +104,23 @@ uint32_t plat_block_count(void);
  * Everything else - the kernel's own memory, MMIO, the rest of the app
  * window - is out of reach for user mode, including the hole between brk
  * and stack_low that neither region claims.  `stack_top - stack_low` must
- * be a power of two and stack_low aligned to it. */
+ * be a power of two and stack_low aligned to it.
+ *
+ * How closely a port can follow those bounds is its own business: an
+ * ARMv7-M MPU only has naturally aligned power-of-two regions, so there the
+ * heap is not cut at `brk` (it ends at the last block the window region
+ * covers) and only PLAT_HEAP_GUARD bytes under the stack are a hole (see
+ * docs/PLATFORM-DESIGN.md, section 8). */
 void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
                        uint32_t stack_low, uint32_t stack_top);
+
+/* Bytes the kernel keeps unclaimed between the top of the heap and the
+ * bottom of the stack: process_sbrk refuses to grow the break past
+ * stack_low - PLAT_HEAP_GUARD, and ports with a real protection unit deny
+ * user access to the whole hole.  Big enough to catch a runaway recursion
+ * deeper than one page, small enough to leave most of the window to the
+ * heap. */
+#define PLAT_HEAP_GUARD 16384u
 
 /* Register frame captured when trapping from user mode.  The layout is
  * architecture specific, so each port supplies it (arch/<arch>/regs.h);

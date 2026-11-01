@@ -4,7 +4,7 @@
 **RV32（QEMU virt）** 和 **ARM（QEMU mps2-an385，Cortex-M3）** 三个可运行目标，
 配套的构建/运行工具用 **Go** 写。
 它的核心能力是：从 **littlefs** 镜像里**动态加载 ELF 可执行文件**，在用户态
-（x86 ring 3 / RV32 U-mode / ARM Thread+PSP；ARM 暂保持特权，MPU 计划中）里运行，
+（x86 ring 3 / RV32 U-mode / ARM Thread+PSP 非特权 + MPU）里运行，
 程序可以 `exec` 另一个程序、读写文件、申请堆内存；程序崩溃只会杀掉自己，不会拖垮内核。
 
 ```
@@ -284,7 +284,8 @@ wfile / sh`，参数传递、`exec`、`sbrk`、后台 `spin &` 抢占、`exit` �
 
 | 主题 | 做法 |
 | --- | --- |
-| 特权级 | Thread 模式 + PSP 跑任务，Handler 模式 + MSP 跑内核，`svc #0` 进内核 |
+| 特权级 | Thread 模式 + PSP 跑任务（**非特权**，`CONTROL.nPRIV=1`），Handler 模式 + MSP 跑内核，`svc #0` 进内核 |
+| 内存保护 | MPU 8 个区域：窗口 RW+XN、`[win_base, wx)` 按 32 B 起的 2 的幂块 RO+可执行、栈下 16 KiB 护栏；内核走 `PRIVDEFENA` 默认映射 |
 | trap 帧 | `regs_t` 20 个字号 = 80 B：r4–r11 + `exc/vec/hw/kern_sp` + 硬件帧副本（`exc/vec/...` 与 `start.S` 的 `FR_*` 共享，`regs.h` 有编译期尺寸校验） |
 | 首次进用户态 | `arm_enter_user()` 发布帧后主动 `svc`，由 `arm_svc` 的 pending 分支换成任务帧（EXC_RETURN 只在异常返回路径上有效） |
 | 栈切换 | `arm_resume` 按 EXC_RETURN 的 S 位决定是否重设 PSP，并恢复 MSP/r4–r11 |
@@ -292,10 +293,19 @@ wfile / sh`，参数传递、`exec`、`sbrk`、后台 `spin &` 抢占、`exit` �
 | 块设备 | 与 rv32 相同的 `.data.ramdisk`（`.incbin` 嵌入），`plat_block_*` 直接内存拷贝 |
 | 缺的运行时 | `kernel/libgcc.c` 补 `__aeabi_memcpy4/8`、`__aeabi_memset/memmove`，以及按 EABI 返回 `r0:r1`/`r2:r3` 的 `__aeabi_*divmod` |
 
-真机上还差的一步是 **MPU + `nPRIV=1`**：现在任务虽是 Thread/PSP，但仍保持特权，靠
-`process_user_ok` 的窗口范围检查（与 x86 同级别，不是真正的内存隔离）。把置位动作
-放进 PendSV（最低优先级，不会被抢占）就能安全打开非特权态。踩坑记录见
-`docs/PLATFORM-DESIGN.md` §8.0。
+**MPU + 非特权用户态已实现**：每个任务有 8 个 MPU 区域——区域 0 是整个窗口
+（RW、不可执行），区域 1–6 把 `[win_base, wx)` 按 2 的幂块标成只读可执行（32 B
+粒度，`user.ld` 已把可写段对齐到 32 B），区域 7 是栈底 16 KiB 的护栏。内核在
+Handler 模式靠 `PRIVDEFENA` 访问整片 RAM/MMIO，非特权访问默认映射一律拒绝。
+`nPRIV` 在 `arm_resume` 里、`bx lr` 之前写（Handler 模式忽略它，所以中断仍是特权）。
+
+能力边界（ARMv7-M 的 MPU 没有 TOR，只能写自然对齐的 2 的幂块）：
+
+- `run prot null` / `prot rodata` / `prot stack` 都会当场 MemManage，只杀当前任务；
+- `run prot heap` 会 “survived”——`brk` 只能对齐到区域边界，写越界一字节拦不住；
+- 栈溢出 ≤ 16 KiB 被护栏拦下，更深则会踩进窗口里。
+
+细节和踩坑记录见 `docs/PLATFORM-DESIGN.md` §5.2、§8.0。
 
 ## 加一个自己的程序
 
@@ -488,14 +498,14 @@ image 35320 / 92160 bytes, footprint ends at 0x286d4 (limit 0x400000, 3934 KiB h
 | --- | --- |
 | `0x01000000`–`0x08000000` | 任务窗口区，每个任务独占 4 MiB（`PLAT_APP_WINDOW`） |
 | 窗口 + 0 | ELF 代码（RX，可读可执行，不可写） |
-| 窗口 + 代码长度 向上 | ELF 数据 + `.bss` + `sbrk` 堆（RW），堆上限到栈下 4 KiB |
-| 堆顶到栈底之间 4 KiB | **空洞**：不归属任何区域，写越界当场 fault |
+| 窗口 + 代码长度 向上 | ELF 数据 + `.bss` + `sbrk` 堆（RW），堆上限到栈下 16 KiB |
+| 堆顶到栈底之间 16 KiB | **空洞**：不归属任何区域，写越界当场 fault |
 | 窗口顶部 − 32 KiB 到顶 | 8 页用户栈（RW），栈顶即窗口顶，argv 从顶部往下 256 B 开始 |
 
 没有分页、没有 CR3 切换：`exec` 只是把镜像拷到窗口里再把栈指针指好，退出时把
 窗口槽位还回位图。x86 上**没有任何内存保护**——用户程序能读写内核内存，
-这是 MCU 级 OS 的刻意取舍。RV32 不是：RISC-V 的 PMP 把上面这张表变成了硬件强制
-（见下一节），x86 只能靠约定。
+这是 MCU 级 OS 的刻意取舍。RV32 和 ARM 不是：PMP / MPU 把上面这张表变成了硬件
+强制（见下面两节），x86 只能靠约定。
 
 ### RV32 的 PMP 分段
 
@@ -514,6 +524,25 @@ image 35320 / 92160 bytes, footprint ends at 0x286d4 (limit 0x400000, 3934 KiB h
 在 x86 上它会老实打印 `survived: this machine cannot stop us`。
 
 细节（为什么栈用 NAPOT、为什么空条目能当边界）见 `docs/PLATFORM-DESIGN.md` 5.1。
+
+### ARM 的 MPU 区域
+
+Cortex-M3 只有 8 个 MPU 区域，且每个区域必须是自然对齐的 2 的幂块，没有 PMP 那种
+TOR 上界。`plat_task_protect()` 的拼法是：区域 0 覆盖整个 256 KiB 窗口（RW、XN），
+区域 1–6 把 `[win_base, wx)` 按 32 B 起的 2 的幂块标成只读可执行，区域 7 是栈底
+16 KiB 的护栏（内核可写、用户不可访问）。窗口外的 RAM、MMIO、其它任务都落进
+“默认映射”，而 `MPU_CTRL.PRIVDEFENA` 只把它留给特权代码。
+
+因此：
+
+- 写 .rodata 或代码 → `MemManage`（`MMFAR` 给出地址）；
+- 读写内核、MMIO、窗口外 → `MemManage`；
+- 栈向下压穿 16 KiB 以内 → `MemManage`；
+- 写越过 `brk` 一字节 → **不会 fault**：`brk` 不是 2 的幂边界，MPU 表达不了，
+  要等 `sbrk()` 把这块算进去。这是与 RV32 唯一的实质性差距。
+
+`nPRIV` 的置位在 `arm_resume` 里、`bx lr` 之前完成（Handler 模式忽略该位，
+所以之后到达的中断仍是特权）。细节见 `docs/PLATFORM-DESIGN.md` 5.2、8.0。
 
 ## 系统调用 ABI
 
@@ -574,11 +603,11 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   所以空闲时几乎不占 RAM。
 - x86 上没有任何内存保护：ring 3 只挡住特权指令，用户程序可以直接读写内核内存。
   内核不做用户指针的拷贝校验，只用范围检查 `process_user_ok()`（够用，但不是安全边界）。
-  **RV32 不同**：PMP 把 code/data/stack 三段变成硬件强制（见上），
+  **RV32 / ARM 不同**：PMP / MPU 把 code/data/stack 三段变成硬件强制（见上），
   ELF 加载器侧另有目标窗口校验与 w^X 校验（段同时置 `PF_W|PF_X` 直接拒绝），
   防止坏镜像覆写内核或拿到可写可执行的区间。
-- 同一时刻最多 28 个嵌套任务窗口（x86：112 MiB / 4 MiB）或 16 个（RV32：16 MiB / 1 MiB），
-  同时活着的任务超过这个数会报 `out of task windows`。
+- 同一时刻最多 28 个嵌套任务窗口（x86：112 MiB / 4 MiB）、16 个（RV32：16 MiB / 1 MiB）
+  或 14 个（ARM：3.5 MiB / 256 KiB），同时活着的任务超过这个数会报 `out of task windows`。
 - 内核堆是 **32 KiB** 静态 arena（`.bss`），first-fit **且合并相邻空闲块**；littlefs 的缓存和临时缓冲区都走它
   （每次 `exec` 会临时分配一个文件大小的加载缓冲，随后立即释放）。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。

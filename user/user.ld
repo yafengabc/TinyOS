@@ -16,8 +16,15 @@ SECTIONS
     }
 
     /* .data.rel.ro and relatives hold relocated pointers; keep them with
-       writable data so the kernel can patch them after copying. */
-    .data : ALIGN(16) {
+       writable data so the kernel can patch them after copying.  The
+       32-byte alignment matters to the ARM port: it describes the
+       read-only part of the image [win_base, wx) with power-of-two MPU
+       regions whose smallest size is 32 bytes, so the split has to land on
+       a 32-byte boundary or the last few bytes of code would fall into the
+       non-executable window region.  The bare `. =` is what forces it when
+       .data is empty and the next writable section takes the address. */
+    . = ALIGN(32);
+    .data : ALIGN(32) {
         *(.data.rel.ro*)
         *(.data*)
         *(.got*)

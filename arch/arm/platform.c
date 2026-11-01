@@ -13,14 +13,18 @@
  * What differs - console, timer, block device, shutdown - belongs to the
  * board and is reached through the hooks in board.h.
  *
- * There is no MMU and no MPU in this port yet: all addresses are physical
- * and task windows come from the bump allocator in kernel/process.c.  User
- * tasks run in Thread mode on PSP but *privileged* (CONTROL.nPRIV = 0),
- * because turning nPRIV on has to happen as the last step before the
- * exception return and any interrupt taken in that window would run the
- * handler unprivileged.  Moving the switch into PendSV, which is the
- * lowest-priority exception and therefore cannot be preempted, is the
- * follow-up that MPU-protected user mode will need.
+ * There is no MMU and no MPU-backed virtual memory: all addresses are
+ * physical and task windows come from the bump allocator in
+ * kernel/process.c.  User tasks run in Thread mode on PSP and
+ * *unprivileged* (CONTROL.nPRIV = 1), with the MPU letting them reach their
+ * own window and nothing else.  The kernel runs in Handler mode on MSP,
+ * where the MPU's PRIVDEFENA keeps the whole flat address space available.
+ *
+ * nPRIV is written in arm_resume, still inside the exception: the bit is
+ * ignored in Handler mode, so handlers and any interrupt taken on the way
+ * out stay privileged, and only the Thread context the exception return
+ * installs is unprivileged.  (A PendSV switch is not needed for this; it
+ * is what a deferred context switch would use.)
  */
 
 /* ---- faults ----------------------------------------------------------- */
@@ -46,12 +50,29 @@ static const char *vec_name(uint32_t vec)
     }
 }
 
+/* Data address a MemManage/BusFault refers to, when the status register
+ * says it is valid.  A fault on an instruction fetch leaves it empty. */
+static uint32_t fault_addr(const regs_t *f)
+{
+    uint32_t cfsr = mmio_read32(ARM_CFSR);
+
+    if (f->vec == 4 && (cfsr & ARM_CFSR_MMARVALID))
+        return mmio_read32(ARM_MMFAR);
+    if (f->vec == 5 && (cfsr & ARM_CFSR_BFARVALID))
+        return mmio_read32(ARM_BFAR);
+    return 0;
+}
+
 /* Called from every fault stub.  Returns the frame to resume with. */
 regs_t *arm_handle_fault(regs_t *f)
 {
     if (frame_is_user(f)) {
-        kprintf("\n[pid %d] %s at 0x%08x\n", process_current_pid(),
+        uint32_t addr = fault_addr(f);
+        kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
                 vec_name(f->vec), f->pc);
+        if (addr)
+            kprintf(" (address 0x%08x)", addr);
+        kprintf("\n");
         return process_exit(f, 139);
     }
 
@@ -93,10 +114,25 @@ void plat_init(void)
        reschedules when the interrupted frame is a user frame, so a tick
        that lands in the middle of a kernel call just returns.
 
-       PendSV is parked at the lowest priority for the future MPU work,
-       where the unprivileged switch has to happen at the last moment. */
+       PendSV is parked at the lowest priority for a future deferred
+       context switch. */
     mmio_write32(ARM_SHPR3, (ARM_PRIO_SYSTICK << 24) | (ARM_PRIO_PENDSV << 16));
     mmio_write32(ARM_SHPR2, ARM_PRIO_SVC << 24);
+
+    /* Turn the configurable faults on: without these bits an MPU violation
+       is escalated to HardFault and `prot` cannot say why the task died. */
+    mmio_write32(ARM_SHCSR, ARM_SHCSR_MEMFAULTENA |
+                            ARM_SHCSR_BUSFAULTENA |
+                            ARM_SHCSR_USGFAULTENA);
+
+    /* MPU on.  No region covers kernel RAM or the MMIO, so privileged code
+       reaches them through the default map (PRIVDEFENA); unprivileged code
+       gets the default map denied and only sees what plat_task_protect()
+       programs for the running task.  Enabling it here, before any task
+       exists, means user mode can never start unprotected. */
+    mmio_write32(ARM_MPU_CTRL, ARM_MPU_CTRL_ENABLE | ARM_MPU_CTRL_PRIVDEFENA);
+    __asm__ volatile("dsb" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
 
     plat_board_init();
 }
@@ -128,17 +164,98 @@ void plat_cpu_idle(void)
 
 /* ---- user mode ------------------------------------------------------- */
 
-/* No MPU yet: user mode can reach the whole address space.  The hook is
- * here so the MPU work has one place to land, and because the scheduler
- * already calls it on every switch. */
+/* Program one MPU region.  `size` must be a power of two, at least 32 bytes
+ * (the ARMv7-M minimum), and `base` aligned to it; the RASR size field
+ * stores log2(size)-1, so 4 KiB is 11 and 256 KiB is 17. */
+static void mpu_region(uint32_t n, uint32_t base, uint32_t size, uint32_t attr)
+{
+    uint32_t log2 = 0;
+
+    while ((1u << log2) < size)
+        log2++;
+    mmio_write32(ARM_MPU_RNR, n);
+    mmio_write32(ARM_MPU_RBAR, base);
+    mmio_write32(ARM_MPU_RASR, attr | ((log2 - 1u) << 1) | 1u);
+}
+
+static void mpu_disable(uint32_t n)
+{
+    mmio_write32(ARM_MPU_RNR, n);
+    mmio_write32(ARM_MPU_RASR, 0);
+}
+
+/* Per-task MPU.  The running task gets:
+ *
+ *   0      RW, XN  the whole window       data, heap, stack
+ *   1..6   RO       [win_base, wx) in      code and read-only data
+ *                   aligned power-of-two   (executable: no XN)
+ *                   blocks
+ *   7      --       the hole under the stack  stack overflow guard
+ *
+ * Region numbers are priority: a higher number wins where two overlap, so
+ * the read-only blocks sit on top of the window region and the guard on
+ * top of everything.  Because region 0 is execute-never, only the blocks
+ * that cover [win_base, wx) can be executed: that is w^X, the same shape
+ * rv32 gets from PMP (code RX, data/heap/stack RW with X off).  Everything
+ * outside the window - kernel RAM, MMIO, other tasks - matches no region
+ * and is denied to user mode (the kernel still reaches it through
+ * PRIVDEFENA).
+ *
+ * What an ARMv7-M MPU cannot express, and the rv32 PMP can: a boundary at
+ * an arbitrary byte.  Regions are naturally aligned powers of two, so the
+ * heap is not cut at `brk` (a write just past the break survives until
+ * sbrk() covers it), and the hole below the stack is one aligned block
+ * rather than everything from brk to stack_low.  Code is read-only down to
+ * the 32-byte minimum region and user.ld aligns the writable segment to
+ * 32 bytes, so the split at wx is exact.
+ *
+ * mpu_region/mpu_disable are not atomic with respect to the tick.  That is
+ * fine: a handler taken mid-update runs privileged and access to RAM and
+ * MMIO does not depend on region 0, and process_tick only reschedules on a
+ * user frame. */
 void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
                        uint32_t stack_low, uint32_t stack_top)
 {
-    (void)win_base;
-    (void)wx;
+    uint32_t addr, n;
+
     (void)brk;
-    (void)stack_low;
     (void)stack_top;
+
+    /* wx is 32-byte aligned by user.ld; round up defensively so a stale
+       script cannot turn the tail of .text into non-executable memory.  At
+       worst a few bytes of .data become read-only. */
+    wx = (wx + ARM_MPU_MIN_SIZE - 1u) & ~(ARM_MPU_MIN_SIZE - 1u);
+
+    /* The window is the board's PLAT_APP_WINDOW and every slot starts on a
+       multiple of it, so the base is aligned for a region of that size. */
+    mpu_region(0, win_base, PLAT_APP_WINDOW,
+               ARM_MPU_AP_FULL | ARM_MPU_SRAM | ARM_MPU_XN);
+
+    /* Cover the read-only part of the image with the fewest aligned blocks
+       the eight-region budget allows, starting at the smallest region an
+       ARMv7-M MPU supports. */
+    addr = win_base;
+    n = 1;
+    while (addr < wx && n < 7) {
+        uint32_t size = ARM_MPU_MIN_SIZE;
+
+        while ((addr & (2u * size - 1u)) == 0 && addr + 2u * size <= wx)
+            size *= 2;
+        mpu_region(n++, addr, size, ARM_MPU_AP_RO | ARM_MPU_SRAM);
+        addr += size;
+    }
+    while (n < 7)
+        mpu_disable(n++);
+
+    /* A stack that grows past its bottom hits this block: user mode has no
+       access, the kernel still does.  Its size is the hole process.c keeps
+       between the break and the stack, so no legitimate heap write lands
+       here. */
+    mpu_region(7, stack_low - PLAT_HEAP_GUARD, PLAT_HEAP_GUARD,
+               ARM_MPU_AP_PRIV_RW | ARM_MPU_SRAM | ARM_MPU_XN);
+
+    __asm__ volatile("dsb" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
 }
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)

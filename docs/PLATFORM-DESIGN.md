@@ -93,7 +93,9 @@ void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 
 `plat_task_protect()` 是唯一带“内存保护”味道的接口，但语义仍然很薄：它只说
 “现在要跑的这个任务，它的三段地址在哪里”，具体怎么表达交给端口——rv32 写成
-PMP 条目，x86 什么也不做（见 5.1）。
+PMP 条目，arm 写成 MPU 区域，x86 什么也不做（见 5.1、5.2）。堆与栈之间的空洞
+大小是平台常量 `PLAT_HEAP_GUARD`（16 KiB），`process_sbrk()` 与能表达该空洞的
+端口共用同一个数。
 
 ## 4. 平坦内存模型
 
@@ -129,7 +131,7 @@ PMP 条目，x86 什么也不做（见 5.1）。
 |---|---|---|---|---|
 | x86 | ring 3（分段平坦，**CR0.PG=0**） | `int 0x80` | TSS `esp0`（共用一层 16 KiB 内核栈） | 无（关分页后无从表达） |
 | RV32 | U-mode | `ecall`（M 模式陷入） | 单一 32 KiB 内核栈，U 模式陷入时切换 | **PMP 分段**（P2.6 已实现） |
-| ARM | Thread (PSP)，暂为**特权** | `svc` | Handler 用 MSP，Thread 用 PSP；每任务 PSP | MPU（计划） |
+| ARM | Thread (PSP)，**非特权**（`CONTROL.nPRIV=1`） | `svc` | Handler 用 MSP，Thread 用 PSP；每任务 PSP | **MPU 区域**（P3 已实现） |
 
 x86 关闭分页后：内核与用户共享 4 GiB 平坦空间，ring 3 仍能阻止 `cli/hlt/out` 等特权指令，
 系统调用仍然走中断门。这与 C3/RP2040 的能力边界一致。
@@ -162,6 +164,44 @@ RISC-V 对每次 U 模式访问都查 PMP，M 模式在没置 lock 位时不受�
   8 页 = 32 KiB，窗口是 1 MiB 对齐的）。
 
 代价：每个任务 4 个条目（PMP 有 16 个），切换时 5 次 CSR 写。
+
+### 5.2 ARM 的 MPU 区域
+
+Cortex-M3 的 MPU 只有 8 个区域，而且每个区域是“自然对齐的 2 的幂”块，没有 TOR
+那种任意上界。`plat_task_protect()` 用全部 8 个区域拼出一个任务：
+
+| 区域 | 权限 | 范围 | 用途 |
+|---|---|---|---|
+| 0 | RW，**XN** | `[win_base, win_base + 256 KiB)` | 整个窗口：数据、堆、栈 |
+| 1–6 | RO，可执行 | `[win_base, wx)`，从 32 B 起的 2 的幂块 | 代码 + 只读数据 |
+| 7 | 特权 RW，用户不可访问 | `[stack_low - 16 KiB, stack_low)` | 栈溢出护栏 |
+
+- **`PRIVDEFENA`**：`MPU_CTRL = ENABLE|PRIVDEFENA`。内核在 Handler 模式（以及
+  第一个任务之前的 Thread/MSP）走默认内存映射，RAM/MMIO 全部可达；非特权访问
+  默认映射一律拒绝。所以内核不需要给每个外设单写一个区域。
+- **`nPRIV` 在 `arm_resume` 里、异常返回之前写**：Handler 模式忽略 `nPRIV`，
+  所以写完之后、`bx lr` 之前到达的中断仍然以特权运行内核；只有异常返回装上的
+  Thread 上下文是非特权的。只在 `EXC_RETURN & 4`（Thread/PSP）时置位——对
+  Thread/MSP（第一个任务之前的 kmain）置位，第一次 tick 就会 MemManage。
+- **RO 块从 32 字节起贪心**（ARMv7-M 最小区域 32 B）。`user.ld` 把可写段对齐到
+  32 B，`[win_base, wx)` 因此能被精确覆盖；区域 0 置 XN，代码只能从 RO 块执行，
+  数据/堆/栈不可执行——与 rv32 的 w^X 一致。
+- **护栏 16 KiB** = `PLAT_HEAP_GUARD`，正好是 `process_sbrk()` 在堆和栈之间留下
+  的空洞（`sbrk` 上限 = `stack_low - PLAT_HEAP_GUARD`），所以正常的堆写永远碰
+  不到护栏。
+
+与 rv32 PMP 的**已知差距**（都是“没有 TOR”造成的，如实记录）：
+
+| 规则 | rv32 PMP | ARM MPU |
+|---|---|---|
+| 代码只读 | 精确到字节 | 32 B 粒度（`user.ld` 已对齐，实际精确） |
+| 堆上界 | 精确到 `brk` | 只能到区域边界：`brk` 后写一字节不 fault，直到 `sbrk()` 覆盖它（`prot heap` 在 ARM 上会 “survived”） |
+| 栈下空洞 | `[brk, stack_low)` 全部拒绝 | 只有栈下 16 KiB 护栏，再往下仍属于区域 0 |
+| 栈溢出深度 | 任意深度都当场拦下 | ≤ 16 KiB 拦下，更深会踩进窗口 |
+| 区域数量 | 16 个 PMP 条目 | 8 个（1 个窗口 + 6 个 RO 块 + 1 个护栏） |
+
+实测（`run prot ...`）：`null`、`rodata`、`stack` 在 rv32 和 arm 上都当场
+MemManage / access fault；`heap` 只有 rv32 能拦下。
 
 ## 6. 任务模型
 
@@ -356,10 +396,12 @@ CMSDK UART0 @`0x40004000`（DATA/STATE/CTRL/BAUD）、SysTick @`0xE000E010`（25
 参考时钟，100 Hz 中断）。
 
 异常模型：Thread 模式（PSP）跑任务，Handler 模式（MSP）跑内核，`svc #0` 进内核；
-Linux/MPU 的 `nPRIV=1` 还没开——置位必须发生在异常返回前的最后一步，否则窗口里
-到达的中断会以非特权跑 Handler。等 PendSV（最低优先级）+ MPU 一起做。
+用户任务是非特权的（`CONTROL.nPRIV=1`），靠 §5.2 的 MPU 区域限制可达范围。
+`nPRIV` 在 `arm_resume` 里、`bx lr` 之前写：Handler 模式忽略这一位，所以之后的
+中断仍是特权，只有异常返回装上的 Thread 上下文非特权。不需要 PendSV——只有在
+“把切换本身推迟到最低优先级异常”时才需要它。
 
-踩过的四个坑，都有明确现象：
+踩过的五个坑，都有明确现象：
 
 1. **帧布局不能有填充字。** `regs_t` 与 `arch/arm/start.S` 的 `FR_*` 偏移共享布局：
    20 个字号 = 80 字节，前 32 字节是 r4–r11，接着 `exc/vec/hw/kern_sp`，最后 8 个
@@ -379,6 +421,13 @@ Linux/MPU 的 `nPRIV=1` 还没开——置位必须发生在异常返回前的�
    SysTick 0x00、SVCall 0x40、PendSV 0xE0，`plat_init()` 写进 SHPR2/SHPR3
    （偏移是 `0xD1C`/`0xD20`，千万别照 NVIC 的 `0x01C` 去算）。tick 打断内核调用
    不会重调度（`process_tick` 只看用户态帧），所以不存在内核栈被换走的竞态。
+5. **MPU 的 SIZE 字段是 `log2(size) - 1`，不是 `log2(size)`。** 写错一次（256 KiB
+   写成 128 KiB）的现象很误导：入口地址仍在区域 0 里，取指没问题，但异常返回时
+   要从栈顶弹出硬件帧，而栈顶已经落在区域外，于是报 `MemManage ... at
+   <入口地址>` 且 `MMFAR` 无效（出问题的是栈，不是 PC）。看到“入口就 fault、没有
+   MMFAR”，先查区域覆盖到哪。另外 MemManage/BusFault/UsageFault 必须先在
+   `SHCSR` 里使能（`plat_init()` 写 bit16–18），否则一律升级成 HardFault，`prot`
+   就报不出具体异常名。
 
 另外：`__aeabi_uldivmod` 必须按 ARM EABI 返回 `r0:r1` = 商、`r2:r3` = 余数。
 用 C 的 16 字节结构体返回走的是隐藏指针，调用方读到的商是垃圾——表现为
@@ -596,7 +645,7 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | ELF 错误文案 | 相同 |
 | exec | spawn，返回子任务 pid；`wait(pid)` 取退出码 |
 | 调度 | 时间片轮转，50 ms；只在用户态帧上抢占 |
-| 内存保护 | x86 无（平坦）；rv32 PMP：code RX / data+heap RW / stack RW / 其余拒绝；内核读用户内存不受影响 |
+| 内存保护 | x86 无（平坦）；rv32 PMP：code RX / data+heap RW / stack RW / 其余拒绝；arm MPU：窗口 RW+XN / code RO+可执行 / 栈下 16 KiB 护栏；内核读用户内存不受影响 |
 | 异常隔离 | 只杀当前任务，其余继续跑 |
 
 **`crash` 测试已经改写（P0 完成）。** 原先它靠写 `0xdeadb000` 触发缺页；关闭分页后没有缺页，
@@ -616,6 +665,7 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | **P2.5** ✅ | 抢占式调度：任务状态机、时间片轮转、`exec`/`wait`、tty 行规程 | `ps` 里看到 `rdy`，后台 `spin` 与 shell 并行——已完成 |
 | **P2.6** ✅ | RV32 PMP 分段 + 窗口重排（栈顶对齐、堆栈之间留洞）+ ELF w^X/入口校验 | `prot rodata/heap/stack/null` 四条都被拦下且只杀任务——已完成 |
 | **P3** ✅ | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick、用户态 ELF + littlefs | smoke 全绿（`hello`/`sh`/后台 `spin`/`crash` 只杀任务）——已完成 |
+| **P3.1** ✅ | ARM MPU + `nPRIV=1`：每任务 8 个区域、RO 代码、栈护栏、`PLAT_HEAP_GUARD` | `prot null/rodata/stack` 当场 MemManage，smoke 全绿——已完成 |
 | P4 | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello` |
 | P5 | RP2040：boot2 + UF2 + SRAM 运行 | 真机 `hello` |
 | P6 | 可选：PIE/重定位加固、优先级、每子任务退出码队列 | — |
@@ -627,7 +677,8 @@ P0 是最容易被低估的一步：**它会让 x86 失去现有的进程隔离*
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| x86 无内存保护 | 用户程序可破坏内核 | 文档明确；`process_user_ok` 只做窗口范围检查；rv32 已用 PMP 补上 |
+| x86 无内存保护 | 用户程序可破坏内核 | 文档明确；`process_user_ok` 只做窗口范围检查；rv32 PMP / arm MPU 均已补上 |
+| ARM MPU 无 TOR（只能 2 的幂对齐块） | 堆上界不精确、栈下空洞只有 16 KiB | 见 5.2 的差距表；`prot heap` 在 ARM 上预期不 fault |
 | 用户二进制跨板分发 | 依赖加载器重定位正确性 | ELF32 ET_DYN + `.rel/.rela`，elf.c 校验目标窗口与 w^X |
 | x86 关闭分页后 APP_BASE 需在 RAM 内 | 现有 `0x08048000` 超界 | 改链接地址，QEMU 内存覆盖 |
 | C3 启动镜像格式 | 无法启动 | 先用 QEMU virt；或 ESP-IDF 二级引导 |

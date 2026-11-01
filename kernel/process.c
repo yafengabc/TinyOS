@@ -20,8 +20,9 @@
 
 /* Left unmapped between the heap and the stack: a heap that runs off its
  * end and a stack that runs off its bottom then fault instead of eating
- * each other. */
-#define HEAP_GUARD  4096u
+ * each other.  The size lives in platform.h because the port that maps the
+ * hole (rv32 PMP, ARM MPU) needs the same number. */
+#define HEAP_GUARD  PLAT_HEAP_GUARD
 
 /* Ticks a task may run before the timer takes the CPU away.  At 100 Hz a
    slice is 50 ms: long enough that switches are noise, short enough that a

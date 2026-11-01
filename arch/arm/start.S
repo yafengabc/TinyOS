@@ -185,7 +185,22 @@ arm_resume:
     mov     sp, r12
     pop     {r4-r11}
     mov     sp, r0
-    bx      lr
+
+    /* Returning to Thread mode on PSP: make it unprivileged.  Thread mode
+       on MSP (a tick that interrupted kmain before the first task) keeps
+       its privileges - it is still kernel code.  CONTROL.nPRIV is ignored
+       in Handler mode, so writing it here, still inside the exception,
+       only affects the Thread context the exception return installs.
+       Handlers, and any interrupt taken from now on, stay privileged; the
+       MPU regions programmed by plat_task_protect() decide what the task
+       itself can touch.  SPSEL comes from EXC_RETURN, and the core has no
+       FPU, so the value written is just nPRIV. */
+    tst     lr, #4                  /* bit 2: Thread mode on PSP?       */
+    beq     7f
+    movs    r2, #1                  /* CONTROL.nPRIV = 1                */
+    msr     control, r2
+    isb
+7:  bx      lr
 
 /* -------------------------------------------------------------------- */
 /* arm_enter_user: r0 = regs_t of a task that has never run.             */
@@ -248,9 +263,9 @@ arm_svc:
     ldr     r4, [r3, #FR_R0 + 28]
     str     r4, [r0, #FR_R0 + 28]
     /* Thread mode on PSP comes from the task's EXC_RETURN (0xFFFFFFFD):
-       exception return restores CONTROL.SPSEL from it, so nothing needs to
-       be written here.  The task runs privileged, like the rest of this
-       flat-model port - see the note in arch/arm/platform.c. */
+       exception return restores CONTROL.SPSEL from it.  arm_resume also
+       sets CONTROL.nPRIV on the way out, so the task starts unprivileged
+       with only the MPU regions plat_task_protect() installed. */
     b       arm_resume
 1:
     bl      syscall_dispatch
