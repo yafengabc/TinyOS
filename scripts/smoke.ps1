@@ -171,7 +171,12 @@ function Read-Available([int]$WindowMs) {
 }
 
 Read-Available 500
-$deadline = [DateTime]::Now.AddMilliseconds(20000)
+# 60 s, not 20: the rv32 kernel takes seconds to walk the filesystem image
+# under TCG (the image is read block by block through the same memcpy and
+# each littlefs metadata scan costs real emulated time), and the socket
+# chardev adds more on top.  The other targets reach the prompt in well
+# under a second, so a generous ceiling costs nothing when they pass.
+$deadline = [DateTime]::Now.AddMilliseconds(60000)
 while ($sb.ToString() -notmatch "tos>" -and [DateTime]::Now -lt $deadline) {
     Read-Available 300
 }
