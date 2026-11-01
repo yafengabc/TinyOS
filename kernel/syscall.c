@@ -9,6 +9,13 @@
 
 #define MAX_EXEC_ARGS 12
 
+/* One argv string.  A single argument cannot be longer than the console line
+ * it was typed on, so TTY_LINE_MAX is the only honest bound: at 64 a long
+ * "wfile notes.txt <text...>" lost everything past the 63rd character, and
+ * the program had no way to tell - the copy reported success on a string it
+ * had quietly shortened. */
+#define EXEC_ARG_MAX TTY_LINE_MAX
+
 static int copy_user_string(char *dst, uint32_t src, int max)
 {
     for (int i = 0; i < max - 1; i++) {
@@ -19,14 +26,17 @@ static int copy_user_string(char *dst, uint32_t src, int max)
         if (!c)
             return 1;
     }
+    /* Still no terminator: the string does not fit.  Fail instead of
+       truncating - a silently shortened argument looks exactly like a
+       program that lost data halfway. */
     dst[max - 1] = '\0';
-    return 1;
+    return 0;
 }
 
 static regs_t *do_exec(regs_t *r, const syscall_t *sc)
 {
-    static char path[64];
-    static char argbuf[MAX_EXEC_ARGS][64];
+    static char path[EXEC_ARG_MAX];
+    static char argbuf[MAX_EXEC_ARGS][EXEC_ARG_MAX];
     char *argv[MAX_EXEC_ARGS];
     int argc = (int)sc->a2;
 
@@ -48,7 +58,7 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
         const uint32_t *uargv = (const uint32_t *)sc->a1;
         for (int i = 0; i < argc; i++) {
             argv[i] = argbuf[i];
-            if (!copy_user_string(argbuf[i], uargv[i], 64)) {
+            if (!copy_user_string(argbuf[i], uargv[i], EXEC_ARG_MAX)) {
                 plat_frame_set_ret(r, (uint32_t)-1);
                 return r;
             }

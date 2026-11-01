@@ -2,7 +2,10 @@
 
 #define MAX_ARGS 8
 
-static char line[128];
+/* A command line, sized to what the kernel's line discipline will hand over
+ * in one piece (TTY_LINE_MAX).  At 128 the shell silently cut anything longer
+ * before the kernel ever saw the arguments. */
+static char line[256];
 /* Note: this is our own storage.  The argv passed to main() only has room
    for the arguments the kernel actually created, so do not reuse it. */
 static char *args[MAX_ARGS];
