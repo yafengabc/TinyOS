@@ -615,9 +615,11 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 - 内核堆是 **32 KiB** 静态 arena（`.bss`），first-fit **且合并相邻空闲块**；littlefs 的缓存和临时缓冲区都走它
   （每次 `exec` 会临时分配一个文件大小的加载缓冲，随后立即释放）。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。
-- 引导扇区固定读取 180 个扇区；改内核大小时同步改 `boot/stage1.S` 的
-  `KERNEL_SECTORS`、`internal/build/build.go` 的 `KernelSectors` 和
-  `board/pc/layout.c` 的 `PLAT_LFS_LBA`，并保持内核含 `.bss` 的结束地址低于 `0x400000`。
+- 引导扇区固定读取 180 个扇区（`internal/build/build.go` 的 `KernelSectors`）。改内核大小时
+  还要同步改 `boot/stage1.S` 的 `KERNEL_SECTORS` 和 `board/pc/layout.c` 的 `PLAT_LFS_LBA`——
+  这两处 Go 代码看不见，所以每次构建都会去源码里读一遍做交叉校验（`internal/build/layout.go`），
+  对不上直接报错而不是让镜像悄悄截断或让 littlefs 挂到内核尾巴上。
+  另外内核含 `.bss` 的结束地址必须低于 `0x400000`。
 - ATA 驱动是 PIO 轮询、28-bit LBA：单次传输最多 255 扇区，适合 QEMU 和真实 IDE；
   没有 48-bit LBA，>128 GiB 的盘不支持。
 

@@ -373,6 +373,9 @@ func (b *Builder) Build() error {
 	if err != nil {
 		return err
 	}
+	if err := b.checkLayout(); err != nil {
+		return err
+	}
 
 	for _, d := range []string{
 		b.BuildDir,
