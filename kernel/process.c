@@ -189,19 +189,35 @@ static regs_t *sched_switch(regs_t *r)
     }
 
     for (;;) {
-        proc_t *next = sched_pick();
+        proc_t *next;
+        int waiting;
+
+        /* Picking a task and asking "is anybody still blocked?" have to
+         * observe the same instant.  sched_idle() below switches interrupts
+         * on and nothing ever switches them off again, so from the first
+         * idle onwards this loop runs preemptible.  A tick landing between
+         * the scan and the probe then hands a finished console line to a
+         * task sched_pick() has already walked past: the scan reports
+         * "nothing ready" (it will not look behind rr again this round) and
+         * the probe reports "nobody waiting" (the sleeper just became
+         * READY), which used to add up to a panic on a machine that had a
+         * runnable shell all along.  Closing the window here is enough -
+         * the frame the tick wrote is picked up by the next iteration. */
+        plat_irq_disable();
+        next = sched_pick();
+        waiting = proc_waiting();
         if (next) {
             next->state = ST_RUNNING;
             current = next;
             quantum = QUANTUM;
             apply_protection(next);
+            /* Leave interrupts closed: the caller is trap exit and mret
+               restores MIE from MPIE, which is the state we came in with. */
             return &next->saved;
         }
-        if (proc_waiting()) {
-            sched_idle();
-            continue;
-        }
-        panic("no runnable process");
+        if (!waiting)
+            panic("no runnable process");
+        sched_idle();       /* re-enables interrupts and sleeps until the next tick */
     }
 }
 
