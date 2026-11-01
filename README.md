@@ -74,6 +74,7 @@ arch/rv32/           RV32 实现：start.S（入口 + trap 向量）platform.c�
 board/pc/            x86 板级内存布局（layout.c，含 littlefs 分区 LBA）
 board/qemu-virt/     QEMU virt (rv32) 板级布局（layout.c）
 docs/PLATFORM-DESIGN.md  无 MMU 平坦模型的设计与路线图
+docs/SHELL-GUIDE.md   shell 脚本与优先级的详细使用说明（示例均为实跑输出）
 docs/OPEN-ITEMS.md   已评估、还没拍板的事项（决策队列，含实测数字）
 third_party/littlefs/  上游 littlefs v2.9.3（lfs.c/lfs.h/lfs_util.*）
 tools/mklfs.c        host 端 littlefs 打包/校验工具
