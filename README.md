@@ -185,6 +185,8 @@ tos> ps             # 看看当前有哪些任务、各自状态
 tos> run echo hi
 tos> run spin &     # 后台跑一个死循环程序，shell 仍然可用
 tos> run prot heap  # 故意写越界的堆：RV32 上当场被 PMP 拦下，x86 上什么也不会发生
+tos> source etc/rc  # 在本进程里读一个命令文件（C3 上只有 3 个任务窗口，这是唯一安全的嵌套方式）
+tos> run sh etc/rc  # 也可以把它当成一个程序跑：新任务、新 pid、崩溃不影响 shell
 tos> reboot         # 真复位芯片（C3 上 ROM 会报 rst:0x3 RTC_SW_SYS_RST）
 tos> exit
 ```
@@ -328,6 +330,35 @@ int main(int argc, char *argv[])
 
 普通数据文件放到 `files/` 下（可以带子目录），会以同样的相对路径出现在 littlefs 里，
 用 `cat` 读取。
+
+## 脚本
+
+shell 认得出命令文件，语法与你在控制台敲的**完全一样**——同一个 `split`、同一个
+派发函数，只是换了个输入源（`src_t`）并把提示符关掉。`#` 起注释，空行跳过，
+行尾 `&` 放后台，`exit N` 结束脚本并返回 N（在控制台才是关机）：
+
+```sh
+# a script, any name under the filesystem root
+echo [rc] hello from the boot script
+uptime
+run sh other.sh &
+exit 3
+```
+
+两种跑法，区别只在"要不要多一个任务"：
+
+| 写法 | 做什么 | 任务窗口 | 适合 |
+| --- | --- | --- | --- |
+| `source <file>` | 在当前 shell 进程里递归读，不 `exec` | 不占 | 嵌套脚本；C3 上跑任何东西 |
+| `run sh <file>` | `exec` 一个新的 sh，文件名作参数 | 占 1 个 | 崩溃隔离、`&`、要退出码 |
+
+`source` 不是图省事，是唯一可行的：C3 一共只有 **3 个任务窗口**（shell、前台、备用），
+一层 `run sh` 再在脚本里 `run` 一个程序就是第四个，内核只会回
+`exec: out of task windows`。嵌套深度上限 `MAX_SOURCE = 4`，预算就是那 16 KiB 栈：
+每层约 110 B（`src_t` 里的 96 B 读缓冲 + 几个局部量）。
+
+启动时 pid 1 会读一次 `etc/rc`（源文件 `files/etc/rc`，随镜像打包）。它默认是空的：
+开机自己说话的机器没法做差分测试，而这里打印的每个字节都会落在所有验收用例前面。
 
 ## 进程与调度
 

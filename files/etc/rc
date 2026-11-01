@@ -1,0 +1,17 @@
+# /etc/rc - commands the init shell reads once, before the first prompt.
+#
+# The syntax is the console's, because it is the same parser: one command per
+# line, '#' starts a comment, a trailing '&' backgrounds a command, blank
+# lines are ignored.  `exit N` ends the script with code N instead of
+# shutting the machine down.
+#
+# `source <file>` runs another script in this process; `run sh <file>` runs
+# one as a separate task (a new pid, a new window - and the C3 has only three
+# windows in total, so prefer source for anything that runs a program).
+#
+# This file is empty on purpose.  A boot that talks without being asked is a
+# boot you cannot diff, and every byte printed here lands in front of each
+# acceptance test and smoke run.  Uncomment to taste:
+#
+# echo [rc] hello from the boot script
+# uptime

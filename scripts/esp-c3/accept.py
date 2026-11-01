@@ -121,6 +121,19 @@ def main():
     check(results, "cat reads it back", b.cmd("cat accept.txt"),
           want=("abracadabra",))
 
+    # Command files: the same parser with a file as its input source.  `source`
+    # runs in this process on purpose - the C3 has three task windows, so a
+    # shell that execs a script which runs a program is one window too many.
+    # The script is written by wfile so the image needs no extra entry.
+    check(results, "wfile writes a script", b.cmd("wfile s.sh hello"),
+          want=("s.sh",))
+    check(results, "source runs the command file", b.cmd("source s.sh"),
+          want=("hello from ring 3!",))
+    check(results, "source names the file it cannot open", b.cmd("source nosuch"),
+          want=("sh: cannot open nosuch",))
+    check(results, "the boot script parses", b.cmd("run sh etc/rc"),
+          want=("tos>",))
+
     # ^C must reach the task blocked on the console.  "cat" with no argument
     # waits for input, so it is the reliable way to have somebody to signal.
     b.s.write(b"cat\r\n")
