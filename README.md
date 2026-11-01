@@ -219,7 +219,7 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target arm
 内核、用户程序、littlefs 镜像，全部用同一份源码，不需要第二套实现。
 
 ```powershell
-go run ./cmd/tos build -target rv32   # -> build/kernel-rv32.elf (+ build/ramdisk.bin)
+go run ./cmd/tos build -target rv32   # -> build/kernel-rv32.elf (+ build/ramdisk-rv32.bin)
 go run ./cmd/tos run   -target rv32
 ```
 
@@ -253,7 +253,7 @@ qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.e
 | PMP | 每任务 4 条：空条目（下界）+ code RX + data/heap RW + stack NAPOT RW，切换时重写；条目 0 只能从地址 0 起，所以下界靠“上一条的 `pmpaddr` 即使 OFF 也生效”来表达 |
 | 用户态入口 | `rv32_enter_user()` 复用 trap 返回路径，`mret` 进 U-mode |
 | 缺的运行时 | `kernel/libgcc.c` 补 `__lshrdi3/__ashldi3/__ashrdi3`（RV32 无 64 位移位指令） |
-| 块设备 | `build/ramdisk.bin` 由生成的 `.S` 用 `.incbin` 嵌进 `.data.ramdisk`，`plat_block_*` 直接内存拷贝 |
+| 块设备 | `build/ramdisk-rv32.bin` 由生成的 `.S` 用 `.incbin` 嵌进 `.data.ramdisk`，`plat_block_*` 直接内存拷贝 |
 
 工具链：`clang --target=riscv32-unknown-elf` 编译，`ld.lld -m elf32lriscv` 直接链接
 （走 clang 驱动会强行拉入硬浮点 ABI 的 `compiler_rt`，和我们的 ilp32 对象冲突）。
@@ -384,7 +384,8 @@ tos> ps
 
 1. `tos build` 把要打包的文件暂存到 `build/fs-stage/`
 2. 用 Zig 把 `tools/mklfs.c` + `lfs.c` + `lfs_util.c` 编成 host 程序 `build/mklfs.exe`
-3. `mklfs.exe` 用 littlefs 自己 `lfs_format` + `lfs_file_write` 生成 `build/ramdisk.bin`
+3. `mklfs.exe` 用 littlefs 自己 `lfs_format` + `lfs_file_write` 生成 `build/ramdisk-<target>.bin`
+   （按目标分开命名：每个目标装的是自己的用户程序，共用一个名字会让最后构建的那个覆盖前面所有）
 4. 内核启动后用同一份 littlefs 源码 + ATA 驱动 `lfs_mount` 磁盘上的分区
 
 这样磁盘格式由 littlefs 自己产生和校验，不需要手写格式化器，也不会出现
@@ -452,7 +453,7 @@ RV32 内核（`.text` 26,564 + `.rodata` 2,500 = 29,064 B 代码/常量，`.bss`
 手动检查镜像内容：
 
 ```powershell
-.\build\mklfs.exe -v .\build\ramdisk.bin
+.\build\mklfs.exe -v .\build\ramdisk-x86.bin
 ```
 
 ## 磁盘布局
@@ -468,7 +469,7 @@ LBA 常量由板级提供（`board/pc/layout.c` 的 `PLAT_LFS_LBA = 181`），
 `boot/stage1.S` 与 `internal/build/build.go` 的 `KernelSectors` 需保持同步；
 构建时对内核镜像大小和 `.bss` 结尾都有检查。
 
-RV32 没有磁盘，构建工具把同一份 `build/ramdisk.bin` 用生成的 `.S`（`.incbin`）
+RV32 没有磁盘，构建工具把 `build/ramdisk-rv32.bin` 用生成的 `.S`（`.incbin`）
 嵌进内核的 `.data.ramdisk`，板级给 `PLAT_LFS_LBA = 0`，`plat_block_*` 就是内存拷贝。
 
 ## 内存布局

@@ -149,7 +149,7 @@ func (b *Builder) emitRP2040UF2(elfPath string) error {
 	if err != nil {
 		return err
 	}
-	ramdiskPath := filepath.Join(b.BuildDir, "ramdisk.bin")
+	ramdiskPath := b.fsImage()
 	ramdisk, err := os.ReadFile(ramdiskPath)
 	if err != nil {
 		return fmt.Errorf("littlefs image missing (%s); run a full build first", ramdiskPath)

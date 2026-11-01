@@ -630,7 +630,8 @@ nibble 是真的**。于是 entries < 0x10000000 时永远打出 `00000000`，�
 #### 8.7 SPI flash 块设备（已验证，2026-11-01）
 
 littlefs 分区烧在 flash 偏移 0x100000（`PLAT_LFS_LBA=2048`，300 KiB=600 扇区），
-`esptool write-flash 0x100000 build/ramdisk.bin`。块设备三层组合，全部真机验证：
+`esptool write-flash 0x100000 build/ramdisk-esp32c3.bin`（脚本：`scripts/esp-c3/flash.py`）。
+块设备三层组合，全部真机验证：
 
 - **读 = ROM `esp_rom_spiflash_read`（0x40000130）**。ROM bootloader 已探测好芯片，
   零初始化即可用；dest 需 4 字节对齐。
@@ -665,6 +666,51 @@ handler 本体仍在拒绝区，进入 M-mode 后执行。
 复位后 `cat` 读回一致（真 NOR 持久化）、`ls/hello/uptime/echo/spin &`
 （400 ms 抢占一跳）、`crash` 隔离、`prot rodata/null` 越界被 PMP 击杀。
 `mem` 需 195 KiB 堆，超出 C3 的 64 KiB 窗口，malloc 失败是预期。
+
+#### 8.8 任务布局：栈必须和它的尺寸对齐，否则 PMP 划错区间（真机发现，2026-11-01）
+
+C3 上跑 `prot stack`（往栈底下面一字节写）**没有被杀**，而这四条越界用例在
+qemu-virt 上全部 trap。原因不是 PMP 没生效，是**栈区 NAPOT 编码描述的不是我们
+想要的那 32 KiB**：
+
+- 窗口基址 `0x403AC000` 只有 16 KiB 对齐（内核结束在 `0x4039DA80`，窗口从它后面
+  对齐到 16 KiB 才开始），于是 `stack_low = top - 32 KiB` 也只有 16 KiB 对齐；
+- NAPOT 的编码 `(addr >> 2) | ((size >> 3) - 1)` 在基址未按 size 对齐时，硬件
+  解码得到的是「**包含** stack_low 的那个 32 KiB 区」而不是「以 stack_low 开头的
+  32 KiB 区」；
+- 具体到 `[0x403C4000, 0x403CC000)`，实际生效的是 `[0x403C0000, 0x403C8000)`：
+  守卫页（`0x403C0000..0x403C4000`）变成可写 —— 测试就是这么漏过去的 ——
+  而真栈的上半截（`0x403C8000..0x403CC000`）反而不可用。
+
+顺着这条线查出**同一类问题的第二个受害者**：RP2040 的窗口是 32 KiB，而栈大小是
+全平台共用的 32 KiB、守卫 16 KiB，`span + 32 KiB + 16 KiB > 32 KiB` 恒成立，
+`exec` 会永远回 `does not fit a 32 KiB task window`。它一直没被发现，是因为
+Pico 还没有控制台，用户程序压根没跑起来过。
+
+修法：**栈大小与守卫改为按板配置**（`PLAT_STACK_BYTES` / `PLAT_HEAP_GUARD` 放进
+各自的 `layout.c`），并在 `process_init()` 里做一次四项自检（2 的幂、窗口是它的
+整数倍、窗口容得下栈+守卫+镜像、`base + 窗口 - 栈` 按栈尺寸对齐），任一不成立
+直接 panic 并说明是哪一项 —— 这类错误的表现（栈用一半 fault、守卫页可写、
+exec 全被拒）跟布局八竿子打不着，靠症状反推太贵。
+
+| 板 | 窗口 | 栈 | 守卫 | 镜像+堆可用 |
+|---|---|---|---|---|
+| pc (x86) | 4 MiB | 32 KiB | 16 KiB | 3.95 MiB |
+| qemu-virt | 1 MiB | 32 KiB | 16 KiB | 976 KiB |
+| qemu-mps2 | 256 KiB | 32 KiB | 16 KiB | 208 KiB |
+| esp32c3 | 64 KiB | **16 KiB** | 16 KiB | 32 KiB |
+| rp2040 | 32 KiB | **16 KiB** | **4 KiB** | 12 KiB |
+
+真机复验：C3 `prot stack` 现在报 `store access fault at ... (address 0x403c3fff)`，
+`scripts/esp-c3/accept.py` 18/18；x86/rv32/arm 的 smoke 与 compat 全绿。x86 代价
+`.text` +224 B（自检与文案），`.bss` 不变。
+
+**同一轮还修掉一个更难看的**：`build/ramdisk.bin` 是所有目标共用的名字，循环构建
+时最后那个目标会覆盖它。于是「构建 rv32 → 构建 rp2040 → 烧 esp32c3」这条最常见的
+顺序会把 **ARM 用户程序**烧进 C3，内核列出 14 个文件、然后拒绝每一个，报
+"not a valid ELF32 program"，屏幕上没有任何线索指向文件系统不是它的。现在镜像按
+目标命名（`build/ramdisk-<target>.bin`），并且 ELF 架构不匹配时会直接说
+`program is machine 40 (arm), this kernel runs machine 243 (rv32)`。
 
 ### RP2040
 
