@@ -70,6 +70,11 @@ int ps(void)
     return tos_sys0(SYS_PS);
 }
 
+int setprio(int pid, int prio)
+{
+    return tos_sys2(SYS_SETPRIO, pid, prio);
+}
+
 void *sbrk(int bytes)
 {
     int r = tos_sys1(SYS_SBRK, bytes);

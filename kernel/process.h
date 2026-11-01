@@ -40,6 +40,9 @@ regs_t  *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len);
 int      process_exec(regs_t *r, const char *path, char *const argv[], int argc);
 
 int      process_current_pid(void);
+/* Move a task to another priority level (0 = highest, 2 = lowest).  A task
+ * cannot climb above the caller's own level.  pid 0 means the caller. */
+int      process_setprio(int pid, int prio);
 uint32_t process_sbrk(uint32_t bytes);
 int      process_dump(void);
 

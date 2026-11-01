@@ -30,6 +30,17 @@
 #define QUANTUM     5
 #define MAX_WINDOWS 32
 
+/* Priority levels, lower number wins.  A child starts at its parent's level
+ * and setprio() moves it afterwards; nothing ages, because a level is only
+ * starved when somebody leaves a higher-priority task runnable forever -
+ * which is what asking for levels means.  Nobody can climb above their own
+ * level (see process_setprio), so a program cannot lock the console out:
+ * the worst it can do is round-robin, which is what the shell had before. */
+#define PRIO_LEVELS 3
+#define PRIO_HIGH   0
+#define PRIO_NORMAL 1
+#define PRIO_LOW    2
+
 enum {
     ST_FREE = 0,
     ST_READY,
@@ -49,6 +60,7 @@ typedef struct {
 
 typedef struct proc {
     int      state;
+    int      prio;          /* PRIO_*, 0 = highest */
     int      pid;
     int      slot;          /* window slot, -1 when none */
     int      wait_pid;      /* ST_WAIT_CHILD: which child, -1 for any */
@@ -134,15 +146,50 @@ static uint32_t align_up(uint32_t v, uint32_t a)
     return (v + a - 1) & ~(a - 1);
 }
 
+/* Look a task up by pid.  Out of line on purpose: -O2 turns a sixteen-step
+ * loop over a static array into ~300 bytes of unrolled code, and there are
+ * two callers (signals, setprio).  One copy is cheaper than both. */
+static proc_t *proc_by_pid(int pid) __attribute__((noinline));
+
+static proc_t *proc_by_pid(int pid)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state != ST_FREE && procs[i].pid == pid)
+            return &procs[i];
+    }
+    return NULL;
+}
+
 /* ---- scheduler ------------------------------------------------------- */
+
+/* A task more important than whoever is on the CPU must not wait for the
+ * rest of that slice: need_resched makes the trap exit switch, exactly as
+ * an expired quantum would. */
+static void preempt_if_higher(proc_t *p)
+{
+    if (current && current->state == ST_RUNNING && p->prio < current->prio)
+        need_resched = 1;
+}
+
+/* Hand a blocked task its result and make it runnable.  `val` lands in the
+ * saved frame, so the task resumes straight in user mode with that return
+ * value - nothing is replayed. */
+static void make_ready(proc_t *p, int32_t val)
+{
+    plat_frame_set_ret(&p->saved, (uint32_t)val);
+    p->state = ST_READY;
+    preempt_if_higher(p);
+}
 
 static proc_t *sched_pick(void)
 {
-    for (int i = 1; i <= MAX_PROCS; i++) {
-        int idx = (rr + i) % MAX_PROCS;
-        if (procs[idx].state == ST_READY) {
-            rr = idx;
-            return &procs[idx];
+    for (int lvl = 0; lvl < PRIO_LEVELS; lvl++) {
+        for (int i = 1; i <= MAX_PROCS; i++) {
+            int idx = (rr + i) % MAX_PROCS;
+            if (procs[idx].state == ST_READY && procs[idx].prio == lvl) {
+                rr = idx;
+                return &procs[idx];
+            }
         }
     }
     return NULL;
@@ -187,6 +234,9 @@ static regs_t *sched_switch(regs_t *r)
         prev->saved = *r;
         prev->state = ST_READY;
     }
+    /* Somebody asked for this switch; whoever asked (a wake-up, a syscall)
+       does not need to ask again once we are here. */
+    need_resched = 0;
 
     for (;;) {
         proc_t *next;
@@ -266,8 +316,7 @@ void process_tick(regs_t *r)
             if (p->state != ST_WAIT_INPUT)
                 continue;
             int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
-            plat_frame_set_ret(&p->saved, (uint32_t)n);
-            p->state = ST_READY;
+            make_ready(p, n);
             break;
         }
     }
@@ -281,10 +330,8 @@ void process_tick(regs_t *r)
     now = plat_ticks();
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
-        if (p->state == ST_WAIT_SLEEP && (int64_t)(now - p->wake_tick) >= 0) {
-            plat_frame_set_ret(&p->saved, 0);
-            p->state = ST_READY;
-        }
+        if (p->state == ST_WAIT_SLEEP && (int64_t)(now - p->wake_tick) >= 0)
+            make_ready(p, 0);
     }
 
     /* Preempt only a task the timer interrupted in user mode: a tick that
@@ -585,6 +632,9 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     memset(p, 0, sizeof(*p));
     p->slot = slot;
     p->pid = next_pid++;
+    /* Children inherit: a task cannot spawn something more important than
+       itself, which is what keeps a program from locking the console out. */
+    p->prio = current ? current->prio : PRIO_HIGH;
     p->start_ns = plat_uptime_ms();
     p->win_base = base;
     p->wx_start = base + (link_wx - link_lo);
@@ -645,6 +695,34 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
     return (int)p->pid;
 }
 
+/* Move a task to another level.  pid 0 means the caller, so a program can
+ * nice itself without knowing its pid.  Climbing above the caller's own
+ * level is refused rather than policed: with no aging, a program that could
+ * promote itself above the shell would own the console, and the only honest
+ * way to keep that from happening in ~40 bytes is to not allow it. */
+int process_setprio(int pid, int prio)
+{
+    proc_t *t;
+
+    if (prio < 0 || prio >= PRIO_LEVELS)
+        return -1;
+    if (current && prio < current->prio)
+        return -1;
+
+    if (pid == 0) {
+        t = current;
+    } else {
+        t = proc_by_pid(pid);
+    }
+    if (!t)
+        return -1;
+
+    t->prio = prio;
+    if (t != current && t->state == ST_READY)
+        preempt_if_higher(t);
+    return 0;
+}
+
 /* ---- exit ------------------------------------------------------------ */
 
 /* Close a task's files and give back its window.  Shared by process_exit()
@@ -672,8 +750,7 @@ static void reap_into_parent(proc_t *p, int code)
     if (parent) {
         if (parent->state == ST_WAIT_CHILD &&
             (parent->wait_pid == p->pid || parent->wait_pid < 0)) {
-            plat_frame_set_ret(&parent->saved, (uint32_t)code);
-            parent->state = ST_READY;
+            make_ready(parent, code);
         } else {
             parent->exit_code = code;
             parent->laggards++;
@@ -761,14 +838,8 @@ regs_t *process_yield(regs_t *r)
  * on its own. */
 int process_signal(int pid, int sig)
 {
-    proc_t *victim = NULL;
+    proc_t *victim = proc_by_pid(pid);
 
-    for (int i = 0; i < MAX_PROCS; i++) {
-        if (procs[i].state != ST_FREE && procs[i].pid == pid) {
-            victim = &procs[i];
-            break;
-        }
-    }
     if (!victim || victim == current || victim == init_proc)
         return -1;
 
@@ -797,6 +868,7 @@ int process_signal(int pid, int sig)
         victim->stop_pending = 0;
         if (victim->state == ST_STOPPED) {
             victim->state = ST_READY;
+            preempt_if_higher(victim);
             kprintf("[pid %d] continued\n", pid);
         }
     } else {
@@ -877,7 +949,7 @@ int process_dump(void)
        look tiny: one tick is 10 ms of CPU but the task runs for a 50 ms
        slice including the timer's own work.  cpums is the time spent on the
        CPU, cpu% its share of the machine since the task started. */
-    kprintf(" pid ppid state cpu%% cpums  name\n");
+    kprintf(" pid ppid prio state cpu%% cpums  name\n");
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
         if (p->state == ST_FREE)
@@ -896,8 +968,8 @@ int process_dump(void)
         if (pct10 > 9999u)
             pct10 = 9999u;
 
-        kprintf("%4d %4d %s %4u.%u %5u  %s\n", p->pid,
-                p->parent ? p->parent->pid : 0, state_name(p->state),
+        kprintf("%4d %4d %4d %s %4u.%u %5u  %s\n", p->pid,
+                p->parent ? p->parent->pid : 0, p->prio, state_name(p->state),
                 pct10 / 10u, pct10 % 10u, busy / 1000u, p->name);
         n++;
     }

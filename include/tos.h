@@ -20,6 +20,7 @@
 #define SYS_PS       14  /* ps() -> task count, prints a table  */
 #define SYS_SIGNAL   15  /* signal(pid, sig) -> 0 or -1         */
 #define SYS_REBOOT   16  /* reboot() -> does not return         */
+#define SYS_SETPRIO  17  /* setprio(pid, prio) -> 0 or -1       */
 
 /* Signals.  There are no handlers: a signal either kills the task or parks
  * it, both decided by the kernel. */

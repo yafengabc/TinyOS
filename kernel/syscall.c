@@ -209,6 +209,10 @@ static regs_t *dispatch(regs_t *r)
         plat_frame_set_ret(r, (uint32_t)process_signal((int)sc.a0, (int)sc.a1));
         return r;
 
+    case SYS_SETPRIO:
+        plat_frame_set_ret(r, (uint32_t)process_setprio((int)sc.a0, (int)sc.a1));
+        return r;
+
     case SYS_REBOOT:
         /* Nothing to hand back: the machine starts over from the reset
          * vector, so this frame is abandoned along with the process table.

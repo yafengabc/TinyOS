@@ -17,6 +17,9 @@ int  uptime(void);
 int  wait(int pid);
 int  yield(void);
 int  ps(void);
+/* 0 = highest, 2 = lowest; pid 0 means yourself.  A task cannot climb
+ * above its own level, so a program cannot starve the shell. */
+int  setprio(int pid, int prio);
 void *sbrk(int bytes);
 void exit(int code) __attribute__((noreturn));
 void reboot(void) __attribute__((noreturn));

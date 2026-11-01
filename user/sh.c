@@ -115,13 +115,15 @@ static void cmd_help(void)
     puts("  run <prog> ... &   run it in the background\n");
     puts("  run sh <file>      run the commands in a file, as a task\n");
     puts("  source <file>      run the commands in a file, in this shell\n");
+    puts("  nice <n> <prog> .. run it at priority n (0 high, 2 low)\n");
+    puts("  prio <pid> <n>     move a running task to priority n\n");
     puts("  help               this text\n");
     puts("  reboot             reset the machine and boot again\n");
     puts("  exit [code]        shut TinyOS down (end the script, in a script)\n");
 }
 
 /* exec only spawns a child; the caller decides whether to wait for it. */
-static int run_program(char *argv[], int argc, int bg)
+static int spawn(char *argv[], int argc)
 {
     char path[64];
     path[0] = '\0';
@@ -132,7 +134,12 @@ static int run_program(char *argv[], int argc, int bg)
     }
     strcpy(path + 4, argv[0]);
 
-    int pid = exec(path, argv, argc);
+    return exec(path, argv, argc);
+}
+
+static int run_program(char *argv[], int argc, int bg)
+{
+    int pid = spawn(argv, argc);
     if (pid < 0)
         return pid;     /* the kernel already said why */
 
@@ -143,6 +150,26 @@ static int run_program(char *argv[], int argc, int bg)
         return 0;
     }
     return wait(pid);
+}
+
+/* Start a program at a lower (or equal) priority level.  exec only spawns,
+ * so the child is still READY and has never run when its level is set -
+ * there is no window in which it takes a slice at the wrong level. */
+static void run_nice(char *argv[], int argc, int bg, int lvl)
+{
+    int pid = spawn(argv, argc);
+    if (pid < 0)
+        return;
+    if (setprio(pid, lvl) < 0)
+        puts("nice: cannot move that task to that level\n");
+
+    if (bg) {
+        puts("[");
+        putint(pid);
+        puts("]\n");
+    } else {
+        wait(pid);
+    }
 }
 
 static int run_script(const char *path);
@@ -201,6 +228,20 @@ static int run_command(char *s)
             puts("usage: run <program> [args...]\n");
         } else {
             run_program(&args[1], ac - 1, bg);
+        }
+    } else if (!strcmp(args[0], "nice")) {
+        /* nice <level> <program> [args...] [&] */
+        int lvl = ac > 1 ? atoi(args[1]) : -1;
+        if (ac < 3 || lvl < 0 || lvl > 2)
+            puts("usage: nice <0-2> <program> [args...] [&]\n");
+        else
+            run_nice(&args[2], ac - 2, bg, lvl);
+    } else if (!strcmp(args[0], "prio")) {
+        /* prio <pid> <level>: move a task that is already running */
+        if (ac != 3) {
+            puts("usage: prio <pid> <0-2>  (0 highest, 2 lowest)\n");
+        } else if (setprio(atoi(args[1]), atoi(args[2])) < 0) {
+            puts("prio: no such task, or a level you cannot set\n");
         }
     } else {
         /* exec failure details (not found / corrupt / ...) are reported
