@@ -19,6 +19,7 @@
 #define SYS_YIELD    13  /* yield() -> 0, give up the CPU       */
 #define SYS_PS       14  /* ps() -> task count, prints a table  */
 #define SYS_SIGNAL   15  /* signal(pid, sig) -> 0 or -1         */
+#define SYS_REBOOT   16  /* reboot() -> does not return         */
 
 /* Signals.  There are no handlers: a signal either kills the task or parks
  * it, both decided by the kernel. */

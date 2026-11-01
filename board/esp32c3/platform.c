@@ -138,6 +138,15 @@ int plat_console_getchar(void)
 #define RTC_SWD_DISABLE         (1u << 30)
 #define RTC_SWD_WKEY            0x8F1D312Au
 
+/* Software system reset.  OPTIONS0 bit 31 is write-only: setting it resets
+ * the digital domain (the RTC domain survives) and the CPU restarts at the
+ * ROM, which boots whatever sits at flash offset 0 - the same path esptool
+ * takes after flashing.  Nothing to unlock, nothing to acknowledge: the
+ * write either resets the chip or, if the bit were wrong, does nothing at
+ * all and plat_panic_halt() keeps the machine stopped. */
+#define RTC_CNTL_OPTIONS0_REG   0x000u
+#define RTC_CNTL_SW_SYS_RST     (1u << 31)
+
 /* INTMTX (interrupt matrix).  Source 32 is TG0 timer 0
  * (ETS_TG0_T0_LEVEL_INTR_SOURCE); every source has a MAP register at
  * base + 4*source holding the CPU line it feeds.  Lines 1 (WiFi) and 6
@@ -487,8 +496,6 @@ void plat_board_init(void)
 
 /* ---- power ------------------------------------------------------------ */
 
-/* No SiFive test device here.  Reset goes through the RTC_CNTL options
- * byte (P4); until then, halt. */
 void plat_shutdown(void)
 {
     console_shutdown();
@@ -497,5 +504,17 @@ void plat_shutdown(void)
 
 void plat_reboot(void)
 {
+    console_shutdown();
+
+    /* console_shutdown() waits for the FIFO to drain, not for the shift
+     * register: up to one character (87 us at 115200 baud) is still on the
+     * wire, and resetting mid-character makes the host print a broken last
+     * line.  A few milliseconds of margin is free next to the reset itself. */
+    for (volatile int i = 0; i < 200000; i++)
+        ;
+
+    mmio_write32(RTC_WDT_BASE + RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_SYS_RST);
+
+    /* Only reached if the reset never happened. */
     plat_panic_halt();
 }

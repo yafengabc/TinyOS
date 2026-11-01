@@ -260,6 +260,9 @@ void plat_panic_halt(void)
 
 void plat_reboot(void)
 {
+    /* Same reason as plat_shutdown: the 16550 still holds the tail of the
+     * message and the reset does not flush it. */
+    console_shutdown();
     outb(0x64, 0xFE);      /* pulse the keyboard controller reset line */
     cli();
     for (;;)

@@ -19,7 +19,11 @@ param(
     [string[]]$Commands = @("ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta", "reloc", "run spin &", "ps", "wfile demo.txt hello from the filesystem", "cat demo.txt", "mem", "run prot heap", "crash", "uptime", "exit"),
     [int]$Port = 5566,
     [int]$BootWaitMs = 3000,
-    [int]$CommandWaitMs = 700
+    [int]$CommandWaitMs = 700,
+    # QEMU normally runs with -no-reboot so a guest reset ends the test.  The
+    # `reboot` command needs the opposite: the machine has to come back up so
+    # that the second banner proves the reset went through.
+    [switch]$AllowReboot
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,8 +80,7 @@ if ($Target -eq "rv32") {
         "-display", "none",
         "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=on",
         "-serial", "chardev:tosserial",
-        "-monitor", "none",
-        "-no-reboot"
+        "-monitor", "none"
     )
 } elseif ($Target -eq "arm") {
     # mps2-an385 (Cortex-M3): the kernel ELF is mapped into the SSRAM at
@@ -89,8 +92,7 @@ if ($Target -eq "rv32") {
         "-display", "none",
         "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=on",
         "-serial", "chardev:tosserial",
-        "-monitor", "none",
-        "-no-reboot"
+        "-monitor", "none"
     )
 } else {
     $qemuArgs = @(
@@ -103,6 +105,12 @@ if ($Target -eq "rv32") {
         "-serial", "chardev:tosserial",
         "-monitor", "none"
     )
+}
+
+# A guest reset normally ends the run (the test then sees a missing prompt
+# and fails); -AllowReboot keeps QEMU alive to boot again.
+if (-not $AllowReboot -and $Target -ne "x86") {
+    $qemuArgs += "-no-reboot"
 }
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo

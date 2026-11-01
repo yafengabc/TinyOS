@@ -1,6 +1,7 @@
 #include "platform.h"
 #include "board.h"
 #include "rv32_memmap.h"
+#include "console.h"
 #include "string.h"
 
 /* Board: QEMU virt (rv32).
@@ -17,6 +18,7 @@
 #define UART_REG_LSR  0x05
 #define UART_LSR_DR   0x01
 #define UART_LSR_THRE 0x20
+#define UART_LSR_TEMT 0x40      /* THR and shift register both empty */
 
 void plat_console_init(void)
 {
@@ -30,6 +32,13 @@ void plat_console_putc(char c)
     while (!(mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_THRE))
         ;
     mmio_write8(RV32_UART_BASE + UART_REG_DATA, (uint8_t)c);
+}
+
+/* console_shutdown() drains the transmitter before a shutdown or reset. */
+void plat_console_flush(void)
+{
+    while (!(mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_TEMT))
+        ;
 }
 
 int plat_console_getchar(void)
@@ -195,7 +204,9 @@ void plat_shutdown(void)
 
 void plat_reboot(void)
 {
-    /* 0x7777 is the reset request of the same test device. */
+    /* 0x7777 is the reset request of the same test device.  Drain the UART
+     * first - it is emulated with a real output queue. */
+    console_shutdown();
     mmio_write32(RV32_TEST_BASE, 0x7777u);
     plat_panic_halt();
 }

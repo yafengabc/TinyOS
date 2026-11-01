@@ -81,6 +81,10 @@ void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
                        uint32_t stack_low, uint32_t stack_top);
 void plat_panic_halt(void) __attribute__((noreturn));
 
+/* ---- 电源 ---- */
+void plat_shutdown(void) __attribute__((noreturn));
+void plat_reboot(void) __attribute__((noreturn));   /* 先排空控制台 */
+
 /* ---- trap frame 视图（架构无关） ---- */
 void     plat_frame_get_syscall(const trapframe_t *tf, syscall_t *sc);
 void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
@@ -726,11 +730,33 @@ ROM bootloader -> boot2（256 B，配置 XIP）-> 内核 @0x10000000（XIP）
 RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配置 QSPI XIP。
 产物可用 UF2 格式，通过 ROM 的 USB 大容量设备拖拽烧录。
 
+### 电源：关机与复位（跨板）
+
+init 任务退出走 `plat_shutdown()`；shell 的 `reboot` 走 `SYS_REBOOT` →
+`plat_reboot()`。两者都是 noreturn，都先 `console_shutdown()` 把控制台排空——
+复位不会替你冲刷发送 FIFO，最后一行的尾巴会被吃掉（模拟器里的 16550 尤其明显，
+它确实有个输出队列）。
+
+| 板 | shutdown | reboot | 状态 |
+|---|---|---|---|
+| x86 | ACPI `0x604`/`0xB004`/`0x4004` | 键盘控制器 `0x64 <- 0xFE` | smoke 跑通（复位后出现第二次 banner） |
+| qemu-virt | SiFive test `0x100000 <- 0x5555` | 同设备 `0x7777` | smoke `-AllowReboot` 跑通两次 boot |
+| qemu-mps2 | 停机（无对应设备，测试认最后一行） | `AIRCR.SYSRESETREQ` | 未单独验 |
+| esp32c3 | 停机（未做 deep sleep） | `RTC_CNTL_OPTIONS0(0x60008000) bit31` = `SW_SYS_RST` | **真机验过** |
+| rp2040 | 停机 | `AIRCR.SYSRESETREQ` | 未验（Pico 还没有控制台） |
+
+C3 这条是这一轮唯一在真机上验过的：写之前先等 FIFO 排空、再空转几毫秒（最后
+一个字符还在移位寄存器里，115200 下 87 µs），然后写那个只写位。证据是 ROM 自己
+打印的 `rst:0x3 (RTC_SW_SYS_RST)`——它和主机拉 EN 的 `POWERON` 不是一回事，所以
+`scripts/esp-c3/accept.py` 直接断言这行字符串；`Saved PC` 落在 `plat_reboot()`
+的自旋里，也印证复位确实发生在写完之后。ARM 两个端口用的是 `AIRCR` 的
+`SYSRESETREQ`（`arch/arm/scs.h`），写法照规范但还没有硬件可验。
+
 ## 9. 行为一致性契约
 
 | 项 | 约定 |
 |---|---|
-| 系统调用号 | `include/tos.h`，0–14 |
+| 系统调用号 | `include/tos.h`，0–16 |
 | 参数寄存器 | x86 `ebx/ecx/edx`；rv32 `a0/a1/a2`；arm `r0/r1/r2`，由 trap 入口统一映射 |
 | 返回值 | 同上，负数表示错误 |
 | 控制台 | `\n` 自动转 `\r\n`；退格回显 `\b \b` |

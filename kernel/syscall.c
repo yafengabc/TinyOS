@@ -209,6 +209,15 @@ static regs_t *dispatch(regs_t *r)
         plat_frame_set_ret(r, (uint32_t)process_signal((int)sc.a0, (int)sc.a1));
         return r;
 
+    case SYS_REBOOT:
+        /* Nothing to hand back: the machine starts over from the reset
+         * vector, so this frame is abandoned along with the process table.
+         * Reaching plat_reboot() from a task is fine - it drops the
+         * interrupts and drains the console before touching the reset
+         * register, and a reset does not care what the stack looks like. */
+        kprintf("\nreboot requested by pid %d\n", process_current_pid());
+        plat_reboot();
+
     default:
         plat_frame_set_ret(r, (uint32_t)-1);
         return r;

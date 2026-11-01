@@ -207,7 +207,9 @@ int plat_fault_is_user(void *frame);
 /* Stop the machine. */
 void plat_panic_halt(void) __attribute__((noreturn));
 
-/* Reboot the machine (used after a fatal error, may be a no-op). */
+/* Reset the machine and boot again (SYS_REBOOT, the shell's `reboot`).
+ * Noreturn by contract: a port that cannot reset halts instead, so the
+ * caller never resumes.  Implementations drain the console first. */
 void plat_reboot(void) __attribute__((noreturn));
 
 #endif

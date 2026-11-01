@@ -19,6 +19,7 @@ int  yield(void);
 int  ps(void);
 void *sbrk(int bytes);
 void exit(int code) __attribute__((noreturn));
+void reboot(void) __attribute__((noreturn));
 
 /* tiny libc */
 size_t strlen(const char *s);

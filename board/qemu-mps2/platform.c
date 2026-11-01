@@ -195,6 +195,13 @@ void plat_shutdown(void)
 
 void plat_reboot(void)
 {
+    console_shutdown();
+
+    /* Same core-level reset as the RP2040 port.  QEMU's mps2-an385 accepts
+     * SYSRESETREQ; with no flash controller the machine re-runs the image
+     * the loader put at 0. */
+    mmio_write32(ARM_AIRCR, ARM_AIRCR_VECTKEY | ARM_AIRCR_SYSRESETREQ);
+
     plat_panic_halt();
 }
 

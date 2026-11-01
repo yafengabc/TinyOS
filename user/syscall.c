@@ -82,3 +82,12 @@ void exit(int code)
     for (;;)
         ;
 }
+
+/* The kernel resets the machine instead of returning.  If a port can only
+ * halt, this is where the task stops for good. */
+void reboot(void)
+{
+    tos_sys0(SYS_REBOOT);
+    for (;;)
+        ;
+}

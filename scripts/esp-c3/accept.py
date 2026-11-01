@@ -133,6 +133,17 @@ def main():
     check(results, "the file is still there after a reset", b.cmd("cat accept.txt"),
           want=("abracadabra",))
 
+    # `reboot` has to reset the chip itself - no EN pulse from the host, no
+    # esptool.  The proof is the ROM's own reset-cause line
+    # (rst:0x3 RTC_SW_SYS_RST), then the banner coming back on its own.
+    out = b.cmd("reboot", timeout=25.0)
+    check(results, "reboot resets the chip", out,
+          want=("rebooting...", "reboot requested by pid", "RTC_SW_SYS_RST",
+                "TinyOS - a tiny multi-platform operating system",
+                "TinyOS shell"))
+    check(results, "the filesystem survives a reboot", b.cmd("cat accept.txt"),
+          want=("abracadabra",))
+
     b.close()
 
     width = max(len(r[0]) for r in results)

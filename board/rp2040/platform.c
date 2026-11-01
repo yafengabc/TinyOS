@@ -307,5 +307,14 @@ void plat_shutdown(void)
 
 void plat_reboot(void)
 {
+    console_shutdown();
+
+    /* SYSRESETREQ resets everything but the debug domain, and the boot ROM
+     * then loads stage-2 from flash again - the same cold path as power-on.
+     * Not exercised yet: the Pico has no console wired up (see the notes on
+     * the missing second USB CDC port), so this is textbook ARMv6-M, not
+     * hardware-verified. */
+    mmio_write32(ARM_AIRCR, ARM_AIRCR_VECTKEY | ARM_AIRCR_SYSRESETREQ);
+
     plat_panic_halt();
 }

@@ -41,6 +41,7 @@ static void cmd_help(void)
     puts("  run <prog> [args]  run a program from /bin\n");
     puts("  run <prog> ... &   run it in the background\n");
     puts("  help               this text\n");
+    puts("  reboot             reset the machine and boot again\n");
     puts("  exit               shut TinyOS down\n");
 }
 
@@ -101,6 +102,9 @@ int main(int argc, char *argv[])
         } else if (!strcmp(args[0], "exit")) {
             puts("bye.\n");
             exit(0);
+        } else if (!strcmp(args[0], "reboot")) {
+            puts("rebooting...\n");
+            reboot();           /* does not return */
         } else if (!strcmp(args[0], "run")) {
             if (ac < 2) {
                 puts("usage: run <program> [args...]\n");

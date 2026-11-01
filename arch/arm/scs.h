@@ -27,6 +27,16 @@
 #define ARM_PRIO_SVC     0x40u
 #define ARM_PRIO_PENDSV  0xE0u
 
+/* ---- reset ------------------------------------------------------------ */
+
+/* Application Interrupt and Reset Control.  Every write needs the key in
+ * [31:16] (any other value is ignored, which is how a typo turns a reset
+ * into nothing at all), and SYSRESETREQ in [2] asks the core to reset the
+ * system.  Present on ARMv6-M and ARMv7-M alike. */
+#define ARM_AIRCR             (ARM_SCS_BASE + 0xD0Cu)
+#define ARM_AIRCR_VECTKEY     0x05FA0000u
+#define ARM_AIRCR_SYSRESETREQ (1u << 2)
+
 /* ---- fault status ----------------------------------------------------- */
 
 /* System handler control: the configurable faults are off at reset, which

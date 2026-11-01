@@ -40,7 +40,7 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - **LZ4 压缩的程序**：用户 ELF 在构建时压缩，内核内嵌约 420 字节的解压器在
   `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
-  `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps`
+  `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
 - **抢占式调度**：时间片轮转（50 ms）、`exec` 创建子任务、`wait` 收退出码、
   `read/wait/sleep` 阻塞而不忙等；只在用户态帧上抢占，内核调用不会被撕裂
 - 用户态异常（非法指令、GPF）只终止当前进程，其他任务继续跑
@@ -184,6 +184,7 @@ tos> ps             # 看看当前有哪些任务、各自状态
 tos> run echo hi
 tos> run spin &     # 后台跑一个死循环程序，shell 仍然可用
 tos> run prot heap  # 故意写越界的堆：RV32 上当场被 PMP 拦下，x86 上什么也不会发生
+tos> reboot         # 真复位芯片（C3 上 ROM 会报 rst:0x3 RTC_SW_SYS_RST）
 tos> exit
 ```
 
@@ -573,6 +574,14 @@ TOR 上界。`plat_task_protect()` 的拼法是：区域 0 覆盖整个 256 KiB 
 | 12 | wait | `wait(pid)` 等子任务退出并返回其退出码（阻塞）；`-1` 表示任意子任务 |
 | 13 | yield | 主动让出 CPU，返回 0 |
 | 14 | ps | 打印任务表，返回任务数 |
+| 15 | signal | `signal(pid, sig)`，`SIGKILL` 杀、`SIGSTOP`/`SIGCONT` 停/续（终端 `^C` 走这条） |
+| 16 | reboot | 复位机器并从 flash 重新启动，不返回 |
+
+`reboot` 是唯一一个按平台差别很大的调用：QEMU virt / x86 写入各自的复位设备
+（SiFive test `0x7777`、键盘控制器 `0xFE`），ARM 端口写 `AIRCR.SYSRESETREQ`，
+ESP32-C3 写 `RTC_CNTL_OPTIONS0` 的 `SW_SYS_RST` 位（真机实测复位原因
+`rst:0x3 (RTC_SW_SYS_RST)`）。所有端口都先把控制台排空再复位，否则最后一行
+会被复位截断；做不到真复位的端口退化成停机，因此调用者永远不会返回。
 
 用户程序可以直接往文件系统写文件了，例如：
 
