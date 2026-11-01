@@ -21,6 +21,7 @@ void elf_set_window(uint32_t lo, uint32_t hi)
 #define PF_W       2
 #define EM_386     3
 #define EM_RISCV   243
+#define EM_ARM     40
 #define ELFCLASS32 1
 
 #define ET_EXEC 2
@@ -385,6 +386,8 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
     const uint16_t expected_machine = EM_RISCV;
 #elif defined(__i386__)
     const uint16_t expected_machine = EM_386;
+#elif defined(__arm__)
+    const uint16_t expected_machine = EM_ARM;
 #else
     const uint16_t expected_machine = eh->e_machine;
 #endif

@@ -162,6 +162,20 @@ func DetectToolchain(target Target) (Toolchain, error) {
 		}
 	}
 
+	if strings.HasPrefix(triple, "thumbv7m") {
+		// Cortex-M: Thumb only, and the ELF machine is EM_ARM, which lld
+		// selects from the target triple.  Driving lld directly avoids the
+		// compiler_rt a driver would pull in (thumb's libgcc helpers are
+		// not needed: the kernel supplies __aeabi_* below).
+		clang := findTool("clang", "clang-19", "clang-18", "clang-17", "clang-16")
+		lld := findTool("ld.lld", "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16")
+		if clang != "" && lld != "" {
+			tc.CC = []string{clang, "--target=" + triple, "-mcpu=cortex-m3", "-mthumb", "-mfloat-abi=soft"}
+			tc.LD = []string{lld, "-m", "armelf"}
+			return tc, nil
+		}
+	}
+
 	if target.Name == "x86" {
 		clang := findTool("clang", "clang-19", "clang-18", "clang-17", "clang-16")
 		lld := findTool("ld.lld", "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16")

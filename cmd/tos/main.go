@@ -14,10 +14,11 @@ func usage() {
 	fmt.Print(`TinyOS build tool
 
 usage:
-  tos build [-v] [-target x86|rv32]
-                            build build/tinyos.img (x86) or
-                            build/kernel-rv32.elf (rv32)
-  tos run   [-headless] [-debug] [-no-build] [-target x86|rv32]
+  tos build [-v] [-target x86|rv32|arm]
+                            build build/tinyos.img (x86),
+                            build/kernel-rv32.elf (rv32) or
+                            build/kernel-arm.elf (arm, QEMU mps2-an385)
+  tos run   [-headless] [-debug] [-no-build] [-target x86|rv32|arm]
                             build (unless -no-build) and boot in QEMU
   tos espimg <elf> <out.bin>
                             package a linked ELF as an ESP32-C3 boot image,
@@ -53,12 +54,12 @@ func main() {
 	case "build":
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
 		verbose := fs.Bool("v", false, "print full compiler command lines")
-		target := fs.String("target", "x86", "build target: x86 or rv32")
+		target := fs.String("target", "x86", "build target: x86, rv32 or arm")
 		fs.Parse(os.Args[2:])
 		b.Verbose = *verbose
 		t, ok := build.Targets[*target]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown target %q (want x86 or rv32)\n", *target)
+			fmt.Fprintf(os.Stderr, "unknown target %q (want x86, rv32 or arm)\n", *target)
 			os.Exit(2)
 		}
 		b.Target = t
@@ -78,12 +79,12 @@ func main() {
 		debug := fs.Bool("debug", false, "log interrupts / CPU resets to build/qemu.log")
 		noBuild := fs.Bool("no-build", false, "do not rebuild before running")
 		verbose := fs.Bool("v", false, "verbose build")
-		target := fs.String("target", "x86", "build target: x86 or rv32")
+		target := fs.String("target", "x86", "build target: x86, rv32 or arm")
 		fs.Parse(os.Args[2:])
 		b.Verbose = *verbose
 		t, ok := build.Targets[*target]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown target %q (want x86 or rv32)\n", *target)
+			fmt.Fprintf(os.Stderr, "unknown target %q (want x86, rv32 or arm)\n", *target)
 			os.Exit(2)
 		}
 		b.Target = t
@@ -122,7 +123,7 @@ func main() {
 
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
-		for _, name := range []string{"x86", "rv32"} {
+		for _, name := range []string{"x86", "rv32", "arm"} {
 			t := build.Targets[name]
 			tc, err := build.DetectToolchain(t)
 			if err != nil {
@@ -132,7 +133,7 @@ func main() {
 			fmt.Printf("%-4s  : %s\n", name, tc)
 			version(tc.CC[0], "--version")
 		}
-		for _, name := range []string{"x86", "rv32"} {
+		for _, name := range []string{"x86", "rv32", "arm"} {
 			b := build.New(root)
 			b.Target = build.Targets[name]
 			qemu := b.FindQEMU()

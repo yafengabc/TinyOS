@@ -12,8 +12,11 @@ func (b *Builder) FindQEMU() string { return findQEMU(b.Target) }
 
 // qemuBinary is the emulator that matches a build target.
 func qemuBinary(t Target) string {
-	if t.Name == "rv32" {
+	switch t.Name {
+	case "rv32":
 		return "qemu-system-riscv32"
+	case "arm":
+		return "qemu-system-arm"
 	}
 	return "qemu-system-i386"
 }
@@ -40,19 +43,27 @@ and add C:\msys64\ucrt64\bin to PATH, or set TOS_BIN/TOS_QEMU.`, qemuBinary(b.Ta
 	}
 
 	var args []string
-	if b.Target.Name == "rv32" {
-		// QEMU virt with no firmware: the kernel ELF is loaded at
-		// 0x80000000 and starts in machine mode, which is exactly what a
-		// bare-metal rv32 board does.
+	if b.Target.Name == "rv32" || b.Target.Name == "arm" {
+		// Both targets boot a raw kernel ELF instead of a disk image: the
+		// loader places the image at its link address and the kernel brings
+		// its own entry point, vector table and device setup.
 		kernel := filepath.Join(b.BuildDir, "kernel-"+b.Target.Name+".elf")
 		if _, err := os.Stat(kernel); err != nil {
 			return fmt.Errorf("no kernel ELF, run 'tos build -target %s' first", b.Target.Name)
 		}
-		args = []string{
-			"-machine", "virt",
-			"-m", "256M",
-			"-bios", "none",
-			"-kernel", kernel,
+		if b.Target.Name == "arm" {
+			// mps2-an385 is a Cortex-M3 (SSRAM at 0, 4 MiB SRAM, CMSDK UART0).
+			args = []string{
+				"-machine", "mps2-an385",
+				"-kernel", kernel,
+			}
+		} else {
+			args = []string{
+				"-machine", "virt",
+				"-m", "256M",
+				"-bios", "none",
+				"-kernel", kernel,
+			}
 		}
 		if headless {
 			args = append(args, "-display", "none", "-monitor", "none", "-serial", "stdio")

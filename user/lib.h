@@ -41,6 +41,8 @@ void   free(void *p);
  * the process instead of the machine. */
 #if defined(__riscv)
 #define TOS_ILLEGAL_INSN() __asm__ volatile(".word 0")
+#elif defined(__arm__)
+#define TOS_ILLEGAL_INSN() __asm__ volatile("udf #0")
 #else
 #define TOS_ILLEGAL_INSN() __asm__ volatile("ud2")
 #endif

@@ -51,6 +51,7 @@ var Targets = map[string]Target{
 	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk"},
 	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded"},
 	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash"},
+	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded"},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.
@@ -126,6 +127,13 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		if b.Target.March != "" {
 			archFlags = append(archFlags, "-march="+b.Target.March)
 		}
+		if b.Target.Machine != "" {
+			archFlags = append(archFlags, "-mcpu="+b.Target.Machine)
+		}
+	} else if b.Target.Arch == "arm" {
+		// Cortex-M is Thumb only; soft-float keeps the kernel free of FPU
+		// state save code and matches the reference M3 core.
+		archFlags = []string{"-mthumb", "-mfloat-abi=soft"}
 		if b.Target.Machine != "" {
 			archFlags = append(archFlags, "-mcpu="+b.Target.Machine)
 		}
@@ -243,7 +251,9 @@ func (b *Builder) link(objs []string, script, out string, extra ...string) error
 	args = append(args, extra...)
 	// no symbol table in the final image: it is only needed for debugging,
 	// and `strip` would not touch the loadable segments anyway
-	args = append(args, w("-s"))
+	if os.Getenv("TOS_KEEP_SYMS") == "" {
+		args = append(args, w("-s"))
+	}
 	args = append(args, "-o", out)
 	args = append(args, objs...)
 	return b.runTool(tool, args, "LD")

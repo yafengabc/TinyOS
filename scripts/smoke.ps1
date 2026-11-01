@@ -25,10 +25,16 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
-$qemuName = if ($Target -eq "rv32") { "qemu-system-riscv32.exe" } else { "qemu-system-i386.exe" }
+$qemuName = switch ($Target) {
+    "rv32" { "qemu-system-riscv32.exe" }
+    "arm"  { "qemu-system-arm.exe" }
+    default { "qemu-system-i386.exe" }
+}
 if (-not $Image) {
     if ($Target -eq "rv32") {
         $Image = Join-Path $root "build\kernel-rv32.elf"
+    } elseif ($Target -eq "arm") {
+        $Image = Join-Path $root "build\kernel-arm.elf"
     } else {
         $Image = Join-Path $root "build\tinyos.img"
     }
@@ -66,6 +72,19 @@ if ($Target -eq "rv32") {
         "-machine", "virt",
         "-m", "256M",
         "-bios", "none",
+        "-kernel", $Image,
+        "-display", "none",
+        "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=on",
+        "-serial", "chardev:tosserial",
+        "-monitor", "none",
+        "-no-reboot"
+    )
+} elseif ($Target -eq "arm") {
+    # mps2-an385 (Cortex-M3): the kernel ELF is mapped into the SSRAM at
+    # address 0 by QEMU, its vector table is the reset entry and UART0 is
+    # the only serial port.
+    $qemuArgs = @(
+        "-machine", "mps2-an385",
         "-kernel", $Image,
         "-display", "none",
         "-chardev", "socket,id=tosserial,host=127.0.0.1,port=$Port,server=on,wait=on",

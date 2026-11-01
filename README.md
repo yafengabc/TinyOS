@@ -1,10 +1,11 @@
 # TinyOS
 
-一个用 **C + 汇编** 写的极简 32 位操作系统，目前有 **x86（PC/QEMU i386）** 与
-**RV32（QEMU virt）** 两个可运行目标，配套的构建/运行工具用 **Go** 写。
-它的核心能力是：从 **littlefs** 镜像里**动态加载 ELF 可执行文件**，在**非特权态**
-（x86 ring 3 / RV32 U-mode）里运行，程序可以 `exec` 另一个程序、读写文件、申请堆内存；
-程序崩溃只会杀掉自己，不会拖垮内核。
+一个用 **C + 汇编** 写的极简 32 位操作系统，目前有 **x86（PC/QEMU i386）**、
+**RV32（QEMU virt）** 和 **ARM（QEMU mps2-an385，Cortex-M3）** 三个可运行目标，
+配套的构建/运行工具用 **Go** 写。
+它的核心能力是：从 **littlefs** 镜像里**动态加载 ELF 可执行文件**，在用户态
+（x86 ring 3 / RV32 U-mode / ARM Thread+PSP；ARM 暂保持特权，MPU 计划中）里运行，
+程序可以 `exec` 另一个程序、读写文件、申请堆内存；程序崩溃只会杀掉自己，不会拖垮内核。
 
 ```
 x86 : BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
@@ -13,10 +14,13 @@ x86 : BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
 RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
        -> trap 向量 + CLINT 定时器 + 16550 串口 + PMP 分段（每任务 code/data/stack）
        -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/sh -> mret 到 U-mode
+ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
+       -> Thread/PSP 跑任务、Handler/MSP 跑内核 + SysTick + CMSDK UART0
+       -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/sh -> 异常返回进入用户任务
 ```
 
-两条链跑的是**同一套内核代码**（`kernel/`）和**同一批用户程序**：程序是 PIE，
-加载时按板级 `APP_BASE` 重定位，所以同一份 `bin/hello` 在两边都能跑。
+三条链跑的是**同一套内核代码**（`kernel/`）和**同一批用户程序**：程序是 PIE，
+加载时按板级 `APP_BASE` 重定位，所以同一份 `bin/hello` 在各目标上都能跑。
 
 ## 功能
 
@@ -161,6 +165,10 @@ go run ./cmd/tos run -headless -debug
 # RV32：编译出 build/kernel-rv32.elf，并在 qemu-system-riscv32 里启动
 go run ./cmd/tos build -target rv32
 go run ./cmd/tos run   -target rv32
+
+# ARM：编译出 build/kernel-arm.elf，并在 qemu-system-arm（mps2-an385）里启动
+go run ./cmd/tos build -target arm
+go run ./cmd/tos run   -target arm
 ```
 
 进去以后：
@@ -198,10 +206,11 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
 脚本会启动 QEMU、依次执行 `ls / cat / hello / reloc / run spin & / ps / wfile / mem /
 run prot heap / crash / uptime / exit`，检查提示符和内核 panic，最后打印完整记录。
 `ps` 那一步等于一次调度器验收：`spin` 必须还活着并处于 `rdy`。
-RV32 用同一个脚本加 `-Target rv32`：
+RV32 用同一个脚本加 `-Target rv32`，ARM 用 `-Target arm`：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target rv32
+powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target arm
 ```
 
 ## RV32 目标（qemu-virt）
@@ -249,6 +258,44 @@ qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.e
 工具链：`clang --target=riscv32-unknown-elf` 编译，`ld.lld -m elf32lriscv` 直接链接
 （走 clang 驱动会强行拉入硬浮点 ABI 的 `compiler_rt`，和我们的 ilp32 对象冲突）。
 需要 `qemu-system-riscv32`：MSYS2 的 `mingw-w64-ucrt-x86_64-qemu` 已经带上。
+
+## ARM 目标（QEMU mps2-an385，Cortex-M3）
+
+`-target arm` 构建 **Thumb-2 / ARMv7-M（Cortex-M3，软浮点）** 的同一套系统：
+内核、用户程序、littlefs 镜像，用户 ELF 仍是标准 ELF32 ET_DYN + LZ4 信封。
+
+```powershell
+go run ./cmd/tos build -target arm   # -> build/kernel-arm.elf
+go run ./cmd/tos run   -target arm
+```
+
+等价的 QEMU 启动命令：
+
+```
+qemu-system-arm -machine mps2-an385 -kernel build/kernel-arm.elf
+```
+
+mps2-an385 上，镜像加载地址就是 `0x00000000`，向量表的头两个字号是初始 MSP 和复位
+向量（所以 `.vectors` 必须排在 `kernel.ld` 的最前面）；`.data/.bss`、内核栈和用户窗口
+都在 `0x20000000` 起的 4 MiB SRAM 里。
+
+同样跑通的一批程序：`ls / cat / hello / hello_printf / reloc / mem / crash / uptime /
+wfile / sh`，参数传递、`exec`、`sbrk`、后台 `spin &` 抢占、`exit` 关机都与其它目标一致。
+
+| 主题 | 做法 |
+| --- | --- |
+| 特权级 | Thread 模式 + PSP 跑任务，Handler 模式 + MSP 跑内核，`svc #0` 进内核 |
+| trap 帧 | `regs_t` 20 个字号 = 80 B：r4–r11 + `exc/vec/hw/kern_sp` + 硬件帧副本（`exc/vec/...` 与 `start.S` 的 `FR_*` 共享，`regs.h` 有编译期尺寸校验） |
+| 首次进用户态 | `arm_enter_user()` 发布帧后主动 `svc`，由 `arm_svc` 的 pending 分支换成任务帧（EXC_RETURN 只在异常返回路径上有效） |
+| 栈切换 | `arm_resume` 按 EXC_RETURN 的 S 位决定是否重设 PSP，并恢复 MSP/r4–r11 |
+| 定时器 | SysTick @25 MHz 参考时钟，100 Hz；**优先级必须高于 SVCall**，否则阻塞在 syscall 里的 `wfi` 永远等不到 tick |
+| 块设备 | 与 rv32 相同的 `.data.ramdisk`（`.incbin` 嵌入），`plat_block_*` 直接内存拷贝 |
+| 缺的运行时 | `kernel/libgcc.c` 补 `__aeabi_memcpy4/8`、`__aeabi_memset/memmove`，以及按 EABI 返回 `r0:r1`/`r2:r3` 的 `__aeabi_*divmod` |
+
+真机上还差的一步是 **MPU + `nPRIV=1`**：现在任务虽是 Thread/PSP，但仍保持特权，靠
+`process_user_ok` 的窗口范围检查（与 x86 同级别，不是真正的内存隔离）。把置位动作
+放进 PendSV（最低优先级，不会被抢占）就能安全打开非特权态。踩坑记录见
+`docs/PLATFORM-DESIGN.md` §8.0。
 
 ## 加一个自己的程序
 

@@ -113,6 +113,7 @@ PMP 条目，x86 什么也不做（见 5.1）。
 |---|---|---|---|
 | x86 (QEMU) | 128 MiB @0 | `0x01000000` | 需 `-m 128M` 覆盖 |
 | QEMU virt rv32 | 128 MiB @0x80000000 | `0x80400000` | |
+| QEMU mps2-an385 (Cortex-M3) | 4 MiB @0x20000000 | `0x20080000` | 内核留 512 KiB；窗口 256 KiB × 14，`kernel.ld` 用 ASSERT 卡住不越界 |
 | ESP32-C3 | 400 KiB @0x40380000 | `0x40390000` | 应用窗口 ≤ ~200 KiB；**必须用指令总线别名**，见 §8.1 |
 | RP2040 | 264 KiB @0x20000000 | `0x20010000` | 应用窗口 ≤ ~120 KiB |
 
@@ -128,7 +129,7 @@ PMP 条目，x86 什么也不做（见 5.1）。
 |---|---|---|---|---|
 | x86 | ring 3（分段平坦，**CR0.PG=0**） | `int 0x80` | TSS `esp0`（共用一层 16 KiB 内核栈） | 无（关分页后无从表达） |
 | RV32 | U-mode | `ecall`（M 模式陷入） | 单一 32 KiB 内核栈，U 模式陷入时切换 | **PMP 分段**（P2.6 已实现） |
-| ARM | Thread/unprivileged | `svc` | PSP（硬件自动切换），每任务 | MPU（计划） |
+| ARM | Thread (PSP)，暂为**特权** | `svc` | Handler 用 MSP，Thread 用 PSP；每任务 PSP | MPU（计划） |
 
 x86 关闭分页后：内核与用户共享 4 GiB 平坦空间，ring 3 仍能阻止 `cli/hlt/out` 等特权指令，
 系统调用仍然走中断门。这与 C3/RP2040 的能力边界一致。
@@ -343,9 +344,50 @@ TB 缓存容量、单/多线程 TCG、CPU 型号、C 扩展、PMP 写入、guest
 ### QEMU mps2（ARM 参考）
 
 ```
-qemu-system-arm -machine mps2-an385 -kernel tinyos.elf
+qemu-system-arm -machine mps2-an385 -kernel build/kernel-arm.elf
   Cortex-M3，适合先验证异常/PSP/SysTick，再接 RP2040
 ```
+
+#### 8.0 Cortex-M3 移植要点（P3）
+
+硬件：SSRAM 4 MiB @`0x00000000`（代码，镜像加载地址就是 0，向量表头两个字号是
+初始 MSP 与复位向量）、SRAM 4 MiB @`0x20000000`（`.data`/`.bss`/内核栈/用户窗口）、
+CMSDK UART0 @`0x40004000`（DATA/STATE/CTRL/BAUD）、SysTick @`0xE000E010`（25 MHz
+参考时钟，100 Hz 中断）。
+
+异常模型：Thread 模式（PSP）跑任务，Handler 模式（MSP）跑内核，`svc #0` 进内核；
+Linux/MPU 的 `nPRIV=1` 还没开——置位必须发生在异常返回前的最后一步，否则窗口里
+到达的中断会以非特权跑 Handler。等 PendSV（最低优先级）+ MPU 一起做。
+
+踩过的四个坑，都有明确现象：
+
+1. **帧布局不能有填充字。** `regs_t` 与 `arch/arm/start.S` 的 `FR_*` 偏移共享布局：
+   20 个字号 = 80 字节，前 32 字节是 r4–r11，接着 `exc/vec/hw/kern_sp`，最后 8 个
+   字号是硬件帧副本。多一个填充字会让 C 的 `pc` 读到 `xpsr`（`pc=0x0100000f`，
+   `CFSR=0x40000` INVPC）。`arch/arm/regs.h` 里的 `arm_regs_frame_size_check`
+   在编译期卡住大小。
+2. **先 `sub sp,#48` 再 `push {r4-r11}`。** 反过来会把 r4–r11 推到帧的 +48（随后
+   被硬件帧副本覆盖），`arm_resume` 从 +0 弹出的是内核栈里的陈旧内容：用户任务的
+   callee-saved 寄存器全变垃圾，下一次 `sched_pick` 就用 `r6` 取 `procs[]` 而
+   BusFault（`BFAR` 指向一个像指令字的地址）。
+3. **`arm_resume` 必须按 EXC_RETURN 重设 PSP。** 切到另一个任务时（exec 出来的
+   子任务），PSP 还停在上一个任务的用户栈上；只有 `0xFFFFFFFD`（Thread/PSP）
+   的帧才需要在 `bx lr` 前 `msr psp, <帧保存的硬件帧地址>`。
+4. **SysTick 必须比 SVCall 优先级高。** 任务在 syscall 里阻塞时是“SVCall active +
+   `wfi`”等 tick；Cortex-M 里同优先级异常不能互相抢占，系统会永久停在
+   `ICSR = 0x0400F80B`（VECTACTIVE=11，VECTPENDING=15）。`arch/arm/scs.h` 定义
+   SysTick 0x00、SVCall 0x40、PendSV 0xE0，`plat_init()` 写进 SHPR2/SHPR3
+   （偏移是 `0xD1C`/`0xD20`，千万别照 NVIC 的 `0x01C` 去算）。tick 打断内核调用
+   不会重调度（`process_tick` 只看用户态帧），所以不存在内核栈被换走的竞态。
+
+另外：`__aeabi_uldivmod` 必须按 ARM EABI 返回 `r0:r1` = 商、`r2:r3` = 余数。
+用 C 的 16 字节结构体返回走的是隐藏指针，调用方读到的商是垃圾——表现为
+`uptime` 永远是 0，而 `ps` 的 tick 计数正常。`kernel/libgcc.c` 里用汇编 shim
+调 C 辅助函数修正，`__aeabi_uidivmod`/`__aeabi_idivmod` 同理（余数在 r1）。
+
+QEMU 调试：`-S -gdb tcp::1234`，`gdb-multiarch build/kernel-arm.elf`（必须显式
+传 ELF，否则断点不生效）。诊断帧问题看 `CFSR`@`0xE000ED28`、`HFSR`@`0xE000ED2C`、
+`BFAR`@`0xE000ED38`、`ICSR`@`0xE000ED04`。
 
 ### ESP32-C3
 
@@ -573,7 +615,7 @@ RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配
 | **P2** ✅ | RV32 ELF 直接加载 + ecall/U-mode + 内存盘 littlefs + 工具链探测 | smoke 全绿——已完成 |
 | **P2.5** ✅ | 抢占式调度：任务状态机、时间片轮转、`exec`/`wait`、tty 行规程 | `ps` 里看到 `rdy`，后台 `spin` 与 shell 并行——已完成 |
 | **P2.6** ✅ | RV32 PMP 分段 + 窗口重排（栈顶对齐、堆栈之间留洞）+ ELF w^X/入口校验 | `prot rodata/heap/stack/null` 四条都被拦下且只杀任务——已完成 |
-| P3 | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick | 跑 `hello` |
+| **P3** ✅ | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick、用户态 ELF + littlefs | smoke 全绿（`hello`/`sh`/后台 `spin`/`crash` 只杀任务）——已完成 |
 | P4 | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello` |
 | P5 | RP2040：boot2 + UF2 + SRAM 运行 | 真机 `hello` |
 | P6 | 可选：PIE/重定位加固、优先级、每子任务退出码队列 | — |
@@ -606,7 +648,7 @@ arch/
   x86/  boot/stage1.S entry.S isr.S gdt.c idt.c pmm.c
         timer.c serial.c keyboard.c ata.c vga.c
   rv32/ start.S trap.S pmm.c timer.c uart.c block_ram.c
-  arm/  start.S exc.S pmm.c systick.c uart.c block_ram.c
+  arm/  start.S platform.c regs.h board.h scs.h usys.h
 board/
   pc/        layout.h
   qemu-virt/ layout.h init.c
