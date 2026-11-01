@@ -184,6 +184,8 @@ tos> uptime
 tos> ps             # 看看当前有哪些任务、各自状态
 tos> run echo hi
 tos> run spin &     # 后台跑一个死循环程序，shell 仍然可用
+tos> nice 2 bench & # 以 2 级（最低）启动：shell 和前台永远先跑
+tos> prio 2 1       # 把 pid 2 的任务调到 1 级
 tos> run prot heap  # 故意写越界的堆：RV32 上当场被 PMP 拦下，x86 上什么也不会发生
 tos> source etc/rc  # 在本进程里读一个命令文件（C3 上只有 3 个任务窗口，这是唯一安全的嵌套方式）
 tos> run sh etc/rc  # 也可以把它当成一个程序跑：新任务、新 pid、崩溃不影响 shell
@@ -370,11 +372,33 @@ tos> run hello deep      # 前台：shell 阻塞在 wait 里，直到 hello 退�
 tos> run spin &          # 后台：立刻回到提示符，[pid] 是子任务
 ```
 
-调度是时间片轮转，50 ms 一片，由定时器 tick 驱动，**只在用户态帧上抢占**：
+调度是**三级优先级（0 最高）+ 级内时间片轮转**，50 ms 一片，由定时器 tick 驱动。
+唤醒也抢占：级别更高的任务被叫醒（输入行到达、sleep 到点、子任务退出）时立刻标记
+重新调度，切换仍在 trap 收尾完成。**只在用户态帧上抢占**：
 trap 落进内核态时（比如 syscall 执行中），那次内核调用一定跑完——内核栈上压着
 它的调用帧，中途换走就再也接不回来了。
 
-`ps` 显示 pid、状态、窗口起点、占用 tick 数和程序名：
+级别是继承的，且只能下调：`nice <0-2> <prog>` 以指定级别启动一个程序，
+`prio <pid> <0-2>` 移动一个在跑的任务，谁也不能把自己抬得比 shell（0 级）更高。
+级间是严格的——高一级只要有一个任务可运行，低一级一个 tick 都拿不到；
+没有 aging，饿死是刻意的行为。验证方法：
+
+```
+tos> nice 1 spin &
+[2]
+tos> run spin &          # 0 级
+[3]
+tos> ps
+ pid ppid prio state cpu% cpums  name
+   1    0    0 run      0.0     0  sh
+   2    1    1 rdy     51.3     0  spin
+   3    1    0 rdy    100.0     0  spin
+```
+
+0 级的 `spin[3]` 会先打完自己的 6 条输出，1 级的 `spin[2]` 一条都插不进来；
+它一退出，`spin[2]` 立刻补上。把两行反过来（都是 0 级）则是标准的 50/50 轮转。
+
+`ps` 显示 pid、ppid、优先级、状态、CPU 占用和程序名：
 
 ```
 tos> run spin &
