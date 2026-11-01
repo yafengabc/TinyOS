@@ -92,13 +92,37 @@ IROM  0x42000000  取指映射（flash 代码）
 DROM  0x3C000000  数据映射（flash 只读）
 ```
 
-ROM 自身就是 XIP 执行的，说明这两个窗口在跳 entry 前已由 ROM 配好。
-对 TinyOS 的两个潜在用途（均未验证，留给 P3/P4 探针）：
+**原先的推断是错的，已实测否定。** 当时的理由是"ROM 自身 XIP 执行，所以窗口
+在跳 entry 前就配好了"——但 C3 的 ROM 是掩膜 ROM（0x40000000），它不需要 flash
+窗口；flash 的 cache/MMU 是**二级引导**建立的，而我们绕过了二级引导（镜像直接
+由 ROM 装进 SRAM）。`scripts/esp-c3/drom.S` 在真机上读 0x3C000000：不回应
+（见 `board/esp32c3/platform.c` 的 `plat_block_read` 头注释）。所以进入 kmain 时
+cache 是关的、MMU 是空的。
 
-- 只读块设备：littlefs 分区放 flash，`plat_block_read` 直接从 0x3C000000
-  memcpy——C3 第一版就能有只读文件系统，不需要写 SPI flash 驱动；
-- 代码段 XIP：用户程序 .text 留在 flash 不占 RAM（代价是要研究
-  ROM 的 mmap API 和 cache 一致性）。
+结论：两个窗口**都得自己拉起来**（SPI_MEM 的 MMU item index/content +
+CACHE_SCTRL，可能还要 ROM 的 Cache_Start）。所需寄存器偏移不在本仓库里
+（`third_party/esp32c3-soc/` 只有 9 个头，没有 spi_mem_reg.h；Zephyr 的
+`common/loader.c` 只留下 `cache_hal_disable/enable` 的调用点，hal 实现未随仓库），
+得从 TRM / esp-idf 抄一份，然后照老规矩上探针。
+
+即便 cache 通了，**代码段 XIP 还有三条与现有设计冲突的硬约束**（见
+PLATFORM-DESIGN §7 的加载器模型）：
+
+1. **与 PIE 互斥**：clang 的 medany 模型用 `auipc+addi` 访问全局量和字符串，
+   链接期就写死了"数据在代码后 D 字节"，不产生重定位，loader 改不了。代码进
+   flash、数据留 RAM 只有一条路——**固定地址、零重定位**（esp-idf 模式），
+   于是每个程序一份固定 data 区，同程序不能有两个实例，`-fPIC` 也救不了。
+2. **littlefs 物理不连续**：XIP 要求代码在 flash 上连续且 64 KiB 页对齐，
+   日志结构的文件系统给不了，必须另开一个连续代码分区（打包器生成）。
+3. **擦写期间不能取 flash**：写盘走 ROM write + SPI1 硬件擦除，没有任何 cache
+   停摆（esp-idf 为此有 `spi_flash_disable_interrupts_caches_and_other_cpu`）。
+   现在安全只是因为"写盘只在内核态、向量表和内核都在 SRAM"，XIP 后这条要变成
+   硬约束。
+
+**便宜得多的中间态**：只把大常量表（字库/查找表）放进 flash，代码仍在 RAM。
+把表链接到一个绝对地址符号（`PROVIDE(xip_rodata = 0x3C000000)`），程序不按
+符号名引用它、只经由内核给出的地址访问，因此不需要改 PIE、不需要改窗口模型。
+它同样卡在"cache 能不能拉起"这个前提上。
 
 ### 4. 无重定位的 rodata 可以留在原地
 
