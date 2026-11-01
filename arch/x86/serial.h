@@ -9,6 +9,7 @@ void serial_init(void);
 void serial_poll(void);
 void serial_putc(char c);
 void serial_write(const char *s, size_t n);
+void serial_flush(void);
 int  serial_has_input(void);
 int  serial_read(void);
 

@@ -1,71 +1,86 @@
 #include "console.h"
 #include "platform.h"
+#include "process.h"
 #include "string.h"
 
 /* Architecture independent console: formatting + routing to the platform's
  * character output.  The VGA text buffer, UART or any other device lives
  * behind plat_console_putc(). */
 
-/* A line of output must not be cut in half by a keystroke.  Echo does not
- * come from a task: the tick calls tty_poll(), and that tick lands wherever
- * the timer feels like, including halfway through someone's write().  So
- * echo is queued and only released on a tick in which nothing was printed -
- * the gaps *between* a program's write() calls are just as dangerous as the
- * middle of one, since cat() prints a block at a time. */
-#define ECHO_MAX    64
-#define ECHO_STARVE 50                 /* ticks before we insist: 0.5 s     */
+/* A line of output must not be cut in half by another task or by the kernel
+ * printing its own message: a task preempted between two puts() leaves a
+ * line open, the next task's text continues it, and the rest of the first
+ * task's text lands after that (a killed task's "[pid 2] killed" splitting
+ * "spin[2] 1/6 at ...").  out_owner remembers who is mid-line and
+ * console_adopt_line() closes the line when somebody else takes the console
+ * over, before their first character.  The kernel prints as owner 0, which
+ * no task is, and keystroke echo is its own owner so that it never
+ * interrupts the task that is printing.
+ *
+ * Keystroke echo is not queued any more.  It used to wait for a "quiet
+ * tick" because it could not tear a line; now that lines are closed at
+ * ownership changes, waiting only delays typing: into a program that prints
+ * continuously, a keystroke would arrive seconds after it was pressed. */
+#define CONSOLE_ECHO_OWNER (-1)
 
-static char           echo_q[ECHO_MAX];
-static uint8_t        echo_head, echo_tail;  /* touched only from the tick */
-static volatile int   out_active;      /* something printed this tick       */
-static int            echo_wait;       /* ticks the queue has been held back */
 static int            in_echo;         /* printing echo, not a task's output */
+static int            out_owner;       /* pid whose line is still open      */
+static int            out_mid;         /* last character was not a newline  */
 
 static void out_char(char c)
 {
-    if (!in_echo)
-        out_active = 1;
+    int who = in_echo ? CONSOLE_ECHO_OWNER : process_current_pid();
+
+    if (who != out_owner && out_mid) {
+        plat_console_putc('\r');
+        plat_console_putc('\n');
+    }
+    out_owner = who;
+    out_mid = (c != '\n');
     if (c == '\n')
         plat_console_putc('\r');
     plat_console_putc(c);
 }
 
-static void echo_flush(void)
+void console_adopt_line(void)
 {
-    in_echo = 1;
-    while (echo_tail != echo_head) {
-        char c = echo_q[echo_tail];
-        echo_tail = (uint8_t)((echo_tail + 1) % ECHO_MAX);
-        out_char(c);
-    }
-    in_echo = 0;
+    if (!out_mid || process_current_pid() == out_owner)
+        return;
+    out_owner = process_current_pid();
+    out_mid = 0;
+    plat_console_putc('\r');
+    plat_console_putc('\n');
 }
 
-/* Called once per tick, after tty_poll() has queued anything that arrived.
- * A quiet tick is the signal that no program is halfway through a line. */
+/* The console is dying with the machine: push the last characters out and
+ * stop everything that could still print.  The device is drained first
+ * because halting the CPU drops whatever is still sitting in a boxed output
+ * queue (an emulated 16550 has exactly that problem). */
+void console_shutdown(void)
+{
+    plat_console_flush();
+    plat_irq_disable();
+}
+
+/* Nothing is queued any more, so there is nothing to release here.  Kept as
+ * the tick's hook: a port that needs to pace output can drain it here. */
 void console_echo_tick(void)
 {
-    if (out_active && echo_wait < ECHO_STARVE) {
-        echo_wait++;
-        out_active = 0;
-        return;
-    }
-    echo_wait = 0;
-    out_active = 0;
-    echo_flush();
 }
 
-/* Show a keystroke.  A full queue drops the echo rather than a character of
- * the program's line: a missing letter beats a torn one. */
+/* Show a keystroke at once, on its own line if a program has one open. */
 void console_echo(const char *s, size_t n)
 {
+    in_echo = 1;
     for (size_t i = 0; i < n; i++) {
-        uint8_t next = (uint8_t)((echo_head + 1) % ECHO_MAX);
-        if (next != echo_tail) {
-            echo_q[echo_head] = s[i];
-            echo_head = next;
-        }
+        char c = s[i];
+        out_owner = CONSOLE_ECHO_OWNER;
+        out_mid = (c != '\n');
+        if (c == '\n')
+            plat_console_putc('\r');
+        plat_console_putc(c);
     }
+    in_echo = 0;
 }
 
 struct outbuf {
@@ -194,6 +209,8 @@ void kprintf(const char *fmt, ...)
 
     if (n > (int)sizeof(buf) - 1)
         n = sizeof(buf) - 1;
+    /* A kernel line stands on its own: close any task line it interrupts. */
+    console_adopt_line();
     for (int i = 0; i < n; i++)
         out_char(buf[i]);
 }
@@ -235,6 +252,7 @@ void panic(const char *fmt, ...)
     __builtin_va_end(ap);
     if (n > (int)sizeof(buf) - 1)
         n = sizeof(buf) - 1;
+    console_adopt_line();
     for (int i = 0; i < n; i++)
         out_char(buf[i]);
     kprintf("\nSystem halted.\n");

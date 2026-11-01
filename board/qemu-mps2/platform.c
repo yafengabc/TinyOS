@@ -32,6 +32,13 @@ void plat_console_putc(char c)
     mmio_write32(ARM_UART0_DATA, (uint32_t)(uint8_t)c);
 }
 
+void plat_console_flush(void)
+{
+    while (mmio_read32(ARM_UART0_STATE) & 1u)
+        ;                                  /* FIFO empty: the last byte is
+                                              on its way to the host */
+}
+
 int plat_console_getchar(void)
 {
     if (!(mmio_read32(ARM_UART0_STATE) & 2u))
@@ -175,6 +182,7 @@ void plat_timer_irq_unmask(void)
  * end of the run. */
 void plat_shutdown(void)
 {
+    console_shutdown();
     plat_panic_halt();
 }
 

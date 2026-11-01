@@ -18,5 +18,12 @@
 #define SYS_WAIT     12  /* wait(pid) -> exit code, blocks      */
 #define SYS_YIELD    13  /* yield() -> 0, give up the CPU       */
 #define SYS_PS       14  /* ps() -> task count, prints a table  */
+#define SYS_SIGNAL   15  /* signal(pid, sig) -> 0 or -1         */
+
+/* Signals.  There are no handlers: a signal either kills the task or parks
+ * it, both decided by the kernel. */
+#define SIGKILL 9       /* terminate now                        */
+#define SIGSTOP 19      /* stop until SIGCONT                   */
+#define SIGCONT 18      /* resume a stopped task                */
 
 #endif

@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "board.h"
+#include "console.h"
 
 /* Board: ESP32-C3.
  *
@@ -42,9 +43,20 @@ static int uart_rx_count(void)
            & UART_RXFIFO_CNT_V;
 }
 
+/* Dual console: UART0 (CH343 on GPIO20/21) and the hardware USB-Serial/JTAG
+ * CDC (native USB connector).  Output goes to both, input is accepted from
+ * whichever has data, so the board stays reachable over the wired line while
+ * the USB port is being exercised.  The USJ path drops bytes when no host is
+ * reading; the UART keeps everything. */
+
+void usj_init(void);
+void usj_putc(char c);
+int  usj_getchar(void);
+
 void plat_console_init(void)
 {
-    /* See above: the ROM already left the line up. */
+    /* The ROM already left UART0 up; just bring up the USB CDC pads. */
+    usj_init();
 }
 
 void plat_console_putc(char c)
@@ -53,13 +65,20 @@ void plat_console_putc(char c)
     while (uart_tx_count() >= 100)
         ;
     mmio_write32(UART0_BASE + UART_FIFO_REG, (uint8_t)c);
+    usj_putc(c);
+}
+
+void plat_console_flush(void)
+{
+    while (uart_tx_count() > 0)
+        ;
 }
 
 int plat_console_getchar(void)
 {
-    if (uart_rx_count() == 0)
-        return -1;
-    return mmio_read32(UART0_BASE + UART_FIFO_REG) & 0xFF;
+    if (uart_rx_count() > 0)
+        return mmio_read32(UART0_BASE + UART_FIFO_REG) & 0xFF;
+    return usj_getchar();
 }
 
 /* ---- TIMG0 tick + INTMTX --------------------------------------------- */
@@ -403,6 +422,7 @@ void plat_board_init(void)
  * byte (P4); until then, halt. */
 void plat_shutdown(void)
 {
+    console_shutdown();
     plat_panic_halt();
 }
 

@@ -43,6 +43,21 @@ int      process_current_pid(void);
 uint32_t process_sbrk(uint32_t bytes);
 int      process_dump(void);
 
+/* Send `sig` to task `pid`.  SIGKILL terminates it, SIGSTOP parks it until
+ * SIGCONT.  Returns 0, or -1 when there is no such task, the signal is not
+ * one the kernel knows, or the task cannot act on it in its current state.
+ * Console ^C / ^Z / ^\ arrive here too: the tty layer cannot touch another
+ * task, only the kernel can. */
+int      process_signal(int pid, int sig);
+
+/* Called on the way out of a trap: parks the current task if SIGSTOP
+ * arrived while it was running.  Every port's trap exit must call it. */
+regs_t  *process_suspend(regs_t *r);
+
+/* pid of the task blocked reading the console, or 0 when none is.  That is
+ * the foreground task as far as the terminal is concerned. */
+int      process_console_reader(void);
+
 /* Is [addr, addr+len) inside the current task's window?  Replaces the old
  * page-table probe: the flat model only has range checks. */
 int      process_user_ok(uint32_t addr, uint32_t len);

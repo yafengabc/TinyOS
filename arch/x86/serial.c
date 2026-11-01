@@ -11,6 +11,41 @@
 static volatile uint8_t  rxbuf[RX_BUFSZ];
 static volatile uint32_t rx_head, rx_tail;
 
+/* End of output: set by serial_flush on the way down and never cleared.  The
+ * timer keeps interrupting while we wait for the UART, and after "exit" the
+ * shell is gone - a tick that wakes a sleeper would print on top of the
+ * shutdown message. */
+static volatile int shutting_down;
+
+int serial_is_shutting_down(void)
+{
+    return shutting_down;
+}
+
+/* Push the last characters out before the machine stops.  QEMU's 16550
+ * takes a simulated bit time per character, so the CPU is about to outrun
+ * it: wait for the transmitter to go empty (TEMT, LSR bit 6).  The bound
+ * matters - on real hardware or a stalled port, "shut down" must not become
+ * "hang".
+ *
+ * This is a console-layer operation, not a device one the arch port has to
+ * describe: other architectures in this tree have no such register to wait
+ * on, and the kernel only calls it through plat_console_flush(). */
+void serial_flush(void)
+{
+    uint32_t flags;
+    uint32_t spin = 4000000;
+
+    shutting_down = 1;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    while (!(inb(COM1 + 5) & 0x40)) {
+        if (--spin == 0)
+            break;
+    }
+    if (flags & 0x200)
+        __asm__ volatile("sti" : : : "memory");
+}
+
 void serial_init(void)
 {
     rx_head = rx_tail = 0;
@@ -46,6 +81,8 @@ static void drain_rx(void)
 
 void serial_poll(void)
 {
+    if (shutting_down)
+        return;             /* nobody is left to hand the bytes to */
     drain_rx();
 }
 

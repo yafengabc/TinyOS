@@ -107,6 +107,11 @@ void plat_console_putc(char c)
     serial_putc(c);
 }
 
+void plat_console_flush(void)
+{
+    serial_flush();
+}
+
 int plat_console_getchar(void)
 {
     /* Input comes from the PS/2 keyboard or the serial console. */
@@ -197,6 +202,10 @@ uint32_t plat_frame_get_ret(const regs_t *r)    { return r->eax; }
 
 void plat_shutdown(void)
 {
+    /* Let the last line reach the serial port before the power goes off:
+     * halting first would drop the tail of the message. */
+    console_shutdown();
+
     /* ACPI power off (works in QEMU and most modern machines) */
     outw(0x604, 0x2000);
     outw(0xB004, 0x2000);

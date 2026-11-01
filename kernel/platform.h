@@ -42,6 +42,9 @@ void plat_init(void);
 
 void plat_console_init(void);
 void plat_console_putc(char c);
+/* Wait until everything written has actually been transmitted.  Called once
+ * on the way down: the device may buffer, and the CPU is about to stop. */
+void plat_console_flush(void);
 int  plat_console_getchar(void);      /* -1 when no input is pending */
 
 /* ---- timer / interrupts ---------------------------------------------- */

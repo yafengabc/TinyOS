@@ -595,6 +595,10 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   行级粘贴，但高速灌数据会丢；行编辑只有一行的 type-ahead。回显会在"安静 tick"才放行，
   所以后台程序持续输出时，你打的字可能要等一两行才显示出来；键入跨多个 tick 时，
   后台输出仍可能落在两批回显之间（还没有行编辑器，`Ctrl-C`/`Ctrl-D` 不起作用）。
+  **type-ahead 只有一行**：`tty_poll()` 把一次读到的整段字符全部喂给行缓冲，第二个
+  `\n` 之后的输入被直接丢掉——所以脚本一次灌入多行时，shell 会把它们拼成一条命令
+  （`echo a` + `hello` 变成 `echo a hello`）。`scripts/compat.ps1` 因此对每条命令
+  单独启动一次 QEMU。
 - 文件系统（littlefs）可读可写，分区 300 KiB / 75 个 4 KiB 块，文件名 ≤ 63 字符。
   写入经过内核侧自检（创建→读回→删除 `selftest.tmp`）和用户态 `wfile` 演示程序验证；
   还没有 `delete`/`rename`/`seek` 系统调用，`read` 也只能顺序读。

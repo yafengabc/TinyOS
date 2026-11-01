@@ -7,6 +7,7 @@
 #include "heap.h"
 #include "lz4.h"
 #include "platform.h"
+#include "tos.h"
 
 #define MAX_PROCS   16
 #define MAX_ARGS    12
@@ -34,6 +35,7 @@ enum {
     ST_FREE = 0,
     ST_READY,
     ST_RUNNING,
+    ST_STOPPED,     /* ^Z: parked, keeps its frame and window */
     ST_WAIT_CHILD,
     ST_WAIT_INPUT,
     ST_WAIT_SLEEP,
@@ -56,7 +58,8 @@ typedef struct proc {
     uint32_t in_buf;        /* ST_WAIT_INPUT: where the line goes */
     uint32_t in_len;
     uint64_t wake_tick;     /* ST_WAIT_SLEEP */
-    uint32_t cpu_ticks;     /* ticks spent running, for ps */
+    uint64_t cpu_ms;        /* CPU time actually spent on the CPU */
+    uint32_t cpu_ticks;     /* whole ticks spent running, see cpu_ms */
 
     /* This task's slice of the flat address space: image at the bottom,
      * sbrk heap above it, stack at the top.  wx_start splits the image
@@ -72,6 +75,8 @@ typedef struct proc {
 
     char     name[10];
     struct proc *parent;
+    uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
+    int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
 
     /* Everything the task needs while it is not on the CPU. */
     regs_t   saved;
@@ -230,8 +235,10 @@ void process_tick(regs_t *r)
        that very stack. */
     kstack_check(r);
 
-    if (current && current->state == ST_RUNNING)
+    if (current && current->state == ST_RUNNING) {
         current->cpu_ticks++;
+        current->cpu_ms += 1000u / plat_tick_hz();
+    }
 
     /* Console input first: a line finished this tick should reach its
        reader in the same tick.  Echo leaves through the console only if
@@ -249,6 +256,12 @@ void process_tick(regs_t *r)
             break;
         }
     }
+
+    /* Control characters act on the foreground task - whoever is blocked
+       reading the console - which is exactly the job the two shells above
+       found.  They are handled after the line hand-over so that ^C on an
+       empty prompt cannot be swallowed as input. */
+    tty_ctrl_deliver();
 
     now = plat_ticks();
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -272,10 +285,26 @@ void process_tick(regs_t *r)
 
 regs_t *process_resched(regs_t *r)
 {
-    if (!need_resched)
-        return r;
-    need_resched = 0;
-    return sched_switch(r);
+    if (need_resched) {
+        need_resched = 0;
+        return sched_switch(r);
+    }
+    return r;
+}
+
+/* Trap exit for the current task: park it if somebody stopped it while it
+ * was running.  Deferred from process_signal because stopping there would
+ * abandon a kernel stack that is still in use - here the frame is already
+ * saved and sched_switch() abandons the stack the way every switch does. */
+regs_t *process_suspend(regs_t *r)
+{
+    if (current && current->stop_pending && current->state == ST_RUNNING) {
+        current->stop_pending = 0;
+        kprintf("\n[pid %d] stopped\n", current->pid);
+        current->state = ST_STOPPED;
+        return sched_switch(r);
+    }
+    return r;
 }
 
 void process_init(void)
@@ -302,6 +331,15 @@ void process_init(void)
 int process_current_pid(void)
 {
     return current ? current->pid : 0;
+}
+
+int process_console_reader(void)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == ST_WAIT_INPUT)
+            return procs[i].pid;
+    }
+    return 0;
 }
 
 /* Validate a user pointer against the current task's window.  Without an
@@ -347,6 +385,19 @@ static proc_t *proc_alloc(void)
             return &procs[i];
     }
     return NULL;
+}
+
+/* Where the initial [argc][argv..][NULL] block would start for argc
+ * arguments.  build_initial_stack() lays the strings out below
+ * stack_top - 256 and this block below them, so the distance to the
+ * initial sp is the headroom a start-up frame needs; a program that needs
+ * more stack than the window has left must be refused (see process_exec). */
+static uint32_t argv_block_start(proc_t *p, int argc)
+{
+    uint32_t sp = p->stack_top - 256;
+
+    sp = (sp - (uint32_t)(argc + 2) * 4) & ~0xFu;
+    return sp;
 }
 
 static uint32_t build_initial_stack(proc_t *p, char *const argv[], int argc)
@@ -489,6 +540,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     memset(p, 0, sizeof(*p));
     p->slot = slot;
     p->pid = next_pid++;
+    p->start_ns = plat_uptime_ms();
     p->win_base = base;
     p->wx_start = base + (link_wx - link_lo);
     /* The stack occupies the very top of the window, so that its region is
@@ -507,6 +559,24 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         return NULL;
     }
     p->user_esp = sp;
+
+    /* The very top of the stack is reserved for the handler path: an
+       exception taken by a user task pushes its 8-word hardware frame (and
+       then the kernel's 80-byte regs_t) below a stack pointer that can be
+       as high as the initial frame.  256 bytes is what that needs, and it
+       has to be untouched by ordinary stack use, so a program that uses a
+       lot of stack must be refused here instead of faulting on its first
+       interrupt.  The guess comes from the image's .bss: the shell keeps
+       its line buffer there, at the lowest address .bss is loaded to. */
+    uint32_t need = (argv_block_start(p, argc) - sp) + 256u;
+    if (link_hi - link_lo > need)
+        need = link_hi - link_lo;
+    if (sp - need < p->stack_top - STACK_BYTES) {
+        kprintf("exec: '%s' needs %u bytes of stack, the window has %u\n",
+                path, need, STACK_BYTES);
+        win_free(slot);
+        return NULL;
+    }
 
     /* The frame this task will resume on.  Nothing else is needed to start
        it: the trap epilogue restores exactly this. */
@@ -532,22 +602,28 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
 
 /* ---- exit ------------------------------------------------------------ */
 
-regs_t *process_exit(regs_t *r, int code)
+/* Close a task's files and give back its window.  Shared by process_exit()
+ * (the task exits itself) and process_signal() (SIGKILL against somebody
+ * else). */
+static void task_release(proc_t *p)
 {
-    proc_t *p = current;
-    if (!p)
-        panic("no current process");
-
-    /* close any files the process still had open */
     for (int i = 0; i < MAX_FDS; i++) {
-        if (p->fds[i].used)
+        if (p->fds[i].used) {
             ramdisk_close(p->fds[i].fh);
+            p->fds[i].used = 0;
+        }
     }
+    win_free(p->slot);
+    p->slot = -1;
+}
 
+/* Hand a dead task's exit code to whoever waits for it: an actual waiter
+ * gets it in its saved frame, otherwise it is remembered for the next
+ * wait().  Children of the dead task go to its parent, or to init. */
+static void reap_into_parent(proc_t *p, int code)
+{
     proc_t *parent = p->parent;
 
-    /* Hand the exit code to the parent: an actual waiter gets it in its
-       saved frame, otherwise it is remembered for the next wait(). */
     if (parent) {
         if (parent->state == ST_WAIT_CHILD &&
             (parent->wait_pid == p->pid || parent->wait_pid < 0)) {
@@ -559,14 +635,33 @@ regs_t *process_exit(regs_t *r, int code)
         }
     }
 
-    /* Orphans outlive us: hand them to our parent, or to init if we are the
-       last link in the chain. */
     for (int i = 0; i < MAX_PROCS; i++) {
         if (procs[i].state != ST_FREE && procs[i].parent == p)
             procs[i].parent = parent ? parent : init_proc;
     }
+}
 
-    win_free(p->slot);
+/* Retire a task that is not the caller: the caller keeps the CPU, the
+ * victim's frame is never resumed again.  Used by SIGKILL; the init task
+ * cannot be retired this way (it is what shuts the machine down). */
+static void task_kill(proc_t *p, int code)
+{
+    task_release(p);
+    reap_into_parent(p, code);
+    p->state = ST_FREE;
+    p->pid = 0;
+    p->parent = NULL;
+}
+
+regs_t *process_exit(regs_t *r, int code)
+{
+    proc_t *p = current;
+    if (!p)
+        panic("no current process");
+
+    task_release(p);
+    reap_into_parent(p, code);
+
     p->state = ST_FREE;
     p->pid = 0;
     p->parent = NULL;
@@ -606,6 +701,63 @@ regs_t *process_wait(regs_t *r, int pid)
 regs_t *process_yield(regs_t *r)
 {
     return sched_switch(r);
+}
+
+/* ---- signals --------------------------------------------------------- */
+
+/* SIGKILL acts on the target immediately, from whatever context sent it: a
+ * task killed by ^C must not get another tick of CPU.  SIGSTOP is only a
+ * request - the task has to stop at a boundary where its own kernel stack
+ * is not in use, and the only such boundary this kernel has is the trap
+ * exit, so the flag is checked there (process_suspend).
+ *
+ * A task cannot signal itself: its own frame is the one still running, so
+ * that case is refused and left to process_exit, which the caller reaches
+ * on its own. */
+int process_signal(int pid, int sig)
+{
+    proc_t *victim = NULL;
+
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state != ST_FREE && procs[i].pid == pid) {
+            victim = &procs[i];
+            break;
+        }
+    }
+    if (!victim || victim == current || victim == init_proc)
+        return -1;
+
+    if (sig == SIGKILL) {
+        kprintf("\n[pid %d] killed\n", pid);
+        /* The caller keeps the CPU; the victim simply never runs again.
+           Its exit code reaches a waiting parent through laggards. */
+        task_kill(victim, 137);
+        return 0;
+    }
+
+    if (sig == SIGSTOP) {
+        victim->stop_pending = 1;
+        /* A task blocked in the kernel (a sleeper, a console reader, a
+           parent waiting for a child) is already off the CPU and only
+           re-enters it through the trap exit that wakes it, which is where
+           process_suspend parks it.  A task that is NOT on the CPU and not
+           blocked is one waiting in the run queue: park it now, there is
+           no kernel stack to protect. */
+        if (victim->state == ST_READY) {
+            victim->state = ST_STOPPED;
+            victim->stop_pending = 0;
+            kprintf("\n[pid %d] stopped\n", pid);
+        }
+    } else if (sig == SIGCONT) {
+        victim->stop_pending = 0;
+        if (victim->state == ST_STOPPED) {
+            victim->state = ST_READY;
+            kprintf("[pid %d] continued\n", pid);
+        }
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
 regs_t *process_sleep(regs_t *r, uint32_t ms)
@@ -662,6 +814,7 @@ static const char *state_name(int st)
     switch (st) {
     case ST_RUNNING:    return "run  ";
     case ST_READY:      return "rdy  ";
+    case ST_STOPPED:    return "stop ";
     case ST_WAIT_CHILD: return "wait ";
     case ST_WAIT_INPUT: return "tty  ";
     case ST_WAIT_SLEEP: return "sleep";
@@ -672,14 +825,35 @@ static const char *state_name(int st)
 int process_dump(void)
 {
     int n = 0;
+    uint64_t now = plat_uptime_ms();
 
-    kprintf(" pid state window      ticks  name\n");
+    /* The window address says nothing here (every task has the same one,
+       slots are process.c's business) and a raw tick count made CPU time
+       look tiny: one tick is 10 ms of CPU but the task runs for a 50 ms
+       slice including the timer's own work.  cpums is the time spent on the
+       CPU, cpu% its share of the machine since the task started. */
+    kprintf(" pid ppid state cpu%% cpums  name\n");
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
         if (p->state == ST_FREE)
             continue;
-        kprintf("%4d %s 0x%08x %6u  %s\n", p->pid, state_name(p->state),
-                p->win_base, p->cpu_ticks, p->name);
+
+        uint32_t age  = (uint32_t)(now - p->start_ns);
+        uint32_t busy = (uint32_t)p->cpu_ms;
+        /* Tenths of a percent with 32-bit arithmetic only (rv32 has no
+           64-bit divide); saturate rather than wrap. */
+        uint32_t pct10 = 0;
+        if (age > 0) {
+            uint32_t t = (uint32_t)(busy / age);
+            pct10 = t * 1000u;
+            pct10 += ((busy % age) * 1000u) / age;
+        }
+        if (pct10 > 9999u)
+            pct10 = 9999u;
+
+        kprintf("%4d %4d %s %4u.%u %5u  %s\n", p->pid,
+                p->parent ? p->parent->pid : 0, state_name(p->state),
+                pct10 / 10u, pct10 % 10u, busy / 1000u, p->name);
         n++;
     }
     return n;

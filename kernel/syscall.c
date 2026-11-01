@@ -62,7 +62,17 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
 /* Every handler returns the frame to resume: most hand back the one that
  * came in, but a syscall that blocks gives the CPU to another task and
  * returns its frame instead. */
+static regs_t *dispatch(regs_t *r);
+
 regs_t *syscall_dispatch(regs_t *r)
+{
+    /* Whatever the syscall did - including waiting for a child, for the
+       console or for a sleep - this is the last point at which the task's
+       kernel stack is still needed, so a stop request lands here. */
+    return process_suspend(dispatch(r));
+}
+
+static regs_t *dispatch(regs_t *r)
 {
     syscall_t sc;
     plat_frame_get_syscall(r, &sc);
@@ -97,11 +107,15 @@ regs_t *syscall_dispatch(regs_t *r)
             return r;
         }
         if (fd == 0) {
-            /* A whole line or nothing: the shell expects line input, and
-               blocking here costs nothing because the tick still runs. */
+            /* One call per line, whatever the caller asked for: a line of
+               type-ahead must not be handed over two lines' worth at a time
+               (the shell's buffer would then hold two commands and echo
+               them as one). */
+            uint32_t room = len < TTY_LINE_MAX ? len : TTY_LINE_MAX;
+
             if (!tty_line_ready())
-                return process_block_read(r, ptr, len);
-            plat_frame_set_ret(r, (uint32_t)tty_take_line((char *)ptr, (int)len));
+                return process_block_read(r, ptr, room);
+            plat_frame_set_ret(r, (uint32_t)tty_take_line((char *)ptr, (int)room));
             return r;
         }
         plat_frame_set_ret(r, (uint32_t)process_fd_read((int)fd, (void *)ptr, len));
@@ -179,6 +193,10 @@ regs_t *syscall_dispatch(regs_t *r)
 
     case SYS_PS:
         plat_frame_set_ret(r, (uint32_t)process_dump());
+        return r;
+
+    case SYS_SIGNAL:
+        plat_frame_set_ret(r, (uint32_t)process_signal((int)sc.a0, (int)sc.a1));
         return r;
 
     default:
