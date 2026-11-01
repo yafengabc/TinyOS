@@ -52,6 +52,7 @@ var Targets = map[string]Target{
 	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded"},
 	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash"},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded"},
+	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash"},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.
@@ -136,6 +137,12 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		archFlags = []string{"-mthumb", "-mfloat-abi=soft"}
 		if b.Target.Machine != "" {
 			archFlags = append(archFlags, "-mcpu="+b.Target.Machine)
+		}
+		// RP2040 is a Cortex-M0+ (ARMv6-M): no MPU, no BASEPRI, no
+		// ldrex/strex, no CFSR/MMFAR/BFAR.  arch/arm isolates the M0+
+		// specific bits behind this macro so the M3 build is unaffected.
+		if b.Target.Name == "rp2040" {
+			archFlags = append(archFlags, "-DTOS_ARM_M0P")
 		}
 	} else {
 		archFlags = []string{
@@ -576,19 +583,26 @@ func (b *Builder) buildKernel() error {
 			b.logf("      kernel ends at 0x%x\n", end)
 		}
 
-		// The esp32c3 ROM wants its own image format, not an ELF.
+		// Flash-backed targets need a board-specific image format.
 		if b.Target.FSBacking == "flash" {
-			img, segs, err := ESPImageFromELF(elfPath, true)
-			if err != nil {
-				return err
+			switch b.Target.Name {
+			case "esp32c3":
+				img, segs, err := ESPImageFromELF(elfPath, true)
+				if err != nil {
+					return err
+				}
+				out := filepath.Join(b.BuildDir, "esp32c3.bin")
+				if err := os.WriteFile(out, img, 0o644); err != nil {
+					return err
+				}
+				b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
+				b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x100000 build/ramdisk.bin\n",
+					relName(b.Root, out))
+			case "rp2040":
+				if err := b.emitRP2040UF2(elfPath); err != nil {
+					return err
+				}
 			}
-			out := filepath.Join(b.BuildDir, "esp32c3.bin")
-			if err := os.WriteFile(out, img, 0o644); err != nil {
-				return err
-			}
-			b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
-			b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x100000 build/ramdisk.bin\n",
-				relName(b.Root, out))
 		}
 		return nil
 	}
@@ -695,7 +709,10 @@ func (b *Builder) buildUser() ([]string, error) {
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
-	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c"}
+	// aeabi.c supplies the EABI division helpers the Cortex-M0+ needs (it
+	// has no hardware divide); on the M3, rv32 and i386 nothing references
+	// it and --gc-sections drops it.
+	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c", "aeabi.c"}
 	var commonObjs []string
 	var tasks []task
 	for _, name := range common {
@@ -722,7 +739,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		if e.IsDir() || !strings.HasSuffix(name, ".c") {
 			continue
 		}
-		if name == "lib.c" || name == "syscall.c" {
+		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" {
 			continue
 		}
 		progs = append(progs, strings.TrimSuffix(name, ".c"))

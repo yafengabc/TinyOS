@@ -1,0 +1,93 @@
+#include "types.h"
+
+#if defined(__arm__)
+
+/* ARM EABI division helpers for user programs.
+ *
+ * The Cortex-M0+ (RP2040) has no hardware divide, so every / and % that the
+ * compiler cannot fold into a shift becomes a call to __aeabi_uidiv and
+ * friends.  The Cortex-M3 (qemu-mps2) has UDIV/SDIV, so nothing references
+ * this file there and --gc-sections drops it.  User programs link only
+ * crt0 + lib + syscall, so unlike the kernel they cannot borrow
+ * kernel/libgcc.c; the helpers here are self-contained.
+ *
+ * The divmod entry points return the quotient and the remainder in separate
+ * registers (r0 and r1), which a C function cannot express - AAPCS would
+ * hand a two-int struct back through a hidden pointer.  Like the kernel,
+ * the shims marshal registers by hand and call a plain C helper. */
+
+static uint32_t tos_udiv32(uint32_t n, uint32_t d)
+{
+    uint32_t q = 0, r = 0;
+    int i;
+
+    if (d == 0)
+        return 0;
+    for (i = 31; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1u);
+        if (r >= d) {
+            r -= d;
+            q |= (1u << i);
+        }
+    }
+    return q;
+}
+
+uint32_t __aeabi_uidiv(uint32_t n, uint32_t d)
+{
+    return tos_udiv32(n, d);
+}
+
+int __aeabi_idiv(int n, int d)
+{
+    int neg = (n < 0) != (d < 0);
+    uint32_t un = (uint32_t)(n < 0 ? -n : n);
+    uint32_t ud = (uint32_t)(d < 0 ? -d : d);
+    uint32_t q = tos_udiv32(un, ud);
+    return neg ? -(int)q : (int)q;
+}
+
+__asm__(
+    "    .syntax unified\n"
+    "    .thumb\n"
+    "    .text\n"
+    /* Same ARMv6-M-only subset as kernel/libgcc.c: no .cpu directive (the
+     * build's -mcpu decides), movs/muls instead of three-register MUL. */
+
+    /* r0 = n, r1 = d  ->  r0 = n/d, r1 = n%d */
+    "    .p2align 1\n"
+    "    .globl  __aeabi_uidivmod\n"
+    "    .type   __aeabi_uidivmod, %function\n"
+    "    .thumb_func\n"
+    "__aeabi_uidivmod:\n"
+    "    push    {r4, r5, lr}\n"
+    "    mov     r4, r0\n"           /* n                               */
+    "    mov     r5, r1\n"           /* d                               */
+    "    bl      __aeabi_uidiv\n"
+    "    mov     r2, r0\n"           /* q                               */
+    "    movs    r3, r2\n"
+    "    muls    r3, r5\n"           /* q*d                             */
+    "    subs    r1, r4, r3\n"       /* n - q*d                         */
+    "    mov     r0, r2\n"
+    "    pop     {r4, r5, pc}\n"
+    "    .size   __aeabi_uidivmod, . - __aeabi_uidivmod\n"
+
+    /* r0 = n, r1 = d  ->  r0 = n/d, r1 = n%d (signed) */
+    "    .p2align 1\n"
+    "    .globl  __aeabi_idivmod\n"
+    "    .type   __aeabi_idivmod, %function\n"
+    "    .thumb_func\n"
+    "__aeabi_idivmod:\n"
+    "    push    {r4, r5, lr}\n"
+    "    mov     r4, r0\n"
+    "    mov     r5, r1\n"
+    "    bl      __aeabi_idiv\n"
+    "    mov     r2, r0\n"           /* q                               */
+    "    movs    r3, r2\n"
+    "    muls    r3, r5\n"           /* q*d                             */
+    "    subs    r1, r4, r3\n"       /* n - q*d                         */
+    "    mov     r0, r2\n"
+    "    pop     {r4, r5, pc}\n"
+    "    .size   __aeabi_idivmod, . - __aeabi_idivmod\n");
+
+#endif /* __arm__ */

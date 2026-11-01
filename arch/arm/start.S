@@ -25,7 +25,8 @@
  */
 
     .syntax unified
-    .cpu    cortex-m3
+    /* The CPU is chosen by the build's -mcpu= flag (cortex-m3 for the MPS2
+       board, cortex-m0plus for the RP2040), so do not pin it here. */
     .thumb
 
 /* -------------------------------------------------------------------- */
@@ -72,15 +73,20 @@ _start:
     ldr     r2, =__data_load
 1:  cmp     r0, r1
     bhs     2f
-    ldr     r3, [r2], #4
-    str     r3, [r0], #4
+    /* Post-indexed addressing is Thumb-2 only; ARMv6-M (Cortex-M0+) needs
+       the increment spelled out.  The same form is valid on the M3. */
+    ldr     r3, [r2]
+    str     r3, [r0]
+    adds    r2, #4
+    adds    r0, #4
     b       1b
 2:  ldr     r0, =__bss_start
     ldr     r1, =__bss_end
     movs    r3, #0
 3:  cmp     r0, r1
     bhs     4f
-    str     r3, [r0], #4
+    str     r3, [r0]
+    adds    r0, #4
     b       3b
 4:  bl      kmain
 
@@ -99,25 +105,44 @@ arm_trap_enter:
        "push" after it puts the saved registers at the BOTTOM of the block
        (r0+0), while pushing first would place them at r0+48 and leave the
        stale kernel stack at the offset arm_resume pops from. */
-    sub     sp, #48                 /* bookkeeping + hardware copy       */
-    push    {r4-r11}                /* 32 bytes; 80 total, 8-byte aligned */
+    sub     sp, #80                 /* whole regs_t frame (8-byte aligned) */
     mov     r0, sp
-
-    str     r3, [r0, #FR_EXC]
-    str     r1, [r0, #FR_VEC]
+    /* Save r4-r11 explicitly.  ARMv6-M (Cortex-M0+) cannot push the high
+       registers in one PUSH, nor store them with an immediate offset, so the
+       high registers are moved through a low scratch first.  The same code is
+       valid on the Cortex-M3, so a single path serves every board. */
+    str     r4,  [r0, #FR_R4 + 0]
+    str     r5,  [r0, #FR_R4 + 4]
+    str     r6,  [r0, #FR_R4 + 8]
+    str     r7,  [r0, #FR_R4 + 12]
+    /* r3 = EXC_RETURN and r1 = vector are live, so record them before r1 is
+       reused as the high-register scratch. */
+    str     r3,  [r0, #FR_EXC]
+    str     r1,  [r0, #FR_VEC]
+    mov     r1,  r8
+    str     r1,  [r0, #FR_R4 + 16]
+    mov     r1,  r9
+    str     r1,  [r0, #FR_R4 + 20]
+    mov     r1,  r10
+    str     r1,  [r0, #FR_R4 + 24]
+    mov     r1,  r11
+    str     r1,  [r0, #FR_R4 + 28]
 
     /* Hardware frame address: PSP for a Thread-mode trap, otherwise the
-       words the core stacked just below our frame. */
+       words the core stacked just below our frame.  ARMv6-M cannot add an
+       immediate larger than 7, so load FR_SIZE into a register first. */
     ldr     r3, [r0, #FR_EXC]
     movs    r2, #4
     tst     r3, r2
     beq     1f
     mrs     r3, psp                 /* Thread: hardware frame on PSP    */
     b       2f
-1:  add     r3, r0, #FR_SIZE       /* Handler: it sits under our frame */
+1:  movs    r3, r0
+    adds    r3, r1                  /* Handler: frame sits under ours    */
 2:  str     r3, [r0, #FR_HW]
 
-    add     r1, r0, #FR_SIZE
+    movs    r1, r0
+    adds    r1, #FR_SIZE
     str     r1, [r0, #FR_TSP]
 
     /* Copy the hardware frame into the regs_t view. */
@@ -148,9 +173,15 @@ arm_trap_enter:
     .globl arm_resume
     .thumb_func
 arm_resume:
-    mov     r12, r0
-    ldr     r1, [r12, #FR_HW]
-    cbz     r1, 9f
+    /* The frame arrives in r0 (arm_trap_enter and every C helper returns
+       it there, and the svc task-start path keeps it in r0).  It must stay
+       in a LOW register: ARMv6-M cannot use a high register as an LDR/STR
+       base, and r0 already is one - the M3-only rewrite moved it to r12
+       for indexed addressing, but on the M0+ that copy is backwards and
+       would clobber the frame pointer with garbage. */
+    ldr     r1, [r0, #FR_HW]
+    cmp     r1, #0
+    beq     9f
 
     /* A frame that goes back to Thread mode on PSP (EXC_RETURN bit 2) must
        also switch PSP: the exception return pops the register frame from
@@ -158,33 +189,46 @@ arm_resume:
        switch happened inside another exception.  The saved hardware frame
        address is the PSP the core must pop.  Frames returning to Handler
        mode or to Thread mode on MSP keep the current PSP. */
-    ldr     r3, [r12, #FR_EXC]
-    tst     r3, #4
+    ldr     r3, [r0, #FR_EXC]
+    movs    r2, #4
+    tst     r3, r2
     beq     8f
     msr     psp, r1
 8:
-    ldr     r2, [r12, #FR_R0 + 0]
+    ldr     r2, [r0, #FR_R0 + 0]
     str     r2, [r1, #0]
-    ldr     r2, [r12, #FR_R0 + 4]
+    ldr     r2, [r0, #FR_R0 + 4]
     str     r2, [r1, #4]
-    ldr     r2, [r12, #FR_R0 + 8]
+    ldr     r2, [r0, #FR_R0 + 8]
     str     r2, [r1, #8]
-    ldr     r2, [r12, #FR_R0 + 12]
+    ldr     r2, [r0, #FR_R0 + 12]
     str     r2, [r1, #12]
-    ldr     r2, [r12, #FR_R0 + 16]
+    ldr     r2, [r0, #FR_R0 + 16]
     str     r2, [r1, #16]
-    ldr     r2, [r12, #FR_R0 + 20]
+    ldr     r2, [r0, #FR_R0 + 20]
     str     r2, [r1, #20]
-    ldr     r2, [r12, #FR_R0 + 24]
+    ldr     r2, [r0, #FR_R0 + 24]
     str     r2, [r1, #24]
-    ldr     r2, [r12, #FR_R0 + 28]
+    ldr     r2, [r0, #FR_R0 + 28]
     str     r2, [r1, #28]
 9:
-    ldr     lr, [r12, #FR_EXC]
-    ldr     r0, [r12, #FR_TSP]
-    mov     sp, r12
-    pop     {r4-r11}
-    mov     sp, r0
+    ldr     r2, [r0, #FR_EXC]
+    mov     lr, r2
+    ldr     r3, [r0, #FR_TSP]       /* r3 = task stack to resume          */
+    mov     sp, r0                  /* sp = frame base; r4-r11 at +0..28 */
+    ldr     r4,  [sp, #FR_R4 + 0]
+    ldr     r5,  [sp, #FR_R4 + 4]
+    ldr     r6,  [sp, #FR_R4 + 8]
+    ldr     r7,  [sp, #FR_R4 + 12]
+    ldr     r1,  [sp, #FR_R4 + 16]
+    mov     r8,  r1
+    ldr     r1,  [sp, #FR_R4 + 20]
+    mov     r9,  r1
+    ldr     r1,  [sp, #FR_R4 + 24]
+    mov     r10, r1
+    ldr     r1,  [sp, #FR_R4 + 28]
+    mov     r11, r1
+    mov     sp, r3                   /* sp = task stack to resume          */
 
     /* Returning to Thread mode on PSP: make it unprivileged.  Thread mode
        on MSP (a tick that interrupted kmain before the first task) keeps
@@ -195,7 +239,9 @@ arm_resume:
        MPU regions programmed by plat_task_protect() decide what the task
        itself can touch.  SPSEL comes from EXC_RETURN, and the core has no
        FPU, so the value written is just nPRIV. */
-    tst     lr, #4                  /* bit 2: Thread mode on PSP?       */
+    movs    r2, #4
+    mov     r1, lr
+    tst     r1, r2                  /* bit 2: Thread mode on PSP?       */
     beq     7f
     movs    r2, #1                  /* CONTROL.nPRIV = 1                */
     msr     control, r2
@@ -224,8 +270,19 @@ arm_enter_user:
     /* Not reached. */
 1:  b       1b
 
-/* -------------------------------------------------------------------- */
+    /* -------------------------------------------------------------------- */
 /* Exception stubs.  EXC_RETURN goes to r3 before anything clobbers LR.  */
+
+    /* Tail jump to arm_resume.  The stubs live in .text while arm_resume
+       is in .text.entry, so the distance is whatever the linker makes it
+       (tens of KB once the C sections sit in between) - far beyond the
+       +/-2 KiB of the ARMv6-M 16-bit B.  Load the address and bx instead;
+       BL would work too (arm_resume replaces lr from the frame), but this
+       says "tail call" plainly.  r3 is scratch at every site below. */
+    .macro tail_resume
+    ldr     r3, =arm_resume
+    bx      r3
+    .endm
 
     .thumb_func
 arm_svc:
@@ -235,7 +292,8 @@ arm_svc:
 
     ldr     r2, =arm_pending_frame
     ldr     r3, [r2]
-    cbz     r3, 1f
+    cmp     r3, #0
+    beq     1f
 
     /* Start a new task: overwrite the frame we are about to resume with
        the task's own, and switch to the user stack. */
@@ -266,10 +324,10 @@ arm_svc:
        exception return restores CONTROL.SPSEL from it.  arm_resume also
        sets CONTROL.nPRIV on the way out, so the task starts unprivileged
        with only the MPU regions plat_task_protect() installed. */
-    b       arm_resume
+    tail_resume
 1:
     bl      syscall_dispatch
-    b       arm_resume
+    tail_resume
 
     .thumb_func
 arm_systick:
@@ -277,7 +335,7 @@ arm_systick:
     movs    r1, #15
     bl      arm_trap_enter
     bl      arm_handle_tick
-    b       arm_resume
+    tail_resume
 
     .thumb_func
 arm_hardfault:
@@ -317,7 +375,7 @@ arm_default_handler:
 arm_fault:
     bl      arm_trap_enter
     bl      arm_handle_fault
-    b       arm_resume
+    tail_resume
 
 /* -------------------------------------------------------------------- */
 

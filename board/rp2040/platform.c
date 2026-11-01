@@ -1,0 +1,266 @@
+#include "platform.h"
+#include "board.h"
+#include "arm_memmap.h"
+#include "usb_cdc.h"
+#include "console.h"
+#include "string.h"
+
+/* Board: Raspberry Pi RP2040 (dual Cortex-M0+, ARMv6-M).
+ *
+ * The RP2040 has no MMU and no MPU, so the flat "no memory protection" model
+ * from the x86 port applies unchanged (see plat_task_protect in
+ * arch/arm/platform.c): a task runs unprivileged but sees the whole address
+ * space.  There is also no BASEPRI, no ldrex/strex, and only a simplified
+ * HardFault (no CFSR/MMFAR/BFAR), so fault reporting just prints the PC.
+ *
+ * Boot flow: the on-chip boot ROM loads the 256-byte stage-2
+ * (board/rp2040/boot2.bin) from flash offset 0, verifies a CRC-32/MPEG-2 over
+ * its first 252 bytes and jumps to 0x10000100 (the reset vector in our vector
+ * table).  The stage-2 leaves clk_sys and clk_peri running from the 12 MHz
+ * crystal (XOSC), which is the clock source this board assumes everywhere
+ * (UART baud and SysTick rate).  Exception vectors are NOT repointed by the
+ * stage-2, so we set VTOR ourselves in plat_board_early.
+ *
+ * Flash: it runs in place from XIP at 0x10000000, so reads go straight through
+ * the XIP mapping.  Writes and erases go through the boot ROM's flash API
+ * (resolved from the boot ROM function table), which drives the QSPI serial
+ * command state and must be followed by rom_flash_flush_cache() so XIP sees the
+ * new data.  The littlefs image is concatenated at flash offset 0x100000 by the
+ * UF2 packer, which matches PLAT_LFS_LBA * 512 == 0x100000. */
+
+/* ---- boot ROM flash API ----------------------------------------------- */
+
+/* The function signatures are from the RP2040 boot ROM header
+ * (bootrom.h, BSD-3-Clause, Raspberry Pi Ltd).  The boot ROM stores a 16-bit
+ * function-table pointer at BOOTROM_FUNC_TABLE_OFFSET (0x14) and a pointer to
+ * its own lookup routine at BOOTROM_TABLE_LOOKUP_OFFSET (0x18); both are
+ * 16-bit addresses into the (<=64 KiB) boot ROM. */
+typedef void (*rp_rom_erase_t)(uint32_t addr, size_t count,
+                               uint32_t block_size, uint8_t block_cmd);
+typedef void (*rp_rom_program_t)(uint32_t addr, const uint8_t *data, size_t count);
+typedef void (*rp_rom_flush_t)(void);
+typedef void *(*rp_rom_lookup_t)(uint16_t *table, uint32_t code);
+
+static rp_rom_erase_t   g_rom_erase;
+static rp_rom_program_t g_rom_program;
+static rp_rom_flush_t   g_rom_flush;
+static int              g_rom_ready;   /* 0 until all three are resolved */
+
+/* Read a 16-bit value at `addr` and treat it as a pointer.  The boot ROM is
+ * small enough that every pointer it stores is 16 bits. */
+static void *rp_rom_hword(uint32_t addr)
+{
+    return (void *)(uintptr_t)(*(volatile uint16_t *)addr);
+}
+
+static void *rp_rom_func(uint32_t code)
+{
+    rp_rom_lookup_t lookup = (rp_rom_lookup_t)rp_rom_hword(BOOTROM_TABLE_LOOKUP_OFFSET);
+    uint16_t *functab = (uint16_t *)rp_rom_hword(BOOTROM_FUNC_TABLE_OFFSET);
+    if (!lookup || !functab)
+        return NULL;
+    /* The table returns a Thumb-callable address; OR in the Thumb bit so the
+     * value is safe to bx regardless of how the ROM stored it. */
+    return (void *)((uintptr_t)lookup(functab, code) | 1u);
+}
+
+/* ---- console: USB CDC-ACM ------------------------------------------------ */
+
+/* The Pico board has no soldered UART pins in the target setup and the only
+ * connector is USB, so the console lives on the hand-rolled CDC stack in
+ * usb_cdc.c: plugging the board into a PC enumerates a COM port with no
+ * extra hardware.  The polled EP0/bulk model matches the kernel's tick-driven
+ * console exactly (no USB interrupt is registered). */
+
+void plat_console_init(void)
+{
+    usb_cdc_console_init();
+}
+
+void plat_console_putc(char c)
+{
+    usb_cdc_putc(c);
+}
+
+void plat_console_flush(void)
+{
+    usb_cdc_flush();
+}
+
+int plat_console_getchar(void)
+{
+    return usb_cdc_getchar();
+}
+
+/* ---- SysTick ----------------------------------------------------------- */
+
+/* The stage-2 leaves clk_sys (and therefore the SysTick input) at 12 MHz, so
+ * a reload of CLK/hz gives `hz` ticks per second.  The counter is started
+ * here with the interrupt masked; plat_irq_enable() later unmasks it (same
+ * ordering the rv32 port gets from mstatus.MIE). */
+
+static volatile uint64_t g_ticks;
+static uint32_t g_reload;
+
+void plat_timer_init(uint32_t hz)
+{
+    g_reload = ARM_SYSTICK_CLK / hz;
+    g_ticks = 0;
+
+    mmio_write32(ARM_SYSTICK_LOAD, g_reload - 1u);
+    mmio_write32(ARM_SYSTICK_VAL, 0);
+    /* ENABLE | CLKSOURCE (processor clock).  TICKINT (interrupt) stays clear. */
+    mmio_write32(ARM_SYSTICK_CTRL, 5u);
+}
+
+uint64_t plat_ticks(void)
+{
+    return g_ticks;
+}
+
+uint32_t plat_tick_hz(void)
+{
+    return ARM_SYSTICK_CLK / g_reload;
+}
+
+uint32_t plat_uptime_ms(void)
+{
+    return (uint32_t)((g_ticks * 1000u) / (uint64_t)plat_tick_hz());
+}
+
+void plat_timer_tick(void)
+{
+    g_ticks++;
+    /* SysTick reloads itself; nothing to re-arm. */
+}
+
+/* ---- block device: NOR flash via boot ROM ------------------------------ */
+
+/* The build tool concatenates the littlefs image into the flash at offset
+ * 0x100000 (see emitRP2040UF2 in internal/build/uf2.go), which is exactly
+ * PLAT_LFS_LBA * 512.  lba passed by ramdisk.c is already global
+ * (PLAT_LFS_LBA + sector), so the flash byte address is simply lba * 512.
+ * Erase operates on 4 KiB sectors (8 littlefs sectors); the ROM function
+ * requires the address aligned to 4 KiB and the count a multiple of 4 KiB. */
+
+#define RP_FLASH_SECTOR   4096u
+#define RP_SECTOR_ERASE_CMD 0x20u          /* W25Qxx 4 KiB sector erase   */
+
+int plat_block_read(uint32_t lba, uint32_t count, void *buf)
+{
+    /* Reads go straight through the XIP mapping; the cache serves them once
+     * flushed after the most recent write. */
+    const void *src = (const void *)(XIP_BASE + lba * 512u);
+    memcpy(buf, src, count * 512u);
+    return 0;
+}
+
+int plat_block_erase(uint32_t lba, uint32_t count)
+{
+    uint32_t addr, end, was_enabled;
+
+    if (!g_rom_ready)
+        return -1;
+
+    /* Round the range out to 4 KiB sector boundaries for the ROM call. */
+    addr = (lba * 512u) & ~(RP_FLASH_SECTOR - 1u);
+    end  = ((lba + count) * 512u + RP_FLASH_SECTOR - 1u) & ~(RP_FLASH_SECTOR - 1u);
+
+    /* The ROM functions drive the QSPI in serial command mode and busy-wait
+     * while the flash is in use; an interrupt whose handler lives in XIP
+     * (e.g. SysTick) must not fire mid-operation, so take the lock and
+     * restore the prior interrupt state afterwards. */
+    __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
+    __asm__ volatile("cpsid i" ::: "memory");
+    g_rom_erase(addr, end - addr, RP_FLASH_SECTOR, RP_SECTOR_ERASE_CMD);
+    g_rom_flush();
+    if (!(was_enabled & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
+    return 0;
+}
+
+int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
+{
+    uint32_t addr, was_enabled;
+
+    if (!g_rom_ready)
+        return -1;
+
+    /* lba is always 512-aligned and count*512 is a multiple of 256, satisfying
+     * the ROM program alignment rules.  The bounce buffer in ramdisk.c is in
+     * SRAM, so the ROM reads its source from RAM (never from XIP). */
+    addr = lba * 512u;
+
+    __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
+    __asm__ volatile("cpsid i" ::: "memory");
+    g_rom_program(addr, (const uint8_t *)buf, count * 512u);
+    g_rom_flush();
+    if (!(was_enabled & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
+    return 0;
+}
+
+uint32_t plat_block_size(void)
+{
+    return 512;
+}
+
+uint32_t plat_block_count(void)
+{
+    /* 600 sectors == 300 KiB, matching FS_BLOCK_COUNT (75) in ramdisk.c.  The
+     * partition starts at flash 0x100000, well inside a 2 MiB (or 4 MiB) part. */
+    return 600;
+}
+
+/* ---- boot -------------------------------------------------------------- */
+
+void plat_board_early(void)
+{
+    /* Repoint exceptions at our vector table (the stage-2 leaves VTOR at the
+     * boot ROM).  Must happen before any interrupt/fault can be taken. */
+    mmio_write32(ARM_VTOR, XIP_BASE + 0x100u);
+
+    /* Defensive core-1 park.  The boot ROM normally holds core 1 in its own
+     * wait-for-FIFO loop, so it never executes our image; if it ever were
+     * started (e.g. a future multicore launch) it spins here instead of
+     * corrupting the single kernel image in SRAM. */
+    if (mmio_read32(SIO_CPUID) != 0) {
+        for (;;)
+            __asm__ volatile("wfe");
+    }
+
+    plat_console_init();
+}
+
+void plat_board_init(void)
+{
+    /* Resolve the boot ROM flash API.  If any entry is missing (for example a
+     * simulator without a boot ROM) the block device degrades to read-only and
+     * the littlefs write self-test reports FAILED instead of crashing. */
+    g_rom_erase   = (rp_rom_erase_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_ERASE);
+    g_rom_program = (rp_rom_program_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_PROGRAM);
+    g_rom_flush   = (rp_rom_flush_t)rp_rom_func(ROM_FUNC_FLASH_FLUSH_CACHE);
+    g_rom_ready   = (g_rom_erase && g_rom_program && g_rom_flush) ? 1 : 0;
+}
+
+/* Called from plat_irq_enable() the first time interrupts come on.  TICKINT
+ * stays clear until then so a tick cannot arrive before the scheduler exists. */
+void plat_timer_irq_unmask(void)
+{
+    uint32_t ctrl = mmio_read32(ARM_SYSTICK_CTRL);
+    if (!(ctrl & 2u))
+        mmio_write32(ARM_SYSTICK_CTRL, ctrl | 2u);
+}
+
+/* ---- power -------------------------------------------------------------- */
+
+void plat_shutdown(void)
+{
+    console_shutdown();
+    plat_panic_halt();
+}
+
+void plat_reboot(void)
+{
+    plat_panic_halt();
+}

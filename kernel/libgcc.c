@@ -206,6 +206,33 @@ int __aeabi_idiv(int n, int d)
     return neg ? -(int)q : (int)q;
 }
 
+/* 64-bit helpers the ARM EABI names differently from the libgcc-style
+ * symbols above: on AArch32 clang emits calls to __aeabi_llsl/llsr/lasr
+ * for every 64-bit shift and __aeabi_lmul for every 64x64 multiply (the
+ * M0+ has neither UMULL nor a wider-than-32-bit shift, so nothing is
+ * inlined; rv32 and x86-32 reach the __*di3 forms instead).  They wrap
+ * the half-word implementations above, which contain no 64-bit shifts or
+ * multiplies of their own and therefore cannot recurse. */
+uint64_t __aeabi_llsl(uint64_t v, int n)      { return __ashldi3(v, n); }
+uint64_t __aeabi_llsr(uint64_t v, int n)      { return __lshrdi3(v, n); }
+int64_t  __aeabi_lasr(int64_t v, int n)       { return __ashrdi3(v, n); }
+uint64_t __aeabi_lmul(uint64_t a, uint64_t b) { return __muldi3(a, b); }
+
+/* littlefs asks for __builtin_clz when walking its allocation bitmap; the
+ * M0+ has no CLZ instruction, so clang lowers it to this call. */
+int __clzsi2(uint32_t x)
+{
+    int n = 0;
+
+    if (x == 0)
+        return 32;
+    while (!(x & 0x80000000u)) {
+        x <<= 1;
+        n++;
+    }
+    return n;
+}
+
 /* Shared body for the "divmod" entry points.  It cannot be written as a C
  * function returning a struct: the ARM EABI returns the quotient and the
  * remainder in separate register pairs (r0:r1 and r2:r3), while AAPCS
@@ -229,9 +256,13 @@ void tos_udivmod64(uint32_t nlo, uint32_t nhi, uint32_t dlo, uint32_t dhi,
 
 __asm__(
     "    .syntax unified\n"
-    "    .cpu    cortex-m3\n"
     "    .thumb\n"
     "    .text\n"
+    /* No .cpu directive: the command line -mcpu (cortex-m3 for mps2,
+     * cortex-m0plus for rp2040) decides, and every instruction below is
+     * deliberately kept in the ARMv6-M subset so one body serves both.
+     * The two Thumb-2 forms the M3 would allow - three-register MUL and
+     * SUB with high registers - are spelled with movs/muls instead. */
 
     /* r0:r1 = n, r2:r3 = d  ->  r0:r1 = n/d, r2:r3 = n%d */
     "    .p2align 1\n"
@@ -287,8 +318,9 @@ __asm__(
     "    mov     r5, r1\n"           /* d                               */
     "    bl      __aeabi_idiv\n"
     "    mov     r2, r0\n"           /* q                               */
-    "    mul     r3, r2, r5\n"       /* q*d                             */
-    "    sub     r1, r4, r3\n"       /* n - q*d                         */
+    "    movs    r3, r2\n"
+    "    muls    r3, r5\n"           /* q*d (MULS: r3 = r3 * r5)        */
+    "    subs    r1, r4, r3\n"       /* n - q*d                         */
     "    mov     r0, r2\n"
     "    pop     {r4, r5, pc}\n"
     "    .size   __aeabi_idivmod, . - __aeabi_idivmod\n");

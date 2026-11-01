@@ -39,6 +39,17 @@ void elf_set_window(uint32_t lo, uint32_t hi)
 #define R_386_JMP_SLOT     7
 #define R_386_RELATIVE     8
 
+/* ARM (Cortex-M) relocation types.  ARM uses the .rel.dyn form (implicit
+ * addend stored at the target), and with no dynamic symbol table every
+ * supported type reduces to "value already in place plus load bias":
+ * RELATIVE is an absolute address fixed up at load, ABS32 is the same for
+ * a plain 32-bit datum, and GLOB_DAT/JUMP_SLOT point at local functions
+ * (S = 0, so the stored value is the link-time address itself). */
+#define R_ARM_ABS32        2
+#define R_ARM_GLOB_DAT     21
+#define R_ARM_JUMP_SLOT    22
+#define R_ARM_RELATIVE     23
+
 typedef struct {
     uint8_t  e_ident[16];
     uint16_t e_type;
@@ -318,6 +329,12 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
                 case R_RISCV_32:      /* same numeric value as R_386_32 */
                 case R_RISCV_JUMP_SLOT:
                 case R_386_JMP_SLOT:
+                /* ARM links emit .rel.dyn, never .rela.dyn, so these are
+                   belt-and-braces for the explicit-addend path. */
+                case R_ARM_RELATIVE:
+                case R_ARM_ABS32:
+                case R_ARM_GLOB_DAT:
+                case R_ARM_JUMP_SLOT:
                     val = (uint32_t)r.r_addend + bias;
                     break;
                 default:
@@ -344,7 +361,7 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
 
                 uint32_t type = R_TYPE(r_info);
                 if (type == R_386_NONE)
-                    continue;
+                    continue;      /* same numeric value as R_ARM_NONE */
 
                 uint32_t where = r_offset + bias;
                 uint32_t val;
@@ -358,6 +375,12 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
                 case R_386_RELATIVE:
                 case R_386_32:
                 case R_386_JMP_SLOT:
+                /* ARM (Cortex-M): .rel.dyn with the addend stored in place.
+                   See the R_ARM_* comment above - all reduce to val += bias. */
+                case R_ARM_RELATIVE:
+                case R_ARM_ABS32:
+                case R_ARM_GLOB_DAT:
+                case R_ARM_JUMP_SLOT:
                     val += bias;
                     break;
                 default:

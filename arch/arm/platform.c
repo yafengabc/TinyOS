@@ -51,7 +51,12 @@ static const char *vec_name(uint32_t vec)
 }
 
 /* Data address a MemManage/BusFault refers to, when the status register
- * says it is valid.  A fault on an instruction fetch leaves it empty. */
+ * says it is valid.  A fault on an instruction fetch leaves it empty.
+ *
+ * On the Cortex-M0+ (ARMv6-M) there is only HardFault: no CFSR, no
+ * MMFAR/BFAR, and no configurable fault status at all, so there is nothing
+ * to decode - the fault message just reports the PC. */
+#ifndef TOS_ARM_M0P
 static uint32_t fault_addr(const regs_t *f)
 {
     uint32_t cfsr = mmio_read32(ARM_CFSR);
@@ -62,6 +67,13 @@ static uint32_t fault_addr(const regs_t *f)
         return mmio_read32(ARM_BFAR);
     return 0;
 }
+#else
+static uint32_t fault_addr(const regs_t *f)
+{
+    (void)f;
+    return 0;
+}
+#endif
 
 /* Called from every fault stub.  Returns the frame to resume with. */
 regs_t *arm_handle_fault(regs_t *f)
@@ -119,8 +131,11 @@ void plat_init(void)
     mmio_write32(ARM_SHPR3, (ARM_PRIO_SYSTICK << 24) | (ARM_PRIO_PENDSV << 16));
     mmio_write32(ARM_SHPR2, ARM_PRIO_SVC << 24);
 
+#ifndef TOS_ARM_M0P
     /* Turn the configurable faults on: without these bits an MPU violation
-       is escalated to HardFault and `prot` cannot say why the task died. */
+       is escalated to HardFault and `prot` cannot say why the task died.
+       The Cortex-M0+ has no configurable fault status (everything is
+       HardFault), so this is M3-only. */
     mmio_write32(ARM_SHCSR, ARM_SHCSR_MEMFAULTENA |
                             ARM_SHCSR_BUSFAULTENA |
                             ARM_SHCSR_USGFAULTENA);
@@ -129,10 +144,14 @@ void plat_init(void)
        reaches them through the default map (PRIVDEFENA); unprivileged code
        gets the default map denied and only sees what plat_task_protect()
        programs for the running task.  Enabling it here, before any task
-       exists, means user mode can never start unprotected. */
+       exists, means user mode can never start unprotected.
+       The Cortex-M0+ has no MPU, so user tasks run unprivileged but with
+       the whole flat address space visible - the same shape as the x86
+       port (see plat_task_protect below). */
     mmio_write32(ARM_MPU_CTRL, ARM_MPU_CTRL_ENABLE | ARM_MPU_CTRL_PRIVDEFENA);
     __asm__ volatile("dsb" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
+#endif
 
     plat_board_init();
 }
@@ -163,6 +182,8 @@ void plat_cpu_idle(void)
 }
 
 /* ---- user mode ------------------------------------------------------- */
+
+#ifndef TOS_ARM_M0P
 
 /* Program one MPU region.  `size` must be a power of two, at least 32 bytes
  * (the ARMv7-M minimum), and `base` aligned to it; the RASR size field
@@ -257,6 +278,16 @@ void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
     __asm__ volatile("dsb" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
 }
+
+#else /* TOS_ARM_M0P: no MPU, user tasks run unprivileged but unprotected. */
+
+void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
+                       uint32_t stack_low, uint32_t stack_top)
+{
+    (void)win_base; (void)wx; (void)brk; (void)stack_low; (void)stack_top;
+}
+
+#endif
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
