@@ -29,7 +29,10 @@ import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EMU = os.environ.get("TOS_EMU", r"C:\Users\SONG\Documents\Projects\RV32EMU\rv32emu.exe")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from emu_path import find_emu  # noqa: E402
+
+EMU = find_emu()
 QEMU = os.environ.get("TOS_QEMU", r"C:\msys64\ucrt64\bin\qemu-system-riscv32.exe")
 DEFAULT_CMD = "bench"
 
@@ -121,6 +124,8 @@ def start_emu():
     # targets (internal/build/build.go: "an esp32c3 user binary is
     # bit-identical to a rv32 one"), which is what makes the comparison
     # meaningful: bin/bench is the same guest instruction stream in both.
+    if not os.path.exists(EMU):
+        raise SystemExit("RV32EMU-C not found: %s (run 'python scripts/emu.py build')" % EMU)
     cmd = [EMU,
            "-elf", os.path.join(ROOT, "build", "kernel-esp32c3.elf"),
            "-ramdisk", os.path.join(ROOT, "build", "ramdisk-esp32c3.bin"),
@@ -154,7 +159,10 @@ def pump(src, until, timeout):
                 break
             continue
         chunk = d.decode("utf-8", "replace")
-        text += chunk
+        # The guest's UART output is CRLF, and the ESP32-C3 console path makes
+        # it CR CR LF; strip CRs from the match buffer so `^done$` (re.M) works
+        # on the line the guest actually printed.
+        text += chunk.replace("\r", "")
         partial += chunk
         parts = partial.split("\n")
         partial = parts.pop()

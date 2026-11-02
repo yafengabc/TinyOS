@@ -12,6 +12,10 @@
 /tos
 /tos.exe
 
+# Python bytecode from the test scripts
+__pycache__/
+*.pyc
+
 # Local agent workspace notes (not part of the project)
 /.workbuddy/
 

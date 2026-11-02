@@ -141,7 +141,33 @@ pacman -S --needed mingw-w64-ucrt-x86_64-clang \
 $env:TOS_QEMU = "D:\qemu\qemu-system-i386.exe"
 ```
 
-### 4. 检查
+### 4. RV32EMU-C（RV32 标准测试运行时）
+
+RV32 的功能验收和性能测试默认跑在 **RV32EMU-C** 上，源码以 submodule 形式放在
+`rv32emu-c/`（<https://github.com/yafengabc/RV32EMU-C>），不是 `third_party`。
+clone 之后先取子模块并构建：
+
+```powershell
+git submodule update --init
+python scripts/emu.py build     # -> build/rv32emu-c.exe
+python scripts/emu.py test      # 启动 esp32c3 内核 + uptime/ls 冒烟
+```
+
+装了 make 的话也可以 `make emu` / `make test-emu`；Windows 上通常没有 make，
+直接用上面的 Python 入口。`scripts/bench.py`、`scripts/esp-c3/emutest.py`、
+`scripts/esp-c3/benchtime.py` 会自动找 `build/rv32emu-c.exe`，`TOS_EMU` 可覆盖：
+
+```powershell
+$env:TOS_EMU = "C:\path\to\rv32emu.exe"    # 例如用 Go 版做差分测试
+```
+
+为什么 QEMU 只做功能验证、不做性能：QEMU 的 TCG 在 store 落到已翻译的代码页时
+会作废整个 TB，`memcpy` 每次迭代都要重新翻译同一段循环——实测同 5 个 TB 被翻译了
+8000 多次，所以 `bench` 在 QEMU 上慢两三个数量级（`rv32emu-c/bench/tinyos_qemu.py --tb-stats`
+可以复现）。`tos run -target rv32` 继续用于启动/兼容性检查，速度与回归以
+RV32EMU-C 为准；细节见 `docs/PLATFORM-DESIGN.md`。
+
+### 5. 检查
 
 ```powershell
 go run ./cmd/tos doctor
