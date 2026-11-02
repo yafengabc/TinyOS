@@ -9,8 +9,9 @@ The emulator / QEMU test harness lives in `cmd/tostest` (Go), not here:
     tostest bench    guest bench timing on RV32EMU-C / QEMU (was scripts/bench.py + benchtime.py)
 
 Only `esp-c3/` remains here: **real-hardware** bring-up and acceptance for the
-ESP32-C3 board.  It stays in Python on purpose — esptool and pyserial are the
-ESP ecosystem standard, the chip can only be flashed through esptool's
-download-mode protocol, and there is no Go equivalent worth depending on.
+ESP32-C3 board.  It stays in Python (plus the small probe shells in the same
+directory) on purpose — esptool and pyserial are the ESP ecosystem standard,
+the chip can only be flashed through esptool's download-mode protocol, and
+there is no Go equivalent worth depending on.
 Everything a porter needs for build and CI is Go + a C toolchain; the board
 scripts are the one documented exception (see README.md "环境准备").
