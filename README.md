@@ -141,6 +141,10 @@ pacman -S --needed mingw-w64-ucrt-x86_64-clang \
 $env:TOS_QEMU = "D:\qemu\qemu-system-i386.exe"
 ```
 
+> 真机 esp32c3 的烧录/验收脚本 `scripts/esp-c3/` 仍然用 Python（esptool + pyserial
+> 是 ESP 生态标准，芯片只能通过它的下载模式协议写入），只在接板子时才需要。
+> 构建、模拟器测试和 CI 全部用 Go，不需要 Python。
+
 ### 4. RV32EMU-C（RV32 标准测试运行时）
 
 RV32 的功能验收和性能测试默认跑在 **RV32EMU-C** 上，源码以 submodule 形式放在
@@ -149,13 +153,13 @@ clone 之后先取子模块并构建：
 
 ```powershell
 git submodule update --init
-python scripts/emu.py build     # -> build/rv32emu-c.exe
-python scripts/emu.py test      # 启动 esp32c3 内核 + uptime/ls 冒烟
+go run ./cmd/tostest emu build     # -> build/rv32emu-c.exe
+go run ./cmd/tostest emu test      # 启动 esp32c3 内核 + uptime/ls 冒烟
 ```
 
-装了 make 的话也可以 `make emu` / `make test-emu`；Windows 上通常没有 make，
-直接用上面的 Python 入口。`scripts/bench.py`、`scripts/esp-c3/emutest.py`、
-`scripts/esp-c3/benchtime.py` 会自动找 `build/rv32emu-c.exe`，`TOS_EMU` 可覆盖：
+装了 make 的话也可以 `make emu` / `make test-emu`；否则直接用上面的 Go 入口。
+`tostest bench`、`tostest emutest` 也会自动找 `build/rv32emu-c.exe`，
+`TOS_EMU` 可覆盖：
 
 ```powershell
 $env:TOS_EMU = "C:\path\to\rv32emu.exe"    # 例如用 Go 版做差分测试
@@ -163,8 +167,8 @@ $env:TOS_EMU = "C:\path\to\rv32emu.exe"    # 例如用 Go 版做差分测试
 
 为什么 QEMU 只做功能验证、不做性能：QEMU 的 TCG 在 store 落到已翻译的代码页时
 会作废整个 TB，`memcpy` 每次迭代都要重新翻译同一段循环——实测同 5 个 TB 被翻译了
-8000 多次，所以 `bench` 在 QEMU 上慢两三个数量级（`rv32emu-c/bench/tinyos_qemu.py --tb-stats`
-可以复现）。`tos run -target rv32` 继续用于启动/兼容性检查，速度与回归以
+8000 多次，所以 `bench` 在 QEMU 上慢两三个数量级（`rv32emu-c` 的 `bench` Go 工具
+`check` 里可以复现）。`tos run -target rv32` 继续用于启动/兼容性检查，速度与回归以
 RV32EMU-C 为准；细节见 `docs/PLATFORM-DESIGN.md`。
 
 ### 5. 检查
@@ -230,20 +234,20 @@ go build -o tos.exe ./cmd/tos
 
 > Windows 上 QEMU 的 `-serial stdio` 输入端在**整行粘贴**时可能丢字节（QEMU 自己的
 > 后端限制，不是内核的问题）；一个字符一个字符地敲是没问题的。
-> 自动化测试请用 `scripts/smoke.ps1`，它通过 TCP 串口喂命令：
+> 自动化测试用 `tostest smoke`，它通过 TCP 串口喂命令：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
+go run ./cmd/tostest smoke
 ```
 
 脚本会启动 QEMU、依次执行 `ls / cat / hello / reloc / run spin & / ps / wfile / mem /
 run prot heap / crash / uptime / exit`，检查提示符和内核 panic，最后打印完整记录。
 `ps` 那一步等于一次调度器验收：`spin` 必须还活着并处于 `rdy`。
-RV32 用同一个脚本加 `-Target rv32`，ARM 用 `-Target arm`：
+RV32 用同一个命令加 `-target rv32`，ARM 用 `-target arm`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target rv32
-powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Target arm
+go run ./cmd/tostest smoke -target rv32
+go run ./cmd/tostest smoke -target arm
 ```
 
 ## RV32 目标（qemu-virt）
@@ -690,7 +694,7 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   后台输出仍可能落在两批回显之间（还没有行编辑器，`Ctrl-C`/`Ctrl-D` 不起作用）。
   **type-ahead 只有一行**：`tty_poll()` 把一次读到的整段字符全部喂给行缓冲，第二个
   `\n` 之后的输入被直接丢掉——所以脚本一次灌入多行时，shell 会把它们拼成一条命令
-  （`echo a` + `hello` 变成 `echo a hello`）。`scripts/compat.ps1` 因此对每条命令
+  （`echo a` + `hello` 变成 `echo a hello`）。`tostest compat` 因此对每条命令
   单独启动一次 QEMU。
 - 文件系统（littlefs）可读可写，分区 300 KiB / 75 个 4 KiB 块，文件名 ≤ 63 字符。
   写入经过内核侧自检（创建→读回→删除 `selftest.tmp`）和用户态 `wfile` 演示程序验证；

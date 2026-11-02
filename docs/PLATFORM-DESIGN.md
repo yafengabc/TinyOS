@@ -533,7 +533,7 @@ P2 落地的实现要点（`arch/rv32/`）：
 #### rv32 在 QEMU 下极慢：已解决（2026-11-01）
 
 症状：banner 能打印，但列目录时约 4 秒才出一个文件（正常应为毫秒级），
-`scripts/smoke.ps1 -Target rv32` 报 `shell prompt never appeared`。
+`tostest smoke -target rv32` 报 `shell prompt never appeared`。
 
 **根因**：clang 的尺寸优化 `-Oz`（以及 `-Os`）生成的 RV32 代码在 QEMU TCG 下
 每次循环迭代都被重新翻译（`-d in_asm` 显示同一循环体被翻译数十万次、每条指令
@@ -598,7 +598,7 @@ flush 也没有 invalidate。逐次迭代成本约 15–20 µs，与「每条指
 ##### 这个坑在用户程序里一样存在，RV32EMU 没有（2026-11-02 实测）
 
 上面两次都是内核自己的 `memcpy`。为了看清它到底是「QEMU 慢」还是「形状敏感」，
-`user/bench.c` 用**同一份用户二进制**跑了两个循环（`scripts/bench.py` 从宿主机
+`user/bench.c` 用**同一份用户二进制**跑了两个循环（`tostest bench` 从宿主机
 给 START/END 打时间戳；guest 的 `uptime()` 在 QEMU 是墙钟、在 RV32EMU 是指令计数，
 不能当秒表用）：
 
@@ -965,7 +965,7 @@ C3 这条是这一轮唯一在真机上验过的：写之前先等 FIFO 排空�
 三平台行为无法一致。现在改为执行**非法指令**（x86 `ud2`、rv32 `.word 0`、arm `udf #0`），
 三个架构上都产生“非法指令”异常，由内核终止当前任务。
 
-验证方式：`scripts/compat.ps1` 对每个目标启动对应 QEMU，喂相同命令序列，
+验证方式：`tostest compat` 对每个目标启动对应 QEMU，喂相同命令序列，
 比较归一化输出（去掉时间戳和 pid）。
 
 ## 10. 迁移阶段

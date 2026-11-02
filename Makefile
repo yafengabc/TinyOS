@@ -1,4 +1,4 @@
-.PHONY: all build run headless clean doctor emu test-emu
+.PHONY: all build run headless clean doctor emu test-emu smoke compat bench
 
 all: build
 
@@ -14,15 +14,22 @@ headless:
 doctor:
 	go run ./cmd/tos doctor
 
-# Standard test runtime: RV32EMU-C from the rv32emu-c/ submodule.
-# `make emu` builds it into build/rv32emu-c.exe; `make test-emu` boots the
-# esp32c3 kernel on it and pokes the shell. On Windows without make, run
-# `python scripts/emu.py build|test` instead.
+# Test harness: cmd/tostest (Go).  The old scripts/*.py and *.ps1 are gone;
+# a fresh checkout needs only the C toolchain and Go.
 emu:
-	python scripts/emu.py build
+	go run ./cmd/tostest emu build
 
 test-emu:
-	python scripts/emu.py test
+	go run ./cmd/tostest emu test
+
+smoke:
+	go run ./cmd/tostest smoke
+
+compat:
+	go run ./cmd/tostest compat
+
+bench:
+	go run ./cmd/tostest bench
 
 clean:
 	go run ./cmd/tos clean

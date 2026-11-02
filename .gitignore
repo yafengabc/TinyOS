@@ -11,6 +11,7 @@
 # The tos CLI binary at the repo root (cmd/tos/ is source)
 /tos
 /tos.exe
+/tostest.exe
 
 # Python bytecode from the test scripts
 __pycache__/

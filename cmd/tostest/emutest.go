@@ -1,0 +1,175 @@
+package main
+
+import (
+	"bytes"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+var badSigns = []string{"KERNEL PANIC", "System halted"}
+
+func hasBad(text string) bool {
+	for _, b := range badSigns {
+		if strings.Contains(text, b) {
+			return true
+		}
+	}
+	return false
+}
+
+func bootDone(text string) bool {
+	return strings.Contains(text, "TinyOS shell") && strings.Contains(text, "tos> ")
+}
+
+// cmdEmutest implements `tostest emutest`, the Go port of scripts/esp-c3/
+// emutest.py: a full functional pass on RV32EMU-C.
+func cmdEmutest(args []string) int {
+	_ = flag.NewFlagSet("emutest", flag.ExitOnError).Parse(args)
+	emu := findEmu()
+	if !fileExists(emu) {
+		fmt.Fprintf(os.Stderr, "RV32EMU-C not found: %s (run 'tostest emu build')\n", emu)
+		return 1
+	}
+	elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3.elf")
+	rd := filepath.Join(repoRoot(), "build", "ramdisk-esp32c3.bin")
+	if !fileExists(elf) {
+		fmt.Fprintf(os.Stderr, "build artifact missing: %s (run 'tos build -target esp32c3')\n", elf)
+		return 1
+	}
+
+	s, err := startEmulator(emu, elf, rd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer s.close()
+
+	// ---- boot ----
+	t0 := time.Now()
+	ok, _ := s.waitForText(bootDone, 60*time.Second)
+	bootMs := int64(time.Since(t0) / time.Millisecond)
+	bootlog := s.text()
+	fmt.Printf("==== boot (%d ms wall) ====\n", bootMs)
+	fmt.Println(bootlog)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "EMU TEST FAILED: no shell prompt")
+		return 1
+	}
+	if hasBad(bootlog) {
+		fmt.Fprintln(os.Stderr, "EMU TEST FAILED: kernel panic during boot")
+		return 1
+	}
+
+	// ---- command checks ----
+	send := func(line string, wait time.Duration) string {
+		_ = s.sendLine(line, "\r\n")
+		var out []byte
+		tend := time.Now().Add(wait)
+		for time.Now().Before(tend) {
+			b, more := s.read(200 * time.Millisecond)
+			if b != nil {
+				out = append(out, b...)
+			}
+			if !more {
+				break
+			}
+			if bytes.Contains(out, []byte("tos> ")) {
+				// The shell answers the CR and the LF after it with a prompt
+				// each; drain the trailing one so the next command is not
+				// measured against a leftover prompt.
+				grace := time.Now().Add(150 * time.Millisecond)
+				for time.Now().Before(grace) {
+					b2, more2 := s.read(50 * time.Millisecond)
+					if b2 != nil {
+						out = append(out, b2...)
+					}
+					if !more2 {
+						break
+					}
+				}
+				break
+			}
+		}
+		return string(out)
+	}
+
+	checks := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{"ls", "ls", []string{"bin/sh", "readme.txt"}},
+		{"cat readme.txt", "cat readme.txt", []string{"TinyOS"}},
+		{"hello", "hello", []string{"hello"}},
+		{"hello_printf", "hello_printf", []string{"hello"}},
+		{"mem", "mem", []string{"heap demo"}},
+		{"uptime", "uptime", []string{"uptime:", "pid="}},
+		{"ps", "ps", []string{"cpu", "sh"}},
+		{"crash", "crash", []string{"illegal instruction", "tos>"}},
+		{"source etc/rc", "source etc/rc", []string{"tos>"}},
+	}
+	for _, c := range checks {
+		tstart := time.Now()
+		out := send(c.line, 4*time.Second)
+		ms := int64(time.Since(tstart) / time.Millisecond)
+		fmt.Printf("---- %s (%d ms) ----\n", c.name, ms)
+		fmt.Println(out)
+		for _, w := range c.want {
+			if !strings.Contains(out, w) {
+				fmt.Printf("  WARN: expected %q not seen in output of %q\n", w, c.name)
+			}
+		}
+	}
+
+	// ---- reboot ----
+	fmt.Println("---- reboot (expect software reset + banner again) ----")
+	mark := s.mark()
+	_ = s.sendLine("reboot", "\r\n")
+	trb := time.Now()
+	sawReset, sawPrompt2 := false, false
+	end := time.Now().Add(30 * time.Second)
+	for time.Now().Before(end) {
+		b, more := s.read(200 * time.Millisecond)
+		if b != nil {
+			txt := s.text()
+			if strings.Contains(txt, "software reset") || strings.Contains(txt, "rebooting") {
+				sawReset = true
+			}
+			if sawReset && strings.Contains(txt, "tos> ") {
+				sawPrompt2 = true
+				break
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	rbMs := int64(time.Since(trb) / time.Millisecond)
+	rebuf := s.sinceMark(mark)
+	fmt.Println(rebuf)
+	fmt.Printf("  reboot observed=%v, second prompt=%v (%d ms)\n", sawReset, sawPrompt2, rbMs)
+
+	if hasBad(rebuf) {
+		fmt.Fprintln(os.Stderr, "EMU TEST FAILED: kernel panic after reboot")
+		return 1
+	}
+
+	pass := sawReset && sawPrompt2
+	fmt.Printf("==== EMU TEST %s (boot %d ms, reboot %d ms) ====\n",
+		boolStr(pass), bootMs, rbMs)
+	if !pass {
+		return 1
+	}
+	return 0
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "OK"
+	}
+	return "FAILED"
+}
