@@ -230,14 +230,17 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
 3. 决定性实验：把 `usj_putc()` 临时改成直接 return，10/10 块连续全通。
    所以真凶是**无 USB 主机时 `usj_putc` 每字节空转 40000 次超时**；内核打印
    在 trap 里执行、中断关着，UART0 的接收 FIFO 就这样被饿到溢出。
-4. 修复：USJ 发送改成 4 KiB 环形缓冲 + `SERIAL_IN_EMPTY` 中断（永不阻塞，
+4. 修复：USJ 发送改成环形缓冲 + `SERIAL_IN_EMPTY` 中断（永不阻塞，
    没有主机就填满即丢）；USJ 接收中断（`SERIAL_OUT_RECV_PKT`）；raw 环
-   256 B → 1 KiB、cooked 16 行；`process_console_kick()` 让接收中断直接唤醒
-   阻塞的读者，而不是等下一个 tick。
+   256 B → 1 KiB、cooked 4 行（1 KiB）；`process_console_kick()` 让接收中断
+   直接唤醒阻塞的读者，而不是等下一个 tick。
 5. 结果：64 KiB 传输 64 s → 9.4 s，**1.0 → 7.0 KiB/s**；`accept.py` 24/24。
-6. 收尾：raw 环先设 4 KiB，随后按"最坏调度延迟 = QUANTUM 5 tick = 50 ms，
-   115200 只走 576 B"收回 1 KiB（省 3 KiB `.bss`）；256 KiB 传输 7.1 KiB/s、
-   CRC 通过，`accept.py` 24/24。
+6. 收尾：三个队列都收到 1 KiB。raw 环按"最坏调度延迟 = QUANTUM 5 tick =
+   50 ms，115200 只走 576 B"定；USJ 发送环 4 KiB 是按"没人插 USB"设的，
+   缩到 1 KiB 无影响；cooked 行队列从 16 行变 4 行，代价是粘贴预输入深度
+   掉到 **5 行**（4 行排队 + 1 行直接交给 shell）。实测：256 KiB 传输
+   7.1 KiB/s CRC 通过、64 KiB 7.0 KiB/s、`accept.py` 24/24。C3 `.bss`
+   105 984 → 96 720 B。
 
 **尾巴**：本机只插了 CH343（COM13 = UART0），原生 USB 口没线，所以 USJ 的
 RX 中断和 TX 环只在代码层对称实现，没在真机跑到主机侧。插线后要验：用新出现

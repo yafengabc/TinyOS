@@ -54,11 +54,12 @@
  * commits them, and the next write has to wait for the host. */
 #define USJ_PACKET 64
 
-/* Transmit ring.  A power of two so the indices wrap with a mask.  Bigger
- * than one console line and bigger than the UART's own FIFO: the point is
- * that a program printing a screenful never finds the console full just
- * because nobody is plugged into the USB port. */
-#define USJ_TXQ 4096
+/* Transmit ring.  A power of two so the indices wrap with a mask.  It only
+ * has to bridge the gap between a program printing and the IN_EMPTY
+ * interrupt draining the FIFO, i.e. a few console lines - the 4 KiB it
+ * started with was sized for the case where nobody is plugged into the
+ * USB port, where the ring is a lost-cause holding area anyway. */
+#define USJ_TXQ 1024
 #define USJ_TXQ_MASK (USJ_TXQ - 1)
 
 static char txq[USJ_TXQ];

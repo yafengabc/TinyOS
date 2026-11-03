@@ -17,12 +17,19 @@
  * whole rather than losing everything past the first line, and typing
  * still works the same.  The x86 and qemu ports keep polling from the
  * tick and just see a deeper type-ahead. */
-#define TTY_Q_LINES 16
+/* 1 KiB for the whole queue, i.e. four maximum-length lines.  This one is
+ * type-ahead, not rate: a pasted batch of commands is queued here while
+ * the shell runs the previous one, so the depth decides how many lines a
+ * paste may carry before the tail is dropped.  Four is what a 1 KiB total
+ * buys while keeping TTY_LINE_MAX at 256 - the shell's own line buffer is
+ * 256 too, so shrinking the line instead would truncate long commands. */
+#define TTY_Q_LINES 4
 #define TTY_LINE_MAX 256
 
 static char q[TTY_Q_LINES][TTY_LINE_MAX];
 static int  q_len[TTY_Q_LINES];
-static int  q_head, q_tail;            /* ring: tail == head means empty   */
+static int  q_head, q_tail;
+static int  q_cnt;                     /* lines in the queue, 0..TTY_Q_LINES */
 
 static char pending[TTY_LINE_MAX];     /* the line being typed             */
 static int  pending_len;
@@ -132,14 +139,17 @@ static void tty_char(char c)
     if (c == '\n') {
         console_echo("\n", 1);
         /* A full queue drops the line - the reader is too far behind for
-           more type-ahead to mean anything. */
-        int next = (q_tail + 1) % TTY_Q_LINES;
-        if (next != q_head) {
+           more type-ahead to mean anything.  The count is what makes the
+           queue hold TTY_Q_LINES lines: an empty slot as the full marker
+           would waste one, and with four slots that is a quarter of the
+           type-ahead a paste gets. */
+        if (q_cnt < TTY_Q_LINES) {
             int n = pending_len < TTY_LINE_MAX - 1 ? pending_len : TTY_LINE_MAX - 1;
             memcpy(q[q_tail], pending, (size_t)n);
             q[q_tail][n] = '\0';
             q_len[q_tail] = n + 1;
-            q_tail = next;
+            q_tail = (q_tail + 1) % TTY_Q_LINES;
+            q_cnt++;
         }
         pending_len = 0;
         return;
@@ -176,18 +186,19 @@ void tty_poll(void)
 
 int tty_line_ready(void)
 {
-    return q_head != q_tail;
+    return q_cnt > 0;
 }
 
 int tty_take_line(char *dst, int max)
 {
-    if (q_head == q_tail)
+    if (q_cnt == 0)
         return 0;
 
     int n = q_len[q_head] < max ? q_len[q_head] : max;
     if (n > 0)
         memcpy(dst, q[q_head], (size_t)n);
     q_head = (q_head + 1) % TTY_Q_LINES;
+    q_cnt--;
     return n;
 }
 
