@@ -18,7 +18,7 @@
 
 /* The board's default stack size, from layout.c.  It is what a task gets
  * when its image does not ask for anything else; a program can ask with
- * TOS_STACK() (see elf_tos_stack) and the answer lives in proc_t.stack_size,
+ * TOS_STACK() (see elf_tos_note) and the answer lives in proc_t.stack_size,
  * because one board now runs tasks with different stacks at the same time.
  * process_init() checks that the default still works with the grain and the
  * guard; exec() checks each request against the same rules. */
@@ -963,44 +963,61 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         proc_retire(p);
         return NULL;
     }
-    /* What the image says about its own stack, read before the window is
-       sized because the stack is the largest single line item in it.  The
-       default is the board's; a request replaces it only when the port can
-       describe that size - PMP NAPOT and MPU regions are powers of two, and
-       stack_low has to stay aligned to its own size, which is why the grain
-       has to be a multiple of it.  A request the port cannot honour is
-       refused loudly: silently rounding it would leave a program that
-       overflowed its stack with no clue which of the two numbers lied. */
+    /* What the image says about itself, read before the window is sized
+       because both answers are line items in it.  The stack default is the
+       board's; a request replaces it only when the port can describe that
+       size - PMP NAPOT and MPU regions are powers of two, and stack_low has
+       to stay aligned to its own size, which is why the grain has to be a
+       multiple of it.  The heap has no such constraint - the break is a
+       plain address and the PMP entry over it is TOR - so any byte value is
+       a legal floor, and the only question is whether the window fits.
+       A request that cannot be honoured is refused loudly: silently
+       rounding it would leave a program that overflowed its stack, or
+       failed its malloc, with no clue which of the two numbers lied. */
     uint32_t stk = DEFAULT_STACK;
-    uint32_t asked = 0;
-    if (elf_tos_stack(data, size, &asked) == 0 && asked != 0) {
-        if ((asked & (asked - 1u)) != 0 || asked < PLAT_PAGE_SIZE ||
-            PLAT_APP_GRAIN % asked != 0) {
-            kprintf("exec: '%s' asks for a %u-byte stack; this board needs a "
-                    "power of two from %u to %u KiB\n",
-                    path, asked, PLAT_PAGE_SIZE / 1024u, PLAT_APP_GRAIN / 1024u);
-            ramdisk_release(data);
-            proc_retire(p);
-            return NULL;
+    uint32_t heap_ask = 0;
+    uint32_t asked_stack = 0, asked_heap = 0;
+    if (elf_tos_note(data, size, &asked_stack, &asked_heap) == 0) {
+        if (asked_stack != 0) {
+            if ((asked_stack & (asked_stack - 1u)) != 0 ||
+                asked_stack < PLAT_PAGE_SIZE ||
+                PLAT_APP_GRAIN % asked_stack != 0) {
+                kprintf("exec: '%s' asks for a %u-byte stack; this board "
+                        "needs a power of two from %u to %u KiB\n",
+                        path, asked_stack, PLAT_PAGE_SIZE / 1024u,
+                        PLAT_APP_GRAIN / 1024u);
+                ramdisk_release(data);
+                proc_retire(p);
+                return NULL;
+            }
+            stk = asked_stack;
         }
-        stk = asked;
+        heap_ask = asked_heap;
     }
 
     uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
     uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
-    if (span + stk + HEAP_GUARD > app_total) {
-        kprintf("exec: '%s' needs %u KiB, the whole user area is %u KiB\n",
-                path, (span + stk + HEAP_GUARD) / 1024u,
-                app_total / 1024u);
+    /* The window has to hold the image, the stack, whatever heap the
+       program declared as its floor, and the guard hole between heap and
+       stack.  A declared heap is what makes a small image reserve a big
+       window - that is its point - so it is part of the fit check, not an
+       afterthought the malloc path discovers later. */
+    uint32_t win_need = span + stk + heap_ask + HEAP_GUARD;
+    if (win_need > app_total) {
+        kprintf("exec: '%s' needs %u KiB (image %u, stack %u, heap %u), "
+                "the whole user area is %u KiB\n",
+                path, win_need / 1024u, span / 1024u, stk / 1024u,
+                heap_ask / 1024u, app_total / 1024u);
         ramdisk_release(data);
         proc_retire(p);
         return NULL;
     }
 
     /* Size the window to this image and nothing more: a page for what the
-       image rounds up to, the stack, the guard hole.  A small program stops
-       reserving a big program's share. */
-    uint32_t win = align_up(span + stk + HEAP_GUARD, PLAT_APP_GRAIN);
+       image rounds up to, the stack, the declared heap, the guard hole.
+       A small program stops reserving a big program's share; a program
+       that declared a heap gets at least that much of one. */
+    uint32_t win = align_up(win_need, PLAT_APP_GRAIN);
     if (win < PLAT_APP_GRAIN)
         win = PLAT_APP_GRAIN;
 

@@ -32,6 +32,33 @@
         unsigned stack_bytes;                                                \
     } tos_stack_note = { 7u, 4u, 1u, "TinyOS", (unsigned)(bytes) }
 
+/* How much heap this program wants, when what the window would leave is not
+ * it.  Same note channel as TOS_STACK, a different type, so a program can
+ * carry both:
+ *
+ *     TOS_HEAP(24 * 1024);       -- at file scope, once per program
+ *
+ * The kernel reads it before it sizes the window and adds it to the window
+ * cost, next to the stack and the guard hole - the window is the only place
+ * a task's heap can come from, since sbrk() just moves the break between
+ * the image and the stack.  A script engine holding an AST, a program
+ * buffering a file: these ask; a filter that reads a line at a time does
+ * not need to.
+ *
+ * Unlike the stack, the heap has no alignment constraint of its own - the
+ * break is a plain address and the PMP entry that covers it is TOR - so any
+ * byte value is legal, and the only check is that the whole window still
+ * fits the user area.  The request is a floor, not a ceiling: if the window
+ * rounds up past it, the extra belongs to the heap (or to a stack that
+ * faults into it - see process_stack_grow). */
+#define TOS_HEAP(bytes)                                                      \
+    __attribute__((section(".note.tos"), used, aligned(4)))                  \
+    static const struct {                                                    \
+        unsigned namesz, descsz, type;                                       \
+        char     name[8];                                                    \
+        unsigned heap_bytes;                                                 \
+    } tos_heap_note = { 7u, 4u, 2u, "TinyOS", (unsigned)(bytes) }
+
 /* system calls */
 int  write(int fd, const void *buf, int len);
 int  read(int fd, void *buf, int len);

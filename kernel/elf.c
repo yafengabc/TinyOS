@@ -243,16 +243,18 @@ int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
 
 /* ---- what the program says about itself -------------------------------
  *
- * A program can ask for a particular stack instead of taking the board's
- * default: user/lib.h's TOS_STACK() drops an ELF note in .note.tos, user.ld
- * gives that section its own PT_NOTE segment, and this walks it.  It has to
- * be read before the window is sized - the stack is part of the window's
- * cost - and it is a request, not a fact, so process.c validates it against
- * what the port can describe (a power of two that divides the grain).
+ * A program can ask for a particular stack or heap instead of taking what
+ * the window would leave it: user/lib.h's TOS_STACK() and TOS_HEAP() drop
+ * ELF notes in .note.tos, user.ld gives that section its own PT_NOTE
+ * segment, and this walks it.  Both have to be read before the window is
+ * sized - stack and heap are the two line items the window has to hold -
+ * and they are requests, not facts, so process.c validates them against
+ * what the port and the user area can describe.
  *
  * The name has to match: a toolchain is free to add .note.ABI-tag or
  * .note.gnu.property, and those must never be mistaken for a request. */
 #define TOS_NOTE_STACK 1
+#define TOS_NOTE_HEAP  2
 
 static uint32_t le32(const uint8_t *p)
 {
@@ -260,16 +262,20 @@ static uint32_t le32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-int elf_tos_stack(const uint8_t *data, uint32_t size, uint32_t *bytes_out)
+int elf_tos_note(const uint8_t *data, uint32_t size,
+                 uint32_t *stack_out, uint32_t *heap_out)
 {
     const Elf32_Ehdr *eh;
+    int found = 0;
 
-    if (bytes_out)
-        *bytes_out = 0;
+    if (stack_out)
+        *stack_out = 0;
+    if (heap_out)
+        *heap_out = 0;
     if (header_ok(data, size, &eh) != 0)
         return -1;
 
-    for (uint32_t i = 0; i < eh->e_phnum; i++) {
+    for (uint32_t i = 0; i < eh->e_phnum && found < 2; i++) {
         const Elf32_Phdr *ph = phdr_at(data, eh, i);
         uint32_t off, end;
 
@@ -281,8 +287,9 @@ int elf_tos_stack(const uint8_t *data, uint32_t size, uint32_t *bytes_out)
         end = off + ph->p_filesz;
 
         /* A note is three words of header, then the name and the
-           descriptor, each padded to four bytes. */
-        while (off <= end && end - off >= 12) {
+           descriptor, each padded to four bytes.  Keep walking after a
+           hit: a program can carry both a stack and a heap request. */
+        while (off <= end && end - off >= 12 && found < 2) {
             uint32_t namesz   = le32(data + off);
             uint32_t descsz   = le32(data + off + 4);
             uint32_t type     = le32(data + off + 8);
@@ -292,11 +299,17 @@ int elf_tos_stack(const uint8_t *data, uint32_t size, uint32_t *bytes_out)
 
             if (next < desc_off || next > end)
                 break;      /* truncated, or a length that cannot be true */
-            if (type == TOS_NOTE_STACK && namesz >= 6 && descsz >= 4 &&
+            if (namesz >= 6 && descsz >= 4 &&
                 memcmp(data + name_off, "TinyOS", 6) == 0) {
-                if (bytes_out)
-                    *bytes_out = le32(data + desc_off);
-                return 0;
+                if (type == TOS_NOTE_STACK && stack_out &&
+                    *stack_out == 0) {
+                    *stack_out = le32(data + desc_off);
+                    found++;
+                } else if (type == TOS_NOTE_HEAP && heap_out &&
+                           *heap_out == 0) {
+                    *heap_out = le32(data + desc_off);
+                    found++;
+                }
             }
             off = next;
         }

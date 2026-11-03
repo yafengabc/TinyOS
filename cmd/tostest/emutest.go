@@ -159,6 +159,18 @@ func cmdEmutest(args []string) int {
 		// Sharing one region means the first claim wins - which is exactly
 		// why TOS_STACK() still exists for a program that cannot risk it.
 		{"deep, heap in the way", "deep 6 0 8", []string{"store access fault", "tos>"}},
+		// A declared heap is a floor on the window, not a run-time
+		// allocation: wheap's image is one page, but its TOS_HEAP(12 KiB)
+		// note makes the window 32 KiB instead of the 16 a bare image of
+		// this size would take (4 image + 12 heap + 8 stack + 4 guard).
+		// The writes matter - malloc only moves the break, so a break that
+		// ended up somewhere wrong would still "succeed" until the first
+		// store, and the read-back is what says the region is real.
+		{"wheap takes its declared heap", "wheap",
+			[]string{"12 KiB declared, 12 KiB taken, pattern intact"}},
+		{"wheap (parked)", "wheap 3000 &", []string{"tos>"}},
+		{"ps (declared heap)", "ps", []string{"wheap", "  32 "}},
+		{"wait out wheap", "hold 3", []string{"tos>"}},
 		{"cd /dev", "cd /dev", []string{"/dev tos>"}},
 		{"ls (in /dev)", "ls", []string{"gpio4"}},
 		{"cd /", "cd /", []string{"tos>"}},
