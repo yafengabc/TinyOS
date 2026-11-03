@@ -114,14 +114,31 @@ func cmdEmutest(args []string) int {
 		// wink is the window the task actually holds.  The shell's 8 KiB
 		// image plus the 16 KiB stack and the 4 KiB guard rounds up to
 		// 32 KiB - it used to reserve a fixed 64 KiB whatever it needed.
-		{"ps", "ps", []string{"cpu", "wink", "  32  sh"}},
+		// stk is the stack high-water mark: exec() fills the stack with 0xCC
+		// and ps scans up for the first byte that changed, so this column is
+		// the only measurement of how much of the 16 KiB stack is guesswork.
+		{"ps", "ps", []string{"cpums wink stk", "  32 "}},
+		// Four frames of 2 KiB, parked at the bottom: the number ps reports
+		// has to land in the eights.  A scanner that never looked, or that
+		// counted frames the compiler dropped, would read 0.3.
+		{"stk 4", "stk 4 3000 &", []string{"tos>"}},
+		{"ps (stk)", "ps", []string{"  32    8."}},
+		// Let the parked task exit before the window tests below: they fill
+		// the user area exactly, so a leftover task would refuse the fifth
+		// hold and the failure would look like a window bug.
+		{"wait out stk", "hold 3", []string{"tos>"}},
 		{"crash", "crash", []string{"illegal instruction", "tos>"}},
 		{"source etc/rc", "source etc/rc", []string{"tos>"}},
 		// Devices are files, so the table has to be enumerable and entry-able,
 		// not just openable.  This is the only target tested end to end with
 		// peripherals behind it, so it is the one place /dev is not empty.
 		{"ls /dev", "ls /dev", []string{"gpio0", "gpio21"}},
-		{"ls /proc", "ls /proc", []string{"uptime", "ps", "mem"}},
+		{"ls /proc", "ls /proc", []string{"uptime", "ps", "mem", "stack"}},
+		// The record is taken when a task dies, not sampled: stk burned 8.3
+		// KiB and exited during the wait above, and this still reports it.
+		// That is the number that decides whether PLAT_STACK_BYTES is right,
+		// so it has to survive the program it belongs to.
+		{"proc stack", "cat /proc/stack", []string{"high-water", "8.", "stk"}},
 		{"cd /dev", "cd /dev", []string{"/dev tos>"}},
 		{"ls (in /dev)", "ls", []string{"gpio4"}},
 		{"cd /", "cd /", []string{"tos>"}},

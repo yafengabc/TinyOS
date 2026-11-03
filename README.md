@@ -73,6 +73,12 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   `lfs_remove` 对目录是**递归删除**，`rm /bin` 不能真的把 shell 删掉；
   正在被打开的文件也拒绝，否则句柄会继续往已经不在树上的块里写
 - `/proc/lfs`：块设备调用计数（reads / progs / erases），写性能花在哪儿看它
+- **栈高水位**：`exec` 在程序跑起来之前把整块栈填成 `0xCC`，`ps` 的 `stk` 列
+  从栈底往上找第一个被改过的字节，就是它至今最深用到的栈；`/proc/stack` 记的是
+  历史最深的那一次（含已经退出的程序）。真机实测 shell 0.6 KiB、`spin` 0.2、
+  `edit` 0.6 —— 16 KiB 的栈按实测有二十多倍余量，这个数就是将来要不要调小的依据
+- `stk`：`stk 4 3000 &` 递归四层、每层 2 KiB 局部存储然后睡住，专门用来验证
+  上面那个测量本身是对的（`ps` 里必须读到 8.x KiB）
 - 输出同时走 VGA 文本模式和 COM1，可用 `-headless` 直接在终端里玩
 - 其余：PIT 定时器、PS/2 键盘、PIC 重映射、串口
 - **RV32 移植**（`-target rv32`）：M 模式起步、U-mode + `ecall`、CLINT
@@ -260,6 +266,9 @@ tos> adc 0          # 采一次 ADC：raw 计数 + 换算出的毫伏
 tos> cat /proc/ps   # 进程表也是文件；`ps > f.txt` 把它写进文件
 tos> cat /proc/mem  # 内存地图（和 free 同一套数字）
 tos> cat /proc/lfs  # 块设备调用计数：读/写/擦除各多少次
+tos> cat /proc/stack # 栈高水位：历史最深的一次，以及是哪个程序用掉的
+tos> stk 4 3000 &    # 递归四层各 2 KiB 再睡住，验证栈测量本身
+tos> ps              # stk 列 = 每个任务至今最深用到的栈
 tos> dd of=/tmp.bin bs=4096 count=80   # 往扩容区写 320 KiB 图案
 tos> dd if=/tmp.bin bs=4096 count=80   # 逐字节读回校验
 tos> rm /tmp.bin    # 删掉；目录和打开中的文件会被拒绝
@@ -377,11 +386,11 @@ worker 1: cpu 1, 222 blocks in 800 ms
 smp: done
 tos> run smp &
 tos> ps
- pid ppid prio state  c cpu% cpums wink  name
-   1    0    0 run   0    0.7     0   32  sh
-   5    1    0 wait  -    0.0     0   32  smp
-   6    5    0 rdy   -   93.7     0   32  smp
-   7    5    0 run   1   86.5     0   32  smp
+ pid ppid prio state  c cpu% cpums wink stk  name
+   1    0    0 run   0    0.7     0   32   0.6  sh
+   5    1    0 wait  -    0.0     0   32   0.5  smp
+   6    5    0 rdy   -   93.7     0   32   0.4  smp
+   7    5    0 run   1   86.5     0   32   0.4  smp
 ```
 
 两个 worker 各占一个 hart（`c` 列是正在跑它的 CPU），各自接近 100% —— 是真并行，
@@ -525,10 +534,10 @@ tos> nice 1 spin &
 tos> run spin &          # 0 级
 [3]
 tos> ps
- pid ppid prio state  c cpu% cpums wink  name
-   1    0    0 run    -    0.0     0   32  sh
-   2    1    1 rdy    -   51.3     0   32  spin
-   3    1    0 rdy    -  100.0     0   32  spin
+ pid ppid prio state  c cpu% cpums wink stk  name
+   1    0    0 run    -    0.0     0   32   0.6  sh
+   2    1    1 rdy    -   51.3     0   32   0.2  spin
+   3    1    0 rdy    -  100.0     0   32   0.2  spin
 ```
 
 0 级的 `spin[3]` 会先打完自己的 6 条输出，1 级的 `spin[2]` 一条都插不进来；
@@ -540,9 +549,9 @@ tos> ps
 tos> run spin &
 [2]
 tos> ps
- pid ppid prio state  c cpu% cpums wink  name
-   1    0    0 run    -    0.0     0   32  sh
-   2    1    0 rdy    -   70.0     0   32  spin
+ pid ppid prio state  c cpu% cpums wink stk  name
+   1    0    0 run    -    0.0     0   32   0.6  sh
+   2    1    0 rdy    -   70.0     0   32   0.2  spin
 ```
 
 `rdy` 的意思是"可运行、这一瞬间不在 CPU 上"。`spin` 是个只烧 CPU、从不主动让出的

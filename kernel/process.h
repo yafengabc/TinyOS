@@ -98,6 +98,12 @@ int  process_ioctl(int fd, int cmd, int arg);
  * Returns the number of bytes written; output is truncated, not overrun. */
 uint32_t process_ps_text(char *buf, uint32_t cap);
 
+/* Deepest stack any task has ever used, in bytes, and (in `name`, copied and
+ * NUL terminated) which task reached it.  The record survives the task, so a
+ * program that has already exited still answers "was 16 KiB of stack the
+ * right number?" - see the stk column of ps for the live value. */
+uint32_t process_stack_peak(char *name, uint32_t cap);
+
 /* Current working directory of the calling task.  chdir()/getcwd() and the
  * directory-relative open/stat/readdir syscalls ride on this. */
 const char *process_cwd_str(void);

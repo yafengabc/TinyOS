@@ -21,6 +21,16 @@
  * numbers.  process_init() checks the combination. */
 #define STACK_BYTES PLAT_STACK_BYTES
 
+/* Byte written over a new task's stack, and the value stack_used() looks for.
+ * 0xCC is the usual x86 int3 fill; any constant works, the only requirement
+ * being that a program is unlikely to write it as its first stack byte (which
+ * would make the measurement read short). */
+#define STACK_POISON 0xCC
+
+/* Defined next to process_ps_text(), which is where it is used for display;
+ * task_release() needs it too, and proc_t is not a type yet at this point. */
+static uint32_t stack_used(const struct proc *p);
+
 /* Left unmapped between the heap and the stack: a heap that runs off its
  * end and a stack that runs off its bottom then fault instead of eating
  * each other.  The size lives in platform.h because the port that maps the
@@ -1038,6 +1048,14 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     p->stack_top = base + win;
     p->heap_base = base + span;
     p->heap_end = p->stack_top - STACK_BYTES - HEAP_GUARD;
+
+    /* Fill the stack with a poison byte before anything uses it, so the
+       deepest address the program ever wrote to can be recovered later: the
+       first byte from the bottom that is no longer 0xCC is the high-water
+       mark (see stack_used()).  Done here, before build_initial_stack()
+       writes argv on top, so the arguments count as usage - they are memory
+       the program can see. */
+    memset((void *)(p->stack_top - STACK_BYTES), STACK_POISON, STACK_BYTES);
     p->entry = entry;
     p->brk = p->heap_base;
     set_name(p, path);
@@ -1126,11 +1144,47 @@ int process_setprio(int pid, int prio)
 
 /* ---- exit ------------------------------------------------------------ */
 
+/* Deepest stack any task has ever used, and which task it was: the record
+ * outlives the task, because the programs whose stack use matters most are
+ * the ones that finish (a `cat` of a large file, an `edit` save).  Updated
+ * where a task dies, while its window is still its own.  A torn read on SMP
+ * (two tasks exiting at once) can pair one task's number with another's name;
+ * that is a diagnostic, not state anything acts on. */
+static struct {
+    uint32_t bytes;
+    char     name[10];
+} stack_peak;
+
+uint32_t process_stack_peak(char *name, uint32_t cap)
+{
+    uint32_t bytes = stack_peak.bytes;
+
+    if (name && cap) {
+        uint32_t i = 0;
+        for (; i + 1 < cap && stack_peak.name[i]; i++)
+            name[i] = stack_peak.name[i];
+        name[i] = '\0';
+    }
+    return bytes;
+}
+
 /* Close a task's files and give back its window.  Shared by process_exit()
  * (the task exits itself) and process_signal() (SIGKILL against somebody
  * else). */
 static void task_release(proc_t *p)
 {
+    uint32_t used = stack_used(p);
+
+    if (used > stack_peak.bytes) {
+        stack_peak.bytes = used;
+        for (uint32_t i = 0; i + 1 < sizeof(stack_peak.name); i++) {
+            stack_peak.name[i] = p->name[i];
+            if (!p->name[i])
+                break;
+        }
+        stack_peak.name[sizeof(stack_peak.name) - 1] = '\0';
+    }
+
     for (int i = 0; i < MAX_FDS; i++)
         fd_close_in(p, i);
     /* A full-screen program that dies (^C, a crash, a plain exit) must not
@@ -1359,6 +1413,34 @@ static const char *state_name(int st)
     }
 }
 
+/* How deep into its stack a task has ever been, in bytes.
+ *
+ * exec() fills the stack with STACK_POISON before the program gets to run, so
+ * the first byte still holding the poison, counting up from the bottom of the
+ * stack, marks the deepest address anything has written: everything above it
+ * has been touched at least once and nothing below it ever was.  Returned as
+ * the distance from that address to stack_top, which is what a program would
+ * have used had it grown down from the first instruction.
+ *
+ * Reading a live task's stack from another CPU is safe for the same reason
+ * reading its registers is: it is a read of memory that task owns and nobody
+ * else writes, and the worst outcome of racing it is a value one context
+ * switch stale.  A task that turned out to be bigger than the poison run
+ * reads as full - the measurement can only be short if a program writes 0xCC
+ * as its lowest stack byte, which is why STACK_POISON is not 0x00. */
+static uint32_t stack_used(const proc_t *p)
+{
+    const uint8_t *low;
+    uint32_t i = 0;
+
+    if (p->win_size == 0 || p->stack_top == 0 || STACK_BYTES == 0)
+        return 0;
+    low = (const uint8_t *)(p->stack_top - STACK_BYTES);
+    while (i < STACK_BYTES && low[i] == STACK_POISON)
+        i++;
+    return STACK_BYTES - i;
+}
+
 /* Format the process table into `buf`, returning the bytes written.
  *
  * Both `ps` and /proc/ps come through here.  The alternative - a kprintf
@@ -1373,7 +1455,9 @@ static const char *state_name(int st)
  * its share of the machine since the task started.  The `c` column is the CPU
  * running it right now ("-" when it is not on one): on a two-hart build it is
  * what makes two tasks both saying "run" readable, and it is how a program
- * checks that it migrated. */
+ * checks that it migrated.  `stk` is the stack high-water mark in KiB with
+ * one decimal - the number that says whether the board's PLAT_STACK_BYTES is
+ * the right size rather than a guess. */
 uint32_t process_ps_text(char *buf, uint32_t cap)
 {
     uint32_t off;
@@ -1383,7 +1467,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
     if (!buf || cap < 64)
         return 0;
 
-    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums wink  name\n");
+    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums wink stk  name\n");
     if (n < 0)
         return 0;
     off = (uint32_t)n;
@@ -1391,7 +1475,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
         char cpubuf[4];
-        uint32_t age, busy, pct10;
+        uint32_t age, busy, pct10, stk10;
 
         if (p->state == ST_FREE)
             continue;
@@ -1417,13 +1501,19 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
         if (pct10 > 9999u)
             pct10 = 9999u;
 
+        /* Tenths of a KiB: a task whose deepest call used 1.4 KiB is the
+           common case here, and whole KiB would round it to a 1 or a 2 that
+           says nothing about whether the board's stack size is generous. */
+        stk10 = stack_used(p) * 10u / 1024u;
+
         if (off >= cap - 1)
             break;
         n = ksnprintf(buf + off, cap - off,
-                      "%4d %4d %4d %s %2s %4u.%u %5u %4u  %s\n", p->pid,
+                      "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u  %s\n", p->pid,
                       p->parent ? p->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
-                      busy / 1000u, p->win_size / 1024u, p->name);
+                      busy / 1000u, p->win_size / 1024u,
+                      stk10 / 10u, stk10 % 10u, p->name);
         if (n > 0)
             off += (uint32_t)n;
     }
@@ -1433,9 +1523,10 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
 int process_dump(void)
 {
     /* A stack buffer, not kmalloc: this runs from a syscall, the table is
-     * bounded at 16 rows (~810 bytes), and 1 KiB is small next to the 32 KiB
-     * kernel stack.  kmalloc could fail here, and "ps stops working when the
-     * heap is full" is a poor answer to "what is using the heap". */
+     * bounded at 16 rows (~950 bytes with the stack column), and 1.5 KiB is
+     * small next to the 32 KiB kernel stack.  kmalloc could fail here, and
+     * "ps stops working when the heap is full" is a poor answer to "what is
+     * using the heap". */
     char buf[1536];
     uint32_t n = process_ps_text(buf, sizeof(buf));
     int count = 0;

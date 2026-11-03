@@ -117,6 +117,26 @@ static uint32_t fmt_lfs(char *b, uint32_t cap)
     return off;
 }
 
+/* The stack question, answered with a number instead of a guess: PLAT_STACK_BYTES
+ * is per task of every task window, so if the deepest stack any program has
+ * ever used is a tenth of it, that tenth is what the layout should reserve.
+ * Reported in KiB with one decimal because the interesting values here are
+ * 0.6 and 1.2, not 0 and 1. */
+static uint32_t fmt_stack(char *b, uint32_t cap)
+{
+    char name[12];
+    uint32_t used = process_stack_peak(name, sizeof(name));
+    uint32_t d10 = used * 10u / 1024u;
+    uint32_t off = 0;
+
+    off = put(b, cap, off, "stack high-water mark\n");
+    off = put(b, cap, off, "  peak    %3u.%u KiB  by %s\n",
+              d10 / 10u, d10 % 10u, used ? name : "-");
+    off = put(b, cap, off, "  window  %3u KiB per task (PLAT_STACK_BYTES)\n",
+              PLAT_STACK_BYTES / 1024u);
+    return off;
+}
+
 static int proc_open(const dev_t *d, void **priv)
 {
     char *b;
@@ -135,6 +155,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_mem(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/lfs"))
         n = fmt_lfs(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/stack"))
+        n = fmt_stack(b, PROC_CAP);
     else {
         kfree(b);
         return -1;
@@ -196,4 +218,5 @@ void procfs_init(void)
     devfs_register("proc/ps",     &proc_ops, NULL);
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);
+    devfs_register("proc/stack",  &proc_ops, NULL);
 }
