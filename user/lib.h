@@ -10,6 +10,9 @@ int  read(int fd, void *buf, int len);
 int  exec(const char *path, char *const argv[], int argc);
 int  open(const char *path);
 int  create(const char *path);
+/* Remove a file.  Fails if it is a directory, a device node, or open
+ * somewhere (see unlink_locked in kernel/ramdisk.c). */
+int  unlink(const char *path);
 int  close(int fd);
 /* Configuration on an open device (GPIO_OP_* / ADC_OP_*).  Reading and
  * writing the descriptor covers values; this covers everything else. */

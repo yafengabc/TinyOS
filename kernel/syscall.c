@@ -239,6 +239,25 @@ static regs_t *dispatch(regs_t *r)
         return r;
     }
 
+    case SYS_UNLINK: {
+        char upath[64];
+        if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        char path[64];
+        resolve_path(upath, path, sizeof(path));
+        /* Device nodes and the two device directories are not files.  Refuse
+         * explicitly: letting littlefs answer "no such file" for something
+         * `ls` just showed is the kind of error that reads as a bug. */
+        if (devfs_dir_count(path) >= 0 || devfs_lookup(path)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)ramdisk_unlink(path));
+        return r;
+    }
+
     case SYS_CLOSE:
         process_fd_close((int)sc.a0);
         plat_frame_set_ret(r, 0);

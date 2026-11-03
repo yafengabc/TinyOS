@@ -35,6 +35,11 @@ int close(int fd)
     return tos_sys1(SYS_CLOSE, fd);
 }
 
+int unlink(const char *path)
+{
+    return tos_sys1(SYS_UNLINK, (int)path);
+}
+
 int readdir(int index, char *name, int len)
 {
     return tos_sys3(SYS_READDIR, index, (int)name, len);

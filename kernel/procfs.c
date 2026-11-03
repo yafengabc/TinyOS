@@ -4,6 +4,7 @@
 #include "console.h"
 #include "platform.h"
 #include "process.h"
+#include "ramdisk.h"
 #include "string.h"
 
 /* Everything under /proc is a snapshot taken at open() time: the text is
@@ -97,6 +98,25 @@ static uint32_t fmt_mem(char *b, uint32_t cap)
     return off;
 }
 
+/* Block-device call counters.  Read them around one operation to see where
+ * the time goes: on a 3 MiB write the C3 reports ~5,900 progs of 512 bytes
+ * and ~740 block erases, which is why the wall clock is dominated by the
+ * erase time and not by how the writes are batched. */
+static uint32_t fmt_lfs(char *b, uint32_t cap)
+{
+    struct lfs_io_stats s;
+    uint32_t off = 0;
+
+    ramdisk_io_stats(&s);
+    off = put(b, cap, off, "lfs block device\n");
+    off = put(b, cap, off, "  reads     %8u (%u sectors)\n",
+              s.reads, s.read_sectors);
+    off = put(b, cap, off, "  progs     %8u (%u bytes)\n",
+              s.progs, s.prog_bytes);
+    off = put(b, cap, off, "  erases    %8u\n", s.erases);
+    return off;
+}
+
 static int proc_open(const dev_t *d, void **priv)
 {
     char *b;
@@ -113,6 +133,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = process_ps_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/lfs"))
+        n = fmt_lfs(b, PROC_CAP);
     else {
         kfree(b);
         return -1;
@@ -173,4 +195,5 @@ void procfs_init(void)
     devfs_register("proc/uptime", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
     devfs_register("proc/mem",    &proc_ops, NULL);
+    devfs_register("proc/lfs",    &proc_ops, NULL);
 }

@@ -122,6 +122,29 @@ func cmdEmutest(args []string) int {
 		{"cd /dev", "cd /dev", []string{"/dev tos>"}},
 		{"ls (in /dev)", "ls", []string{"gpio4"}},
 		{"cd /", "cd /", []string{"tos>"}},
+		// The image is built small (600 sectors = 300 KiB) and the kernel
+		// grows it to the real partition on mount (ramdisk_init ->
+		// lfs_fs_grow, PLAT_LFS_BLOCKS = 896 blocks).  df's total is the
+		// only place the grown size shows; 307200 would mean the grow did
+		// not happen and the FS is still living in the shipped image.
+		{"df (grown)", "df", []string{"3670016"}},
+		// dd writes 320 KiB = 80 blocks: the shipped image only has ~40
+		// free ones, so allocation must spill into the grown tail and the
+		// pattern must read back identical.  This is the end-to-end proof
+		// that blocks beyond the image are usable, not just addressable.
+		{"dd write (grown tail)", "dd of=/big.bin bs=4096 count=80",
+			[]string{"wrote 327680 bytes"}},
+		{"dd verify", "dd if=/big.bin bs=4096 count=80",
+			[]string{"pattern verified"}},
+		// unlink.  A directory is refused (lfs_remove would delete it
+		// recursively and take /bin with it), a missing name is refused, and
+		// a removed file is gone for good - the read side can no longer open
+		// it, which is the only proof that the tree, not just the handle,
+		// lost the entry.
+		{"rm refuses a directory", "rm /bin", []string{"cannot remove /bin"}},
+		{"rm missing file", "rm /nope", []string{"cannot remove /nope"}},
+		{"rm", "rm /big.bin", []string{"tos>"}},
+		{"dd after rm", "dd if=/big.bin", []string{"cannot open /big.bin"}},
 	}
 	for _, c := range checks {
 		tstart := time.Now()

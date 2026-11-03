@@ -30,6 +30,11 @@ typedef struct {
     struct lfs_file_config fc;   /* points at `cache` under LFS_NO_MALLOC */
     uint8_t *cache;
     uint32_t size;
+    /* The path this handle was opened with, so unlink() can refuse to
+     * delete a file somebody still holds open (see unlink_locked).  Same
+     * length as the resolve_path() buffer in syscall.c, and copied rather
+     * than pointed at because that buffer is the caller's. */
+    char     path[64];
 } ofile_t;
 
 static lfs_t lfs;
@@ -103,6 +108,19 @@ static uint32_t block_lba(lfs_block_t block, lfs_off_t off)
     return PLAT_LFS_LBA + (byte >> 9);
 }
 
+/* ---- block device ------------------------------------------------------
+ *
+ * Counters behind /proc/lfs.  Cheap enough not to guard behind a #ifdef:
+ * five increments per block-device call, next to a 4 KiB flash operation.
+ *
+ * There used to be a 512-byte write-coalescing buffer here, to absorb the
+ * four-byte CTZ pointer updates littlefs makes while a file grows.  Measured
+ * on a C3 it never carried a single byte: littlefs's prog_size equals the
+ * device sector, so every prog arrives 512-aligned and goes straight to the
+ * device.  The counters are what showed that, so they stayed and the buffer
+ * did not. */
+static struct lfs_io_stats io_stats;
+
 static int bd_read(const struct lfs_config *c, lfs_block_t block,
                    lfs_off_t off, void *buffer, lfs_size_t size)
 {
@@ -117,6 +135,8 @@ static int bd_read(const struct lfs_config *c, lfs_block_t block,
         return LFS_ERR_IO;
     }
 
+    io_stats.reads++;
+    io_stats.read_sectors += count;
     if (plat_block_read(PLAT_LFS_LBA + first, count, bounce) != 0) {
         kprintf("[lfs] read FAIL block=%u off=%u size=%u abs_lba=%u count=%u\n",
                 (uint32_t)block, (uint32_t)off, (uint32_t)size,
@@ -139,7 +159,18 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block,
     if (count > FS_BLOCK_SIZE / 512)
         return LFS_ERR_IO;
 
-    /* Read-modify-write: a littlefs prog is rarely sector aligned. */
+    io_stats.progs++;
+    io_stats.prog_bytes += size;
+
+    /* A littlefs prog is sector aligned in the common case (prog_size and
+     * the device sector are both 512), and then the read-modify-write below
+     * is pure overhead: it reads a sector that is about to be overwritten.
+     * Going straight through halved the sector reads on a 3 MiB write. */
+    if ((byte & 0x1FF) == 0 && (size & 0x1FF) == 0)
+        return plat_block_write(PLAT_LFS_LBA + first, size >> 9, buffer) == 0
+                   ? 0 : LFS_ERR_IO;
+
+    /* Unaligned: read the sectors in, patch, write them back. */
     if (plat_block_read(PLAT_LFS_LBA + first, count, bounce) != 0)
         return LFS_ERR_IO;
     memcpy(bounce + (byte & 0x1FF), buffer, size);
@@ -151,12 +182,16 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block,
 static int bd_erase(const struct lfs_config *c, lfs_block_t block)
 {
     (void)c;
+    uint32_t lba = PLAT_LFS_LBA + ((uint32_t)block * FS_BLOCK_SIZE >> 9);
+    uint32_t n = FS_BLOCK_SIZE / 512;
+
+    io_stats.erases++;
+
     /* The platform turns the whole 4 KiB block back to the erased value:
        a real NOR erase on flash-backed boards (writing 0xFF over
        programmed bits would be a no-op there), an 0xFF fill on RAM or
        plain-write media. */
-    uint32_t lba = PLAT_LFS_LBA + ((uint32_t)block * FS_BLOCK_SIZE >> 9);
-    if (plat_block_erase(lba, FS_BLOCK_SIZE / 512) != 0)
+    if (plat_block_erase(lba, n) != 0)
         return LFS_ERR_IO;
     return 0;
 }
@@ -164,6 +199,9 @@ static int bd_erase(const struct lfs_config *c, lfs_block_t block)
 static int bd_sync(const struct lfs_config *c)
 {
     (void)c;
+    /* Every prog already reached the device, so there is nothing to flush.
+     * (A write-back cache here was tried and measured: littlefs's
+     * prog_size equals the sector size, so it never carried a byte.) */
     return 0;
 }
 
@@ -322,7 +360,15 @@ void ramdisk_init(void)
     cfg.read_size      = 512;             /* one disk sector */
     cfg.prog_size      = 512;
     cfg.block_size     = FS_BLOCK_SIZE;
-    cfg.block_count    = PLAT_LFS_BLOCKS;
+    /* block_count=0 tells littlefs to take the size from the image's
+     * superblock instead of checking it against the device (lfs.c: "this
+     * is where we get the block_count from disk if block_count=0").  The
+     * shipped image is built small (RamdiskSectors in build.go) and
+     * lfs_fs_grow below re-commits the superblock for whatever the real
+     * partition says, so a 300 KiB flash image grows into the rest of a
+     * 4 MiB chip on first boot.  When image and device already agree the
+     * grow is a no-op, so every board runs the same code. */
+    cfg.block_count    = 0;
     cfg.cache_size     = FS_CACHE_SIZE;
     cfg.lookahead_size = FS_CACHE_SIZE;
     cfg.block_cycles   = 100;
@@ -346,6 +392,16 @@ void ramdisk_init(void)
                 PLAT_LFS_LBA);
         return;
     }
+
+    /* Grow to the real partition size.  littlefs 2.9 decides free blocks by
+     * tree reachability (lfs_alloc_scan walks every referenced block), not
+     * by erased state, and erases a block the first time it allocates it -
+     * so a tail that still holds an old image is simply reclaimed block by
+     * block, no erase pass needed.  Failure keeps the (smaller) mounted
+     * filesystem working; only the extra space is lost. */
+    if (lfs_fs_grow(&lfs, PLAT_LFS_BLOCKS) < 0)
+        kprintf("[ramdisk] warning: fs grow to %u blocks failed\n",
+                PLAT_LFS_BLOCKS);
 
     /* Readdir walks the tree on demand, so there is nothing to snapshot. */
     ok = 1;
@@ -438,6 +494,38 @@ static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
     if (type)
         *type = (info.type == LFS_TYPE_DIR) ? 1 : 0;
     return 0;
+}
+
+/* Remove a file.  Two refusals, both for good reason:
+ *
+ *   - directories: lfs_remove() deletes a directory *recursively*, so a
+ *     stray `rm /bin` would take the shell with it.  Nothing in the system
+ *     creates a directory at runtime anyway.
+ *   - open files: littlefs would update the parent's metadata and leave the
+ *     live handle pointing at blocks that are no longer in the tree, so the
+ *     next write goes to free space and the file "comes back" as garbage.
+ *     Compared by path, which is why ofile_t carries one.
+ *
+ * The snapshot is dropped: a listing taken before the removal must not
+ * survive it. */
+static int unlink_locked(const char *path)
+{
+    if (!ok)
+        return -1;
+
+    struct lfs_info info;
+    if (lfs_stat(&lfs, path, &info) < 0)
+        return -1;
+    if (info.type == LFS_TYPE_DIR)
+        return -1;
+
+    for (int i = 0; i < MAX_OPEN; i++) {
+        if (openfiles[i].used && !strcmp(openfiles[i].path, path))
+            return -1;
+    }
+
+    dent_drop();
+    return lfs_remove(&lfs, path) < 0 ? -1 : 0;
 }
 
 /* Report littlefs partition usage.  `total` is the configured volume size;
@@ -541,6 +629,8 @@ static int open_with(const char *path, int flags)
 
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
+    strncpy(openfiles[h].path, path, sizeof(openfiles[h].path) - 1);
+    openfiles[h].path[sizeof(openfiles[h].path) - 1] = '\0';
     return h;
 }
 
@@ -606,6 +696,8 @@ static int create_locked(const char *path)
 
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
+    strncpy(openfiles[h].path, path, sizeof(openfiles[h].path) - 1);
+    openfiles[h].path[sizeof(openfiles[h].path) - 1] = '\0';
     return h;
 }
 
@@ -708,6 +800,23 @@ int ramdisk_stat(const char *path, uint32_t *size, uint8_t *type)
     r = stat_locked(path, size, type);
     spin_unlock(&fs_lock);
     return r;
+}
+
+int ramdisk_unlink(const char *path)
+{
+    int r;
+
+    spin_lock(&fs_lock);
+    r = unlink_locked(path);
+    spin_unlock(&fs_lock);
+    return r;
+}
+
+void ramdisk_io_stats(struct lfs_io_stats *s)
+{
+    spin_lock(&fs_lock);
+    *s = io_stats;
+    spin_unlock(&fs_lock);
 }
 
 int ramdisk_df(uint32_t *total, uint32_t *used)

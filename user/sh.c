@@ -118,6 +118,9 @@ static void cmd_help(void)
     puts("  smp                run one worker per CPU, in parallel\n");
     puts("  reboot             reset the machine and boot again\n");
     puts("  df                 filesystem usage\n");
+    puts("  dd of=f bs=n count=n  write n blocks of a test pattern; with\n");
+    puts("                     if=f instead of of= read back and verify\n");
+    puts("  rm <file>...       remove files\n");
     puts("  free               RAM map and kernel heap usage\n");
     puts("  ps                 list tasks\n");
     puts("  cat /proc/ps       the same table as a file (also /proc/mem,\n");
@@ -381,6 +384,21 @@ static int run_command(char *s)
         if (getcwd(buf, sizeof(buf)) > 0) {
             puts(buf);
             puts("\n");
+        }
+    } else if (!strcmp(args[0], "rm")) {
+        /* A builtin rather than a /bin program: one syscall per name and a
+         * message, which a separate 500-byte binary would not improve.  It
+         * also runs before the fork, so `rm` cannot be made to fail for
+         * interesting reasons on a full filesystem. */
+        if (ac < 2) {
+            puts("usage: rm <file>...\n");
+        } else {
+            for (int i = 1; i < ac; i++)
+                if (unlink(args[i]) < 0) {
+                    puts("rm: cannot remove ");
+                    puts(args[i]);
+                    puts("\n");
+                }
         }
     } else if (!strcmp(args[0], "ps")) {
         /* Through /proc, not through the ps() syscall: the syscall writes

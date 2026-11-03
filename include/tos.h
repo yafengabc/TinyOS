@@ -34,6 +34,7 @@
 #define SYS_PIPE     28  /* pipe(int fds[2]) -> 0 or -1          */
 #define SYS_DUP2     29  /* dup2(old, new) -> new or -1          */
 #define SYS_IOCTL    30  /* ioctl(fd, cmd, arg) -> depends on cmd */
+#define SYS_UNLINK   31  /* unlink(path) -> 0 or -1             */
 
 /* Signals.  There are no handlers: a signal either kills the task or parks
  * it, both decided by the kernel. */

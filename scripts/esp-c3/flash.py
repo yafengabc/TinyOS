@@ -6,6 +6,12 @@ Two images go to flash: the kernel at offset 0 and the littlefs image at
 kernel).  Writing the second one replaces whatever the filesystem held, so
 pass --keep-fs to update only the kernel.
 
+The FS image is only 300 KiB while the partition is 3.5 MiB: on first mount
+the kernel takes the size from the image superblock and lfs_fs_grow()s into
+the real partition.  littlefs 2.9 finds free blocks by tree reachability and
+erases on first use, so whatever an older 3.5 MiB image left in the tail is
+reclaimed block by block - no erase_region pass is needed.
+
     scripts/esp-c3/flash.py                  # build is assumed done
     scripts/esp-c3/flash.py --build          # tos build -target esp32c3 first
     scripts/esp-c3/flash.py --keep-fs -p COM4

@@ -53,10 +53,14 @@ type Target struct {
 	RamdiskSectors int
 
 	// HeapBytes is the size of the kernel heap arena (kernel/heap.c), passed
-	// in as TOS_HEAP_BYTES.  It is per-target because the arena is .bss: on
-	// the C3 there is ~50 KiB of unused SRAM between the end of .bss and
-	// the first task window, while the RP2040 only reserves 128 KiB of its
-	// 264 KiB for everything the kernel needs.  0 keeps heap.c's default.
+	// in as TOS_HEAP_BYTES.  0 keeps heap.c's default of 32 KiB, which is
+	// what every target now uses: the C3 briefly asked for 64 KiB to soak up
+	// the ~50 KiB that was free between the end of .bss and the first task
+	// window, but that put the kernel at 175.8 KiB of its 176 KiB budget -
+	// 240 bytes of headroom - while the measured peak never went past
+	// 11.6 KiB (writing 3 MiB, littlefs working set included).  The option
+	// stays for a board that genuinely needs a bigger arena; the C3 is not
+	// one, and its 32 KiB of headroom is worth more than an idle arena.
 	HeapBytes int
 
 	// CPUs is how many harts this target is built for.  0 and 1 mean the
@@ -71,7 +75,13 @@ type Target struct {
 var Targets = map[string]Target{
 	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk", RamdiskSectors: 600},
 	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded", RamdiskSectors: 600},
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 7168, HeapBytes: 64 * 1024},
+	// The shipped littlefs image is small (600 sectors = 300 KiB, same as
+	// every other target): the kernel mounts it with block_count=0 (take
+	// the size from the image superblock) and calls lfs_fs_grow to stretch
+	// it over the real partition, PLAT_LFS_BLOCKS = 896 blocks = 3.5 MiB.
+	// That is what keeps the flashed artifact at 300 KiB while the
+	// filesystem still gets the whole 4 MiB part.
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
 
@@ -80,6 +90,12 @@ var Targets = map[string]Target{
 	// the spin lock is made of (arch/rv32/platform.c), and the plain rv32
 	// target keeps rv32imc so the ESP32-C3's ISA stays the reference.
 	"rv32smp": {Name: "rv32smp", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "embedded", RamdiskSectors: 600, CPUs: 2},
+
+	// rv32nc = rv32im, no C extension: the same machine as rv32 without
+	// compressed instructions.  Exists so the cost/benefit of RVC can be
+	// measured per release (see docs/SIZE-NOTES.md if present); the ELF
+	// links identically, only the encoding differs.
+	"rv32nc": {Name: "rv32nc", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32im", FSBacking: "embedded", RamdiskSectors: 600},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.

@@ -23,7 +23,25 @@ int      ramdisk_list_count(const char *dirpath);
 int      ramdisk_list_name(const char *dirpath, uint32_t index, char *buf,
                            int cap);
 int      ramdisk_stat(const char *path, uint32_t *size, uint8_t *type);
+/* Remove a file.  Directories are refused: an empty directory would need a
+ * second syscall (rmdir) to mean anything, and nothing in the system creates
+ * one at runtime. */
+int      ramdisk_unlink(const char *path);
 int      ramdisk_df(uint32_t *total, uint32_t *used);
+
+/* Block-device call counters, exposed through /proc/lfs.  Profiling aid:
+ * comparing these against the number of bytes a command wrote says where the
+ * time goes.  On the C3, writing 3 MiB is 5,934 progs of 512 bytes and 743
+ * block erases - the erases alone are about half the wall clock, which is
+ * why coalescing writes further bought nothing. */
+struct lfs_io_stats {
+    uint32_t reads;          /* bd_read calls          */
+    uint32_t read_sectors;   /* sectors those read     */
+    uint32_t progs;          /* bd_prog calls          */
+    uint32_t prog_bytes;     /* bytes written through  */
+    uint32_t erases;         /* block erases           */
+};
+void     ramdisk_io_stats(struct lfs_io_stats *s);
 
 /* Stream-style access used by the fd layer (open/read/close). */
 int      ramdisk_open(const char *path);   /* returns handle, -1 on error */

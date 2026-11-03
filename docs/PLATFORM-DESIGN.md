@@ -413,8 +413,8 @@ ELF 头 + 6 个程序头 244 B、`.dynamic` 64 B、段头表 + `.shstrtab` 240 B
 **单文件多入口的代价**（都可接受，但要写下来）：
 
 - 每次 `exec` 解压整块（6.5 KB → 8.8 KB），而不是几百字节的 applet。
-- 内核堆峰值 = 压缩 6,548 + 解压 8,776 = 15.3 KB，占默认 32 KiB arena 的一半多一点
-  （C3 的 arena 是 64 KiB，见下方"内核堆"一节）。真在意就把
+- 内核堆峰值 = 压缩 6,548 + 解压 8,776 = 15.3 KB，占 32 KiB arena 的一半多一点
+  （C3 曾经配到 64 KiB，2026-11-03 已收回，见下方"内核堆"一节）。真在意就把
   busybox 不压缩存（8,776 B，+2.2 KB flash），峰值降回 8.8 KB。
 - rp2040 的镜像预算 = 窗口 32 KiB − 栈 16 KiB − 护栏 4 KiB = 12 KiB，8.1 KB 的 busybox
   只剩 3.9 KiB 余量（约 8 个 applet，再多就 `exec: does not fit a 32 KiB task window`）。
@@ -834,14 +834,41 @@ littlefs 分区烧在 flash 偏移 0x80000（`PLAT_LFS_LBA=1024`，前 512 KiB �
 
 - **读 = ROM `esp_rom_spiflash_read`（0x40000130）**。ROM bootloader 已探测好芯片，
   零初始化即可用；dest 需 4 字节对齐。
-- **写 = ROM `esp_rom_spiflash_write`（0x4000012c）**，外加最小变更比对：跳过与
-  flash 现值相同的字（NOR 编程只能 1→0，重复编程同地址属非法）；需要 1→0 翻转
-  说明漏了擦除，返回错误。
+- **写 = ROM `esp_rom_spiflash_write`（0x4000012c）**，直写。第一版带"最小变更
+  比对"（先读回扇区、只编程与现值不同的字；NOR 只能 1→0，重复编程同地址属非法），
+  正确但慢一倍：每个扇区多一次 512 B 读 + 一遍逐字比较，实测 44 KiB/s（2026-11-03）。
+  唯一调用者 littlefs 只往刚擦过的块里写，每个要写的位本来就是 1，没什么可比的；
+  擦除本身的正确性由 `spi1_command` 的 R/W/SC 位保证（命令位在芯片 busy 期间不清零，
+  所以它返回时擦除真的完成了）。去掉比对后读次数减半、墙钟 +13%。
 - **擦 = SPI1 控制器（SPI_MEM #1 @0x60002000）硬件命令位** `FLASH_WREN`（bit30）
   + `FLASH_SE`（bit24，地址在 ADDR_REG，4 KiB/扇区）。**ROM 的三个擦除入口全部
   不可用**：`esp_rom_spiflash_erase_sector` 与高层 `spi_flash_erase_sector` 返回
   0 但不擦（写过的 pattern 跨复位幸存），旧 API `SPI_sector_erase` 直接返回
   FAIL。硬件命令位是 R/W/SC：写 1 触发、完成自清，控制器自动轮询芯片 busy。
+
+**小镜像 + 首启扩容（2026-11-03）**：烧录的 littlefs 镜像只有 300 KiB（600 扇区，
+与其他目标同规格），分区是 3.5 MiB（896 块）。`ramdisk_init` 挂载时
+`cfg.block_count = 0`——littlefs 从镜像超级块取尺寸、不与设备比对（lfs.c 的
+"block_count=0" 分支）——挂载成功后 `lfs_fs_grow(PLAT_LFS_BLOCKS)` 把超级块
+改成 896。分配上这依赖 **v2.9 的树可达性判空闲**：`lfs_alloc_scan` 遍历整棵
+文件树标记被引用块，其余一律视为空闲，**不看擦除态**；块在首次分配时才擦
+（`lfs_ctz_extend` 拿到块后紧跟 `lfs_bd_erase`）。所以旧 3.5 MiB 镜像在尾部
+留下的脏数据会被逐块自动回收，烧录不需要 `erase_region` 前置。emutest 用
+`df`（应报 3670016）和 `dd` 写 320 KiB（80 块，超出镜像内空闲块）再逐字节
+读回校验来守护这条路径。
+
+**真机验证（2026-11-03，4 MiB Macronix）**，六步全过：`df` 报到 3,670,016；
+320 KiB 与 2.9 MiB（95% 满，尾块距分区顶 168 KiB）写入后全量校验通过、跨复位
+不变；满盘再写时第 41 块 `write` 返回 −1，文件回落到 0 字节且 `df` 的 used 不变
+（没有半截写入、没有泄漏块）；**重烧 300 KiB 小镜像后** `df` 回到 131,072、
+`ls` 只剩 readme.txt，紧接着同样大小的写入照样成功并校验通过——尾部旧数据
+既没干扰挂载，也没有因为"没擦就写"而出错位。
+
+**写性能（2026-11-03）**：3 MiB / 740 块约 60 秒（≈50 KiB/s）。`/proc/lfs`
+的计数器给出分布：5,937 次 prog（3,039,744 字节）+ 743 次块擦除，**擦除占掉
+一半墙钟**。曾实现 512 B 写合并缓存来吸收 4 字节的 CTZ 指针更新，实测一个字节
+都没攒到（littlefs 的 `prog_size` 等于设备扇区，prog 全是 512 对齐直写），已删除；
+留下的计数器就是这条结论的证据。
 
 ROM 的芯片记录 boot 后是 **2 MiB**，所有 ROM flash 调用按它做范围检查
 （`addr+len > chip_size` 即 FAIL，二分定位见 flashsz 探针）；boot 时必须调
@@ -903,6 +930,21 @@ exec 全被拒）跟布局八竿子打不着，靠症状反推太贵。
 真机复验：C3 `prot stack` 现在报 `store access fault at ... (address 0x403c3fff)`，
 `scripts/esp-c3/accept.py` 18/18；x86/rv32/arm 的 smoke 与 compat 全绿。x86 代价
 `.text` +224 B（自检与文案），`.bss` 不变。
+
+**C3 的内核堆回到 32 KiB（2026-11-03）**：arena 曾按"`.bss` 尾到第一个任务窗口
+之间空着约 50 KiB"配成 64 KiB，于是内核长到 175.8 KiB / 176 KiB 预算，距
+`PLAT_APP_BASE`（`0x403AC000`）只剩 **240 字节**。`free` 给出的 peak 说明这是白留：
+写完 3 MiB 文件之后，堆峰值也只有 11,648 字节。改回 `heap.c` 的默认 32 KiB 后：
+
+```
+kernel       147904  (144 KiB)   ← 原 179,984
+tasks        196608  (192 KiB)
+unused        34128  ( 33 KiB)   ← 原 2,048
+```
+
+同时给 `board/esp32c3/kernel.ld` 补了 `ASSERT(__kernel_end <= 0x403AC000)`（rp2040
+早就有）。在此之前，内核 `.bss` 再长 240 字节可以链接成功，运行期表现为 pid 1 的
+映像被内核全局变量覆盖——症状是"用户程序随机崩"，没人会往链接脚本上想。
 
 **同一轮还修掉一个更难看的**：`build/ramdisk.bin` 是所有目标共用的名字，循环构建
 时最后那个目标会覆盖它。于是「构建 rv32 → 构建 rp2040 → 烧 esp32c3」这条最常见的
