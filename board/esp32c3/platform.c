@@ -96,6 +96,7 @@ int plat_console_getchar(void)
     return usj_getchar();
 }
 
+
 /* ---- TIMG0 tick + INTMTX --------------------------------------------- */
 
 /* 80 MHz APB clock, divided down to 1 MHz; 10000 counts per tick = 100 Hz. */
@@ -200,6 +201,37 @@ int plat_console_getchar(void)
 #define UART_RX_FULL_THRHD    30u
 #define UART_RX_TOUT_THRHD    10u
 
+/* ---- receive overrun --------------------------------------------------
+ * The console is drained from an interrupt, but the kernel still runs with
+ * interrupts off: an exec, a flash write or a long print keeps the FIFO
+ * unread for milliseconds, and a 128-byte FIFO at 115200 holds 11 ms.  A
+ * burst longer than that (a 24-line paste was enough) overflows it - and
+ * this UART does not merely lose the extra bytes, it stops delivering and
+ * raises nothing afterwards.  Symptom: the paste runs 20 commands and then
+ * the console is deaf while the tick and every task keep running, until
+ * the board is reset.  Resetting the receive FIFO is what brings it back.
+ * Whatever was still queued is dropped, but at that point it is stale
+ * input anyway. */
+#define UART_INT_RAW_REG      (UART0_BASE + 0x04)
+#define UART_CONF0_REG        (UART0_BASE + 0x20)
+#define UART_INT_RXFIFO_OVF   (1u << 4)
+#define UART_CONF0_RXFIFO_RST (1u << 17)
+
+unsigned uart_rx_ovf_count;
+
+static void uart_rx_ovf_check(void)
+{
+    if (!(mmio_read32(UART_INT_RAW_REG) & UART_INT_RXFIFO_OVF))
+        return;
+    uart_rx_ovf_count++;
+    mmio_write32(UART_INT_CLR_REG, UART_INT_RXFIFO_OVF);
+
+    uint32_t conf0 = mmio_read32(UART_CONF0_REG);
+    mmio_write32(UART_CONF0_REG, conf0 | UART_CONF0_RXFIFO_RST);
+    mmio_write32(UART_CONF0_REG, conf0 & ~UART_CONF0_RXFIFO_RST);
+}
+
+
 static uint32_t tick_reload;
 static uint32_t tick_config;
 
@@ -244,9 +276,13 @@ void plat_timer_init(uint32_t hz)
     mmio_write32(UART_MEM_CONF_REG,
                  (mmio_read32(UART_MEM_CONF_REG) & ~(0x3FFu << 16))
                  | (UART_RX_TOUT_THRHD << 16));
+    /* Overrun is enabled as well: it is the one condition that leaves the
+     * receiver deaf, so it must interrupt rather than wait for the next
+     * tick to notice. */
     mmio_write32(UART_INT_ENA_REG,
                  mmio_read32(UART_INT_ENA_REG)
-                 | UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT);
+                 | UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT
+                 | UART_INT_RXFIFO_OVF);
 
     /* Timer: APB / 80 = 1 MHz, counts up from 0 to the reload value
      * (10000 counts = 10 ms), alarm fires, counter reloads.  The divider
@@ -274,6 +310,10 @@ static volatile uint64_t g_ticks;
 
 void plat_timer_tick(void)
 {
+    /* Cheap insurance for the deaf-receiver case: even if the overrun
+     * interrupt is masked by the very interrupts-off window that caused
+     * it, the next tick brings the console back. */
+    uart_rx_ovf_check();
     g_ticks++;
     mmio_write32(INT_CLR_REG, 1u);        /* clear T0 level interrupt */
     /* ALARM_EN self-clears when the alarm fires and AUTORELOAD does not
@@ -309,9 +349,11 @@ int plat_irq_is_tick(uint32_t line)
  * in between re-latches and fires again. */
 void plat_irq_service(uint32_t line)
 {
-    if (line == CPU_LINE_UART)
+    if (line == CPU_LINE_UART) {
         mmio_write32(UART_INT_CLR_REG,
                      UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT);
+        uart_rx_ovf_check();
+    }
     if (line == CPU_LINE_USJ)
         usj_irq_service();
 }

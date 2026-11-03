@@ -5,36 +5,57 @@
 #include "string.h"
 #include "../include/tos.h"
 
-/* Cooked input, kept as a queue of finished lines.  A burst - a paste, or a
- * script feeding several commands - arrives in one tty_poll() and must not
- * lose the lines after the first: the shell reads them one at a time and
- * answers each.  The queue holds whole lines only; a half-typed line has
- * its own buffer and joins the queue on the newline. */
-/* Both consoles now land their bytes from real receive interrupts (the C3
+/* Cooked queue: a 1 KiB byte pool holding finished lines, each stored as a
+ * two-byte length followed by the bytes (NUL included), so a line costs
+ * exactly what it uses rather than a whole 256-byte slot.  A burst - a
+ * paste, or a script feeding several commands - arrives in one tty_poll()
+ * and must not lose the lines after the first: the shell reads them one at
+ * a time and answers each.
+ *
+ * This is type-ahead, not rate.  With fixed slots, eight 256-byte lines
+ * meant "up to eight commands, however short"; the pool means "up to 1 KiB
+ * of text", which is ~120 six-byte commands or three maximum-length ones.
+ * The trade is deliberate: short commands are what a paste carries.
+ *
+ * Both consoles land their bytes from real receive interrupts (the C3
  * routes UART0 and the USB-Serial/JTAG packet interrupt each to its own
- * CPU line), so the queue absorbs a burst the instant it arrives instead
- * of one tick's worth.  A paste of several commands is therefore held
- * whole rather than losing everything past the first line, and typing
- * still works the same.  The x86 and qemu ports keep polling from the
- * tick and just see a deeper type-ahead. */
-/* 2 KiB for the whole queue, i.e. eight maximum-length lines.  This one is
- * type-ahead, not rate: a pasted batch of commands is queued here while
- * the shell runs the previous one, so the depth decides how many lines a
- * paste may carry before the tail is dropped.  Eight covers a pasted
- * script-sized batch; four was measured to drop the tail of anything past
- * five lines.  The line length stays at 256 - the shell's own line buffer
- * is 256 too, so shrinking the line would truncate long commands instead
- * of dropping whole ones, which is harder to notice. */
-#define TTY_Q_LINES 8
+ * CPU line), so a burst is absorbed the instant it arrives instead of one
+ * tick's worth.  The x86 and qemu ports keep polling from the tick and
+ * just see a deeper type-ahead. */
+#define TTY_Q_BYTES  1024
 #define TTY_LINE_MAX 256
 
-static char q[TTY_Q_LINES][TTY_LINE_MAX];
-static int  q_len[TTY_Q_LINES];
-static int  q_head, q_tail;
-static int  q_cnt;                     /* lines in the queue, 0..TTY_Q_LINES */
+static char q_pool[TTY_Q_BYTES];
+static int  q_base;                    /* offset of the oldest line's header */
+static int  q_fill;                    /* bytes in use from q_base           */
+static int  q_cnt;                     /* lines queued                       */
 
 static char pending[TTY_LINE_MAX];     /* the line being typed             */
 static int  pending_len;
+
+/* Queue one finished line of n bytes (NUL included).  The pool is linear:
+ * the read end only advances, so when the tail runs out of room the live
+ * bytes are slid back to the front before the line is dropped.  Losing a
+ * line is the last resort - a reader that far behind would not act on more
+ * type-ahead anyway. */
+static void q_push(const char *s, int n)
+{
+    /* Both the used bytes and where the tail sits matter: the oldest line
+     * may have moved far into the pool, so "q_fill + n fits in the pool"
+     * is not the same as "it fits after q_base". */
+    if (q_base + q_fill + 2 + n > TTY_Q_BYTES) {
+        memmove(q_pool, q_pool + q_base, (size_t)q_fill);
+        q_base = 0;
+        if (q_fill + 2 + n > TTY_Q_BYTES)
+            return;
+    }
+    int off = q_base + q_fill;
+    q_pool[off] = (char)(n & 0xFF);
+    q_pool[off + 1] = (char)((n >> 8) & 0xFF);
+    memcpy(q_pool + off + 2, s, (size_t)n);
+    q_fill += 2 + n;
+    q_cnt++;
+}
 
 /* Control characters seen since the last tick.  They are not part of the
  * line: ^C in the middle of a half-typed command throws the command away,
@@ -155,20 +176,10 @@ static void tty_char(char c)
     }
 
     if (c == '\n') {
+        int n = pending_len < TTY_LINE_MAX - 1 ? pending_len : TTY_LINE_MAX - 1;
         console_echo("\n", 1);
-        /* A full queue drops the line - the reader is too far behind for
-           more type-ahead to mean anything.  The count is what makes the
-           queue hold TTY_Q_LINES lines: an empty slot as the full marker
-           would waste one, and with a paste that is a whole line of
-           type-ahead. */
-        if (q_cnt < TTY_Q_LINES) {
-            int n = pending_len < TTY_LINE_MAX - 1 ? pending_len : TTY_LINE_MAX - 1;
-            memcpy(q[q_tail], pending, (size_t)n);
-            q[q_tail][n] = '\0';
-            q_len[q_tail] = n + 1;
-            q_tail = (q_tail + 1) % TTY_Q_LINES;
-            q_cnt++;
-        }
+        pending[n] = '\0';
+        q_push(pending, n + 1);
         pending_len = 0;
         return;
     }
@@ -212,12 +223,17 @@ int tty_take_line(char *dst, int max)
     if (q_cnt == 0)
         return 0;
 
-    int n = q_len[q_head] < max ? q_len[q_head] : max;
-    if (n > 0)
-        memcpy(dst, q[q_head], (size_t)n);
-    q_head = (q_head + 1) % TTY_Q_LINES;
+    int n = (unsigned char)q_pool[q_base] |
+            ((unsigned char)q_pool[q_base + 1] << 8);
+    int c = n < max ? n : max;
+    if (c > 0)
+        memcpy(dst, q_pool + q_base + 2, (size_t)c);
+    q_base += 2 + n;
+    q_fill -= 2 + n;
     q_cnt--;
-    return n;
+    if (q_cnt == 0)
+        q_base = q_fill = 0;     /* empty: recycle the whole pool */
+    return c;
 }
 
 void tty_ctrl_deliver(void)

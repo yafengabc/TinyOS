@@ -58,7 +58,7 @@ ASCII 行帧 + 停等流控，base64（raw，无填充）编码：
 |---|---|---|
 | USJ 发送环形缓冲 1 KiB + `SERIAL_IN_EMPTY` 中断 | `board/esp32c3/usj_console.c` | 控制台**永不**阻塞在 USB 上；没有主机就填满即丢（和 UART 满发送器同性质） |
 | USJ 接收中断（`SERIAL_OUT_RECV_PKT` = bit 2，INTMTX source 26 → CPU line 4） | 同上 + `board/esp32c3/platform.c` | 原生 USB 那路的输入也即时排空 |
-| raw 环 256 B → 1 KiB，cooked 队列 16 行 → 8 行（2 KiB） | `kernel/tty.c` | 一次突发整段落进队列，不必按 tick 切片（两个队列的来历见下） |
+| raw 环 256 B → 1 KiB，cooked 队列 → 1 KiB 字节池 | `kernel/tty.c` | 一次突发整段落进队列，不必按 tick 切片（两个队列的来历见下） |
 | `process_console_kick()`，接收中断里直接交数据给阻塞的读者 | `kernel/process.c`、`arch/rv32/platform.c` | 读者不再等下一个 tick 才被唤醒（原来每 tick 一次 = 吞吐天花板） |
 | 单次交接上限 128 → 1024 B | `kernel/process.c` | 配合大环，批量读的程序一次拿到更多 |
 
@@ -69,9 +69,12 @@ ASCII 行帧 + 停等流控，base64（raw，无填充）编码：
 - **raw 环 1 KiB 的来历**：接收中断把字节直接交给阻塞的读者，环只在读者等待
   被调度时积压，最坏一个 `QUANTUM`（5 tick = 50 ms）；115200 8N1 下 50 ms
   走 576 B，所以 1 KiB 有约 1.8 倍余量。装 4 KiB 是 3.5 倍余量，只是白占
-  `.bss`。**cooked 行队列**是另一回事——它管粘贴时的预输入深度，2 KiB（8 行）
-  实测能跑 9 行（1 行直接交给 shell + 8 行排队），再多的尾巴会丢；`\r\n`
-  现在只算一个换行，否则每行会多塞一个空行、把命令挤出队列。
+  `.bss`。**cooked 行队列**是另一回事——它管粘贴时的预输入深度，现在是
+  1 KiB 的字节池（每条 2 字节长度 + 内容），实测粘 100 行短命令全部执行；
+  `\r\n` 也只算一个换行，否则每行会多塞一个空行、把命令挤出队列。
+- **粘贴的行数不再受"接收 FIFO 溢出"限制**：内核在 trap 里关着中断读 flash，
+  128 B 的 FIFO 只存 11 ms 的输入，而 C3 的 UART 溢出后会装聋。现在溢出会
+  复位 FIFO，块设备每次读写前先排空控制台，盲窗从"整个 exec"降到"一个扇区"。
 - 吞吐 **7.0 KiB/s**（64 KiB 实测 ~9.4 s，CRC 通过；原 1.0 KiB/s，**7 倍**）。
   理论上限：115200 → 11.52 KB/s，base64 4/3 膨胀后有效载荷 ≈ 8.6 KiB/s，
   所以已经跑到 **81%**。再往上只能改协议（窗口化，不等 ACK 连发）或换口。

@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "heap.h"
 #include "platform.h"
+#include "tty.h"
 #include "lfs_config.h"   /* must come before lfs.h: defines LFS_NO_* + LFS_MALLOC */
 #include "lfs.h"
 
@@ -137,6 +138,15 @@ static int bd_read(const struct lfs_config *c, lfs_block_t block,
 
     io_stats.reads++;
     io_stats.read_sectors += count;
+    /* The kernel runs with interrupts off, so a flash read is a window in
+     * which nobody drains the console's 128-byte receive FIFO; at 115200
+     * that FIFO holds 11 ms of input and one sector read is about half of
+     * it.  Exec reads a whole program this way, and the paste that is
+     * arriving meanwhile lost its tail (a 24-line paste ran 4 commands and
+     * the receiver then overran).  tty_poll() touches only the console
+     * queues - no lock, no filesystem - so draining per sector brings the
+     * window down to something the FIFO absorbs. */
+    tty_poll();
     if (plat_block_read(PLAT_LFS_LBA + first, count, bounce) != 0) {
         kprintf("[lfs] read FAIL block=%u off=%u size=%u abs_lba=%u count=%u\n",
                 (uint32_t)block, (uint32_t)off, (uint32_t)size,
@@ -161,6 +171,7 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block,
 
     io_stats.progs++;
     io_stats.prog_bytes += size;
+    tty_poll();                       /* see bd_read: same window, same fix */
 
     /* A littlefs prog is sector aligned in the common case (prog_size and
      * the device sector are both 512), and then the read-modify-write below
@@ -182,6 +193,7 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block,
 static int bd_erase(const struct lfs_config *c, lfs_block_t block)
 {
     (void)c;
+    tty_poll();                       /* see bd_read: an erase is ~20 ms  */
     uint32_t lba = PLAT_LFS_LBA + ((uint32_t)block * FS_BLOCK_SIZE >> 9);
     uint32_t n = FS_BLOCK_SIZE / 512;
 
