@@ -102,7 +102,10 @@ func cmdEmutest(args []string) int {
 		line string
 		want []string
 	}{
-		{"ls", "ls", []string{"bin/sh", "readme.txt"}},
+		// `ls` lists one level, so a directory shows as "bin/", not "bin/sh"
+		// (this expectation predated the shell's directory support).  dev and
+		// proc are the two namespaces devfs always exposes.
+		{"ls", "ls", []string{"dev/", "proc/", "bin/", "readme.txt"}},
 		{"cat readme.txt", "cat readme.txt", []string{"TinyOS"}},
 		{"hello", "hello", []string{"hello"}},
 		{"hello_printf", "hello_printf", []string{"hello"}},
@@ -111,6 +114,14 @@ func cmdEmutest(args []string) int {
 		{"ps", "ps", []string{"cpu", "sh"}},
 		{"crash", "crash", []string{"illegal instruction", "tos>"}},
 		{"source etc/rc", "source etc/rc", []string{"tos>"}},
+		// Devices are files, so the table has to be enumerable and entry-able,
+		// not just openable.  This is the only target tested end to end with
+		// peripherals behind it, so it is the one place /dev is not empty.
+		{"ls /dev", "ls /dev", []string{"gpio0", "gpio21"}},
+		{"ls /proc", "ls /proc", []string{"uptime", "ps", "mem"}},
+		{"cd /dev", "cd /dev", []string{"/dev tos>"}},
+		{"ls (in /dev)", "ls", []string{"gpio4"}},
+		{"cd /", "cd /", []string{"tos>"}},
 	}
 	for _, c := range checks {
 		tstart := time.Now()

@@ -16,6 +16,13 @@
 
 const uint32_t PLAT_KERNEL_BASE = 0x40380000;
 
+/* One past the last byte the kernel may use.  Usable SRAM ends at
+ * 0x403DC710; above that sit the ROM's shared download buffers and its
+ * stack (see docs/ZEPHYR-REFERENCE.md).  From the kernel base that is
+ * 378,640 bytes, i.e. the 384 KiB SRAM block minus what the ROM keeps. */
+const uint32_t PLAT_RAM_BASE   = 0x40380000;   /* SRAM, instruction alias */
+const uint32_t PLAT_RAM_TOP    = 0x403DC710;
+
 /* Image + .bss must stay below this.  176 KiB is generous for the ~110 KiB
  * the rv32 kernel currently occupies and keeps the window area page tidy. */
 const uint32_t PLAT_KERNEL_MAX  = 0x403AC000;
@@ -32,7 +39,14 @@ const uint32_t PLAT_STACK_BYTES = 16u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
 
 
-/* The littlefs partition lives on SPI flash at offset 0x100000, served by
- * plat_block_read/write/erase in platform.c (ROM reader + writer, SPI1
- * hardware erase; see docs/PLATFORM-DESIGN.md §8.7). */
-const uint32_t PLAT_LFS_LBA = 0x100000 / 512;
+/* The littlefs partition lives on SPI flash at offset 0x80000 (the
+ * kernel keeps the first 512 KiB), served by plat_block_read/write/erase
+ * in platform.c (ROM reader + writer, SPI1 hardware erase; see
+ * docs/PLATFORM-DESIGN.md §8.7).  PLAT_LFS_BLOCKS sizes it to the rest of
+ * the 4 MiB flash: (0x400000 - 0x80000) / 4096 = 896 blocks = 3.5 MiB. */
+const uint32_t PLAT_LFS_LBA = 0x80000 / 512;   /* 1024 */
+const uint32_t PLAT_LFS_BLOCKS = (0x400000u - 0x80000u) / 4096u;
+
+/* One CPU: these boards have a single core.  The SMP build sets 2 and
+ * start.S brings the second hart up (see kernel/cpu.c). */
+const uint32_t PLAT_MAX_CPUS = 1;

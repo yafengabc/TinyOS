@@ -72,11 +72,28 @@ static uint64_t clint_time(void)
     return ((uint64_t)hi1 << 32) | lo;
 }
 
-static void clint_set_cmp(uint64_t v)
+/* mtimecmp is one register per hart, eight bytes apart: hart 0 at +0x4000,
+ * hart 1 at +0x4008.  Writing hart 0's compare from hart 1 would arm the
+ * wrong CPU and leave the caller's own interrupt tied off for ever - the
+ * single-CPU version of this file could get away with the fixed address
+ * because there was only ever one hart. */
+static void clint_set_cmp(int hart, uint64_t v)
 {
-    mmio_write32(RV32_CLINT_BASE + RV32_CLINT_MTIMECMPH, (uint32_t)0xFFFFFFFFu);
-    mmio_write32(RV32_CLINT_BASE + RV32_CLINT_MTIMECMP, (uint32_t)v);
-    mmio_write32(RV32_CLINT_BASE + RV32_CLINT_MTIMECMPH, (uint32_t)(v >> 32));
+    uint32_t base = RV32_CLINT_BASE + RV32_CLINT_MTIMECMP + 8u * (uint32_t)hart;
+
+    mmio_write32(base + 4, (uint32_t)0xFFFFFFFFu);
+    mmio_write32(base + 0, (uint32_t)v);
+    mmio_write32(base + 4, (uint32_t)(v >> 32));
+}
+
+/* MTIE = bit 7 of mie, which is a per-hart CSR as well. */
+static void timer_unmask(void)
+{
+    uint32_t mie;
+
+    __asm__ volatile("csrr %0, mie" : "=r"(mie));
+    mie |= (1u << 7);
+    __asm__ volatile("csrw mie, %0" : : "r"(mie));
 }
 
 void plat_timer_init(uint32_t hz)
@@ -84,13 +101,17 @@ void plat_timer_init(uint32_t hz)
     /* The virt machine runs mtime at 10 MHz. */
     g_interval = RV32_TIMER_HZ / hz;
     g_ticks = 0;
-    clint_set_cmp(clint_time() + g_interval);
+    clint_set_cmp(plat_cpu_id(), clint_time() + g_interval);
+    timer_unmask();
+}
 
-    /* Enable machine timer interrupt (MTIE = bit 7). */
-    uint32_t mie;
-    __asm__ volatile("csrr %0, mie" : "=r"(mie));
-    mie |= (1u << 7);
-    __asm__ volatile("csrw mie, %0" : : "r"(mie));
+void plat_timer_start_cpu(void)
+{
+    if (plat_cpu_id() == 0)
+        return;                 /* already armed by plat_timer_init */
+
+    clint_set_cmp(plat_cpu_id(), clint_time() + g_interval);
+    timer_unmask();
 }
 
 uint64_t plat_ticks(void)
@@ -108,10 +129,26 @@ uint32_t plat_uptime_ms(void)
     return (uint32_t)(clint_time() / (RV32_TIMER_HZ / 1000u));
 }
 
+/* The real clock: mtime is a free-running 64-bit counter, so the tick is
+ * only a scheduling detail and time resolution is 100 ns. */
+uint64_t plat_now_ns(void)
+{
+    return clint_time() * (1000000000ull / RV32_TIMER_HZ);
+}
+
 void plat_timer_tick(void)
 {
-    g_ticks++;
-    clint_set_cmp(clint_time() + g_interval);
+    int id = plat_cpu_id();
+
+    /* Only the boot CPU counts time.  Every hart needs its own tick (it is
+     * what preempts whatever that hart is running), but the counter they
+     * share is a global one: incrementing it on both would make the clock
+     * run at 2x and every sleep deadline expire twice as fast.  The boot
+     * CPU's timer keeps running even when it is idle, so this stays a true
+     * 100 Hz wall clock. */
+    if (id == 0)
+        g_ticks++;
+    clint_set_cmp(id, clint_time() + g_interval);
 }
 
 /* The CLINT machine timer is the only interrupt this board routes, and the

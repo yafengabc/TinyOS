@@ -29,6 +29,10 @@ void plat_timer_tick(void);
  * that its plat_timer_init() deliberately left masked. */
 void plat_timer_irq_unmask(void);
 
+/* Which core is asking.  The generic layer reads no core-id register: on
+ * the RP2040 it is SIO_CPUID, on a single-core M3 there is nothing to read. */
+uint32_t plat_board_cpu_id(void);
+
 /* MMIO helpers shared by both layers.  Cortex-M has no I/O space, so every
  * peripheral access is a plain load/store. */
 static inline void mmio_write8(uint32_t addr, uint8_t v)

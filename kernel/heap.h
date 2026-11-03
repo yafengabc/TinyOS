@@ -13,5 +13,6 @@ void  kfree(void *ptr);
    log can show how much is really needed. */
 uint32_t heap_peak_bytes(void);
 uint32_t heap_arena_bytes(void);
+uint32_t heap_used_bytes(void);
 
 #endif

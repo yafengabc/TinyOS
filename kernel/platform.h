@@ -2,6 +2,7 @@
 #define TINYOS_PLATFORM_H
 
 #include "types.h"
+#include "tos.h"      /* TOS_PIN_*, so the GPIO modes have one definition */
 
 /* Platform abstraction layer.
  *
@@ -61,6 +62,12 @@ void     plat_timer_init(uint32_t hz);
 uint64_t plat_ticks(void);
 uint32_t plat_tick_hz(void);
 
+/* Arm this CPU's own periodic interrupt.  On a uniprocessor this is a no-op
+ * (plat_timer_init already did it); on SMP it is what a secondary hart calls
+ * before it enters the scheduler, because the timer compare register and the
+ * interrupt-enable CSR are per hart - hart 1 inherits nothing from hart 0. */
+void plat_timer_start_cpu(void);
+
 void plat_irq_enable(void);
 void plat_irq_disable(void);
 void plat_cpu_idle(void);             /* hlt / wfi, interrupts enabled */
@@ -77,9 +84,46 @@ int  plat_irq_is_tick(uint32_t line);
  * spends all its time in the handler and no task ever runs. */
 void plat_irq_service(uint32_t line);
 
+/* ---- cpu topology ----------------------------------------------------- */
+
+/* How many CPUs this build supports.  The build passes -DTOS_MAX_CPUS=2 for
+ * the SMP target (qemu-virt with -smp 2) and nothing for the others; the
+ * fallback keeps every `#if TOS_MAX_CPUS > 1` in the tree honest without a
+ * second macro.  start.S reads the same define, which is how the trap
+ * vectors and the kernel-stack blocks stay in step with it. */
+#ifndef TOS_MAX_CPUS
+#define TOS_MAX_CPUS 1
+#endif
+
+/* How many CPUs the kernel was built for.  Every board but one is a
+ * uniprocessor and sets 1; the SMP build (rv32smp) sets 2 and boots the
+ * secondaries from start.S.  This is a compile-time constant, not a runtime
+ * probe: with no MMU there is nothing to allocate per CPU at runtime except
+ * a kernel stack, and the linker reserves exactly that many.
+ *
+ * It is a separate symbol from TOS_MAX_CPUS on purpose: the board owns the
+ * answer (layout.c), the build only says what it is, and a board that
+ * cannot do SMP simply keeps saying 1 whatever the build asked for. */
+extern const uint32_t PLAT_MAX_CPUS;
+
+/* Which CPU is asking.  Valid everywhere, including before the scheduler
+ * exists (a secondary hart calls kmain-adjacent code with its own id). */
+int plat_cpu_id(void);
+
 /* ---- time ------------------------------------------------------------ */
 
 uint32_t plat_uptime_ms(void);
+
+/* Monotonic nanoseconds since boot.  The tick above is what the scheduler
+ * counts; this is the clock: it comes from a free-running hardware counter
+ * (CLINT mtime on qemu-virt, the TG0 time base on the ESP32-C3, SysTick plus
+ * its live down-counter on Cortex-M) and has sub-tick resolution, so a
+ * program can time something shorter than the 10 ms quantum.
+ *
+ * Boards that only have the tick fall back to `plat_ticks() * period`, which
+ * is monotonic too - just coarser.  The value never goes backwards, even if
+ * the underlying counter is reloaded while the tick is being serviced. */
+uint64_t plat_now_ns(void);
 
 /* ---- block device (backing store for littlefs) ----------------------- */
 
@@ -87,6 +131,12 @@ uint32_t plat_uptime_ms(void);
  * filesystem right after the kernel image on the boot disk (181); boards
  * that embed the image in RAM start at 0. */
 extern const uint32_t PLAT_LFS_LBA;
+
+/* Number of littlefs blocks in the partition.  Board-specific (each
+ * board's layout.c sets it) so the C3 can grow its 4 MiB flash partition
+ * without dragging the other boards up with it.  The kernel mounts this
+ * many blocks of FS_BLOCK_SIZE starting at PLAT_LFS_LBA. */
+extern const uint32_t PLAT_LFS_BLOCKS;
 
 int      plat_block_read(uint32_t lba, uint32_t count, void *buf);
 int      plat_block_write(uint32_t lba, uint32_t count, const void *buf);
@@ -102,6 +152,50 @@ uint32_t plat_block_count(void);
 
 /* The flat model needs no frame allocator or page tables: every byte of RAM
  * is directly addressable. */
+
+/* Start of usable RAM.  On most boards this is PLAT_KERNEL_BASE, but not on
+ * all: the mps2 links its code at 0 while .data/.bss live in SRAM at
+ * 0x20000000, so the two are different numbers there. */
+extern const uint32_t PLAT_RAM_BASE;
+
+/* One past the last byte of RAM the kernel may touch.  Boards differ by
+ * more than the size of the SRAM: on the C3 the top few KiB are the ROM's
+ * own download buffers and stack, and are not ours to use.  `free` reports
+ * the map from PLAT_RAM_BASE to here, so the number a user sees is the
+ * memory that actually exists, not the size of the kernel's heap arena. */
+extern const uint32_t PLAT_RAM_TOP;
+
+/* End of the kernel's .bss, from the linker script.  `free` uses it to say
+ * how much RAM the kernel itself occupies. */
+extern char __bss_end[];
+
+/* ---- gpio / adc ------------------------------------------------------ */
+
+/* Digital I/O.  Pins are numbered the way the board numbers them (the C3's
+ * GPIO0..21, the RP2040's GPIO0..29); there is no port prefix because no
+ * board here has more than one bank.
+ *
+ * A board that has no GPIO at all just does not define these: kernel/periph.c
+ * carries weak defaults that report "unsupported", so a program asks
+ * plat_gpio_count() first and prints a sentence instead of failing. */
+#define PLAT_GPIO_IN          TOS_PIN_IN
+#define PLAT_GPIO_OUT         TOS_PIN_OUT
+#define PLAT_GPIO_IN_PULLUP   TOS_PIN_IN_PULLUP
+#define PLAT_GPIO_IN_PULLDOWN TOS_PIN_IN_PULLDOWN
+
+int plat_gpio_count(void);                       /* 0 = no GPIO on this board */
+int plat_gpio_configure(int pin, int mode);      /* 0 or -1                  */
+int plat_gpio_write(int pin, int value);         /* 0 or -1                  */
+int plat_gpio_read(int pin);                     /* 0/1, or -1               */
+
+/* Analog input.  plat_adc_read() returns raw counts in [0, 2^bits) and -1
+ * when the channel does not exist or the conversion failed; the two
+ * constants describe the scale so user space can turn counts into
+ * millivolts without knowing the part. */
+int plat_adc_count(void);
+int plat_adc_read(int chan);
+int plat_adc_vref_mv(void);
+int plat_adc_bits(void);
 
 /* ---- user mode ------------------------------------------------------- */
 

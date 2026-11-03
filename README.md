@@ -41,8 +41,22 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
+  外加 `clock/getcpu/gpio/adc/pipe/dup2/ioctl`
 - **抢占式调度**：时间片轮转（50 ms）、`exec` 创建子任务、`wait` 收退出码、
   `read/wait/sleep` 阻塞而不忙等；只在用户态帧上抢占，内核调用不会被撕裂
+- **真实时钟**：`uptime`/`clock_ns()` 读硬件自由运行计数器（CLINT `mtime`、
+  ESP32-C3 的 TG0、Cortex-M 的 SysTick），不是数指令；纳秒级分辨率，单调不回退
+- **外设框架**：`plat_gpio_*` / `plat_adc_*` 在 `kernel/periph.c` 是 weak 默认，
+  板级强符号覆盖；`gpio` / `adc` / `reboot` 三个用户程序
+- **设备即文件**：`/dev/gpioN`、`/dev/adcN`（`open`/`read`/`write`/`ioctl`，数据面走
+  文本，配置面走 ioctl）与 `/proc/{ps,mem,uptime}`（只读快照，open 时生成）。
+  于是 `cat /dev/adc2`、`echo 1 > /dev/gpio4`、`ps > f` 都能用，不必为每个外设
+  再写一个程序；C API 仍然保留（`echo 1 >` 是三次 syscall 加一次路径查找）。
+  目录是从设备表算出来的，所以 `ls /dev`、`cd /dev` 也成立（节点显示 `c` 和 `<dev>`）
+- **管道（IPC）**：`pipe()` + `dup2()`，内核里是环形缓冲 + 读/写端引用计数，
+  空管道阻塞、写者全关返回 EOF、读者全关返回 EPIPE；`cat readme.txt | wc` 就是它
+- **双核 SMP**（`-target rv32smp`）：per-CPU 运行队列游标与内核栈、`amoswap` 自旋锁、
+  每 hart 独立 `mtvec` 和 `mtimecmp`，两个 hart 同时跑用户程序
 - 用户态异常（非法指令、GPF）只终止当前进程，其他任务继续跑
 - **littlefs v2.9.3** 文件系统：构建期用 `mklfs`（同一份 littlefs 源码）打包到磁盘上的
   独立分区，运行时由内核通过 ATA 驱动挂载，支持子目录（`bin/`）、**真实写入**
@@ -60,19 +74,25 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 ```
 boot/stage1.S        512 字节引导扇区
 kernel/              架构无关内核（C）
-  main.c             启动、ramdisk 自检、拉起 /bin/sh
-  platform.h         HAL：各 arch/board 实现的平台接口
-  process.c syscall.c  进程/exec/系统调用
+  main.c             启动、ramdisk 自检、cpu_init、拉起 /bin/sh
+  platform.h         HAL：各 arch/board 实现的平台接口（含时钟、CPU 拓扑、GPIO/ADC）
+  cpu.c cpu.h        per-CPU 状态、二级 hart 起步、自旋锁
+  periph.c periph.h  GPIO/ADC 的 weak 默认实现与分发，以及 /dev/gpioN 设备注册
+  devfs.c devfs.h    设备文件表（boot 时注册、之后只读，open 时无需加锁）
+  procfs.c procfs.h  /proc/{ps,mem,uptime}：open 时生成快照文本
+  process.c syscall.c  进程/exec/系统调用/管道与描述符
+  pipe.c pipe.h      环形缓冲 IPC
   elf.c               ELF32 加载器（PT_LOAD + REL/RELA 重定位，目标窗口校验）
   ramdisk.c           littlefs 挂载与文件访问（块设备回调接 ATA）
   heap.c lz4.c libgcc.c console.c string.c
   lfs_config.h        littlefs 的裁剪与配置
 arch/x86/            x86 实现：entry.S isr.S gdt idt ata serial timer keyboard platform.c
   regs.h usys.h      i386 的 trap 帧布局 / 用户态系统调用入口（int 0x80）
-arch/rv32/           RV32 实现：start.S（入口 + trap 向量）platform.c（UART/CLINT/PMP/RAM 盘）
+arch/rv32/           RV32 实现：start.S（入口 + trap 向量，含第二 hart）
+  platform.c         UART/CLINT/PMP/RAM 盘 + 自旋锁（amoswap）
   regs.h usys.h      RV32 的 trap 帧布局（144 B）/ ecall 入口
 board/pc/            x86 板级内存布局（layout.c，含 littlefs 分区 LBA）
-board/qemu-virt/     QEMU virt (rv32) 板级布局（layout.c）
+board/qemu-virt/     QEMU virt (rv32) 板级布局（layout.c）；rv32 与 rv32smp 共用
 docs/PLATFORM-DESIGN.md  无 MMU 平坦模型的设计与路线图
 docs/SHELL-GUIDE.md   shell 脚本与优先级的详细使用说明（示例均为实跑输出）
 docs/OPEN-ITEMS.md   已评估、还没拍板的事项（决策队列，含实测数字）
@@ -83,6 +103,7 @@ user/                用户态程序（freestanding C）
   crt0_x86.S crt0_rv32.S  按目标选择的启动桩
   lib.c syscall.c         与架构无关；系统调用入口来自 arch/<arch>/usys.h
   sh.c hello.c hello_printf.c echo.c ls.c cat.c crash.c mem.c uptime.c wfile.c reloc.c
+  gpio.c adc.c reboot.c smp.c wc.c
   user.ld            PIE 链接脚本（基址 0，由内核重定位）
 cmd/tos/             Go 构建工具（build / run / doctor / clean）
 cmd/mkmini/          [未采用] TOSX 容器工具（见 internal/build/minielf.go 头注释）
@@ -198,6 +219,10 @@ go run ./cmd/tos run -headless -debug
 go run ./cmd/tos build -target rv32
 go run ./cmd/tos run   -target rv32
 
+# RV32 双核：同样的板子，两个 hart（-smp 2，rv32imac）
+go run ./cmd/tos build -target rv32smp
+go run ./cmd/tos run   -target rv32smp
+
 # ARM：编译出 build/kernel-arm.elf，并在 qemu-system-arm（mps2-an385）里启动
 go run ./cmd/tos build -target arm
 go run ./cmd/tos run   -target arm
@@ -218,6 +243,16 @@ tos> run spin &     # 后台跑一个死循环程序，shell 仍然可用
 tos> nice 2 bench & # 以 2 级（最低）启动：shell 和前台永远先跑
 tos> prio 2 1       # 把 pid 2 的任务调到 1 级
 tos> run prot heap  # 故意写越界的堆：RV32 上当场被 PMP 拦下，x86 上什么也不会发生
+tos> gpio 4 1       # 拉高 GPIO4 并回读（C3 / RP2040 上是真引脚）
+tos> adc 0          # 采一次 ADC：raw 计数 + 换算出的毫伏
+tos> cat /proc/ps   # 进程表也是文件；`ps > f.txt` 把它写进文件
+tos> cat /proc/mem  # 内存地图（和 free 同一套数字）
+tos> ls /dev        # 目录是算出来的：c gpio0 ... c adc4（pc/virt 上是空目录）
+tos> echo 1 > /dev/gpio4   # 写设备文件就是驱动引脚（先灌成输出）
+tos> cat /dev/adc2         # 读设备文件采样（RP2040 有 5 路，C3 没有）
+tos> gpio dev mode 4 out   # 配置面走 ioctl：open + ioctl(GPIO_OP_MODE)
+tos> cat readme.txt | wc   # 管道
+tos> smp            # 每个 CPU 一个 worker，看它们各自落在哪个核上
 tos> source etc/rc  # 在本进程里读一个命令文件（C3 上只有 3 个任务窗口，这是唯一安全的嵌套方式）
 tos> run sh etc/rc  # 也可以把它当成一个程序跑：新任务、新 pid、崩溃不影响 shell
 tos> reboot         # 真复位芯片（C3 上 ROM 会报 rst:0x3 RTC_SW_SYS_RST）
@@ -248,6 +283,7 @@ RV32 用同一个命令加 `-target rv32`，ARM 用 `-target arm`：
 ```powershell
 go run ./cmd/tostest smoke -target rv32
 go run ./cmd/tostest smoke -target arm
+go run ./cmd/tostest smoke -target rv32smp   # 双核：同一批命令，两个 hart 上跑
 ```
 
 ## RV32 目标（qemu-virt）
@@ -295,6 +331,58 @@ qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.e
 工具链：`clang --target=riscv32-unknown-elf` 编译，`ld.lld -m elf32lriscv` 直接链接
 （走 clang 驱动会强行拉入硬浮点 ABI 的 `compiler_rt`，和我们的 ilp32 对象冲突）。
 需要 `qemu-system-riscv32`：MSYS2 的 `mingw-w64-ucrt-x86_64-qemu` 已经带上。
+
+## 双核（SMP）目标（qemu-virt，两 hart）
+
+`-target rv32smp` 是同一块 qemu-virt 板子的**两核版本**：`-march=rv32imac`
+（比单核多一个 A 扩展，自旋锁就是一条 `amoswap.w.aqrl`）、`-DTOS_MAX_CPUS=2`、
+QEMU 侧加 `-smp 2`。
+
+```powershell
+go run ./cmd/tos build -target rv32smp   # -> build/kernel-rv32smp.elf
+go run ./cmd/tos run   -target rv32smp
+
+# 等价的手工启动
+qemu-system-riscv32 -machine virt -m 256M -bios none -smp 2 \
+    -kernel build/kernel-rv32smp.elf
+
+# 自动化：同一批冒烟命令，在两个 hart 上跑
+go run ./cmd/tostest smoke -target rv32smp
+```
+
+启动时多打一行 `[smp] 2 of 2 CPU(s) online`。看效果：
+
+```
+tos> smp
+smp: 2 CPU(s), tick 100 Hz, this task on cpu 0
+smp: starting 2 worker(s), 800 ms each
+worker 0: cpu 0, 167 blocks in 800 ms
+worker 1: cpu 1, 222 blocks in 800 ms
+smp: done
+tos> run smp &
+tos> ps
+ pid ppid prio state  c cpu% cpums  name
+   1    0    0 run   0    0.7     0  sh
+   5    1    0 wait  -    0.0     0  smp
+   6    5    0 rdy   -   93.7     0  smp
+   7    5    0 run   1   86.5     0  smp
+```
+
+两个 worker 各占一个 hart（`c` 列是正在跑它的 CPU），各自接近 100% —— 是真并行，
+不是轮流。`smp` 自己还会报 `cpu 1 then 0`，那是任务在两个核之间迁移过。
+
+设计上做了这些事（详见 `docs/PLATFORM-DESIGN.md` §13）：
+
+| 主题 | 做法 |
+| --- | --- |
+| 每 hart 的栈 | `start.S` 的 `.bss` 里 `32768 * TOS_MAX_CPUS`，hart N 用 `__kernel_stack_top - N*32K`，`CPU_KSTACK_TOP(id)` 是唯一算式，栈溢出守卫每块一个 |
+| 每 hart 的 trap | `mtvec` 是 per-hart CSR，所以有两张 256 字节向量表（`trap_vectors` / `trap_vectors_h1`）；`TRAP_ENTRY` 宏参数化成 `trap_entry_h0/h1`，各自 `la` 自己的栈顶 |
+| 从 hart 起步 | 所有 hart 都从 `_start` 进；`csrr mhartid` 分流，非 0 的等 `cpu_release == "SMP1"` 再去碰任何内核数据（否则会和清 `.bss` 的 0 号撞车） |
+| 每 hart 的状态 | `cpu_t`（`kernel/cpu.h`）：`cur / quantum / need_resched / rr`。`process.c` 用同名的三个宏取，所以单核代码一行没改 |
+| 共享的部分 | 只有进程表。一把 `spin_t proc_lock`，锁住的范围是“扫一遍表 + 改状态”，不含任何会阻塞的调用 |
+| 定时器 | `mtimecmp` and `mie.MTIE` 都是 per-hart：`plat_timer_start_cpu()` 给新 hart 装自己的比较值。`g_ticks` 只由 0 号递增，否则时钟会走两倍 |
+| 控制台 | 只有 0 号 hart 读串口 FIFO、发回显（一个设备一个驱动）；输出流一把 `out_lock`，一次 `printf`/`write` 不会被另一个核切开 |
+| 调度 | 共用一条运行队列，两个 hart 各自挑。空闲的 hart 发现“没有 ready”时会再看一眼别的 hart 是否在跑，否则会误判死机 |
 
 ## ARM 目标（QEMU mps2-an385，Cortex-M3）
 

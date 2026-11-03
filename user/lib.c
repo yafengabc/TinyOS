@@ -44,6 +44,25 @@ void *memcpy(void *dst, const void *src, size_t n)
     return dst;
 }
 
+/* Overlapping moves: the editor shifts the whole buffer left and right by a
+ * few bytes when a character is typed, so `dst > src` is the normal case
+ * and memcpy's direction is wrong. */
+void *memmove(void *dst, const void *src, size_t n)
+{
+    unsigned char *d = dst;
+    const unsigned char *s = src;
+    if (d < s) {
+        while (n--)
+            *d++ = *s++;
+    } else {
+        d += n;
+        s += n;
+        while (n--)
+            *--d = *--s;
+    }
+    return dst;
+}
+
 void *memset(void *dst, int c, size_t n)
 {
     unsigned char *d = dst;

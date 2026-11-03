@@ -6,12 +6,15 @@
 #include "string.h"
 #include "heap.h"
 #include "lz4.h"
+#include "pipe.h"
+#include "devfs.h"
 #include "platform.h"
+#include "cpu.h"
 #include "tos.h"
 
 #define MAX_PROCS   16
 #define MAX_ARGS    12
-#define MAX_FDS     8
+#define MAX_FDS     12
 
 /* Both live in the board's layout.c: the size of the window decides what
  * fits, and the port that maps them (rv32 PMP, ARM MPU) needs the same
@@ -49,14 +52,46 @@ enum {
     ST_WAIT_CHILD,
     ST_WAIT_INPUT,
     ST_WAIT_SLEEP,
+    ST_WAIT_PIPE,
+    /* A slot claimed by proc_alloc() and still being filled in.  It has to
+     * exist as a state of its own: on SMP two exec()s can be building two
+     * tasks at the same time, and a slot that is only "not FREE yet" is
+     * what keeps them from choosing the same one.  The scheduler never
+     * picks it (it only looks at ST_READY), and proc_create() publishes
+     * ST_READY as its last act, under the table lock. */
+    ST_NEW,
+};
+
+/* What a descriptor points at.  A pipe needs its own type because the two
+ * ends behave differently (a read end sees EOF, a write end sees EPIPE), and
+ * console descriptors are marked rather than left implicit so dup2() can
+ * replace one: fd 1 is FD_CONSOLE until somebody redirects it. */
+enum {
+    FD_NONE = 0,
+    FD_CONSOLE,
+    FD_FILE,
+    FD_PIPE_R,
+    FD_PIPE_W,
+    FD_CHRDEV,      /* /dev/... or /proc/...: a table of ops, not a file */
 };
 
 typedef struct {
-    int      used;
-    int      fh;           /* littlefs open-file handle, -1 when unused */
+    uint8_t  type;
+    int      fh;           /* FD_FILE: littlefs open-file handle */
     uint32_t size;
     uint32_t pos;
+    struct pipe *pipe;     /* FD_PIPE_R / FD_PIPE_W */
+    const dev_t *dev;      /* FD_CHRDEV: which device this descriptor is on */
+    void    *devpriv;      /* FD_CHRDEV: per-open state from ops->open() */
+    char    *path;         /* FD_FILE: heap copy, so a child can reopen it */
+    uint8_t  writable;     /* FD_FILE: created for writing (reopen as rw) */
 } file_t;
+
+/* A descriptor has to be duplicable to be inheritable, and both the child
+ * inheritance path and dup2() need exactly the same rules.  One helper, so
+ * they cannot disagree about which types are copyable. */
+static int  fd_clone(file_t *dst, const file_t *src);
+static char *kstrdup(const char *s);
 
 typedef struct proc {
     int      state;
@@ -88,6 +123,29 @@ typedef struct proc {
     struct proc *parent;
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
     int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
+    int      kill_pending;  /* SIGKILL aimed at the task on the CPU: die at
+                             * the trap exit, see process_suspend() */
+
+    /* Which CPU is running this task, -1 when it is off-CPU.  Bookkeeping
+     * for ps on an SMP build: a task's state says "running" but only the
+     * CPU field says whether it is this one or the other.  Maintained by
+     * whichever scheduler put it there, and only ever read for display. */
+    int      cpu;
+
+    /* Current working directory (always absolute, no trailing slash unless
+     * it is the root "/").  A child inherits the parent's cwd at exec time,
+     * so a program run from a subdirectory sees the same directory. */
+    char     cwd[64];
+
+    /* ST_WAIT_PIPE: which channel we are waiting on, in which direction,
+     * and for which user buffer.  The waker completes the transfer on our
+     * behalf and writes the byte count into the saved frame - exactly how a
+     * console reader is handed its line, and the reason nothing has to be
+     * replayed when the task resumes. */
+    struct pipe *wpipe;
+    int      wdir;          /* 0 = waiting to read, 1 = waiting to write */
+    uint32_t wbuf;
+    uint32_t wlen;
 
     /* Everything the task needs while it is not on the CPU. */
     regs_t   saved;
@@ -96,7 +154,6 @@ typedef struct proc {
 } proc_t;
 
 static proc_t procs[MAX_PROCS];
-static proc_t *current;
 static proc_t *init_proc;
 static int next_pid = 1;
 
@@ -105,39 +162,79 @@ static int next_pid = 1;
 static uint32_t win_used;
 static int win_slots;
 
-/* Round-robin cursor and the "slice is over" flag the trap exit checks. */
-static int rr;
-static int quantum = QUANTUM;
-static volatile int need_resched;
+/* ---- what became per-CPU ---------------------------------------------
+ *
+ * On one CPU these three were file-static: who is running, how much of its
+ * slice is left, and whether the trap exit should switch.  With two cores
+ * each needs its own answer - hart 0 running the shell says nothing about
+ * what hart 1 is doing - so they moved into cpu_t (kernel/cpu.h) and the
+ * file reaches them through these macros.  Every existing use reads exactly
+ * as before, which is why this conversion touched almost nothing else.
+ *
+ * The code they are used from is the same on both sides of the divide: a
+ * trap handler runs with interrupts off on its own CPU, so per-CPU state
+ * needs no lock.  Only the shared process table does - see proc_lock. */
+#define current        (cpu_self()->cur)
+#define rr             (cpu_self()->rr)
+#define quantum        (cpu_self()->quantum)
+#define need_resched   (cpu_self()->need_resched)
 
-/* One kernel stack only: the stack start.S switches to before kmain is the
- * same one traps from user mode land on.  A trap from user mode always
- * starts at its top and everything it pushes is unwound before the next
- * trap, so the kernel stack carries no state between traps. */
-extern uint8_t __kernel_stack[];
-extern uint8_t __kernel_stack_top[];
-#define KSTACK_TOP ((uint32_t)__kernel_stack_top)
+/* The process table is shared, and on SMP two CPUs pick from it at the same
+ * instant.  One lock over the whole table is the honest choice here: the
+ * critical sections are a sixteen-entry scan and a state store, so a finer
+ * grain would cost more in bounds checks than it saves in contention.
+ *
+ * Lock order, the only one in the kernel: proc_lock, then nothing.  Nothing
+ * that blocks (console, pipe, timer wait) is ever called while holding it -
+ * the scheduler hands the lock back before it idles. */
+static spin_t proc_lock = SPIN_INIT;
+
+/* The machine is on its way down: init has exited and the boot CPU is in
+ * plat_shutdown().  Without this, another hart that finds an empty run queue
+ * in that instant cannot tell "the system is going down" from "the scheduler
+ * lost every task", and panics on a machine that is shutting down exactly as
+ * asked.  Set (under proc_lock) before init's slot is freed, so a CPU that
+ * sees the empty queue is guaranteed to see the flag too. */
+static volatile int sys_down;
+
+/* Defined with the rest of the descriptor code at the bottom of the file;
+ * task_release() (which runs when a task dies) needs it up here. */
+static void fd_close_in(proc_t *p, int fd);
+
+/* One kernel stack per CPU.  The stack start.S switches to before kmain is
+ * the same one traps from user mode land on; on an SMP build each hart has
+ * its own block and both start.S and CPU_KSTACK_TOP (kernel/cpu.h) work out
+ * where it is from the hart id, so there is nothing to initialise.  A trap
+ * from user mode always starts at its top and everything it pushes is
+ * unwound before the next trap, so the kernel stack carries no state
+ * between traps. */
+#define KSTACK_TOP CPU_KSTACK_TOP(cpu_id())
+#define KSTACK_LOW CPU_KSTACK_LOW(cpu_id())
 
 /* There is no guard page to fault on - no MMU - so running off the end of
  * the kernel stack used to end up as a jump into empty memory: a serial
  * driver that recursed on backspace wrapped 16 KiB and died at
  * EIP=4b976946 with the stack pointer outside RAM.  One word at the bottom
  * is enough to recognise the situation: the stack grows down, so anything
- * that overflows must overwrite it first. */
+ * that overflows must overwrite it first.  With several CPUs each block
+ * gets its own guard word, written by cpu_init(). */
 #define KSTACK_GUARD 0x5354414Bu              /* "STAK" */
 
 static void kstack_guard_init(void)
 {
-    ((volatile uint32_t *)__kernel_stack)[0] = KSTACK_GUARD;
+    for (int i = 0; i < (int)(MAX_CPUS); i++) {
+        if (i < (int)PLAT_MAX_CPUS)
+            *(volatile uint32_t *)CPU_KSTACK_LOW(i) = KSTACK_GUARD;
+    }
 }
 
 static void kstack_check(regs_t *r)
 {
     uint32_t sp = (uint32_t)r;
 
-    if (sp < (uint32_t)__kernel_stack || sp >= KSTACK_TOP)
+    if (sp < KSTACK_LOW || sp >= KSTACK_TOP)
         panic("kernel stack out of bounds: sp=%x", sp);
-    if (*(volatile uint32_t *)__kernel_stack != KSTACK_GUARD)
+    if (*(volatile uint32_t *)KSTACK_LOW != KSTACK_GUARD)
         panic("kernel stack overflow");
 }
 
@@ -154,7 +251,11 @@ static proc_t *proc_by_pid(int pid) __attribute__((noinline));
 static proc_t *proc_by_pid(int pid)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
-        if (procs[i].state != ST_FREE && procs[i].pid == pid)
+        /* ST_NEW is a slot claimed by an exec() that has not picked a pid
+         * yet: it still holds the previous task's number and must not be
+         * mistaken for it. */
+        if (procs[i].state != ST_FREE && procs[i].state != ST_NEW &&
+            procs[i].pid == pid)
             return &procs[i];
     }
     return NULL;
@@ -173,11 +274,18 @@ static void preempt_if_higher(proc_t *p)
 
 /* Hand a blocked task its result and make it runnable.  `val` lands in the
  * saved frame, so the task resumes straight in user mode with that return
- * value - nothing is replayed. */
+ * value - nothing is replayed.
+ *
+ * The state change is under the table lock because on SMP the waker and the
+ * scheduler on another CPU can look at the same task at the same time: one
+ * has to win, and it must be the waker (a task the scheduler already saw as
+ * READY must not be handed a result afterwards and lose it). */
 static void make_ready(proc_t *p, int32_t val)
 {
     plat_frame_set_ret(&p->saved, (uint32_t)val);
+    spin_lock(&proc_lock);
     p->state = ST_READY;
+    spin_unlock(&proc_lock);
     preempt_if_higher(p);
 }
 
@@ -199,7 +307,28 @@ static int proc_waiting(void)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
         int st = procs[i].state;
-        if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP)
+        if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP ||
+            st == ST_WAIT_PIPE)
+            return 1;
+    }
+    return 0;
+}
+
+/* Is another CPU running something?  On one CPU this is always false and
+ * costs a comparison.  With two it is what keeps the idle hart from
+ * declaring the kernel dead while its neighbour is happily running the
+ * shell: "nobody blocked" does not mean "nothing left to do" once the other
+ * hart holds a task in ST_RUNNING, which no other CPU may pick up. */
+static int other_cpu_busy(void)
+{
+    int me = cpu_id();
+
+    for (int i = 0; i < (int)cpu_count && i < (int)(MAX_CPUS); i++) {
+        proc_t *p = cpus[i].cur;
+
+        if (i == me || !p)
+            continue;
+        if (p->state == ST_RUNNING)
             return 1;
     }
     return 0;
@@ -232,7 +361,10 @@ static regs_t *sched_switch(regs_t *r)
 
     if (prev && prev->state == ST_RUNNING) {
         prev->saved = *r;
+        spin_lock(&proc_lock);
         prev->state = ST_READY;
+        prev->cpu = -1;
+        spin_unlock(&proc_lock);
     }
     /* Somebody asked for this switch; whoever asked (a wake-up, a syscall)
        does not need to ask again once we are here. */
@@ -252,21 +384,37 @@ static regs_t *sched_switch(regs_t *r)
          * the probe reports "nobody waiting" (the sleeper just became
          * READY), which used to add up to a panic on a machine that had a
          * runnable shell all along.  Closing the window here is enough -
-         * the frame the tick wrote is picked up by the next iteration. */
+         * the frame the tick wrote is picked up by the next iteration.
+         *
+         * On SMP the lock does the same job against the other CPU: both the
+         * scan and the probe happen inside it, so a task cannot slip from
+         * one state to the other between them. */
         plat_irq_disable();
+        spin_lock(&proc_lock);
         next = sched_pick();
-        waiting = proc_waiting();
+        waiting = proc_waiting() || other_cpu_busy();
         if (next) {
             next->state = ST_RUNNING;
+            next->cpu = cpu_id();
             current = next;
             quantum = QUANTUM;
+            spin_unlock(&proc_lock);
             apply_protection(next);
             /* Leave interrupts closed: the caller is trap exit and mret
                restores MIE from MPIE, which is the state we came in with. */
             return &next->saved;
         }
-        if (!waiting)
+        spin_unlock(&proc_lock);
+        if (!waiting) {
+            /* Shutting down is not a scheduling failure: the boot CPU is
+             * already in plat_shutdown() and this one just waits for the
+             * lights to go out. */
+            if (sys_down) {
+                sched_idle();
+                continue;
+            }
             panic("no runnable process");
+        }
         sched_idle();       /* re-enables interrupts and sleeps until the next tick */
     }
 }
@@ -280,7 +428,10 @@ static regs_t *block(regs_t *r, int st)
     /* Woken by something unexpected?  Better a failed syscall than the
        syscall number handed back as a result. */
     plat_frame_set_ret(&p->saved, (uint32_t)-1);
+    spin_lock(&proc_lock);
     p->state = st;
+    p->cpu = -1;
+    spin_unlock(&proc_lock);
 
     return sched_switch(r);
 }
@@ -307,25 +458,50 @@ void process_tick(regs_t *r)
 
     /* Console input first: a line finished this tick should reach its
        reader in the same tick.  Echo leaves through the console only if
-       nothing was printed during this tick (see console_echo_tick). */
-    tty_poll();
-    console_echo_tick();
-    if (tty_line_ready()) {
-        for (int i = 0; i < MAX_PROCS; i++) {
-            proc_t *p = &procs[i];
-            if (p->state != ST_WAIT_INPUT)
-                continue;
-            int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
-            make_ready(p, n);
-            break;
+       nothing was printed during this tick (see console_echo_tick).
+     *
+     * Only the boot CPU does any of this.  The console is one shared device
+     * with one FIFO and one line buffer, and the tty layer is written for a
+     * single reader: letting both harts drain the FIFO would split a line
+     * between two shells, and letting both hand the same finished line to
+     * the same waiter would deliver it twice.  Whoever owns the hardware
+     * owns the driver - the same rule the GPIO and ADC layers follow.
+     * Sleepers are still woken on every CPU: the deadline is a process
+     * property, not a console one. */
+    if (cpu_id() == 0) {
+        tty_poll();
+        console_echo_tick();
+        if (tty_is_raw()) {
+            /* Raw reader: hand over whatever arrived, a keystroke at a time.
+             * An editor wants the byte before the next tick, not after a
+             * newline that will never come. */
+            if (tty_raw_ready()) {
+                for (int i = 0; i < MAX_PROCS; i++) {
+                    proc_t *p = &procs[i];
+                    if (p->state != ST_WAIT_INPUT)
+                        continue;
+                    int n = tty_take_raw((char *)p->in_buf, (int)p->in_len);
+                    make_ready(p, n);
+                    break;
+                }
+            }
+        } else if (tty_line_ready()) {
+            for (int i = 0; i < MAX_PROCS; i++) {
+                proc_t *p = &procs[i];
+                if (p->state != ST_WAIT_INPUT)
+                    continue;
+                int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
+                make_ready(p, n);
+                break;
+            }
         }
-    }
 
-    /* Control characters act on the foreground task - whoever is blocked
-       reading the console - which is exactly the job the two shells above
-       found.  They are handled after the line hand-over so that ^C on an
-       empty prompt cannot be swallowed as input. */
-    tty_ctrl_deliver();
+        /* Control characters act on the foreground task - whoever is blocked
+           reading the console - which is exactly the job the two shells above
+           found.  They are handled after the line hand-over so that ^C on an
+           empty prompt cannot be swallowed as input. */
+        tty_ctrl_deliver();
+    }
 
     now = plat_ticks();
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -354,12 +530,56 @@ regs_t *process_resched(regs_t *r)
     return r;
 }
 
+/* A secondary CPU's first task.  It has no trap frame to switch away from,
+ * so it cannot use sched_switch(): it takes one task out of the shared run
+ * queue, installs it on itself and drops into user mode.  Everything after
+ * that is an ordinary trap on that CPU.
+ *
+ * Called with interrupts off (start.S has just come up); the caller turns
+ * them back on before idling.  Returns NULL when nothing is ready, which on
+ * a freshly started CPU is normal - the boot CPU may still be alone. */
+proc_t *cpu_take_task(void)
+{
+    proc_t *p;
+
+    plat_irq_disable();
+    spin_lock(&proc_lock);
+    p = sched_pick();
+    if (p) {
+        p->state = ST_RUNNING;
+        p->cpu = cpu_id();
+        current = p;
+        quantum = QUANTUM;
+    }
+    spin_unlock(&proc_lock);
+
+    if (p)
+        apply_protection(p);
+    return p;
+}
+
+/* See process.h: proc_t is private to this file. */
+regs_t *process_saved_frame(struct proc *p)
+{
+    return &((proc_t *)p)->saved;
+}
+
 /* Trap exit for the current task: park it if somebody stopped it while it
- * was running.  Deferred from process_signal because stopping there would
- * abandon a kernel stack that is still in use - here the frame is already
- * saved and sched_switch() abandons the stack the way every switch does. */
+ * was running, or finish a kill that had nobody else to run it.  Deferred
+ * from process_signal because stopping there would abandon a kernel stack
+ * that is still in use - here the frame is already saved and sched_switch()
+ * abandons the stack the way every switch does. */
 regs_t *process_suspend(regs_t *r)
 {
+    if (current && current->kill_pending) {
+        /* ^C arrived while this very task was on the CPU (an editor drawing
+         * its screen spends most of its time there), so process_signal()
+         * could not rip out the frame that was running.  It marked the task
+         * instead; this is the first safe point to act on it. */
+        current->kill_pending = 0;
+        kprintf("\n[pid %d] killed\n", current->pid);
+        return process_exit(r, 128 + 9);
+    }
     if (current && current->stop_pending && current->state == ST_RUNNING) {
         current->stop_pending = 0;
         kprintf("\n[pid %d] stopped\n", current->pid);
@@ -425,6 +645,22 @@ int process_current_pid(void)
     return current ? current->pid : 0;
 }
 
+/* The cwd is per task.  When no task is current (early boot, before the
+ * shell starts) the answer is the root, which is also what an uninitialised
+ * proc_t reads as after the memset in proc_create(). */
+const char *process_cwd_str(void)
+{
+    return (current && current->cwd[0]) ? current->cwd : "/";
+}
+
+void process_set_cwd_str(const char *path)
+{
+    if (!current)
+        return;
+    strncpy(current->cwd, path, sizeof(current->cwd) - 1);
+    current->cwd[sizeof(current->cwd) - 1] = '\0';
+}
+
 int process_console_reader(void)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -453,30 +689,73 @@ int process_user_ok(uint32_t addr, uint32_t len)
 
 static int win_alloc(void)
 {
+    /* Under the table lock: the bitmap is one word, and read-modify-write on
+     * it from two CPUs at once loses a bit - which shows up much later as
+     * "exec: out of windows" on a machine with free ones, or worse, as two
+     * tasks sharing an address window. */
+    int slot = -1;
+
+    spin_lock(&proc_lock);
     for (int i = 0; i < win_slots; i++) {
         if (!(win_used & (1u << i))) {
             win_used |= 1u << i;
-            return i;
+            slot = i;
+            break;
         }
     }
-    return -1;
+    spin_unlock(&proc_lock);
+    return slot;
 }
 
 static void win_free(int slot)
 {
-    if (slot >= 0 && slot < win_slots)
-        win_used &= ~(1u << slot);
+    if (slot < 0 || slot >= win_slots)
+        return;
+    spin_lock(&proc_lock);
+    win_used &= ~(1u << slot);
+    spin_unlock(&proc_lock);
 }
 
 /* ---- creation -------------------------------------------------------- */
 
 static proc_t *proc_alloc(void)
 {
+    /* Claim the slot, not just find it: proc_create() then spends a while
+     * loading the ELF and building the initial stack, and on SMP a second
+     * exec() on the other CPU must not settle on the same table entry while
+     * that is happening.  pid is set by the caller; the state is what makes
+     * the slot owned, and ST_NEW says "owned, not runnable". */
+    proc_t *p = NULL;
+
+    spin_lock(&proc_lock);
     for (int i = 0; i < MAX_PROCS; i++) {
-        if (procs[i].state == ST_FREE)
-            return &procs[i];
+        if (procs[i].state == ST_FREE) {
+            p = &procs[i];
+            /* Clear it here rather than in proc_create(): the caller used to
+             * memset() the whole struct a hundred lines later, which wiped
+             * this very claim (ST_FREE is 0) and reopened the race. */
+            memset(p, 0, sizeof(*p));
+            p->state = ST_NEW;
+            p->cpu = -1;
+            break;
+        }
     }
-    return NULL;
+    spin_unlock(&proc_lock);
+    return p;
+}
+
+/* Hand a slot back to the table.  Two callers: a failed exec() (a claimed
+ * slot that never became a task) and a dying one.  Both have to be under the
+ * table lock, because on SMP the other CPU is scanning the table at the same
+ * moment - a half-cleared entry can be picked up as a runnable task. */
+static void proc_retire(proc_t *p)
+{
+    spin_lock(&proc_lock);
+    p->state = ST_FREE;
+    p->pid = 0;
+    p->parent = NULL;
+    p->cpu = -1;
+    spin_unlock(&proc_lock);
 }
 
 /* Where the initial [argc][argv..][NULL] block would start for argc
@@ -596,6 +875,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     if (elf_probe(data, size, &link_lo, &link_hi, &link_entry, &link_wx) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         ramdisk_release(data);
+        proc_retire(p);
         return NULL;
     }
     uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
@@ -603,6 +883,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         kprintf("exec: '%s' does not fit a %u KiB task window\n",
                 path, PLAT_APP_WINDOW / 1024u);
         ramdisk_release(data);
+        proc_retire(p);
         return NULL;
     }
 
@@ -610,6 +891,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     if (slot < 0) {
         kprintf("exec: out of task windows\n");
         ramdisk_release(data);
+        proc_retire(p);
         return NULL;
     }
     uint32_t base = PLAT_APP_BASE + (uint32_t)slot * PLAT_APP_WINDOW;
@@ -624,15 +906,55 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         elf_set_window(0, 0);
         ramdisk_release(data);
         win_free(slot);
+        proc_retire(p);
         return NULL;
     }
     elf_set_window(0, 0);
     ramdisk_release(data);
 
-    memset(p, 0, sizeof(*p));
+    /* proc_alloc() already cleared this entry and marked it ST_NEW; from
+     * here to the publish at the bottom it is "owned and unusable", which is
+     * exactly what ST_NEW means.  Start in the root, then inherit the
+     * parent's cwd so a program spawned
+     * from a subdirectory lists and opens files relative to where the user
+     * is, not always the root. */
+    p->cwd[0] = '/';
+    p->cwd[1] = '\0';
+    if (current && current->cwd[0]) {
+        strncpy(p->cwd, current->cwd, sizeof(p->cwd) - 1);
+        p->cwd[sizeof(p->cwd) - 1] = '\0';
+    }
     p->slot = slot;
+    p->cpu = -1;        /* memset() above zeroed it; 0 is a real CPU */
+    /* Pid allocation is under the table lock for the same reason the slot is:
+     * two exec()s on two CPUs would otherwise hand out the same number, and
+     * `wait(pid)` would then reap the wrong task. */
+    spin_lock(&proc_lock);
     p->pid = next_pid++;
-    /* Children inherit: a task cannot spawn something more important than
+    spin_unlock(&proc_lock);
+
+    /* Descriptors.  0/1/2 are the console by default; everything else is
+     * inherited from the parent, which is the whole reason `a | b` works:
+     * the shell wires fd 1 to a pipe, then exec()s the child, and the child
+     * gets that wiring as part of its own table.  The same is what makes
+     * `echo hi > file` work - by the time the child starts, the shell's fd 1
+     * is a file, and the child inherits it. */
+    for (int i = 0; i < MAX_FDS; i++)
+        p->fds[i].type = FD_NONE;
+    if (current) {
+        for (int i = 0; i < MAX_FDS; i++) {
+            /* Console and pipes were always inherited; files and devices
+             * joined them when redirection started crossing exec().  The
+             * rules live in fd_clone() so dup2() cannot drift from this. */
+            if (current->fds[i].type == FD_NONE)
+                continue;
+            if (fd_clone(&p->fds[i], &current->fds[i]) < 0)
+                p->fds[i].type = FD_NONE;
+        }
+    }
+    for (int i = 0; i < 3; i++)
+        if (p->fds[i].type == FD_NONE)
+            p->fds[i].type = FD_CONSOLE;    /* Children inherit: a task cannot spawn something more important than
        itself, which is what keeps a program from locking the console out. */
     p->prio = current ? current->prio : PRIO_HIGH;
     p->start_ns = plat_uptime_ms();
@@ -651,6 +973,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     if (!sp) {
         kprintf("exec: out of memory\n");
         win_free(slot);
+        proc_retire(p);
         return NULL;
     }
     p->user_esp = sp;
@@ -670,13 +993,20 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         kprintf("exec: '%s' needs %u bytes of stack, the window has %u\n",
                 path, need, STACK_BYTES);
         win_free(slot);
+        proc_retire(p);
         return NULL;
     }
 
     /* The frame this task will resume on.  Nothing else is needed to start
        it: the trap epilogue restores exactly this. */
     plat_prepare_user_frame(&p->saved, p->entry, p->user_esp);
+
+    /* Publish it.  The state store is the last write and it happens under
+       the table lock, so a scheduler on another CPU either sees a free slot
+       or a finished task, never a half-built one. */
+    spin_lock(&proc_lock);
     p->state = ST_READY;
+    spin_unlock(&proc_lock);
     return p;
 }
 
@@ -730,12 +1060,13 @@ int process_setprio(int pid, int prio)
  * else). */
 static void task_release(proc_t *p)
 {
-    for (int i = 0; i < MAX_FDS; i++) {
-        if (p->fds[i].used) {
-            ramdisk_close(p->fds[i].fh);
-            p->fds[i].used = 0;
-        }
-    }
+    for (int i = 0; i < MAX_FDS; i++)
+        fd_close_in(p, i);
+    /* A full-screen program that dies (^C, a crash, a plain exit) must not
+     * leave the console in raw mode: the shell's next getline() would then
+     * return single bytes and every command would look like one letter. */
+    if (tty_is_raw())
+        tty_set_raw(0);
     win_free(p->slot);
     p->slot = -1;
 }
@@ -770,9 +1101,7 @@ static void task_kill(proc_t *p, int code)
 {
     task_release(p);
     reap_into_parent(p, code);
-    p->state = ST_FREE;
-    p->pid = 0;
-    p->parent = NULL;
+    proc_retire(p);
 }
 
 regs_t *process_exit(regs_t *r, int code)
@@ -784,12 +1113,21 @@ regs_t *process_exit(regs_t *r, int code)
     task_release(p);
     reap_into_parent(p, code);
 
-    p->state = ST_FREE;
-    p->pid = 0;
-    p->parent = NULL;
+    int is_init = (p == init_proc);
+    if (is_init) {
+        /* Raise the flag *before* the slot goes back to the table: a CPU
+         * that sees an empty run queue must be able to see it, and the only
+         * way to guarantee that without a shared clock is to make the flag
+         * visible first. */
+        spin_lock(&proc_lock);
+        sys_down = 1;
+        spin_unlock(&proc_lock);
+    }
+
+    proc_retire(p);
     current = NULL;
 
-    if (p == init_proc) {
+    if (is_init) {
         kprintf("\ninit process exited with code %d - shutting down\n", code);
         plat_shutdown();
     }
@@ -833,15 +1171,25 @@ regs_t *process_yield(regs_t *r)
  * is not in use, and the only such boundary this kernel has is the trap
  * exit, so the flag is checked there (process_suspend).
  *
- * A task cannot signal itself: its own frame is the one still running, so
- * that case is refused and left to process_exit, which the caller reaches
- * on its own. */
+ * A task cannot rip out its own frame: when the target is the task on the
+ * CPU - which is exactly the case for ^C in a full screen program, because
+ * the tick that notices the key usually lands while the program is drawing -
+ * the signal is recorded and process_suspend() acts on it at the next trap
+ * exit.  Refusing outright (the old behaviour) lost that ^C entirely. */
 int process_signal(int pid, int sig)
 {
     proc_t *victim = proc_by_pid(pid);
 
-    if (!victim || victim == current || victim == init_proc)
+    if (!victim || victim == init_proc)
         return -1;
+
+    if (victim == current) {
+        if (sig == SIGKILL)
+            victim->kill_pending = 1;
+        else if (sig == SIGSTOP)
+            victim->stop_pending = 1;
+        return 0;
+    }
 
     if (sig == SIGKILL) {
         kprintf("\n[pid %d] killed\n", pid);
@@ -935,31 +1283,62 @@ static const char *state_name(int st)
     case ST_WAIT_CHILD: return "wait ";
     case ST_WAIT_INPUT: return "tty  ";
     case ST_WAIT_SLEEP: return "sleep";
+    case ST_WAIT_PIPE:  return "pipe ";
+    case ST_NEW:        return "new  ";
     default:            return "free ";
     }
 }
 
-int process_dump(void)
+/* Format the process table into `buf`, returning the bytes written.
+ *
+ * Both `ps` and /proc/ps come through here.  The alternative - a kprintf
+ * version for the command and a separate text version for the file - is
+ * exactly how a /proc view ends up missing a column the command has, and
+ * then someone debugs the file instead of the kernel.
+ *
+ * Column notes: the window address says nothing here (every task has the same
+ * one, slots are process.c's business) and a raw tick count made CPU time
+ * look tiny: one tick is 10 ms of CPU but the task runs for a 50 ms slice
+ * including the timer's own work.  cpums is the time spent on the CPU, cpu%
+ * its share of the machine since the task started.  The `c` column is the CPU
+ * running it right now ("-" when it is not on one): on a two-hart build it is
+ * what makes two tasks both saying "run" readable, and it is how a program
+ * checks that it migrated. */
+uint32_t process_ps_text(char *buf, uint32_t cap)
 {
-    int n = 0;
+    uint32_t off;
     uint64_t now = plat_uptime_ms();
+    int n;
 
-    /* The window address says nothing here (every task has the same one,
-       slots are process.c's business) and a raw tick count made CPU time
-       look tiny: one tick is 10 ms of CPU but the task runs for a 50 ms
-       slice including the timer's own work.  cpums is the time spent on the
-       CPU, cpu% its share of the machine since the task started. */
-    kprintf(" pid ppid prio state cpu%% cpums  name\n");
+    if (!buf || cap < 64)
+        return 0;
+
+    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums  name\n");
+    if (n < 0)
+        return 0;
+    off = (uint32_t)n;
+
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
+        char cpubuf[4];
+        uint32_t age, busy, pct10;
+
         if (p->state == ST_FREE)
             continue;
 
-        uint32_t age  = (uint32_t)(now - p->start_ns);
-        uint32_t busy = (uint32_t)p->cpu_ms;
+        if (p->cpu < 0 || p->state != ST_RUNNING) {
+            cpubuf[0] = '-';
+            cpubuf[1] = '\0';
+        } else {
+            cpubuf[0] = (char)('0' + (p->cpu % 10));
+            cpubuf[1] = '\0';
+        }
+
+        age  = (uint32_t)(now - p->start_ns);
+        busy = (uint32_t)p->cpu_ms;
         /* Tenths of a percent with 32-bit arithmetic only (rv32 has no
            64-bit divide); saturate rather than wrap. */
-        uint32_t pct10 = 0;
+        pct10 = 0;
         if (age > 0) {
             uint32_t t = (uint32_t)(busy / age);
             pct10 = t * 1000u;
@@ -968,106 +1347,558 @@ int process_dump(void)
         if (pct10 > 9999u)
             pct10 = 9999u;
 
-        kprintf("%4d %4d %4d %s %4u.%u %5u  %s\n", p->pid,
-                p->parent ? p->parent->pid : 0, p->prio, state_name(p->state),
-                pct10 / 10u, pct10 % 10u, busy / 1000u, p->name);
-        n++;
+        if (off >= cap - 1)
+            break;
+        n = ksnprintf(buf + off, cap - off,
+                      "%4d %4d %4d %s %2s %4u.%u %5u  %s\n", p->pid,
+                      p->parent ? p->parent->pid : 0, p->prio,
+                      state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
+                      busy / 1000u, p->name);
+        if (n > 0)
+            off += (uint32_t)n;
     }
-    return n;
+    return off;
+}
+
+int process_dump(void)
+{
+    /* A stack buffer, not kmalloc: this runs from a syscall, the table is
+     * bounded at 16 rows (~810 bytes), and 1 KiB is small next to the 32 KiB
+     * kernel stack.  kmalloc could fail here, and "ps stops working when the
+     * heap is full" is a poor answer to "what is using the heap". */
+    char buf[1024];
+    uint32_t n = process_ps_text(buf, sizeof(buf));
+    int count = 0;
+
+    if (n)
+        console_write(buf, n);
+
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (procs[i].state != ST_FREE)
+            count++;
+    return count;
+}
+
+/* ---- file descriptors ------------------------------------------------- */
+
+static file_t *fd_slot(proc_t *p, int fd)
+{
+    if (!p || fd < 0 || fd >= MAX_FDS)
+        return NULL;
+    return &p->fds[fd];
+}
+
+/* The descriptor number *is* the table index.  open() starts at 3: 0/1/2
+ * belong to the console and a program that opens a file must not be handed
+ * its own stdout by mistake. */
+static int fd_alloc(proc_t *p)
+{
+    for (int i = 3; i < MAX_FDS; i++)
+        if (p->fds[i].type == FD_NONE)
+            return i;
+    return -1;
+}
+
+/* A path has to survive the descriptor if a child is ever going to reopen it
+ * (see the inheritance path in proc_create).  Copying is the only option: the
+ * caller's buffer is a syscall argument that is gone by the time a child
+ * exists.  Failure is not fatal - the file simply becomes non-inheritable,
+ * which is what every file used to be. */
+static char *kstrdup(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *p = kmalloc(n);
+
+    if (p)
+        memcpy(p, s, n);
+    return p;
+}
+
+/* Make `dst` a second, independent instance of `src`.
+ *
+ * The rule that shapes this function: a descriptor owns something, and two
+ * descriptors must never own it twice.  A pipe end is shared by refcount; a
+ * file handle is *reopened* because it carries a read position and exactly
+ * one close; a character device gets its own per-open state so /proc buffers
+ * are not freed twice.
+ *
+ * Returns 0, or -1 when the source cannot be duplicated (a file whose path
+ * was not saved, because the heap was full when it was opened). */
+static int fd_clone(file_t *dst, const file_t *src)
+{
+    if (!dst || !src)
+        return -1;
+    memset(dst, 0, sizeof(*dst));
+
+    switch (src->type) {
+    case FD_CONSOLE:
+        dst->type = FD_CONSOLE;
+        return 0;
+
+    case FD_PIPE_R:
+    case FD_PIPE_W:
+        *dst = *src;
+        if (src->type == FD_PIPE_R)
+            pipe_ref_reader(src->pipe);
+        else
+            pipe_ref_writer(src->pipe);
+        return 0;
+
+    case FD_FILE: {
+        int h;
+
+        if (!src->path)
+            return -1;
+        /* Reopen with the same access the original had.  A read-only handle
+         * would make `echo hi > f` fail in the child, which is the one case
+         * inheritance exists for now. */
+        h = src->writable ? ramdisk_open_rw(src->path)
+                          : ramdisk_open(src->path);
+        if (h < 0)
+            return -1;
+        /* The new handle starts at 0; the descriptor it replaces was
+         * somewhere else.  Without this a child reading a file it inherited
+         * halfway through would start over. */
+        if (ramdisk_seek(h, src->pos) < 0) {
+            ramdisk_close(h);
+            return -1;
+        }
+        dst->type     = FD_FILE;
+        dst->fh       = h;
+        dst->size     = ramdisk_size(h);
+        dst->pos      = src->pos;
+        dst->writable = src->writable;
+        dst->path     = kstrdup(src->path);
+        return 0;
+    }
+
+    case FD_CHRDEV: {
+        void *priv = src->dev->priv;
+
+        if (src->dev->ops->open && src->dev->ops->open(src->dev, &priv) < 0)
+            return -1;
+        dst->type    = FD_CHRDEV;
+        dst->dev     = src->dev;
+        dst->devpriv = priv;
+        dst->pos     = src->pos;
+        return 0;
+    }
+
+    default:
+        return -1;
+    }
 }
 
 int process_fd_open(const char *path)
 {
+    const dev_t *d;
+    file_t *f;
+    int fd, h;
+
     if (!current)
         return -1;
 
-    int h = ramdisk_open(path);
+    /* Device paths are not on the filesystem, so this lookup failing is the
+     * normal case for every plain file open.  Trying devices first costs one
+     * strcmp chain and keeps ramdisk.c from needing to know about /dev. */
+    d = devfs_lookup(path);
+    if (d) {
+        void *priv = d->priv;
+
+        fd = fd_alloc(current);
+        if (fd < 0)
+            return -1;
+        if (d->ops->open && d->ops->open(d, &priv) < 0) {
+            current->fds[fd].type = FD_NONE;
+            return -1;
+        }
+        f = &current->fds[fd];
+        f->type    = FD_CHRDEV;
+        f->dev     = d;
+        f->devpriv = priv;
+        f->pos     = 0;
+        f->size    = 0;
+        return fd;
+    }
+
+    h = ramdisk_open(path);
     if (h < 0)
         return -1;
 
-    for (int i = 0; i < MAX_FDS; i++) {
-        if (!current->fds[i].used) {
-            current->fds[i].used = 1;
-            current->fds[i].fh = h;
-            current->fds[i].size = ramdisk_size(h);
-            current->fds[i].pos = 0;
-            return 3 + i;
-        }
+    fd = fd_alloc(current);
+    if (fd < 0) {
+        ramdisk_close(h);
+        return -1;
     }
-    ramdisk_close(h);
-    return -1;
+    f = &current->fds[fd];
+    f->type = FD_FILE;
+    f->fh   = h;
+    f->size = ramdisk_size(h);
+    f->pos  = 0;
+    f->path = kstrdup(path);
+    return fd;
 }
 
 int process_fd_create(const char *path)
 {
+    file_t *f;
+    int fd, h;
+
     if (!current)
         return -1;
 
-    int h = ramdisk_create(path);
+    /* Creating a device node is a boot-time act (devfs_register), not
+     * something a task does by opening a path for writing. */
+    if (devfs_lookup(path))
+        return -1;
+
+    h = ramdisk_create(path);
     if (h < 0)
         return -1;
 
-    for (int i = 0; i < MAX_FDS; i++) {
-        if (!current->fds[i].used) {
-            current->fds[i].used = 1;
-            current->fds[i].fh = h;
-            current->fds[i].size = ramdisk_size(h);
-            current->fds[i].pos = 0;
-            return 3 + i;
+    fd = fd_alloc(current);
+    if (fd < 0) {
+        ramdisk_close(h);
+        return -1;
+    }
+    f = &current->fds[fd];
+    f->type = FD_FILE;
+    f->fh   = h;
+    f->size = ramdisk_size(h);
+    f->pos  = 0;
+    f->path = kstrdup(path);
+    f->writable = 1;            /* a child inheriting this must be able to write */
+    return fd;
+}
+
+/* Hand a pipe to a sleeping task: whoever moved data completes the transfer
+ * on the waiter's behalf, so nothing has to be replayed when it resumes (the
+ * same trick the console line hand-over uses).  One delivery per event is
+ * enough - the next operation wakes the next waiter. */
+static void pipe_wake(struct pipe *p, int dir)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *w = &procs[i];
+        int n;
+
+        if (w->state != ST_WAIT_PIPE || w->wpipe != p || w->wdir != dir)
+            continue;
+
+        if (dir == 0) {
+            n = pipe_read(p, (void *)w->wbuf, w->wlen);
+            if (n == PIPE_EAGAIN)
+                return;             /* still empty, keep waiting */
+        } else {
+            n = pipe_write(p, (const void *)w->wbuf, w->wlen);
+            if (n == PIPE_EAGAIN)
+                return;             /* still full, keep waiting */
+            if (n == PIPE_EPIPE) {
+                /* Every reader closed while we waited: fail the write
+                 * instead of parking it forever. */
+                w->wpipe = NULL;
+                make_ready(w, (uint32_t)-1);
+                continue;
+            }
         }
-    }
-    ramdisk_close(h);
-    return -1;
-}
-
-int process_fd_read(int fd, void *buf, uint32_t len)
-{
-    if (!current || fd < 3)
-        return -1;
-
-    int i = fd - 3;
-    if (i >= MAX_FDS || !current->fds[i].used)
-        return -1;
-
-    file_t *f = &current->fds[i];
-    if (f->pos >= f->size)
-        return 0;
-
-    uint32_t avail = f->size - f->pos;
-    if (len > avail)
-        len = avail;
-
-    int n = ramdisk_read(f->fh, buf, len);
-    if (n > 0)
-        f->pos += (uint32_t)n;
-    return n;
-}
-
-int process_fd_write(int fd, const void *buf, uint32_t len)
-{
-    if (!current || fd < 3)
-        return -1;
-
-    int i = fd - 3;
-    if (i >= MAX_FDS || !current->fds[i].used)
-        return -1;
-
-    file_t *f = &current->fds[i];
-    int n = ramdisk_write(f->fh, buf, len);
-    if (n > 0)
-        f->size += (uint32_t)n;
-    return n;
-}
-
-void process_fd_close(int fd)
-{
-    if (!current || fd < 3)
+        w->wpipe = NULL;
+        make_ready(w, n);           /* n == 0 is EOF and is delivered too */
         return;
-    int i = fd - 3;
-    if (i < MAX_FDS && current->fds[i].used) {
-        ramdisk_close(current->fds[i].fh);
-        memset(&current->fds[i], 0, sizeof(file_t));
     }
+}
+
+static regs_t *block_on_pipe(regs_t *r, struct pipe *p, int dir,
+                             uint32_t buf, uint32_t len)
+{
+    proc_t *me = current;
+
+    me->saved = *r;
+    plat_frame_set_ret(&me->saved, (uint32_t)-1);
+    me->wpipe = p;
+    me->wdir  = dir;
+    me->wbuf  = buf;
+    me->wlen  = len;
+    me->state = ST_WAIT_PIPE;
+    return sched_switch(r);
+}
+
+/* One read on fd 0 with the console attached: a line at a time in cooked
+ * mode, a byte at a time in raw mode (an editor draws its own screen and
+ * cannot wait for a newline). */
+static regs_t *console_read(regs_t *r, uint32_t ptr, uint32_t len)
+{
+    if (tty_is_raw()) {
+        uint32_t room = len < 128 ? len : 128;
+        if (!tty_raw_ready())
+            return process_block_read(r, ptr, room);
+        return done(r, (uint32_t)tty_take_raw((char *)ptr, (int)room));
+    }
+
+    uint32_t room = len < TTY_LINE_MAX ? len : TTY_LINE_MAX;
+    if (!tty_line_ready())
+        return process_block_read(r, ptr, room);
+    return done(r, (uint32_t)tty_take_line((char *)ptr, (int)room));
+}
+
+regs_t *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
+{
+    proc_t *me = current;
+    file_t *f;
+
+    if (!me)
+        return done(r, (uint32_t)-1);
+    if (len == 0)
+        return done(r, 0);
+
+    f = fd_slot(me, fd);
+    if (!f || f->type == FD_NONE)
+        return done(r, (uint32_t)-1);
+
+    switch (f->type) {
+    case FD_CONSOLE:
+        /* Only fd 0 reads the keyboard; fd 1/2 are outputs. */
+        if (fd != 0)
+            return done(r, (uint32_t)-1);
+        return console_read(r, ubuf, len);
+
+    case FD_FILE: {
+        uint32_t avail;
+        int n;
+
+        if (f->pos >= f->size)
+            return done(r, 0);
+        avail = f->size - f->pos;
+        if (len > avail)
+            len = avail;
+        n = ramdisk_read(f->fh, (void *)ubuf, len);
+        if (n > 0)
+            f->pos += (uint32_t)n;
+        return done(r, (uint32_t)n);
+    }
+
+    case FD_CHRDEV: {
+        int n;
+
+        /* The driver owns the text form and the EOF question; this layer
+         * only keeps the position.  A device that has nothing more to say
+         * returns 0, which is indistinguishable from a file at EOF - which
+         * is exactly what `cat` needs. */
+        if (!f->dev->ops->read)
+            return done(r, (uint32_t)-1);
+        n = f->dev->ops->read(f->devpriv, f->pos, (void *)ubuf, len);
+        if (n > 0)
+            f->pos += (uint32_t)n;
+        return done(r, (uint32_t)n);
+    }
+
+    case FD_PIPE_R: {
+        int n = pipe_read(f->pipe, (void *)ubuf, len);
+        if (n == PIPE_EAGAIN)
+            return block_on_pipe(r, f->pipe, 0, ubuf, len);
+        /* Room appeared: a writer may be parked waiting for it. */
+        if (n > 0)
+            pipe_wake(f->pipe, 1);
+        return done(r, (uint32_t)n);
+    }
+
+    default:
+        return done(r, (uint32_t)-1);
+    }
+}
+
+regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
+{
+    proc_t *me = current;
+    file_t *f;
+
+    if (!me)
+        return done(r, (uint32_t)-1);
+    if (len == 0)
+        return done(r, 0);
+
+    f = fd_slot(me, fd);
+    if (!f || f->type == FD_NONE)
+        return done(r, (uint32_t)-1);
+
+    switch (f->type) {
+    case FD_CONSOLE:
+        console_write((const char *)ubuf, len);
+        return done(r, len);
+
+    case FD_FILE: {
+        int n = ramdisk_write(f->fh, (const void *)ubuf, len);
+        if (n > 0)
+            f->size += (uint32_t)n;
+        return done(r, (uint32_t)n);
+    }
+
+    case FD_CHRDEV: {
+        int n;
+
+        if (!f->dev->ops->write)
+            return done(r, (uint32_t)-1);
+        n = f->dev->ops->write(f->devpriv, f->pos, (const void *)ubuf, len);
+        if (n > 0)
+            f->pos += (uint32_t)n;
+        return done(r, (uint32_t)n);
+    }
+
+    case FD_PIPE_W: {
+        int n = pipe_write(f->pipe, (const void *)ubuf, len);
+        if (n == PIPE_EAGAIN)
+            return block_on_pipe(r, f->pipe, 1, ubuf, len);
+        if (n == PIPE_EPIPE)
+            return done(r, (uint32_t)-1);
+        pipe_wake(f->pipe, 0);      /* data for a sleeping reader */
+        return done(r, (uint32_t)n);
+    }
+
+    default:
+        return done(r, (uint32_t)-1);
+    }
+}
+
+/* Close one descriptor of `p`.  Shared by the syscall (the caller is `p`)
+ * and by task_release (a dead task, which is not necessarily current). */
+static void fd_close_in(proc_t *p, int fd)
+{
+    file_t *f = fd_slot(p, fd);
+
+    if (!f || f->type == FD_NONE)
+        return;
+
+    switch (f->type) {
+    case FD_FILE:
+        ramdisk_close(f->fh);
+        if (f->path)
+            kfree(f->path);
+        break;
+
+    case FD_CHRDEV:
+        if (f->dev->ops->close)
+            f->dev->ops->close(f->devpriv);
+        break;
+
+    case FD_PIPE_R: {
+        struct pipe *pp = f->pipe;
+        if (pipe_drop_reader(pp)) {
+            kfree(pp);              /* no references left at all */
+        } else if (pipe_readers(pp) == 0) {
+            /* Writers waiting for space have nobody to write to now. */
+            pipe_wake(pp, 1);
+        }
+        break;
+    }
+
+    case FD_PIPE_W: {
+        struct pipe *pp = f->pipe;
+        if (pipe_drop_writer(pp)) {
+            kfree(pp);
+        } else if (pipe_writers(pp) == 0) {
+            /* Readers blocked on an empty pipe must see EOF, not hang. */
+            pipe_wake(pp, 0);
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    memset(f, 0, sizeof(*f));
+    /* 0, 1 and 2 are never really closed: "close the redirect" means "back
+     * to the console", which is what the shell relies on after a pipeline
+     * puts fd 1 on a pipe. */
+    if (fd < 3)
+        f->type = FD_CONSOLE;
+}
+
+int process_fd_close(int fd)
+{
+    if (!current)
+        return -1;
+    if (fd < 0 || fd >= MAX_FDS)
+        return -1;
+    fd_close_in(current, fd);
+    return 0;
+}
+
+/* Configuration on an open descriptor: the half of device access that is
+ * neither a read nor a write.  Only character devices have an answer; for a
+ * file or a pipe "set the mode" has no meaning, and -1 says so instead of
+ * silently succeeding. */
+int process_ioctl(int fd, int cmd, int arg)
+{
+    file_t *f;
+
+    if (!current)
+        return -1;
+    f = fd_slot(current, fd);
+    if (!f || f->type != FD_CHRDEV || !f->dev->ops->ioctl)
+        return -1;
+    return f->dev->ops->ioctl(f->devpriv, cmd, arg);
+}
+
+int process_pipe(int *fds)
+{
+    proc_t *me = current;
+    struct pipe *p;
+    int r, w;
+
+    if (!me || !fds)
+        return -1;
+
+    p = pipe_create();
+    if (!p)
+        return -1;
+
+    r = fd_alloc(me);
+    if (r < 0) {
+        kfree(p);
+        return -1;
+    }
+    me->fds[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
+    me->fds[r].pipe = p;
+    pipe_ref_reader(p);
+
+    w = fd_alloc(me);
+    if (w < 0) {
+        me->fds[r].type = FD_NONE;
+        kfree(p);
+        return -1;
+    }
+    me->fds[w].type = FD_PIPE_W;
+    me->fds[w].pipe = p;
+    pipe_ref_writer(p);
+
+    fds[0] = r;
+    fds[1] = w;
+    return 0;
+}
+
+int process_dup2(int oldfd, int newfd)
+{
+    proc_t *me = current;
+    file_t *o, *n, tmp;
+
+    if (!me)
+        return -1;
+    o = fd_slot(me, oldfd);
+    n = fd_slot(me, newfd);
+    if (!o || !n || o->type == FD_NONE)
+        return -1;
+    if (oldfd == newfd)
+        return newfd;
+
+    /* Build the copy first: if it fails (no descriptors, no heap) the target
+     * must be left alone rather than closed for nothing.  What "copy" means
+     * per type is fd_clone()'s business - the same rules a child inherits
+     * by. */
+    if (fd_clone(&tmp, o) < 0)
+        return -1;
+
+    fd_close_in(me, newfd);
+    *n = tmp;
+    return newfd;
 }
 
 void process_start_shell(const char *path)
@@ -1077,8 +1908,20 @@ void process_start_shell(const char *path)
         panic("cannot load initial program '%s'", path);
 
     init_proc = p;
+
+    /* Claim it inside the table lock.  proc_create() published it as READY,
+     * and on an SMP build the other hart's idle loop is already scanning for
+     * exactly that: between the publish and this line it could take the
+     * shell, and then both CPUs would be running the same task on two
+     * different stacks.  Setting RUNNING here is the same "publish" as the
+     * one in sched_switch(), just from the boot CPU's own hand. */
+    spin_lock(&proc_lock);
     p->state = ST_RUNNING;
+    p->cpu = cpu_id();
     current = p;
+    quantum = QUANTUM;
+    spin_unlock(&proc_lock);
+
     plat_set_kernel_stack(KSTACK_TOP);
     apply_protection(p);
 

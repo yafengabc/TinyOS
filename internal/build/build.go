@@ -16,7 +16,6 @@ const (
 	// kernel layout.  The kernel image on disk only holds .text/.rodata/
 	// .data; .bss is zeroed by kernel/entry.S.
 	KernelSectors  = 180 // 90 KiB, loaded at 0x10000
-	RamdiskSectors = 600 // 300 KiB littlefs partition
 	BootSectors    = 1
 
 	// The littlefs partition starts right after the kernel image.  This
@@ -45,14 +44,42 @@ type Target struct {
 	//   embedded  rv32: linked into the kernel image as a RAM disk
 	//   flash     esp32c3: burned to SPI flash, read through the data window
 	FSBacking string // "disk", "embedded" or "flash"
+
+	// RamdiskSectors is the number of 512-byte sectors in the littlefs
+	// image.  It must equal the board's PLAT_LFS_BLOCKS * 8 (the kernel
+	// mounts PLAT_LFS_BLOCKS blocks of FS_BLOCK_SIZE each).  Per-target so
+	// the C3 can grow its 4 MiB flash partition past the other boards'
+	// 300 KiB.
+	RamdiskSectors int
+
+	// HeapBytes is the size of the kernel heap arena (kernel/heap.c), passed
+	// in as TOS_HEAP_BYTES.  It is per-target because the arena is .bss: on
+	// the C3 there is ~50 KiB of unused SRAM between the end of .bss and
+	// the first task window, while the RP2040 only reserves 128 KiB of its
+	// 264 KiB for everything the kernel needs.  0 keeps heap.c's default.
+	HeapBytes int
+
+	// CPUs is how many harts this target is built for.  0 and 1 mean the
+	// same thing - a uniprocessor, with no TOS_MAX_CPUS define at all, so
+	// none of the SMP code (second trap vector, second kernel stack, per-CPU
+	// run queue) is even assembled.  2 or more defines TOS_MAX_CPUS, which
+	// start.S, kernel/cpu.c and kernel/process.c all read, and asks QEMU to
+	// start that many harts.
+	CPUs int
 }
 
 var Targets = map[string]Target{
-	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk"},
-	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded"},
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash"},
-	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded"},
-	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash"},
+	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk", RamdiskSectors: 600},
+	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded", RamdiskSectors: 600},
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 7168, HeapBytes: 64 * 1024},
+	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600},
+	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
+
+	// The SMP build: the same qemu-virt board, two harts, and the only
+	// target that adds the A extension.  Atomic memory operations are what
+	// the spin lock is made of (arch/rv32/platform.c), and the plain rv32
+	// target keeps rv32imc so the ESP32-C3's ISA stays the reference.
+	"rv32smp": {Name: "rv32smp", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "embedded", RamdiskSectors: 600, CPUs: 2},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.
@@ -152,6 +179,23 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 			"-mno-sse2",
 			"-mno-80387",
 		}
+	}
+
+	// Kernel heap arena size: .bss on every board, so the board decides how
+	// much of its SRAM the allocator may claim.
+	if b.Target.HeapBytes > 0 {
+		archFlags = append(archFlags,
+			fmt.Sprintf("-DTOS_HEAP_BYTES=%d", b.Target.HeapBytes))
+	}
+
+	// How many harts.  Left undefined for a uniprocessor so that every
+	// `#if TOS_MAX_CPUS > 1` in the tree (start.S, arch/rv32/platform.c)
+	// simply is not compiled - the single-core ports never see SMP code at
+	// all, and the Makefile-free build has exactly one place to say "this
+	// target is multiprocessor".
+	if b.Target.CPUs > 1 {
+		archFlags = append(archFlags,
+			fmt.Sprintf("-DTOS_MAX_CPUS=%d", b.Target.CPUs))
 	}
 
 	flags := append([]string{}, archFlags...)
@@ -599,8 +643,8 @@ func (b *Builder) buildKernel() error {
 					return err
 				}
 				b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
-				b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x100000 %s\n",
-					relName(b.Root, out), relName(b.Root, b.fsImage()))
+			b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x80000 %s\n",
+				relName(b.Root, out), relName(b.Root, b.fsImage()))
 			case "rp2040":
 				if err := b.emitRP2040UF2(elfPath); err != nil {
 					return err
@@ -840,7 +884,7 @@ func (b *Builder) buildFSImage(bins []string) error {
 	}
 	args := []string{
 		ramdiskPath,
-		fmt.Sprintf("%d", RamdiskSectors*512),
+		fmt.Sprintf("%d", b.Target.RamdiskSectors*512),
 		stage,
 	}
 	args = append(args, names...)
@@ -876,10 +920,10 @@ func (b *Builder) buildDiskImage() error {
 		return err
 	}
 
-	img := make([]byte, 0, (BootSectors+KernelSectors+RamdiskSectors)*512)
+	img := make([]byte, 0, (BootSectors+KernelSectors+b.Target.RamdiskSectors)*512)
 	img = append(img, boot[:512]...)
 	img = append(img, padTo(kernel, KernelSectors*512)...)
-	img = append(img, padTo(ramdisk, RamdiskSectors*512)...)
+	img = append(img, padTo(ramdisk, b.Target.RamdiskSectors*512)...)
 
 	imgPath := filepath.Join(b.BuildDir, "tinyos.img")
 	if err := os.WriteFile(imgPath, img, 0o644); err != nil {

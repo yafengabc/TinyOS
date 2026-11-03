@@ -23,6 +23,8 @@ const uint32_t PLAT_KERNEL_MAX  = 0x20020000u;   /* 128 KiB: kernel .data/
 
 const uint32_t PLAT_APP_BASE   = 0x20020000u;
 const uint32_t PLAT_APP_MAX    = 0x20042000u;   /* 264 KiB SRAM ends here   */
+const uint32_t PLAT_RAM_TOP    = 0x20042000u;   /* same end: all SRAM is ours */
+const uint32_t PLAT_RAM_BASE   = 0x20000000u;   /* .data/.bss start of SRAM  */
 const uint32_t PLAT_APP_WINDOW = 0x00008000u;   /* 32 KiB per task          */
 /* Stack at the top of every task window, and the hole left under it.  See
  * kernel/platform.h for the four conditions this pair has to satisfy. */
@@ -31,3 +33,8 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
 /* The littlefs image is flashed 1 MiB in (see emitRP2040UF2 in build.go). */
 const uint32_t PLAT_LFS_LBA = 0x100000u / 512u;
+const uint32_t PLAT_LFS_BLOCKS = 75;   /* 300 KiB, unchanged */
+
+/* One CPU: these boards have a single core.  The SMP build sets 2 and
+ * start.S brings the second hart up (see kernel/cpu.c). */
+const uint32_t PLAT_MAX_CPUS = 1;

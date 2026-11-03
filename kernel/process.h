@@ -29,6 +29,12 @@ void     process_tick(regs_t *r);
 /* Trap exit: gives the CPU away if the slice is over. */
 regs_t  *process_resched(regs_t *r);
 
+/* The saved frame of a task that has not run yet.  proc_t is private to
+ * process.c, so a secondary CPU starting its first task (kernel/cpu.c)
+ * cannot reach the member itself; this is the one accessor it needs. */
+struct proc;
+regs_t  *process_saved_frame(struct proc *p);
+
 /* Syscalls that may give up the CPU. */
 regs_t  *process_wait(regs_t *r, int pid);
 regs_t  *process_sleep(regs_t *r, uint32_t ms);
@@ -65,11 +71,36 @@ int      process_console_reader(void);
  * page-table probe: the flat model only has range checks. */
 int      process_user_ok(uint32_t addr, uint32_t len);
 
-/* file descriptor helpers (fds are per process, 0/1 are console) */
+/* Descriptor operations.  read/write can block (console, full or empty
+ * pipe), so they return the frame to resume - the caller's own when the
+ * operation completed, the next task's when it blocked. */
+regs_t  *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len);
+regs_t  *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len);
+
 int  process_fd_open(const char *path);
 int  process_fd_create(const char *path);
-int  process_fd_read(int fd, void *buf, uint32_t len);
-int  process_fd_write(int fd, const void *buf, uint32_t len);
-void process_fd_close(int fd);
+int  process_fd_close(int fd);
+
+/* Create a pipe, install both ends in the caller and write the two
+ * descriptor numbers into `fds` (user memory). */
+int  process_pipe(int *fds);
+
+/* Duplicate a descriptor onto another number, closing the target first.
+ * Every type is duplicable: a file is reopened by its saved path, a device
+ * gets its own per-open state, a pipe shares its end by refcount. */
+int  process_dup2(int oldfd, int newfd);
+
+/* Configuration on an open character device (pin direction, ADC metadata).
+ * -1 for anything that is not a device, or a device without an ioctl. */
+int  process_ioctl(int fd, int cmd, int arg);
+
+/* Format the process table into a buffer, for /proc/ps and for `ps`.
+ * Returns the number of bytes written; output is truncated, not overrun. */
+uint32_t process_ps_text(char *buf, uint32_t cap);
+
+/* Current working directory of the calling task.  chdir()/getcwd() and the
+ * directory-relative open/stat/readdir syscalls ride on this. */
+const char *process_cwd_str(void);
+void        process_set_cwd_str(const char *path);
 
 #endif

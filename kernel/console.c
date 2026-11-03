@@ -1,6 +1,7 @@
 #include "console.h"
 #include "platform.h"
 #include "process.h"
+#include "cpu.h"
 #include "string.h"
 
 /* Architecture independent console: formatting + routing to the platform's
@@ -27,6 +28,24 @@ static int            in_echo;         /* printing echo, not a task's output */
 static int            out_owner;       /* pid whose line is still open      */
 static int            out_mid;         /* last character was not a newline  */
 
+/* One lock for the character stream.  The out_* bookkeeping above assumes a
+ * single writer: on an SMP machine two tasks printing at the same moment
+ * would shuffle their characters together and both would see the other as
+ * "somebody who just interrupted me", producing a line break every few
+ * characters.
+ *
+ * The granularity is one output call - a whole kprintf() or one write() to
+ * the console - so a formatted line stays contiguous.  Separate writes can
+ * still interleave, which is exactly what an SMP system does with printf
+ * per character; the pieces are whole lines or whole buffers, never halves.
+ *
+ * Non-recursive.  out_char() is the inner loop and never takes it; the few
+ * public entry points below do, and the internal helpers assume it is
+ * already held.  It can be held while plat_console_putc() waits for a
+ * transmitter, which is why nothing that blocks (reading input, sleeping)
+ * ever runs under it. */
+static spin_t         out_lock = SPIN_INIT;
+
 static void out_char(char c)
 {
     int who = in_echo ? CONSOLE_ECHO_OWNER : process_current_pid();
@@ -42,7 +61,8 @@ static void out_char(char c)
     plat_console_putc(c);
 }
 
-void console_adopt_line(void)
+/* Lock already held. */
+static void adopt_line_locked(void)
 {
     if (!out_mid || process_current_pid() == out_owner)
         return;
@@ -50,6 +70,13 @@ void console_adopt_line(void)
     out_mid = 0;
     plat_console_putc('\r');
     plat_console_putc('\n');
+}
+
+void console_adopt_line(void)
+{
+    spin_lock(&out_lock);
+    adopt_line_locked();
+    spin_unlock(&out_lock);
 }
 
 /* The console is dying with the machine: push the last characters out and
@@ -100,6 +127,10 @@ void console_echo_tick(void)
 {
     int room = plat_console_tx_room();
 
+    if (echo_head == echo_tail)
+        return;
+
+    spin_lock(&out_lock);
     while (room > 0 && echo_head != echo_tail) {
         char c = echo_q[echo_head];
         echo_head = (echo_head + 1) % ECHO_Q;
@@ -112,6 +143,7 @@ void console_echo_tick(void)
             plat_console_putc('\r');
         plat_console_putc(c);
     }
+    spin_unlock(&out_lock);
 }
 
 struct outbuf {
@@ -241,9 +273,11 @@ void kprintf(const char *fmt, ...)
     if (n > (int)sizeof(buf) - 1)
         n = sizeof(buf) - 1;
     /* A kernel line stands on its own: close any task line it interrupts. */
-    console_adopt_line();
+    spin_lock(&out_lock);
+    adopt_line_locked();
     for (int i = 0; i < n; i++)
         out_char(buf[i]);
+    spin_unlock(&out_lock);
 }
 
 void console_init(void)
@@ -264,13 +298,17 @@ void console_set_color(uint8_t fg, uint8_t bg)
 
 void console_putc(char c)
 {
+    spin_lock(&out_lock);
     out_char(c);
+    spin_unlock(&out_lock);
 }
 
 void console_write(const char *s, size_t n)
 {
+    spin_lock(&out_lock);
     for (size_t i = 0; i < n; i++)
         out_char(s[i]);
+    spin_unlock(&out_lock);
 }
 
 void panic(const char *fmt, ...)

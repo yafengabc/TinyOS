@@ -144,6 +144,15 @@ void plat_cpu_idle(void)    { hlt(); }
 
 uint32_t plat_uptime_ms(void)      { return timer_uptime_ms(); }
 
+/* The PC port has no free-running counter wired up (the PIT only ticks at
+ * 100 Hz and reading it back would need channel 2 to be sacrificed), so the
+ * clock is the tick: monotonic, 10 ms of resolution.  Good enough for
+ * `uptime` and for timing anything that is not microscopic. */
+uint64_t plat_now_ns(void)         { return (uint64_t)timer_ticks() * 10000000ull; }
+
+/* One CPU, always. */
+int plat_cpu_id(void)              { return 0; }
+
 /* ---- block device ---------------------------------------------------- */
 
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)

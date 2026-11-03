@@ -1,4 +1,5 @@
 #include "heap.h"
+#include "cpu.h"
 
 /* First-fit allocator over a static arena with free-block coalescing.
    The kernel's .bss is cleared by entry.S, so the arena starts zeroed;
@@ -13,11 +14,15 @@
      [size | next | pad]
    The low bit of `size` marks an allocated block. */
 
-#define HEAP_ARENA 32768         /* 32 KiB, .bss
-                                    Peak use is one exec() load buffer
-                                    (largest program ~2.5 KiB on RV32,
-                                    ~24 KiB with the x86 programs) plus
-                                    littlefs's working set. */
+/* The arena is .bss, so its size is a board decision: the build passes
+   -DTOS_HEAP_BYTES for boards that can spare more than the 32 KiB default
+   (the C3 had ~50 KiB lying unused below its first task window).  Peak use
+   is one exec() load buffer (largest program ~2.5 KiB on RV32, ~24 KiB with
+   the x86 programs) plus littlefs's working set. */
+#ifndef TOS_HEAP_BYTES
+#define TOS_HEAP_BYTES 32768     /* 32 KiB for boards that say nothing */
+#endif
+#define HEAP_ARENA ((uint32_t)TOS_HEAP_BYTES)
 
 static uint8_t arena[HEAP_ARENA] __attribute__((aligned(16)));
 
@@ -51,7 +56,7 @@ void heap_init(void)
     init_done = 1;
 }
 
-void *kmalloc(size_t size)
+static void *kmalloc_locked(size_t size)
 {
     heap_init();
     if (size == 0)
@@ -125,7 +130,7 @@ static void free_insert(blk_t *b)
         free_head = b;
 }
 
-void kfree(void *ptr)
+static void kfree_locked(void *ptr)
 {
     if (!ptr)
         return;
@@ -138,6 +143,37 @@ void kfree(void *ptr)
     free_insert(b);
 }
 
+/* ---- locking ---------------------------------------------------------- *
+ *
+ * The arena is one free list, and on an SMP build two CPUs really can be in
+ * it at once: an exec() on one hart and a /proc open() on the other is
+ * enough.  Two interleaved first-fit walks hand out the same block twice,
+ * and that does not fail loudly - it silently corrupts whoever got the block
+ * first.
+ *
+ * Interrupts are not disabled around the lock because no handler allocates:
+ * the tty queues are static arrays and the timer path only touches the
+ * process table.  If that ever changes, this becomes irqsave + spin.
+ */
+static spin_t heap_lock = SPIN_INIT;
+
+void *kmalloc(size_t size)
+{
+    void *p;
+
+    spin_lock(&heap_lock);
+    p = kmalloc_locked(size);
+    spin_unlock(&heap_lock);
+    return p;
+}
+
+void kfree(void *ptr)
+{
+    spin_lock(&heap_lock);
+    kfree_locked(ptr);
+    spin_unlock(&heap_lock);
+}
+
 uint32_t heap_peak_bytes(void)
 {
     return heap_peak;
@@ -146,4 +182,9 @@ uint32_t heap_peak_bytes(void)
 uint32_t heap_arena_bytes(void)
 {
     return HEAP_ARENA;
+}
+
+uint32_t heap_used_bytes(void)
+{
+    return heap_used;
 }

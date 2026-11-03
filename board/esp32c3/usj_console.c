@@ -36,14 +36,25 @@ void usj_init(void)
     mmio_write32(USJ_BASE + USJ_CONF0, conf0);
 }
 
-/* Send one byte if the host is draining; otherwise drop it.  WR_DONE
- * commits the FIFO content as one USB packet; IN_DATA_FREE goes 0 until
- * the host reads it, which is our natural flow control. */
+/* Send one byte.  WR_DONE commits the FIFO content as one USB packet and
+ * IN_DATA_FREE stays 0 until the host drains that packet, which is the
+ * hardware flow control.  The old code dropped the byte the instant the
+ * FIFO was busy, so any burst the host had not yet drained (the whole
+ * TinyOS banner, `ls`, `cat`) came out garbled on USB while the UART
+ * console - which blocks on its own FIFO - stayed clean.
+ *
+ * Now we wait a bounded time for IN_DATA_FREE instead of dropping.  With a
+ * terminal attached the host frees the FIFO within a USB frame (~1 ms), so
+ * every byte goes out; with nothing connected the wait times out and we
+ * drop, so a headless boot cannot stall forever.  A tighter bound would
+ * risk cutting a slow-but-present host off mid-burst. */
 void usj_putc(char c)
 {
-    uint32_t conf = mmio_read32(USJ_BASE + USJ_EP1_CONF);
-    if (!(conf & USJ_IN_DATA_FREE))
-        return;
+    int wait = 40000;
+    while (!(mmio_read32(USJ_BASE + USJ_EP1_CONF) & USJ_IN_DATA_FREE)) {
+        if (--wait == 0)
+            return;                 /* no host draining: drop */
+    }
     mmio_write32(USJ_BASE + USJ_EP1, (uint32_t)(uint8_t)c);
     mmio_write32(USJ_BASE + USJ_EP1_CONF, USJ_WR_DONE);
 }

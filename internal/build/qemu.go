@@ -13,7 +13,7 @@ func (b *Builder) FindQEMU() string { return findQEMU(b.Target) }
 // qemuBinary is the emulator that matches a build target.
 func qemuBinary(t Target) string {
 	switch t.Name {
-	case "rv32":
+	case "rv32", "rv32smp":
 		return "qemu-system-riscv32"
 	case "arm":
 		return "qemu-system-arm"
@@ -43,7 +43,7 @@ and add C:\msys64\ucrt64\bin to PATH, or set TOS_BIN/TOS_QEMU.`, qemuBinary(b.Ta
 	}
 
 	var args []string
-	if b.Target.Name == "rv32" || b.Target.Name == "arm" {
+	if b.Target.Name == "rv32" || b.Target.Name == "rv32smp" || b.Target.Name == "arm" {
 		// Both targets boot a raw kernel ELF instead of a disk image: the
 		// loader places the image at its link address and the kernel brings
 		// its own entry point, vector table and device setup.
@@ -64,6 +64,11 @@ and add C:\msys64\ucrt64\bin to PATH, or set TOS_BIN/TOS_QEMU.`, qemuBinary(b.Ta
 				"-bios", "none",
 				"-kernel", kernel,
 			}
+		}
+		// Every hart starts at _start, so this has to match what the kernel
+		// was compiled for: 2 harts with TOS_MAX_CPUS=2, 1 otherwise.
+		if b.Target.CPUs > 1 {
+			args = append(args, "-smp", fmt.Sprintf("%d", b.Target.CPUs))
 		}
 		if headless {
 			args = append(args, "-display", "none", "-monitor", "none", "-serial", "stdio")

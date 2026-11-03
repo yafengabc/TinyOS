@@ -13,7 +13,9 @@
    genuinely writable. */
 
 #define FS_BLOCK_SIZE  4096
-#define FS_BLOCK_COUNT 75              /* 75 * 4 KiB == 300 KiB == 600 sectors */
+/* The partition's block count is board-specific: PLAT_LFS_BLOCKS (each
+ * board's layout.c), so the C3 can size its 4 MiB flash partition up
+ * without changing every other board.  FS_BLOCK_SIZE stays shared. */
 #define FS_CACHE_SIZE  512
 #define MAX_OPEN       8               /* concurrent file handles (== MAX_FDS) */
 
@@ -173,10 +175,11 @@ static void write_selftest(void)
         kprintf("[ramdisk] block device write test FAILED\n");
 }
 
-/* Recursively walk the directory tree so "bin/hello" is visible even though
-   the shell and the exec path use full paths.  Depth is shallow.
+/* Walk one directory level only: list the immediate children of `dirpath`
+   as entries and do NOT descend into subdirectories.  This keeps `ls`
+   scalable as the tree grows instead of dumping the whole hierarchy.
    Returns 1 as soon as the entry at enum_target has been recorded; with
-   enum_target < 0 it walks everything, leaving the total in enum_index. */
+   enum_target < 0 it walks the level, leaving the total in enum_index. */
 static int enum_dir(const char *dirpath)
 {
     lfs_dir_t dir;
@@ -188,25 +191,30 @@ static int enum_dir(const char *dirpath)
         if (info.name[0] == '.')
             continue;
 
-        char full[96];
-        if (strcmp(dirpath, "/") == 0) {
-            strncpy(full, info.name, sizeof(full) - 1);
-            full[sizeof(full) - 1] = '\0';
-        } else {
-            size_t dl = strlen(dirpath);
-            if (dl > sizeof(full) - 2)
-                dl = sizeof(full) - 2;
-            memcpy(full, dirpath, dl);
-            full[dl] = '/';
-            strncpy(full + dl + 1, info.name, sizeof(full) - dl - 2);
-            full[sizeof(full) - 1] = '\0';
-        }
-
+        /* Record the bare entry name; the caller (ls) turns it into a
+           path against the directory it asked to list.  Storing the bare
+           name keeps root and subdirectory listings identical in shape. */
         if (info.type == LFS_TYPE_DIR) {
-            if (enum_dir(full)) {
+            /* List the directory itself, but do not descend. */
+            if (dent_active) {
+                if (dent_fill < DENT_MAX) {
+                    strncpy(dents[dent_fill].name, info.name, DENT_NAME - 1);
+                    dents[dent_fill].name[DENT_NAME - 1] = '\0';
+                    dents[dent_fill].size = 0;
+                }
+                dent_fill++;
+                enum_index++;
+                continue;
+            }
+            if (enum_index == enum_target) {
+                strncpy(enum_name, info.name, sizeof(enum_name) - 1);
+                enum_name[sizeof(enum_name) - 1] = '\0';
+                enum_size = 0;
+                enum_hit = 1;
                 lfs_dir_close(&lfs, &dir);
                 return 1;
             }
+            enum_index++;
             continue;
         }
         if (info.type != LFS_TYPE_REG)
@@ -214,7 +222,7 @@ static int enum_dir(const char *dirpath)
 
         if (dent_active) {
             if (dent_fill < DENT_MAX) {
-                strncpy(dents[dent_fill].name, full, DENT_NAME - 1);
+                strncpy(dents[dent_fill].name, info.name, DENT_NAME - 1);
                 dents[dent_fill].name[DENT_NAME - 1] = '\0';
                 dents[dent_fill].size = info.size;
             }
@@ -224,7 +232,7 @@ static int enum_dir(const char *dirpath)
         }
 
         if (enum_index == enum_target) {
-            strncpy(enum_name, full, sizeof(enum_name) - 1);
+            strncpy(enum_name, info.name, sizeof(enum_name) - 1);
             enum_name[sizeof(enum_name) - 1] = '\0';
             enum_size = info.size;
             enum_hit = 1;
@@ -291,7 +299,7 @@ void ramdisk_init(void)
     cfg.read_size      = 512;             /* one disk sector */
     cfg.prog_size      = 512;
     cfg.block_size     = FS_BLOCK_SIZE;
-    cfg.block_count    = FS_BLOCK_COUNT;
+    cfg.block_count    = PLAT_LFS_BLOCKS;
     cfg.cache_size     = FS_CACHE_SIZE;
     cfg.lookahead_size = FS_CACHE_SIZE;
     cfg.block_cycles   = 100;
@@ -361,6 +369,75 @@ const char *ramdisk_name(uint32_t index, uint32_t *size)
     return enum_name;
 }
 
+/* List a given directory (not just the root).  The root reuses the snapshot
+ * built by dent_build(); every other directory is walked directly, which is
+ * correct and cheap for the small directories TinyOS has.  Names are bare
+ * entries (see enum_dir), so the caller builds stat paths itself. */
+int ramdisk_list_count(const char *dirpath)
+{
+    if (!ok)
+        return 0;
+    if (strcmp(dirpath, "/") == 0)
+        return (int)ramdisk_count();
+    enum_start();
+    enum_target = -1;              /* never matches: walk everything */
+    enum_dir(dirpath);
+    return (int)enum_index;
+}
+
+const char *ramdisk_list_name(const char *dirpath, uint32_t index, uint32_t *size)
+{
+    if (!ok)
+        return NULL;
+    if (strcmp(dirpath, "/") == 0)
+        return ramdisk_name(index, size);
+    enum_start();
+    enum_target = (int)index;
+    enum_dir(dirpath);
+    if (!enum_hit)
+        return NULL;
+    if (size)
+        *size = enum_size;
+    return enum_name;
+}
+
+/* Stat a path directly (no traversal of the listing snapshot).  Returns 0
+   and fills *size/*type on success, -1 on error (e.g. ENOENT).  Used by the
+   SYS_STAT syscall so `ls` can show per-entry size and type without the
+   kernel walking the tree. */
+int ramdisk_stat(const char *path, uint32_t *size, uint8_t *type)
+{
+    if (!ok)
+        return -1;
+    struct lfs_info info;
+    if (lfs_stat(&lfs, path, &info) < 0)
+        return -1;
+    if (size)
+        *size = info.size;
+    if (type)
+        *type = (info.type == LFS_TYPE_DIR) ? 1 : 0;
+    return 0;
+}
+
+/* Report littlefs partition usage.  `total` is the configured volume size;
+   `used` is what littlefs has actually consumed.  Note lfs_fs_size()
+   returns a *block count*, so multiply by the block size for bytes.
+   Either pointer may be NULL.  Returns 0 when the filesystem is mounted. */
+int ramdisk_df(uint32_t *total, uint32_t *used)
+{
+    if (total)
+        *total = (uint32_t)FS_BLOCK_SIZE * PLAT_LFS_BLOCKS;
+    if (used) {
+        if (!ok) {
+            *used = 0;
+        } else {
+            lfs_ssize_t n = lfs_fs_size(&lfs);
+            *used = (n < 0) ? 0 : (uint32_t)n * FS_BLOCK_SIZE;
+        }
+    }
+    return ok ? 0 : -1;
+}
+
 /* Load a whole file into a freshly kmalloc'd buffer.  Caller must call
    ramdisk_release() when done. */
 int ramdisk_find(const char *name, uint8_t **data, uint32_t *size)
@@ -409,7 +486,10 @@ void ramdisk_release(void *data)
     kfree(data);
 }
 
-int ramdisk_open(const char *path)
+/* Shared body of every open.  The flags decide read-only, read-write or
+ * truncating; everything else (a cache buffer, a free handle, the size) is
+ * the same and used to be copied three times. */
+static int open_with(const char *path, int flags)
 {
     if (!ok)
         return -1;
@@ -431,7 +511,7 @@ int ramdisk_open(const char *path)
         return -1;
     }
     openfiles[h].fc.buffer = openfiles[h].cache;
-    if (lfs_file_opencfg(&lfs, &openfiles[h].f, path, LFS_O_RDONLY,
+    if (lfs_file_opencfg(&lfs, &openfiles[h].f, path, flags,
                          &openfiles[h].fc) < 0) {
         kfree(openfiles[h].cache);
         openfiles[h].cache = NULL;
@@ -441,6 +521,20 @@ int ramdisk_open(const char *path)
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
     return h;
+}
+
+int ramdisk_open(const char *path)
+{
+    return open_with(path, LFS_O_RDONLY);
+}
+
+/* Read-write, without truncating.  This is what a child gets when it inherits
+ * a descriptor the parent opened for writing (`echo hi > f`): the child must
+ * be able to append to what the shell set up, and a plain ramdisk_open()
+ * would hand it a read-only handle that fails on the first write. */
+int ramdisk_open_rw(const char *path)
+{
+    return open_with(path, LFS_O_RDWR);
 }
 
 /* Create (or truncate) a file for writing.  Opened read-write so the
@@ -509,6 +603,19 @@ int ramdisk_write(int h, const void *buf, uint32_t len)
         dent_drop();          /* the listed size just changed */
     }
     return n < 0 ? -1 : (int)n;
+}
+
+/* Move the handle's position.  A duplicated descriptor keeps the position it
+ * was copied from (fd_clone), but the new littlefs handle starts at 0, so
+ * "same position" has to be re-established rather than assumed. */
+int ramdisk_seek(int h, uint32_t pos)
+{
+    if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
+        return -1;
+    if (lfs_file_seek(&lfs, &openfiles[h].f, (lfs_soff_t)pos,
+                      LFS_SEEK_SET) < 0)
+        return -1;
+    return 0;
 }
 
 void ramdisk_close(int h)

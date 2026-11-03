@@ -119,7 +119,9 @@ func emuSmoke() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	ok, _ = s.waitFor([]byte("ms ("), 5*time.Second)
+	// The marker used to be "ms (" from a previous uptime format; the current
+	// line is "uptime: 0.820 s (820 ms)  tick=..." so match the label.
+	ok, _ = s.waitFor([]byte("uptime:"), 5*time.Second)
 	if !ok {
 		fmt.Fprintln(os.Stderr, "`uptime` produced no answer; last output:")
 		fmt.Fprintln(os.Stderr, s.tail(800))

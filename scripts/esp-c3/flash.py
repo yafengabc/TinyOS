@@ -2,8 +2,9 @@
 """Flash the esp32c3 target and wait for its prompt.
 
 Two images go to flash: the kernel at offset 0 and the littlefs image at
-0x100000 (PLAT_LFS_LBA * 512).  Writing the second one replaces whatever the
-filesystem held, so pass --keep-fs to update only the kernel.
+0x80000 (PLAT_LFS_LBA * 512; the first 512 KiB of flash is reserved for the
+kernel).  Writing the second one replaces whatever the filesystem held, so
+pass --keep-fs to update only the kernel.
 
     scripts/esp-c3/flash.py                  # build is assumed done
     scripts/esp-c3/flash.py --build          # tos build -target esp32c3 first
@@ -28,7 +29,7 @@ import serial
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = ROOT / "build" / "esp32c3.bin"
 FS = ROOT / "build" / "ramdisk-esp32c3.bin"
-FS_OFFSET = 0x100000
+FS_OFFSET = 0x80000
 
 
 def esptool(port, *args):

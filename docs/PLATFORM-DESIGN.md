@@ -413,7 +413,8 @@ ELF 头 + 6 个程序头 244 B、`.dynamic` 64 B、段头表 + `.shstrtab` 240 B
 **单文件多入口的代价**（都可接受，但要写下来）：
 
 - 每次 `exec` 解压整块（6.5 KB → 8.8 KB），而不是几百字节的 applet。
-- 内核堆峰值 = 压缩 6,548 + 解压 8,776 = 15.3 KB，占 32 KiB arena 的一半。真在意就把
+- 内核堆峰值 = 压缩 6,548 + 解压 8,776 = 15.3 KB，占默认 32 KiB arena 的一半多一点
+  （C3 的 arena 是 64 KiB，见下方"内核堆"一节）。真在意就把
   busybox 不压缩存（8,776 B，+2.2 KB flash），峰值降回 8.8 KB。
 - rp2040 的镜像预算 = 窗口 32 KiB − 栈 16 KiB − 护栏 4 KiB = 12 KiB，8.1 KB 的 busybox
   只剩 3.9 KiB 余量（约 8 个 applet，再多就 `exec: does not fit a 32 KiB task window`）。
@@ -827,8 +828,8 @@ nibble 是真的**。于是 entries < 0x10000000 时永远打出 `00000000`，�
 
 #### 8.7 SPI flash 块设备（已验证，2026-11-01）
 
-littlefs 分区烧在 flash 偏移 0x100000（`PLAT_LFS_LBA=2048`，300 KiB=600 扇区），
-`esptool write-flash 0x100000 build/ramdisk-esp32c3.bin`（脚本：`scripts/esp-c3/flash.py`）。
+littlefs 分区烧在 flash 偏移 0x80000（`PLAT_LFS_LBA=1024`，前 512 KiB 留给内核；3.5 MiB = 896 块），
+`esptool write-flash 0x80000 build/ramdisk-esp32c3.bin`（脚本：`scripts/esp-c3/flash.py`）。
 块设备三层组合，全部真机验证：
 
 - **读 = ROM `esp_rom_spiflash_read`（0x40000130）**。ROM bootloader 已探测好芯片，
@@ -950,7 +951,7 @@ C3 这条是这一轮唯一在真机上验过的：写之前先等 FIFO 排空�
 
 | 项 | 约定 |
 |---|---|
-| 系统调用号 | `include/tos.h`，0–16 |
+| 系统调用号 | `include/tos.h`，0–29 |
 | 参数寄存器 | x86 `ebx/ecx/edx`；rv32 `a0/a1/a2`；arm `r0/r1/r2`，由 trap 入口统一映射 |
 | 返回值 | 同上，负数表示错误 |
 | 控制台 | `\n` 自动转 `\r\n`；退格回显 `\b \b` |
@@ -958,6 +959,9 @@ C3 这条是这一轮唯一在真机上验过的：写之前先等 FIFO 排空�
 | ELF 错误文案 | 相同 |
 | exec | spawn，返回子任务 pid；`wait(pid)` 取退出码 |
 | 调度 | 时间片轮转，50 ms；只在用户态帧上抢占 |
+| 时钟 | `clock_ns()` 来自自由运行计数器，单调；`cpus` 字段是编译期 CPU 数 |
+| 描述符 | 0/1/2 是控制台，其余从 3 起分配；`FD_NONE/FD_CONSOLE/FD_FILE/FD_PIPE_R/FD_PIPE_W` 五种 |
+| 管道 | 空且仍有写者 → 阻塞；写者全关 → `read` 返回 0（EOF）；读者全关 → `write` 返回 -1（EPIPE）；缓冲 2 KiB |
 | 内存保护 | x86 无（平坦）；rv32 PMP：code RX / data+heap RW / stack RW / 其余拒绝；arm MPU：窗口 RW+XN / code RO+可执行 / 栈下 16 KiB 护栏；内核读用户内存不受影响 |
 | 异常隔离 | 只杀当前任务，其余继续跑 |
 
@@ -1020,3 +1024,299 @@ board/
   esp32c3/   layout.h init.c flash.c image.h
   rp2040/    layout.h init.c boot2.h
 ```
+
+## 13. 多核（SMP）
+
+目标不是“跑满多核”，而是**在同一份内核上让第二个 hart 也能跑用户任务**，为 RP2350
+这种双核 MCU 铺路。验收标准就一条：`smp` 程序的两个 worker 同时报出不同的
+`getcpu()`，且 `ps` 里两个任务同时处于 `run`、`c` 列分别是 0 和 1。
+
+### 13.1 哪些是 per-CPU，哪些是共享
+
+这是整件事的骨架。判断标准是“它描述的是这台机器，还是这一个核”：
+
+| | 归属 | 原因 |
+|---|---|---|
+| `current` / `rr` / `quantum` / `need_resched` | **per-CPU**（`cpu_t`） | “我正在跑谁”只对本核有意义 |
+| 内核栈 | **per-CPU** | 陷入时从用户栈切过来，必须是自己的 |
+| `mtvec`、`mie.MTIE`、`mtimecmp` | **per-CPU**（硬件就是 per-hart CSR） | 一核装了比较值，另一核什么也不知道 |
+| 进程表 `procs[]` | **共享** | 只有一条运行队列，两个核都从这里取任务 |
+| 控制台 / littlefs / tty 行缓冲 | **共享，但只由 0 号 hart 驱动** | 一个设备一个 FIFO，两个核抢着读会把一行拆成两半 |
+| `g_ticks`（调度 tick 计数） | **共享，只由 0 号 hart 递增** | 两核都加就变成 200 Hz |
+| PMP 条目（`pmpcfg0`） | **per-CPU** | 内存保护是“正在跑的任务”的属性 |
+
+### 13.2 用宏把单核代码原样搬过去
+
+`process.c` 里 `current`、`quantum`、`need_resched` 三处原来是 file-static。
+改成 `cpu_t` 的成员之后，如果逐处改写成 `cpu_self()->cur`，会有 40 多个调用点要动，
+而且以后每一行新代码都得记得不能直接用 `current`。所以反过来做：
+
+```c
+#define current        (cpu_self()->cur)
+#define rr             (cpu_self()->rr)
+#define quantum        (cpu_self()->quantum)
+#define need_resched   (cpu_self()->need_resched)
+```
+
+于是调度器那几百行**一行都没改**，语义自动变成 per-CPU。代价是 `cpu_t` 的成员
+不能叫 `current`（否则 `cpus[i].current` 会被宏展开两次），所以字段叫 `cur`。
+
+`cpu_self()` 就是 `&cpus[plat_cpu_id()]`，rv32 上是 `csrr mhartid`，一条指令。
+
+### 13.3 从 hart 起步（`arch/rv32/start.S`）
+
+所有 hart 都从 `_start` 进来。第一件事必须是分流，**在清 `.bss` 之前**：
+
+```asm
+csrr    t0, mhartid
+bnez    t0, .Lsecondary
+```
+
+否则两个 hart 同时把 `.bss` 清零，会把对方正在用的内存擦掉。从 hart 进来后：
+
+1. 自旋等 `cpu_release == 0x534D5031`（`"SMP1"`，`kernel/cpu.c` 定义）。
+   用 magic 而不是“启动完成”标志，是因为标志本身也在 `.bss` 里——它被清零这件事
+   和从 hart 读它这件事本身就是竞争。magic 在 `cpu_init()` 最后一步才写，
+   那时进程表、控制台、定时器都已就绪。
+2. 装自己的栈：`sp = __kernel_stack_top - mhartid * 32K`。
+3. 装自己的 `mtvec`（`trap_vectors_h1`）。
+4. `call cpu_secondary_main`，永不返回。
+
+### 13.4 两张 trap 向量表
+
+`mtvec` 是 per-hart CSR，而 trap 入口必须知道“该切到哪个栈”。所以入口被写成宏：
+
+```asm
+.macro TRAP_ENTRY name, kstack
+\name:
+    csrw mscratch, t0
+    ...
+    la   t0, \kstack        /* 只有这一行按 hart 不同 */
+    ...
+.endm
+
+    TRAP_ENTRY trap_entry_h0, __kernel_stack_top
+    TRAP_ENTRY trap_entry_h1, __kernel_stack_top - (1 << KSTACK_SHIFT)
+```
+
+`\kstack` 是绝对表达式，链接器把它折进 `la`，所以整个切换只用掉一个暂存寄存器
+（`t0` 先存进 `mscratch`）。两张 256 字节表背靠背放着，`pmp_open_trap_vector()`
+那条 NAPOT 规则一次覆盖两张——否则从 hart 一进 trap 就 `instruction access fault`
+（C3 的 esp-riscv 核会用**旧特权级**做 PMP 检查，这个坑已经踩过）。
+
+### 13.5 锁
+
+一把 `spin_t`，`kernel/cpu.h`。单核上 `spin_lock()` 是个 `if (cpu_count > 1)`，
+什么也不做——内核在系统调用里不会被切走，本来就没有需要互斥的东西。
+
+多核上实现在 `arch/rv32/platform.c`：
+
+```c
+do {
+    __asm__ volatile("amoswap.w.aqrl %0, %1, (%2)"
+                     : "=r"(got) : "r"(1), "r"(v) : "memory");
+} while (got != 0);
+```
+
+`.aqrl` 才是关键：swap 本身只是 test-and-set，让临界区对另一个核可见的是那两个
+ordering 位。释放用 `fence rw, rw` + 普通 store。
+
+这把锁只在 `rv32imac`（`TOS_MAX_CPUS > 1`）编进去；单核构建用 `kernel/cpu.c`
+里的 weak 空实现，所以 `rv32imc` 的 C3 和没有 LDREX/STREX 的 Cortex-M0+ 都不用假装
+自己有原子指令。
+
+**锁的边界**：`proc_lock` 保护“扫一遍进程表 + 改状态”，绝不跨任何会阻塞的调用。
+调度器在 `sched_idle()` 之前必须把锁还回去，否则空闲的那个核会抱着锁去 `wfi`。
+
+### 13.6 定时器：一份时钟，两个 tick
+
+每个 hart 都需要自己的 tick（它才是抢走本核 CPU 的东西），但“现在几点”是全局的。
+所以：
+
+- `plat_timer_start_cpu()` 给新 hart 写自己的 `mtimecmp`、打开自己的 `mie.MTIE`；
+- `plat_timer_tick()` 里 **只有 `plat_cpu_id() == 0` 才 `g_ticks++`**，两个核都重装
+  自己的比较值。
+
+写错这一处的症状很好认：`uptime` 走两倍。实测两个 hart、9 秒真实时间，
+`uptime` 报 9.102 s。
+
+### 13.7 控制台
+
+两条规则：
+
+1. **只有 0 号 hart 调 `tty_poll()` / `console_echo_tick()`**。它是 `process_tick()`
+   里 `if (cpu_id() == 0)` 的全部内容。理由是一个 16550 只有一个 FIFO 和一份行缓冲，
+   两个核抢着 drain 会把一行输入劈成两半（此时两个 shell 各拿到半行）。
+2. **输出流一把 `out_lock`**，粒度是“一次 `kprintf` / 一次 `write()`”。`printf` 和
+   `puts` 在用户库里都是先格式化进缓冲再一次 `write(1, …)`，所以一次 `printf`
+   的输出不会被另一个核切开。分开的 `write()` 之间仍然可以交错——这在任何 SMP
+   系统上都一样，而 `out_char()` 原有的“行主换人时补一个换行”逻辑正好让交错读得懂。
+
+### 13.8 调度器里两个 SMP 才有的坑
+
+**`other_cpu_busy()`。** 单核的 `sched_switch()` 在“没有 ready 且没人阻塞”时
+`panic("no runnable process")`。两核上这会误判：空闲 hart 找不到 ready 任务、
+也没人阻塞，但另一个 hart 正跑着 shell（状态 `RUNNING`，而 `RUNNING` 的任务
+别的核不碰）。所以 panic 前还要看一眼别的 hart 是不是在跑东西。
+
+**`make_ready()` 的锁。** 唤醒者改状态、调度器读状态，两个核可能同时看同一个任务。
+状态存进锁里，至少保证“一个赢”；否则一个已经被调度器看成 `READY` 的任务又被写入
+返回值，那个返回值就丢了。
+
+**`ST_NEW`：认领一个空槽。** `proc_create()` 要先解压、加载 ELF、建初始栈，中间
+几百行不能一直抱着锁。所以 `proc_alloc()` 在锁内把槽位标成 `ST_NEW`（“有人占了，
+但永远不可调度”），`proc_create()` 最后一步才在锁内改成 `ST_READY`。没这一步，
+两个核同时 `exec` 会选中同一个 `proc_t`，两个任务叠在同一块窗口和同一份栈上。
+顺带两个坑：
+
+- `proc_create()` 原来在中间 `memset(p, 0, sizeof(*p))`，而 `ST_FREE == 0`——
+  那一行会把刚做的认领擦掉。`memset` 因此移进了 `proc_alloc()` 的锁内。
+- 每个失败路径（ELF 不合法、窗口不够、栈不够）都必须 `proc_retire(p)` 把槽还回去，
+  否则它卡在 `ST_NEW`，现象是“进程表满了”而机器上什么都没跑。
+
+**关机不是调度失败。** `init` 退出时，另一个核可能正好发现“没有 ready、没人阻塞”，
+于是 `panic("no runnable process")`——在一台**按指令正常关机**的机器上。所以
+`process_exit()` 在释放 init 槽位**之前**（锁内）先置 `sys_down`，调度器看到空队列
+时再读这个标志：关机中就 `wfi` 等着，别 panic。实测这一条是十轮压力测试里唯一
+还能复现的 panic（`-commands "... ,exit"` 跑 10 次大约中 2 次）。
+
+**窗口位图和 pid 也是共享的。** `win_used` 是一个 32 位位图，两个核同时
+`win_alloc/win_free` 就是经典的读-改-写竞争，丢了位以后症状迟得多才出现
+（“out of task windows” 但明明有空位，或者两个任务共用一块窗口）。`next_pid++`
+同理——重号会让 `wait(pid)` 收到别人的退出码。两者都挪进了 `proc_lock`。
+
+### 13.9 还没做的
+
+- **RP2350 / RP2040 的 core1**：`board/rp2040` 还是 `PLAT_MAX_CPUS = 1`。
+  需要的是 SIO 自旋锁（`SIO_SPINLOCK0`）+ 把 core1 从 bootrom 的 `wfe` 循环里
+  拉起来（写 `SIO_FIFO` 或走 PSM）。`plat_spin_acquire()` 换成 SIO 版本即可，
+  其余层不用动。
+- **任务亲和性**：现在是一条队列、谁有空谁拿，任务会在核之间迁移（`smp` 程序会
+  报 `cpu 1 then 0`）。真要绑核，`proc_t` 加一个 `affinity` 字段、`sched_pick()`
+  过滤一下就行，但那是策略，先不做。
+- **TLB / 缓存一致性**：没有 MMU 也没有 D-cache，所以这一层暂时不存在问题。
+  RP2350 有缓存，到时候 `pipe`/`console` 的缓冲要过 `fence`。
+
+
+## 14. 设备文件（/dev 与 /proc）
+
+外设先是 C API（`SYS_GPIO` / `SYS_ADC`），够程序用，不够 shell 用：`cat` 一个
+ADC 通道、`echo 1 >` 一个引脚，本来都该是一行命令，结果每个都要单独编一个程序。
+这一节记的是"设备即文件"这条路的实现，以及为什么它不是 sysfs。
+
+### 14.1 描述符本来就已经是 tagged union
+
+`file_t` 在加管道那一轮就变成了 `{type, fh, size, pos, pipe}` 的判别联合，
+`process_read/write` 本来就是 `switch (f->type)` 分派。所以设备文件不是新架构，
+是把已有的特例表化：
+
+```c
+enum { FD_NONE, FD_CONSOLE, FD_FILE, FD_PIPE_R, FD_PIPE_W, FD_CHRDEV };
+```
+
+`FD_CONSOLE` 是第一个字符设备，只是它靠 `fd == 0` 这个魔法数字认领，而不是靠表。
+加了 `FD_CHRDEV` 之后，console 反而成了"没有 dev_ops 的特例"。
+
+### 14.2 表在 boot 时填满，之后只读
+
+```c
+struct dev_ops {
+    int  (*open)(const struct dev *d, void **priv);
+    int  (*read)(void *priv, uint32_t off, void *buf, uint32_t len);
+    int  (*write)(void *priv, uint32_t off, const void *buf, uint32_t len);
+    int  (*ioctl)(void *priv, int cmd, int arg);
+    void (*close)(void *priv);
+};
+```
+
+`devfs_register()` 只在 `kmain` 里调用，表项 64 个、名字放在静态池里（`gpio4`
+这种名字要靠 `ksnprintf` 现拼，不能指向栈）。运行期没有任何写入，所以 SMP 上
+`open()` 走这张表**不需要锁**——这是把"注册是启动行为"当契约用，省掉一把锁。
+
+没写驱动的板子注册 0 个设备：`/dev/gpio0` 打不开，和 `gpio_count() == 0` 是同一
+个事实的两种问法。`procfs` 注册三个伪文件，`periph` 按 `plat_gpio_count()` /
+`plat_adc_count()` 循环注册。
+
+### 14.3 数据面走文本，配置面走 ioctl
+
+```
+cat /dev/adc2        → read()  → "2048\n"
+echo 1 > /dev/gpio4  → write() → 解析首个非空白字符，自动配成输出
+gpio dev mode 4 out  → ioctl(fd, GPIO_OP_MODE, TOS_PIN_OUT)
+```
+
+三个设计决定：
+
+1. **read 是快照，不是流**。`off != 0` 直接返回 0（EOF），否则 `cat` 会读同一
+   个电平永远不退出。轮询是 C API 的事（`ioctl(fd, GPIO_OP_READ)` 不消耗偏移）。
+2. **write 隐含配方向**。拒绝写直到 ioctl 设过方向，会让 `echo 1 > /dev/gpio4`
+   失败——而那个引脚本来就是调用者的，写它只可能是想输出。
+3. **配置面必须有 ioctl**。方向、上拉、ADC 的 vref/bits 既不是字节读也不是字节写。
+   复用 `tos.h` 里已有的 op 码，`SYS_IOCTL` 只是一个转发，代价 30 行。
+
+### 14.4 为什么不是 sysfs
+
+`/sys` 的复杂度 = VFS 的复杂度 + 对象模型的复杂度 + 文本序列化的复杂度：
+要有 kobject 树、每属性一对 `show/store`、`readdir` 动态枚举、每节点权限。
+而 TinyOS 三个前置件都没有——没有 uid/gid（权限位形同虚设）、没有对象生命周期
+（设备和进程表都是编译期定长）、没有 VFS（`open` 现在直通 `ramdisk_open`）。
+`/dev` + ioctl 覆盖了 sysfs 想解决的问题的 95%，成本是它的 1/15。
+判据是"有没有大量结构相同、数量运行期才知道的对象"，现在离得很远。
+
+### 14.5 重定向要靠描述符继承
+
+`echo hi > f` 的实际形状是：shell 打开 f、`dup2(fd, 1)`、`exec("echo")`。也就是说
+**fd 1 必须能跨 exec 交给子进程**，否则重定向到任何程序都不生效。原来是拒绝的
+（`FD_FILE` 不继承，理由是"句柄带读位置，也没有路径可重开"）。现在 `file_t`
+存一份 `path`（堆上拷贝），继承时：
+
+- `FD_FILE`：按相同访问模式重开（`ramdisk_open` / `ramdisk_open_rw`），再
+  `ramdisk_seek` 到父进程的位置——新句柄从 0 开始，位置要靠 seek 重建。
+- `FD_CHRDEV`：调 `ops->open` 拿自己的 per-open 状态（`/proc` 的快照缓冲不能被
+  两个描述符 free 两次）。
+- `FD_PIPE_*`：引用计数；`FD_CONSOLE`：无事可做。
+
+这套规则只有一份实现（`fd_clone`），`dup2()` 和子进程继承共用——两处各写一遍
+是这类代码最常见的漂移来源。
+
+### 14.6 顺手修掉的两个真 bug
+
+- **x86 的内核栈池与 `KSTACK_BYTES` 不一致**（16 KiB vs 32 KiB）。栈守卫按
+  `__kernel_stack_top - KSTACK_BYTES` 写，结果落在栈下 16 KiB、进程表中间。
+  症状是 `ps` 里多一行 `pid 0, state "free"` ——它的 `state` 其实是 `0x5354414B`
+  （"STAK"）。修法：x86 的 `.space` 改成 32768，并在 `cpu_init()` 里断言
+  `KSTACK_POOL_BYTES == KSTACK_BYTES * PLAT_MAX_CPUS`，把"三处手工同步"变成
+  启动时报错。
+- **内核堆没有锁**。`kmalloc/kfree` 是共享空闲链表上的 first-fit 遍历，SMP 下
+  exec() 和 `/proc` 的 open() 并发就会重复分配同一块。加 `spin_t`（单核退化为
+  空操作，代价为零），中断不关——因为目前没有任何中断处理路径分配内存。
+
+### 14.7 目录是算出来的，不是存出来的
+
+设备表现在有两套用法：按名字查（`open`）和按目录列（`ls`）。目录没有独立的数据
+结构——注册名本身就带路径，`dev/gpio4` 的父目录就是斜杠前的那一段：
+
+- `/dev` 的项 = 表里形如 `dev/<x>`、且 `<x>` 不含斜杠的名字，去掉前缀就是目录项；
+- `/` 的项 = 固定命名空间（`dev`、`proc`）加上表里其余首段去重。
+
+`devfs_dir_count()` 用 `-1` 表示"这不是 devfs 目录"，`0` 表示"是我的、但是空的"。
+这个区分是必须的：前者让 `readdir` 继续去问 littlefs，后者必须直接回答 EOF，
+否则 `ls /dev` 会掉进 littlefs 报 "no such directory"。
+
+两个命名空间无条件存在，哪怕一块板子一个设备都没注册（qemu-virt 就是）。"这块板
+没有 GPIO" 是关于板子的事实，不该表现成"`cd /dev` 在 C3 上能用、在 virt 上不能"。
+
+`/` 是唯一的混合目录：先出 `dev`、`proc`，再出 littlefs 的项。所以偏移的换算放在
+`SYS_READDIR` 里——那是唯一同时看得见两个枚举器的地方。
+
+`stat` 也跟着分了一层（`path_stat`）：`/dev`、`/proc` 报目录，设备节点报新类型
+`TOS_FTYPE_CHR`（`ls` 打 `c` 和 `<dev>`，而不是 "0 bytes"）。`SYS_CHDIR` 用同一个
+helper——能 `ls` 却不能 `cd` 的目录等于半个目录。
+
+### 14.8 还没做的
+
+- **阻塞型设备**：GPIO/ADC 都是即时返回。等按键的设备需要 `read` 返回
+  "would block"，由内核统一挂起——现在的 `ST_WAIT_INPUT` / `ST_WAIT_PIPE` 是
+  两条独立路径，第三条该收敛成一个通用机制。
+- **littlefs 在 SMP 下没有锁**：`lfs_config.h` 没开 `LFS_THREADSAFE`，两个核同时
+  读文件会踩同一个缓存。这是既有问题（本次没修），记在 `docs/OPEN-ITEMS.md`。

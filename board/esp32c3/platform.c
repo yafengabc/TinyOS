@@ -100,6 +100,9 @@ int plat_console_getchar(void)
 #define TICK_HZ        100u
 
 #define T0CONFIG_REG   (TIMG0_BASE + 0x00)
+#define T0LO_REG       (TIMG0_BASE + 0x04)
+#define T0HI_REG       (TIMG0_BASE + 0x08)
+#define T0UPDATE_REG   (TIMG0_BASE + 0x0C)
 #define T0ALARMLO_REG  (TIMG0_BASE + 0x10)
 #define T0ALARMHI_REG  (TIMG0_BASE + 0x14)
 #define T0LOADLO_REG   (TIMG0_BASE + 0x18)
@@ -289,7 +292,44 @@ void plat_irq_service(uint32_t line)
 
 uint32_t plat_uptime_ms(void)
 {
-    return (uint32_t)(g_ticks * (1000u / TICK_HZ));
+    /* From the clock, not from the tick count: the tick is a scheduling
+     * knob, the clock is what the user asked for. */
+    return (uint32_t)(plat_now_ns() / 1000000ull);
+}
+
+/* Sub-tick part of the clock: TG0 counts at TIMG_CLK_HZ/TIMG_DIVIDER = 1 MHz
+ * up to its alarm (10 ms) and then reloads from zero, so the elapsed
+ * microseconds inside the current period are simply T0LO/T0HI.
+ *
+ * The two value registers are snapshots, refreshed only when software asks:
+ * T0UPDATE bit 0 latches them, then LO is read first because reading LO
+ * latches HI (same protocol esp-idf uses).  Putting the two together with
+ * g_ticks gives a microsecond-resolution clock without a second timer.
+ *
+ * The one race worth handling: the counter can wrap and start counting
+ * again before the tick ISR gets around to incrementing g_ticks, which would
+ * make the sum go backwards by a full 10 ms.  Time is clamped so it never
+ * does. */
+uint64_t plat_now_ns(void)
+{
+    static uint64_t last_ns;
+
+    mmio_write32(T0UPDATE_REG, 1u);
+    uint32_t lo = mmio_read32(T0LO_REG);
+    uint32_t hi = mmio_read32(T0HI_REG) & 0xFFFFu;
+    uint64_t sub_us = ((uint64_t)hi << 32) | lo;
+
+    /* A counter that has not been started yet (or a value larger than the
+     * period) must not inflate the clock. */
+    if (sub_us > tick_reload)
+        sub_us = tick_reload;
+
+    uint64_t ns = ((g_ticks * tick_reload) + sub_us) * 1000ull;
+
+    if (ns < last_ns)
+        ns = last_ns;
+    last_ns = ns;
+    return ns;
 }
 
 /* ---- flash block device ---------------------------------------------- */
@@ -344,10 +384,9 @@ typedef int (*rom_config_param_t)(uint32_t device_id, uint32_t chip_size,
 #define FLASH_PAGE_SIZE   0x100u      /* 256 B */
 typedef int (*rom_spiflash_erase_t)(uint32_t sector);
 
-#define LFS_LBA_START  PLAT_LFS_LBA           /* 2048 = flash 0x100000 */
+#define LFS_LBA_START  PLAT_LFS_LBA           /* 1024 = flash 0x80000 */
 #define NOR_SECTOR     4096u
-#define LFS_SECTORS    600u                   /* 300 KiB, see RamdiskSectors
-                                               * in internal/build/build.go */
+#define LFS_SECTORS    (PLAT_LFS_BLOCKS * 8u) /* 7168 = 3.5 MiB partition */
 
 static rom_spiflash_read_t   rom_flash_read   = (rom_spiflash_read_t)ROM_SPIFLASH_READ;
 static rom_spiflash_write_t  rom_flash_write  = (rom_spiflash_write_t)ROM_SPIFLASH_WRITE;

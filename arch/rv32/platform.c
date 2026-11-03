@@ -98,7 +98,6 @@ regs_t *trap_handler(regs_t *f)
 }
 
 /* ---- boot ------------------------------------------------------------ */
-
 /* U-mode reaches memory only through PMP.  Entries 4..15 stay off, so
  * until the first task is programmed the user side can touch nothing at
  * all - M-mode is not subject to PMP as long as no entry sets the lock
@@ -120,6 +119,16 @@ static void pmp_deny_user(void)
 void plat_early_init(void)
 {
     plat_board_early();
+}
+
+int plat_cpu_id(void)
+{
+    uint32_t id;
+
+    /* Every RISC-V implementation in machine mode has mhartid (zero on the
+     * single-hart ESP32-C3, 0..n-1 on qemu-virt). */
+    __asm__ volatile("csrr %0, mhartid" : "=r"(id));
+    return (int)id;
 }
 
 extern char trap_vectors[];
@@ -274,3 +283,39 @@ void plat_panic_halt(void)
     for (;;)
         __asm__ volatile("wfi");
 }
+
+/* ---- spin locks -------------------------------------------------------
+ *
+ * RISC-V gives this for free in the A extension: amoswap.w with the .aqrl
+ * ordering bits is a test-and-set with both acquire and release semantics,
+ * so one instruction is the whole primitive.  A plain swap is enough for
+ * the lock/unlock pair because the ordering bits - not the swap - are what
+ * make the critical section visible in the right order to the other hart.
+ *
+ * A build without the A extension (rv32imc: every board here except the SMP
+ * target) cannot assemble this at all, and does not need to: spin_lock() in
+ * kernel/cpu.c never calls it when cpu_count is 1, and kernel/cpu.c carries
+ * weak no-op defaults for exactly that case.  Guarding it at compile time is
+ * what keeps the single-hart ports building, rather than relying on a
+ * link-time trick. */
+#if TOS_MAX_CPUS > 1
+void plat_spin_acquire(volatile int *v)
+{
+    uint32_t got;
+
+    do {
+        __asm__ volatile("amoswap.w.aqrl %0, %1, (%2)"
+                         : "=r"(got)
+                         : "r"(1), "r"(v)
+                         : "memory");
+    } while (got != 0);
+}
+
+void plat_spin_release(volatile int *v)
+{
+    /* A release store is what orders the critical section's writes before
+       the unlock: the other hart sees the data before it sees the lock. */
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    *v = 0;
+}
+#endif

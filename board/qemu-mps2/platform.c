@@ -94,6 +94,27 @@ uint32_t plat_uptime_ms(void)
     return (uint32_t)((g_ticks * 1000u) / (uint64_t)plat_tick_hz());
 }
 
+/* Clock: whole periods from the tick counter, position inside the current
+ * one from SysTick's live down-counter.  That is 1/25 MHz of resolution
+ * instead of one tick.  Reading VAL while the counter wraps would count a
+ * period twice, so the answer is clamped to stay monotonic. */
+uint64_t plat_now_ns(void)
+{
+    static uint64_t last_ns;
+    uint32_t load = g_reload;
+    uint32_t val  = mmio_read32(ARM_SYSTICK_VAL) & 0xFFFFFFu;
+    uint32_t into = (load > val) ? (load - val) : 0u;
+    uint64_t cycles = g_ticks * (uint64_t)load + into;
+    uint64_t per_us = ARM_SYSTICK_CLK / 1000000u;     /* cycles per microsecond */
+    uint64_t ns = (cycles / per_us) * 1000ull
+                + ((cycles % per_us) * 1000ull) / per_us;
+
+    if (ns < last_ns)
+        ns = last_ns;
+    last_ns = ns;
+    return ns;
+}
+
 void plat_timer_tick(void)
 {
     g_ticks++;
@@ -206,3 +227,9 @@ void plat_reboot(void)
 }
 
 
+
+/* Single-core M3: there is no core id register to read. */
+uint32_t plat_board_cpu_id(void)
+{
+    return 0;
+}

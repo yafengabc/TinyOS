@@ -23,6 +23,19 @@ void tty_poll(void);                       /* drain the device, cook it   */
 int  tty_line_ready(void);
 int  tty_take_line(char *dst, int max);    /* copy one line, clear it     */
 
+/* ---- raw mode --------------------------------------------------------
+ * A full-screen program (edit) needs the bytes the cooked path throws away:
+ * ESC, the arrow-key sequences built from it, and anything else below 32.
+ * While raw mode is on, tty_poll() only queues bytes, read() hands them
+ * over immediately, and no echo is produced - the program owns the screen.
+ * The flag is console-wide, not per process: only one task can be reading
+ * the console at a time, and process.c clears it when that task dies so a
+ * killed editor cannot leave the shell without a line discipline. */
+void tty_set_raw(int on);
+int  tty_is_raw(void);
+int  tty_raw_ready(void);
+int  tty_take_raw(char *dst, int max);
+
 /* ^C / ^Z / ^\ kill, stop and continue the foreground task (the one blocked
  * reading the console).  Called once per tick after tty_poll(); a no-op when
  * no control character arrived.  The tty layer only knows "the reader", the

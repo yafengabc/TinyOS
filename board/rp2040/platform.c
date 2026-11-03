@@ -140,6 +140,29 @@ uint32_t plat_uptime_ms(void)
     return (uint32_t)((g_ticks * 1000u) / (uint64_t)plat_tick_hz());
 }
 
+/* Clock: the tick gives whole periods, SysTick's live down-counter gives
+ * the position inside the current one, so resolution is 1/12 MHz (~83 ns)
+ * rather than 10 ms.  Clamped against the wrap that happens between the
+ * reload and the tick interrupt. */
+uint64_t plat_now_ns(void)
+{
+    static uint64_t last_ns;
+    uint32_t load = g_reload;
+    uint32_t val  = mmio_read32(ARM_SYSTICK_VAL) & 0xFFFFFFu;
+    uint32_t into = (load > val) ? (load - val) : 0u;
+    uint64_t cycles = g_ticks * (uint64_t)load + into;
+    /* 12 MHz does not divide into whole cycles per microsecond, so work in
+     * thousandths: ns = cycles * 1000000 / CLK, split to avoid overflow. */
+    uint64_t per_ms = ARM_SYSTICK_CLK / 1000u;
+    uint64_t ns = (cycles / per_ms) * 1000000ull
+                + ((cycles % per_ms) * 1000000ull) / per_ms;
+
+    if (ns < last_ns)
+        ns = last_ns;
+    last_ns = ns;
+    return ns;
+}
+
 void plat_timer_tick(void)
 {
     g_ticks++;
@@ -219,7 +242,7 @@ uint32_t plat_block_size(void)
 
 uint32_t plat_block_count(void)
 {
-    /* 600 sectors == 300 KiB, matching FS_BLOCK_COUNT (75) in ramdisk.c.  The
+    /* 600 sectors == 300 KiB, matching PLAT_LFS_BLOCKS (75) in layout.c.  The
      * partition starts at flash 0x100000, well inside a 2 MiB (or 4 MiB) part. */
     return 600;
 }
@@ -317,4 +340,11 @@ void plat_reboot(void)
     mmio_write32(ARM_AIRCR, ARM_AIRCR_VECTKEY | ARM_AIRCR_SYSRESETREQ);
 
     plat_panic_halt();
+}
+
+/* SIO_CPUID reads 0 on core 0 and 1 on core 1 - the only thing that tells
+ * the two cores apart before the scheduler exists. */
+uint32_t plat_board_cpu_id(void)
+{
+    return mmio_read32(SIO_CPUID);
 }

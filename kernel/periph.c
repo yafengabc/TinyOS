@@ -1,0 +1,282 @@
+#include "periph.h"
+#include "platform.h"
+#include "devfs.h"
+#include "console.h"
+#include "string.h"
+
+/* Peripheral front end.
+ *
+ * The kernel keeps no device table: a board implements the handful of
+ * plat_gpio_* / plat_adc_* hooks and that is the whole driver model.  What
+ * lives here is everything that is *not* board specific:
+ *
+ *   - the weak defaults, so a board with no GPIO (QEMU virt, the PC, the
+ *     mps2) does not have to write five empty functions to say so;
+ *   - the range checks, so a user program passing pin 99 gets -1 instead of
+ *     writing a random register;
+ *   - the two syscalls, which are multiplexed (one number, an op code in a0)
+ *     rather than one number per operation: adding a new ADC query later
+ *     then costs nothing in the ABI.
+ *
+ * The hooks are `weak` here and strong in the board file.  lld resolves the
+ * strong definition first, so a board that implements GPIO automatically
+ * overrides the default without any #ifdef in this file. */
+
+__attribute__((weak)) int plat_gpio_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_gpio_configure(int pin, int mode)
+{
+    (void)pin; (void)mode;
+    return -1;
+}
+
+__attribute__((weak)) int plat_gpio_write(int pin, int value)
+{
+    (void)pin; (void)value;
+    return -1;
+}
+
+__attribute__((weak)) int plat_gpio_read(int pin)
+{
+    (void)pin;
+    return -1;
+}
+
+__attribute__((weak)) int plat_adc_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_adc_read(int chan)
+{
+    (void)chan;
+    return -1;
+}
+
+__attribute__((weak)) int plat_adc_vref_mv(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_adc_bits(void)
+{
+    return 0;
+}
+
+/* ---- syscall surface ------------------------------------------------- */
+
+int periph_gpio(int op, int pin, int arg)
+{
+    int n = plat_gpio_count();
+
+    if (op == GPIO_OP_COUNT)
+        return n;
+    if (n <= 0)
+        return -1;
+
+    switch (op) {
+    case GPIO_OP_MODE:
+        if (pin < 0 || pin >= n)
+            return -1;
+        return plat_gpio_configure(pin, arg);
+    case GPIO_OP_WRITE:
+        if (pin < 0 || pin >= n)
+            return -1;
+        return plat_gpio_write(pin, arg != 0);
+    case GPIO_OP_READ:
+        if (pin < 0 || pin >= n)
+            return -1;
+        return plat_gpio_read(pin);
+    default:
+        return -1;
+    }
+}
+
+int periph_adc(int op, int chan)
+{
+    int n = plat_adc_count();
+
+    if (op == ADC_OP_COUNT)
+        return n;
+    if (op == ADC_OP_VREF)
+        return plat_adc_vref_mv();
+    if (op == ADC_OP_BITS)
+        return plat_adc_bits();
+    if (op != ADC_OP_READ)
+        return -1;
+    if (n <= 0 || chan < 0 || chan >= n)
+        return -1;
+    return plat_adc_read(chan);
+}
+
+/* ---- device files: /dev/gpioN and /dev/adcN -------------------------- */
+
+/* One int per pin/channel, because struct dev carries a void* and handing it
+ * a cast integer would be a pointer that is not an object.  The RP2040 has 30
+ * pins and 5 channels; 48 leaves room for the RP2350 without a realloc path
+ * that cannot exist (registration happens at boot only). */
+#define MAX_PIN_DEVS 48
+static int gpio_pins[MAX_PIN_DEVS];
+static int adc_chans[MAX_PIN_DEVS];
+
+/* The text form is a digit and a newline - short enough that `echo 1 >
+ * /dev/gpio4` (which writes "1\n") and a program writing a bare "1" both
+ * work.  Leading whitespace is skipped so a stray space does not become a
+ * zero. */
+static int parse_level(const char *s, uint32_t len, int *out)
+{
+    uint32_t i = 0;
+
+    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
+                       s[i] == '\r'))
+        i++;
+    if (i >= len)
+        return -1;
+    if (s[i] == '1') {
+        *out = 1;
+        return 0;
+    }
+    if (s[i] == '0') {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
+
+static int gpio_dev_read(void *priv, uint32_t off, void *buf, uint32_t len)
+{
+    char tmp[8];
+    int n, v;
+
+    /* A pin is a snapshot, not a stream: after the first read the descriptor
+     * is at EOF, so `cat /dev/gpio4` prints one line and exits instead of
+     * looping on the same value.  Polling is what the C API is for. */
+    if (off)
+        return 0;
+
+    v = plat_gpio_read(*(int *)priv);
+    if (v < 0)
+        return -1;
+    n = ksnprintf(tmp, sizeof(tmp), "%d\n", v);
+    if (n < 0)
+        return -1;
+    if ((uint32_t)n > len)
+        n = (int)len;
+    memcpy(buf, tmp, (size_t)n);
+    return n;
+}
+
+static int gpio_dev_write(void *priv, uint32_t off, const void *buf,
+                          uint32_t len)
+{
+    int pin = *(int *)priv;
+    int level;
+
+    (void)off;
+    if (parse_level((const char *)buf, len, &level) < 0)
+        return -1;
+
+    /* Writing a pin implies driving it.  The alternative - refusing until an
+     * ioctl has set the direction - makes the one-liner people actually
+     * type (`echo 1 > /dev/gpio4`) fail, and the pin is theirs either way:
+     * if it is already an output this is a no-op, and if it was an input the
+     * write could not have meant anything else. */
+    if (plat_gpio_configure(pin, PLAT_GPIO_OUT) < 0)
+        return -1;
+    if (plat_gpio_write(pin, level) < 0)
+        return -1;
+    return (int)len;              /* all of "1\n" is consumed */
+}
+
+static int gpio_dev_ioctl(void *priv, int cmd, int arg)
+{
+    int pin = *(int *)priv;
+
+    switch (cmd) {
+    case GPIO_OP_MODE:
+        return plat_gpio_configure(pin, arg);
+    case GPIO_OP_WRITE:
+        return plat_gpio_write(pin, arg != 0);
+    case GPIO_OP_READ:
+        return plat_gpio_read(pin);   /* 0/1, no text */
+    default:
+        return -1;
+    }
+}
+
+static const struct dev_ops gpio_ops = {
+    .read  = gpio_dev_read,
+    .write = gpio_dev_write,
+    .ioctl = gpio_dev_ioctl,
+};
+
+static int adc_dev_read(void *priv, uint32_t off, void *buf, uint32_t len)
+{
+    char tmp[12];
+    int n, v;
+
+    if (off)
+        return 0;
+    v = plat_adc_read(*(int *)priv);
+    if (v < 0)
+        return -1;
+    n = ksnprintf(tmp, sizeof(tmp), "%d\n", v);
+    if (n < 0)
+        return -1;
+    if ((uint32_t)n > len)
+        n = (int)len;
+    memcpy(buf, tmp, (size_t)n);
+    return n;
+}
+
+static int adc_dev_write(void *priv, uint32_t off, const void *buf,
+                         uint32_t len)
+{
+    /* An ADC has nothing to write.  Saying so is better than pretending the
+     * write landed, because `echo 5 > /dev/adc0` is a mistake, not a mode. */
+    (void)priv; (void)off; (void)buf; (void)len;
+    return -1;
+}
+
+static int adc_dev_ioctl(void *priv, int cmd, int arg)
+{
+    (void)arg;
+    switch (cmd) {
+    case ADC_OP_READ: return plat_adc_read(*(int *)priv);
+    case ADC_OP_VREF: return plat_adc_vref_mv();
+    case ADC_OP_BITS: return plat_adc_bits();
+    default:          return -1;
+    }
+}
+
+static const struct dev_ops adc_ops = {
+    .read  = adc_dev_read,
+    .write = adc_dev_write,
+    .ioctl = adc_dev_ioctl,
+};
+
+void periph_init_devs(void)
+{
+    char name[16];
+    int ng = plat_gpio_count();
+    int na = plat_adc_count();
+
+    if (ng > MAX_PIN_DEVS)
+        ng = MAX_PIN_DEVS;
+    if (na > MAX_PIN_DEVS)
+        na = MAX_PIN_DEVS;
+
+    for (int i = 0; i < ng; i++) {
+        gpio_pins[i] = i;
+        ksnprintf(name, sizeof(name), "dev/gpio%d", i);
+        devfs_register(name, &gpio_ops, &gpio_pins[i]);
+    }
+    for (int i = 0; i < na; i++) {
+        adc_chans[i] = i;
+        ksnprintf(name, sizeof(name), "dev/adc%d", i);
+        devfs_register(name, &adc_ops, &adc_chans[i]);
+    }
+}

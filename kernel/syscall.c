@@ -1,8 +1,11 @@
 #include "tos.h"
 #include "console.h"
 #include "ramdisk.h"
+#include "devfs.h"
+#include "heap.h"
 #include "platform.h"
 #include "process.h"
+#include "periph.h"
 #include "tty.h"
 #include "elf.h"
 #include "string.h"
@@ -31,6 +34,104 @@ static int copy_user_string(char *dst, uint32_t src, int max)
        program that lost data halfway. */
     dst[max - 1] = '\0';
     return 0;
+}
+
+/* Resolve `in` against the calling task's cwd into an absolute, normalized
+ * path written to `out` (outlen bytes, always NUL-terminated).  A leading
+ * '/' makes the path absolute (cwd ignored); otherwise it is joined onto the
+ * cwd.  '.' and '..' are collapsed, and '..' above the root stays at '/'. */
+static void resolve_path(const char *in, char *out, int outlen)
+{
+    char cwd[64];
+    strncpy(cwd, process_cwd_str(), sizeof(cwd) - 1);
+    cwd[sizeof(cwd) - 1] = '\0';
+
+    const char *rest = (in && in[0]) ? in : "";
+    char tmp[128];
+    if (in && in[0] == '/') {
+        /* Absolute: ignore the cwd. */
+        int ti = 0;
+        while (in[ti]) {
+            if (ti < (int)sizeof(tmp) - 1)
+                tmp[ti] = in[ti];
+            ti++;
+        }
+        tmp[ti < (int)sizeof(tmp) - 1 ? ti : (int)sizeof(tmp) - 1] = '\0';
+    } else {
+        int bi = 0;
+        while (cwd[bi] && bi < (int)sizeof(tmp) - 1)
+            tmp[bi++] = cwd[bi];
+        if (bi < (int)sizeof(tmp) - 1)
+            tmp[bi++] = '/';
+        int j = 0;
+        while (rest[j] && bi < (int)sizeof(tmp) - 1)
+            tmp[bi++] = rest[j++];
+        tmp[bi] = '\0';
+    }
+
+    /* Normalize: drop duplicate slashes, skip '.', pop on '..', keep a
+     * leading '/'. */
+    char norm[128];
+    int no = 0;
+    int si = 0;
+    while (tmp[si]) {
+        while (tmp[si] == '/')
+            si++;
+        if (!tmp[si])
+            break;
+        char seg[64];
+        int sl = 0;
+        while (tmp[si] && tmp[si] != '/') {
+            if (sl < (int)sizeof(seg) - 1)
+                seg[sl++] = tmp[si];
+            si++;
+        }
+        seg[sl] = '\0';
+        if (strcmp(seg, ".") == 0)
+            continue;
+        if (strcmp(seg, "..") == 0) {
+            if (no > 1) {
+                int k = no - 1;
+                while (k > 0 && norm[k] != '/')
+                    k--;
+                no = k;            /* keep the leading '/' */
+            }
+            continue;
+        }
+        if (no < (int)sizeof(norm) - 1)
+            norm[no++] = '/';
+        for (int s = 0; seg[s] && no < (int)sizeof(norm) - 1; s++)
+            norm[no++] = seg[s];
+    }
+    if (no == 0) {
+        norm[0] = '/';
+        no = 1;
+    }
+    norm[no] = '\0';
+    strncpy(out, norm, outlen - 1);
+    out[outlen - 1] = '\0';
+}
+
+/* stat() for any path: device directories and device nodes first, then
+ * littlefs.  One helper instead of two call sites because SYS_CHDIR asks the
+ * same question ("is this a directory?") and must give the same answer - a
+ * /dev you can list but not enter is not a directory.
+ *
+ * A device node reports size 0 and its own type: `ls` then prints "c" and
+ * "<dev>" instead of the "0 bytes" a regular file would show. */
+static int path_stat(const char *path, uint32_t *size, uint8_t *type)
+{
+    if (devfs_dir_count(path) >= 0) {
+        *size = 0;
+        *type = TOS_FTYPE_DIR;
+        return 0;
+    }
+    if (devfs_lookup(path)) {
+        *size = 0;
+        *type = TOS_FTYPE_CHR;
+        return 0;
+    }
+    return ramdisk_stat(path, size, type);
 }
 
 static regs_t *do_exec(regs_t *r, const syscall_t *sc)
@@ -97,60 +198,43 @@ static regs_t *dispatch(regs_t *r)
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        if (fd == 1 || fd == 2) {
-            console_write((const char *)ptr, len);
-            plat_frame_set_ret(r, len);
-            return r;
-        }
-        plat_frame_set_ret(r, (uint32_t)process_fd_write((int)fd, (const void *)ptr, len));
-        return r;
+        /* Console, file or pipe: process_write decides, and may block (a
+         * full pipe), which is why it hands back a frame. */
+        return process_write(r, (int)fd, ptr, len);
     }
 
     case SYS_READ: {
         uint32_t fd = sc.a0, ptr = sc.a1, len = sc.a2;
-        if (len == 0) {
-            plat_frame_set_ret(r, 0);
-            return r;
-        }
         if (!process_user_ok(ptr, len)) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        if (fd == 0) {
-            /* One call per line, whatever the caller asked for: a line of
-               type-ahead must not be handed over two lines' worth at a time
-               (the shell's buffer would then hold two commands and echo
-               them as one). */
-            uint32_t room = len < TTY_LINE_MAX ? len : TTY_LINE_MAX;
-
-            if (!tty_line_ready())
-                return process_block_read(r, ptr, room);
-            plat_frame_set_ret(r, (uint32_t)tty_take_line((char *)ptr, (int)room));
-            return r;
-        }
-        plat_frame_set_ret(r, (uint32_t)process_fd_read((int)fd, (void *)ptr, len));
-        return r;
+        return process_read(r, (int)fd, ptr, len);
     }
 
     case SYS_EXEC:
         return do_exec(r, &sc);
 
     case SYS_OPEN: {
-        char path[64];
-        if (!copy_user_string(path, sc.a0, sizeof(path))) {
+        char upath[64];
+        if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
+        char path[64];
+        resolve_path(upath, path, sizeof(path));
         plat_frame_set_ret(r, (uint32_t)process_fd_open(path));
         return r;
     }
 
     case SYS_CREATE: {
-        char path[64];
-        if (!copy_user_string(path, sc.a0, sizeof(path))) {
+        char upath[64];
+        if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
+        char path[64];
+        resolve_path(upath, path, sizeof(path));
         plat_frame_set_ret(r, (uint32_t)process_fd_create(path));
         return r;
     }
@@ -162,7 +246,28 @@ static regs_t *dispatch(regs_t *r)
 
     case SYS_READDIR: {
         uint32_t index = sc.a0, ptr = sc.a1, len = sc.a2;
-        const char *name = ramdisk_name(index, NULL);
+        char dir[64];
+        int dc;
+        const char *name = NULL;
+
+        strncpy(dir, process_cwd_str(), sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = '\0';
+
+        /* /dev and /proc are enumerated from the device table; anything else
+         * is littlefs.  The root is both, so its device directories ("dev",
+         * "proc") come first and the littlefs files follow - that split is
+         * the one thing here that needs both enumerators, which is why it
+         * lives in the syscall and not inside either of them. */
+        dc = devfs_dir_count(dir);
+        if (dc >= 0) {
+            if ((int)index < dc)
+                name = devfs_dir_name(dir, index);
+            else if (!strcmp(dir, "/"))
+                name = ramdisk_list_name("/", index - (uint32_t)dc, NULL);
+        } else {
+            name = ramdisk_list_name(dir, index, NULL);
+        }
+
         if (!name) {
             plat_frame_set_ret(r, 0);
             return r;
@@ -180,6 +285,80 @@ static regs_t *dispatch(regs_t *r)
         return r;
     }
 
+    case SYS_STAT: {
+        char upath[64];
+        if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        char path[64];
+        resolve_path(upath, path, sizeof(path));
+        uint32_t ptr = sc.a1;          /* struct stat * in user space */
+        uint32_t size = 0;
+        uint8_t  type = 0;
+        if (path_stat(path, &size, &type) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        /* struct stat { uint32_t size; uint8_t type; } is 8 bytes with
+           `type` at offset 4 (uint32_t alignment). */
+        if (!process_user_ok(ptr, 8)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        *(uint32_t *)ptr = size;
+        *((uint8_t *)ptr + 4) = type;
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
+    case SYS_MEMINFO: {
+        uint32_t ptr = sc.a0;          /* struct meminfo * in user space */
+        uint32_t total = heap_arena_bytes();
+        uint32_t used  = heap_used_bytes();
+        uint32_t free  = total - used;
+        uint32_t peak  = heap_peak_bytes();
+        /* The whole machine, not just the kernel heap: what the SRAM has,
+         * what the kernel image takes, and what is reserved for tasks.  A
+         * user asking `free` after being told the chip has 400 KiB deserves
+         * the real map rather than the 32 KiB arena. */
+        uint32_t ram_total   = PLAT_RAM_TOP - PLAT_RAM_BASE;
+        uint32_t kernel_used = (uint32_t)__bss_end - PLAT_RAM_BASE;
+        uint32_t app_total   = PLAT_APP_MAX - PLAT_APP_BASE;
+        /* A board can reserve more than its SRAM claims (the mps2's app
+         * range is sized for a 4 MiB part): report zero, not a wrap. */
+        uint32_t ram_unused  = (kernel_used + app_total < ram_total)
+                               ? ram_total - kernel_used - app_total : 0;
+        if (!process_user_ok(ptr, 32)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        *(uint32_t *)ptr        = total;
+        *(uint32_t *)(ptr + 4)  = used;
+        *(uint32_t *)(ptr + 8)  = free;
+        *(uint32_t *)(ptr + 12) = peak;
+        *(uint32_t *)(ptr + 16) = ram_total;
+        *(uint32_t *)(ptr + 20) = kernel_used;
+        *(uint32_t *)(ptr + 24) = app_total;
+        *(uint32_t *)(ptr + 28) = ram_unused;
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
+    case SYS_DF: {
+        uint32_t ptr = sc.a0;          /* struct dfinfo * in user space */
+        uint32_t total = 0, used = 0;
+        ramdisk_df(&total, &used);
+        if (!process_user_ok(ptr, 8)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        *(uint32_t *)ptr       = total;
+        *(uint32_t *)(ptr + 4) = used;
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
     case SYS_GETPID:
         plat_frame_set_ret(r, (uint32_t)process_current_pid());
         return r;
@@ -189,6 +368,41 @@ static regs_t *dispatch(regs_t *r)
 
     case SYS_UPTIME:
         plat_frame_set_ret(r, plat_uptime_ms());
+        return r;
+
+    case SYS_CLOCK: {
+        /* struct clockinfo { u64 ns; u32 us; u32 ms; u32 tick_hz; u32 cpus; }
+         * - 24 bytes.  Written as 32-bit halves because a 64-bit store on
+         * RV32/ARMv6-M is not guaranteed to be a single access, and the
+         * scaled values come from here because user programs do not link a
+         * 64-bit division helper. */
+        uint32_t ptr = sc.a0;
+        if (!process_user_ok(ptr, 24)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        uint64_t ns = plat_now_ns();
+        *(uint32_t *)ptr        = (uint32_t)ns;
+        *(uint32_t *)(ptr + 4)  = (uint32_t)(ns >> 32);
+        *(uint32_t *)(ptr + 8)  = (uint32_t)(ns / 1000ull);
+        *(uint32_t *)(ptr + 12) = (uint32_t)(ns / 1000000ull);
+        *(uint32_t *)(ptr + 16) = plat_tick_hz();
+        *(uint32_t *)(ptr + 20) = PLAT_MAX_CPUS;
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
+    case SYS_GETCPU:
+        plat_frame_set_ret(r, (uint32_t)plat_cpu_id());
+        return r;
+
+    case SYS_GPIO:
+        plat_frame_set_ret(r, (uint32_t)periph_gpio((int)sc.a0, (int)sc.a1,
+                                                    (int)sc.a2));
+        return r;
+
+    case SYS_ADC:
+        plat_frame_set_ret(r, (uint32_t)periph_adc((int)sc.a0, (int)sc.a1));
         return r;
 
     case SYS_SBRK:
@@ -221,6 +435,86 @@ static regs_t *dispatch(regs_t *r)
          * register, and a reset does not care what the stack looks like. */
         kprintf("\nreboot requested by pid %d\n", process_current_pid());
         plat_reboot();
+
+    case SYS_CHDIR: {
+        char upath[64];
+        if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        char path[64];
+        resolve_path(upath, path, sizeof(path));
+        /* The root always exists and is a directory; for anything else ask
+         * path_stat, so "/dev" and "/proc" are enterable exactly when they
+         * are listable (same helper, same answer). */
+        if (path[1] != '\0') {
+            uint32_t sz = 0;
+            uint8_t  ty = 0;
+            if (path_stat(path, &sz, &ty) < 0 || ty != TOS_FTYPE_DIR) {
+                plat_frame_set_ret(r, (uint32_t)-1);
+                return r;
+            }
+        }
+        process_set_cwd_str(path);
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
+    case SYS_GETCWD: {
+        uint32_t ptr = sc.a0;
+        int len = (int)sc.a1;
+        const char *c = process_cwd_str();
+        if (len <= 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        uint32_t n = (uint32_t)strlen(c) + 1;
+        uint32_t cp = n < (uint32_t)len ? n : (uint32_t)len;
+        if (!process_user_ok(ptr, cp)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        memcpy((void *)ptr, c, cp);
+        ((char *)ptr)[cp - 1] = '\0';
+        plat_frame_set_ret(r, cp);
+        return r;
+    }
+
+    case SYS_TTYRAW: {
+        /* Return the previous mode so a program can restore it exactly
+         * rather than assuming cooked. */
+        int prev = tty_is_raw();
+        tty_set_raw(sc.a0 != 0);
+        plat_frame_set_ret(r, (uint32_t)prev);
+        return r;
+    }
+
+    case SYS_PIPE: {
+        uint32_t ptr = sc.a0;          /* int fds[2] in user space */
+        int fds[2];
+
+        if (!process_user_ok(ptr, 8)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        if (process_pipe(fds) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        ((uint32_t *)ptr)[0] = (uint32_t)fds[0];
+        ((uint32_t *)ptr)[1] = (uint32_t)fds[1];
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
+    case SYS_DUP2:
+        plat_frame_set_ret(r, (uint32_t)process_dup2((int)sc.a0, (int)sc.a1));
+        return r;
+
+    case SYS_IOCTL:
+        plat_frame_set_ret(r, (uint32_t)process_ioctl((int)sc.a0, (int)sc.a1,
+                                                     (int)sc.a2));
+        return r;
 
     default:
         plat_frame_set_ret(r, (uint32_t)-1);

@@ -27,7 +27,7 @@ type smokeOpts struct {
 func qemuArgs(target string, port int, image string, allowReboot bool) []string {
 	var args []string
 	switch target {
-	case "rv32":
+	case "rv32", "rv32smp":
 		// No firmware: the kernel ELF is loaded at 0x80000000 and starts in
 		// machine mode, so it brings its own trap vector and device setup.
 		args = []string{
@@ -39,6 +39,11 @@ func qemuArgs(target string, port int, image string, allowReboot bool) []string 
 			"-chardev", fmt.Sprintf("socket,id=tosserial,host=127.0.0.1,port=%d,server=on,wait=on", port),
 			"-serial", "chardev:tosserial",
 			"-monitor", "none",
+		}
+		// rv32smp is the two-hart build (internal/build: CPUs: 2); every
+		// other target is a uniprocessor and must not be given -smp.
+		if target == "rv32smp" {
+			args = append(args, "-smp", "2")
 		}
 	case "arm":
 		// mps2-an385 (Cortex-M3): the kernel ELF is mapped into SSRAM at 0,
@@ -85,8 +90,8 @@ func runSmoke(opts smokeOpts) (string, error) {
 	image := opts.image
 	if image == "" {
 		switch opts.target {
-		case "rv32":
-			image = filepath.Join(repoRoot(), "build", "kernel-rv32.elf")
+		case "rv32", "rv32smp":
+			image = filepath.Join(repoRoot(), "build", "kernel-"+opts.target+".elf")
 		case "arm":
 			image = filepath.Join(repoRoot(), "build", "kernel-arm.elf")
 		default:

@@ -12,6 +12,17 @@
  * space: see plat_init in arch/rv32/platform.c).
  */
 
+/* How many CPUs this build supports.  The build passes -DTOS_MAX_CPUS for an
+ * SMP target (qemu-virt with -smp 2); everything else is 1 and none of the
+ * multi-core code below is assembled. */
+#ifndef TOS_MAX_CPUS
+#define TOS_MAX_CPUS 1
+#endif
+
+/* Bytes of kernel stack per CPU.  Must match KSTACK_BYTES in
+ * kernel/process.c - the guard check there indexes the same array. */
+#define KSTACK_SHIFT 15                 /* 32 KiB */
+
     .section .text.entry, "ax"
     .globl _start
 _start:
@@ -26,12 +37,17 @@ _start:
        chip, scripts/esp-c3/csr.S). */
     csrci   mstatus, 8
 
+    /* Which hart are we?  Every hart starts here at reset, so the boot hart
+       has to be singled out before it clears .bss - a second hart doing that
+       concurrently would wipe memory the first one is already using. */
+    csrr    t0, mhartid
+    bnez    t0, .Lsecondary
+
     /* Park a secondary hart.  QEMU virt passes the hart id in a0 (0 on
        the one that matters); the C3's ROM hands over a0 = 17 - it is not
        a hart id at all - so this must not be the only thing deciding
-       whether to continue.  Both our boards are single-core; if a
-       multi-core board ever shows up it needs a real probe (CLINT hart
-       id or mhartid CSR), not an argument check. */
+       whether to continue.  mhartid is the real answer and is 0 on every
+       single-hart board here. */
 
     .option push
     .option norelax
@@ -60,6 +76,36 @@ _start:
 
 park:
     wfi
+    j       park
+
+/* -------------------------------------------------------------------- */
+/* Secondary harts: wait for the boot CPU to say the kernel is usable,   */
+/* then join the scheduler.  They must not touch .bss or any kernel      */
+/* structure before that - the boot CPU is still clearing .bss.          */
+
+.Lsecondary:
+    la      t0, cpu_release
+    li      t1, 0x534D5031              /* "SMP1", see kernel/cpu.c */
+1:  lw      t2, 0(t0)
+    bne     t2, t1, 1b
+
+    .option push
+    .option norelax
+    la      sp, __kernel_stack_top
+    .option pop
+    csrr    t0, mhartid
+    slli    t0, t0, KSTACK_SHIFT
+    sub     sp, sp, t0                  /* this hart's own kernel stack */
+
+#if TOS_MAX_CPUS > 1
+    .option push
+    .option norelax
+    la      t0, trap_vectors_h1
+    .option pop
+    csrw    mtvec, t0
+#endif
+
+    call    cpu_secondary_main          /* never returns */
     j       park
 
 /* -------------------------------------------------------------------- */
@@ -100,39 +146,71 @@ park:
     .balign 256
     .globl trap_vectors
 trap_vectors:
-    j       trap_entry              /* 0: synchronous exceptions land here */
+    j       trap_entry_h0           /* 0: synchronous exceptions land here */
     .rept 31
-    j       trap_entry
+    j       trap_entry_h0
     .endr
     .option pop
 
-trap_entry:
-    csrw    mscratch, t0            /* park t0: needed as scratch below */
+#if TOS_MAX_CPUS > 1
+/* A second hart needs its own 256-byte table: mtvec is a per-hart CSR, and
+ * the entry has to know which kernel stack to switch to.  The two tables are
+ * emitted back to back so one NAPOT PMP entry covers both. */
+    .option push
+    .option norvc
+    .balign 256
+    .globl trap_vectors_h1
+trap_vectors_h1:
+    j       trap_entry_h1
+    .rept 31
+    j       trap_entry_h1
+    .endr
+    .option pop
+#endif
+
+/* One trap entry per hart.
+ *
+ * `kstack` is the top of that hart's kernel stack, an absolute expression the
+ * linker folds into the la - which is what lets the entry switch stacks with
+ * a single scratch register.  The sequence is: park t0 in mscratch (the only
+ * place a trap may write before it has a stack), load the stack top, stash
+ * the interrupted sp just above the frame, then recover t0 from mscratch. */
+    .macro TRAP_ENTRY name, kstack
+\name:
+    csrw    mscratch, t0            /* park t0 */
+
     csrr    t0, mstatus
     srli    t0, t0, 11
     andi    t0, t0, 3               /* mstatus.MPP */
-    beqz    t0, .Lfrom_user
+    beqz    t0, .Luser_\name        /* 0 = came from U-mode */
 
-    /* ---- trap from M-mode: stay on the current stack ---------------- */
-    csrr    t0, mscratch            /* original t0 */
+    /* ---- trap from M-mode: the current stack is already a kernel one --- */
     addi    sp, sp, -FRAME_SIZE
-    sw      t0, 20(sp)              /* x5 = t0 */
+    csrr    t0, mscratch            /* original t0 */
+    sw      t0, 20(sp)              /* frame->x5 */
     addi    t0, sp, FRAME_SIZE
-    sw      t0, 8(sp)               /* frame->sp = kernel sp at trap */
+    sw      t0, 8(sp)               /* frame->sp = sp at trap */
     j       .Lsave
 
-.Lfrom_user:
-    /* ---- trap from U-mode: switch to the kernel stack -------------- */
-    csrr    t0, mscratch            /* original t0 */
-    csrw    mscratch, sp            /* park the user sp */
+.Luser_\name:
+    /* ---- trap from U-mode: switch to this hart's kernel stack --------- */
     .option push
     .option norelax
-    la      sp, __kernel_stack_top
+    la      t0, \kstack
     .option pop
-    addi    sp, sp, -FRAME_SIZE
-    sw      t0, 20(sp)              /* x5 = t0 */
-    csrr    t0, mscratch
+    sw      sp, -4(t0)              /* park the interrupted sp */
+    addi    sp, t0, -(FRAME_SIZE + 16)
+    lw      t0, (FRAME_SIZE + 12)(sp)
     sw      t0, 8(sp)               /* frame->sp = user sp */
+    csrr    t0, mscratch            /* original t0 */
+    sw      t0, 20(sp)              /* frame->x5 */
+    j       .Lsave
+    .endm
+
+    TRAP_ENTRY trap_entry_h0, __kernel_stack_top
+#if TOS_MAX_CPUS > 1
+    TRAP_ENTRY trap_entry_h1, __kernel_stack_top - (1 << KSTACK_SHIFT)
+#endif
 
 .Lsave:
     sw      x1,    4(sp)
@@ -249,6 +327,8 @@ rv32_enter_user:
     .balign 16
     .globl __kernel_stack
 __kernel_stack:
-    .space 32768
+    /* One stack per CPU, allocated statically: hart N gets
+     * [__kernel_stack_top - (N+1)*32K, __kernel_stack_top - N*32K). */
+    .space 32768 * TOS_MAX_CPUS
     .globl __kernel_stack_top
 __kernel_stack_top:

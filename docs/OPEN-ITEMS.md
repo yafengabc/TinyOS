@@ -180,9 +180,29 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
 
 ## 还没结的尾巴
 
+- **littlefs 在 SMP 下没有互斥**：`kernel/lfs_config.h` 没开 `LFS_THREADSAFE`，
+  两个 hart 同时读文件会共享同一份 cache 缓冲和 `lfs` 状态。单核目标无所谓；
+  `rv32smp` 上「两边各 cat 一个文件」理论上会读到对方的缓存块。修法是给
+  `ramdisk_read/write` 加一把 `spin_t`（比给整个 littlefs 加锁更省，因为
+  `bd_*` 回调已经在内核里）。目前压测没复现，但那是运气。
+- **~~`/dev` 和 `/proc` 只能 open，不能 `ls`~~**（2026-11-03 已做）：目录改成从
+  设备表算出来的（`devfs_dir_count/_dir_name`），`SYS_READDIR` 按前缀路由，
+  `stat` 新增 `TOS_FTYPE_CHR`，`cd /dev` 也通了。见 `PLATFORM-DESIGN.md` §14.7。
+  剩下的小缺口：`ls /dev` 在没注册任何设备的板子（qemu-virt、pc）上是空目录，
+  这是对的；但设备节点没有 size 概念，`ls` 显示 `<dev>` 而不是字节数——够用。
 - **arm(qemu-mps2) 首次 exec 就 HardFault**：`bx lr` 处崩、帧没写回。怀疑 `arm_resume`
   的 FR_HW 分支，或 MPU 区域 0 覆盖整窗且 XN。老 bug，没修——ARM 上的功能验证因此
   只能靠「脚本抓 `init process exited`」兜着，别信绿。
+  （2026-11-02 复核：在 `effaa9c` 上原样复现，与 SMP/时钟/外设/管道这一轮无关。
+  `ls` 和 `cat` 都会崩，所以是「任何碰 littlefs 的用户态程序」都中招，不只是 ls。）
+- **RP2040 / RP2350 的 core1 还没起**：`board/rp2040` 仍是 `PLAT_MAX_CPUS = 1`，
+  内核里 SMP 那一整套（per-CPU 栈、第二张向量表、自旋锁）已经就位，缺的是
+  板级三件事：SIO 自旋锁（`SIO_SPINLOCK0` 替掉 `plat_spin_acquire`）、
+  把 core1 从 bootrom 的 `wfe` 循环里拉起来（`SIO_FIFO` 或 PSM）、
+  `plat_timer_start_cpu()` 给 core1 装 SysTick。见 `PLATFORM-DESIGN.md` §13.9。
+- **SMP 没有任务亲和性**：一条共享队列，任务会在核之间迁移（`smp` 程序会报
+  `cpu 1 then 0`）。要绑核就加 `proc_t.affinity` + `sched_pick()` 过滤，
+  属于策略，先没做。
 - **C3 的原生 USB（USJ）控制台**：代码在，真机没插线验证过。
 - **SPI1 硬件页编程（PP）没通**：写走 ROM，不阻塞。
 - **README 说「默认 `-Oz`」是错的**：`internal/build/build.go` 的 `TOS_OPT` 默认 `-O2`

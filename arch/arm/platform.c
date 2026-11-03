@@ -113,6 +113,11 @@ void plat_early_init(void)
     plat_board_early();
 }
 
+int plat_cpu_id(void)
+{
+    return (int)plat_board_cpu_id();
+}
+
 void plat_init(void)
 {
     /* SysTick must outrank SVCall.  A task that blocks inside a syscall

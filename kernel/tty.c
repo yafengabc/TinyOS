@@ -27,6 +27,54 @@ static int  pending_len;
 #define CTRL_STOP 1
 #define CTRL_CONT 2
 static int ctrl_c, ctrl_z, ctrl_bs;
+static int ctrl_age;               /* ticks a pending ^C has waited */
+
+/* ---- raw mode --------------------------------------------------------
+ * A full-screen program needs every keystroke, including the ESC and the
+ * two bytes after it that make up a cursor-key sequence.  The cooked path
+ * below eats all of that: only 32..126 reach the line buffer and nothing is
+ * delivered before a newline, so an editor would never see an arrow key.
+ *
+ * Raw mode replaces the line buffer with a byte queue, one read() at a time.
+ * Signals still work (^C has to be able to kill a wedged editor); the mode
+ * belongs to the console, not to the process, and process.c drops it when
+ * the reading task dies so the shell gets its line discipline back. */
+#define RAW_Q 256
+static char raw_q[RAW_Q];
+static int  raw_head, raw_tail;        /* ring: head == tail means empty */
+static int  raw_on;
+
+void tty_set_raw(int on)
+{
+    if (on) {
+        /* Drop a half-typed command: it belongs to the shell, and the
+         * editor's first keystroke must not complete it. */
+        pending_len = 0;
+    } else {
+        raw_head = raw_tail = 0;
+    }
+    raw_on = on ? 1 : 0;
+}
+
+int tty_is_raw(void)
+{
+    return raw_on;
+}
+
+int tty_raw_ready(void)
+{
+    return raw_head != raw_tail;
+}
+
+int tty_take_raw(char *dst, int max)
+{
+    int n = 0;
+    while (n < max && raw_head != raw_tail) {
+        dst[n++] = raw_q[raw_head];
+        raw_head = (raw_head + 1) % RAW_Q;
+    }
+    return n;
+}
 
 /* Cook one character: echo it, handle backspace, and publish the line on a
  * newline.  Called from the tick, i.e. never from inside a syscall, so a
@@ -46,6 +94,20 @@ static void tty_char(char c)
             ctrl_bs = 1;
         pending_len = 0;
         console_echo("^C\n", 3);
+        return;
+    }
+
+    if (raw_on) {
+        /* Byte for byte: no echo (the program draws its own screen), no
+         * backspace handling, no line assembly, and no CR to LF either -
+         * the editor wants to see what the terminal actually sent.  A full
+         * queue drops the newest byte, which is the same trade the echo
+         * queue makes. */
+        int next = (raw_tail + 1) % RAW_Q;
+        if (next != raw_head) {
+            raw_q[raw_tail] = c;
+            raw_tail = next;
+        }
         return;
     }
 
@@ -119,9 +181,21 @@ void tty_ctrl_deliver(void)
     int pid = process_console_reader();
 
     if (ctrl_bs || ctrl_c) {
-        if (pid > 0)
+        if (pid > 0) {
             (void)process_signal(pid, SIGKILL);
-        ctrl_c = ctrl_bs = 0;
+            ctrl_c = ctrl_bs = 0;
+            ctrl_age = 0;
+        } else if (++ctrl_age > 100) {
+            /* A full screen program spends most of its time drawing rather
+             * than waiting in read(), so for a tick or two there is no
+             * console reader to deliver to.  Hold the key for a second
+             * (100 ticks) and drop it after that: keeping it forever would
+             * fire it at whoever reads the console next. */
+            ctrl_c = ctrl_bs = 0;
+            ctrl_age = 0;
+        }
+    } else {
+        ctrl_age = 0;
     }
     if (ctrl_z) {
         if (pid > 0) {

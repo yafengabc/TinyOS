@@ -79,7 +79,7 @@ func findQEMU(name string) string {
 
 func qemuName(target string) string {
 	switch target {
-	case "rv32":
+	case "rv32", "rv32smp":
 		return exeName("qemu-system-riscv32")
 	case "arm":
 		return exeName("qemu-system-arm")

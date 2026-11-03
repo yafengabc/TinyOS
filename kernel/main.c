@@ -4,6 +4,10 @@
 #include "ramdisk.h"
 #include "heap.h"
 #include "process.h"
+#include "cpu.h"
+#include "devfs.h"
+#include "periph.h"
+#include "procfs.h"
 
 /* Architecture-independent entry point.  Everything platform specific goes
  * through platform.h; this file must build unchanged on i386, RV32 and ARM. */
@@ -13,17 +17,6 @@ static void banner(void)
     kprintf("\nTinyOS - a tiny multi-platform operating system\n");
     kprintf("user-mode ELF loader | littlefs | PIE\n");
     kprintf("kernel heap: %u KiB arena\n\n", heap_arena_bytes() / 1024u);
-}
-
-static void list_files(void)
-{
-    uint32_t n = ramdisk_count();
-    kprintf("littlefs: %u files\n", n);
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t size = 0;
-        const char *name = ramdisk_name(i, &size);
-        kprintf("  %s (%u bytes)\n", name, size);
-    }
 }
 
 void kmain(void)
@@ -37,10 +30,26 @@ void kmain(void)
 
     heap_init();
     ramdisk_init();
+
+    /* Device files exist before the first task does.  Registration is a boot
+     * act and the table is read-only afterwards, which is what lets open()
+     * walk it on two CPUs without a lock.  A board with no GPIO registers
+     * nothing and /dev/gpio0 simply does not open - the same answer the C
+     * API gives when gpio_count() is 0. */
+    devfs_init();
+    periph_init_devs();
+    procfs_init();
+
     process_init();
 
     banner();
-    list_files();
+
+    /* Everything a secondary CPU touches exists from here on: the process
+     * table, the console and the board's timer.  On a uniprocessor this
+     * prints nothing and returns immediately; on the SMP build it wakes the
+     * other harts and waits for them to report in, so that "2 of 2 online"
+     * either appears before the shell does or the boot says why not. */
+    cpu_init();
 
     /* Bring-up self-check: bounded wait for the first scheduler tick.  A
        dead timer otherwise boots fine here and fails confusingly later
