@@ -13,11 +13,10 @@
 /* Both consoles now land their bytes from real receive interrupts (the C3
  * routes UART0 and the USB-Serial/JTAG packet interrupt each to its own
  * CPU line), so the queue absorbs a burst the instant it arrives instead
- * of one tick's worth.  That makes a big ring worth its memory: a transfer
- * program (user/rx.c) can be handed a whole flash-write's worth of bytes
- * while the sender keeps going, and typing still works the same.  The
- * x86 and qemu ports keep polling from the tick and just see a deeper
- * type-ahead. */
+ * of one tick's worth.  A paste of several commands is therefore held
+ * whole rather than losing everything past the first line, and typing
+ * still works the same.  The x86 and qemu ports keep polling from the
+ * tick and just see a deeper type-ahead. */
 #define TTY_Q_LINES 16
 #define TTY_LINE_MAX 256
 
@@ -46,8 +45,16 @@ static int ctrl_age;               /* ticks a pending ^C has waited */
  * Raw mode replaces the line buffer with a byte queue, one read() at a time.
  * Signals still work (^C has to be able to kill a wedged editor); the mode
  * belongs to the console, not to the process, and process.c drops it when
- * the reading task dies so the shell gets its line discipline back. */
-#define RAW_Q 4096
+ * the reading task dies so the shell gets its line discipline back.
+ *
+ * How deep the queue has to be: the receive interrupt hands bytes straight
+ * to a blocked reader (process_console_kick), so the queue only fills while
+ * that reader is waiting to be scheduled - at worst one QUANTUM, 5 ticks =
+ * 50 ms (process.c).  A raw reader asks for one byte per read(), so every
+ * byte costs it a wake-up; the wire meanwhile delivers 576 bytes in those
+ * 50 ms at 115200.  1 KiB covers that with margin, and anything bigger is
+ * memory that no achievable baud rate and quantum can use. */
+#define RAW_Q 1024
 static char raw_q[RAW_Q];
 static int  raw_head, raw_tail;        /* ring: head == tail means empty */
 static int  raw_on;
@@ -157,8 +164,8 @@ void tty_poll(void)
     /* Drain everything the device has: a burst arriving between two
        drains must be cooked in the same drain, or the echo and the
        answers drift apart.  The bound only guards against a device that
-       never runs dry - a 4 KiB raw queue is the most that can be waiting,
-       so twice that is safely above anything reachable. */
+       never runs dry - a full raw queue is the most that can be waiting
+       on top of it, so twice that is safely above anything reachable. */
     for (int i = 0; i < 2 * RAW_Q; i++) {
         int c = plat_console_getchar();
         if (c < 0)
