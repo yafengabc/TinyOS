@@ -804,7 +804,7 @@ TIMG0 → INTMTX 线 2 → vectored 槽 2，全链在实板上跑通，内核
   同一修复必须应用到内核的 `trap_vectors`（qemu-virt 的 direct 模式掩盖此坑）。
 - TIMG0：`REGCLK`(0xFC) 首先写 `0xE0000000`——bit31 默认 0（"寄存器不可读写"），
   bit30/29 默认 1；**单独写 bit31 会把两个默认 1 抹掉，反而关掉定时器功能时钟**。
-  ALARMLO=10000、`CONFIG = EN|INCREASE|AUTORELOAD|ALARM_EN|79<<13`、INT_ENA=1。
+  ALARMLO=10000、`CONFIG = EN|INCREASE|AUTORELOAD|ALARM_EN|20<<13`、INT_ENA=1。
   **寄存器读回是诚实的**（ALARMLO 读回 0x2710，CONFIG 逐位一致）。
 - handler：每次 tick 都要 `INT_CLR` + **重写 CONFIG 的 ALARM_EN**（触发即自清零，
   AUTORELOAD 不恢复它，否则只来一拍）。完全静默的 handler（无任何 UART 访问）
@@ -820,6 +820,42 @@ TG0WDT（ROM 遗留，~1 s，`0x48` 整字写 0）、RTC WDT（esptool `--after 
 遗留，RTC_CNTL `0x90`）、**super watchdog**（~3 s，`rst SUPER_WDT_RST`，SWD_CONF
 0xAC bit30，键 `0x8F1D312A`）。esptool 烧录用的 `run.py` 走 `--after no-reset` +
 手动 EN 脉冲，所以三个都得关。
+
+##### 时钟：这颗芯片只跑 20 MHz，tick 因此慢了四倍（2026-11-04）
+
+真机症状是 tick 只有 **25.3 Hz**：主机墙钟计时，两次 `uptime` 相隔 20.7 s，芯片
+只走了 5.24 s。两个候选原因（时钟假设错 / tick 被吞）需要一个独立时基来分开，
+板子上唯一速率已知且不依赖 PLL 的东西就是 **UART 线路本身**——主机能在 115200 下
+读通这段文字，就证明 640 字节花了 55.5 ms，与 CPU、APB、tick 都无关。三个仪器
+互相印证：
+
+| 仪器 | 读数 | 推出 |
+|---|---|---|
+| 报警 10000 计数两次触发间隔（主机墙钟） | 39.5 ms | 定时器 253 kHz |
+| 640 字节线路时间 55.5 ms 内的计数增量 | 15013 | 定时器 270 kHz |
+| 200000 条 `nop`（已知周期数）内的计数增量 | 2633 ≈ 10.4 ms | 核心 19–20 MHz |
+
+结论：**APB = 晶振 40 MHz ÷ 2 = 20 MHz**。原因是本移植**从不配置 PLL**——那一步
+在 ESP-IDF 里属于二级 bootloader（默认切 160 MHz），而我们的镜像是 ROM 直接加载
+的，硬件复位态就是 20 MHz。代码里按 esp-idf 默认写的 `80 MHz / 80 = 1 MHz`，
+于是同样的 10000 个计数变成了 40 ms 而不是 10 ms，tick 掉到 25 Hz，`uptime`、
+`sleep`、超时全部慢四倍。
+
+顺手钉住两个寄存器细节，都是靠"两次测量反推比例"确定的：
+
+- **`T0_DIVIDER` 字段存的是除数本身，不是除数−1**（0 表示 ÷65536）。写 79 得到
+  253 kHz、写 19 得到 1.052 MHz，比值正好 79/19，这才把编码钉死；此前按
+  `divider-1` 写 79 等于 ÷80。现在写 `20`，计数正好 1 MHz，tick 100.1 Hz
+  （15 s 窗口比值 0.9989，残差在主机计时精度内）。
+- **计数器只能通过 UPDATE 快照读，而快照慢一拍**：写 UPDATE 后立即读拿到的是
+  *上一次* 写入锁存的值，单次读全是废数（20 万条 nop "只花" 68 个计数）；
+  连续写两次、中间读一次丢弃，才拿到当前值。
+- 附带一条：**`csrr mcycle` 在 esp-riscv 核上是非法指令**（mcause=2，mtval 就是
+  这条指令本身），要测 CPU 周期只能用已知长度的 `nop` 循环。
+
+如果以后要把芯片拉到 80/160 MHz（配置 PLL + 时钟 mux），**`APB_CLK_HZ`、
+`TIMG_DIVIDER` 和 UART 波特率分频必须一起改**：UART 现在吃的是 ROM 按 20 MHz
+设好的分频，时钟一变不重设波特率，控制台第一个字符就会变成乱码。
 
 ##### 探针大坑：hex 打印循环吃掉待打印值
 

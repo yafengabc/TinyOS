@@ -99,9 +99,26 @@ int plat_console_getchar(void)
 
 /* ---- TIMG0 tick + INTMTX --------------------------------------------- */
 
-/* 80 MHz APB clock, divided down to 1 MHz; 10000 counts per tick = 100 Hz. */
-#define TIMG_CLK_HZ    80000000u
-#define TIMG_DIVIDER   80u
+/* Timer input clock, divided down to 1 MHz; 10000 counts per tick = 100 Hz.
+ *
+ * The input is the APB clock, and nothing in this port raises the SoC above
+ * the clock the ROM left it at: XTAL 40 MHz divided by two, i.e. 20 MHz for
+ * CPU and APB alike.  Every value here used to be written for the esp-idf
+ * default of 80 MHz APB, which made the tick fire at 25 Hz instead of 100 -
+ * `uptime` ran four times slow, sleep and timeouts were four times long.
+ *
+ * The 20 MHz is measured, not assumed, and three instruments agree:
+ *   - the alarm (10 000 counts) fires every 39.5 ms on the host's wall
+ *     clock  -> timer = 253 kHz;
+ *   - 640 bytes at 115200 (55.5 ms of wire time) tick the counter 15013
+ *     times              -> timer = 270 kHz;
+ *   - 200 000 NOPs (known CPU cycles) tick it 2633 times (~10.4 ms)
+ *                          -> core = 19-20 MHz.
+ * 253 kHz * 80 = 20.2 MHz, which is why the divider below is 20 and not 80.
+ * If the PLL is ever brought up to 80 MHz, this constant has to go with it
+ * (the tick would otherwise be four times fast). */
+#define APB_CLK_HZ     20000000u
+#define TIMG_DIVIDER   20u
 #define TICK_HZ        100u
 
 #define T0CONFIG_REG   (TIMG0_BASE + 0x00)
@@ -237,7 +254,7 @@ static uint32_t tick_config;
 
 void plat_timer_init(uint32_t hz)
 {
-    tick_reload = (TIMG_CLK_HZ / TIMG_DIVIDER) / hz;
+    tick_reload = (APB_CLK_HZ / TIMG_DIVIDER) / hz;
 
     /* Register clock gate comes first: bit31 defaults to 0 ("registers
      * can not be read or written by software") while bits 30/29 default
@@ -284,9 +301,12 @@ void plat_timer_init(uint32_t hz)
                  | UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT
                  | UART_INT_RXFIFO_OVF);
 
-    /* Timer: APB / 80 = 1 MHz, counts up from 0 to the reload value
+    /* Timer: APB / 20 = 1 MHz, counts up from 0 to the reload value
      * (10000 counts = 10 ms), alarm fires, counter reloads.  The divider
-     * field holds (divider - 1).  Register readbacks are truthful
+     * field holds the divisor itself, not divisor-1 (0 would mean 65536):
+     * writing 79 gave 20 MHz/79 = 253 kHz and 19 gave 1.052 MHz, a ratio of
+     * 79/19 - that is how the encoding was pinned down on the real chip.
+     * Register readbacks are truthful
      * (ALARMLO reads 0x2710, CONFIG reads back bit-exact) - earlier probe
      * notes claiming otherwise were an artifact of a broken hex-print
      * loop in the probe, not a chip property. */
@@ -295,7 +315,7 @@ void plat_timer_init(uint32_t hz)
     mmio_write32(T0ALARMLO_REG, tick_reload);
     mmio_write32(T0ALARMHI_REG, 0);
     tick_config = T0_EN | T0_INCREASE | T0_AUTORELOAD | T0_ALARM_EN |
-                  (((TIMG_DIVIDER - 1) & T0_DIVIDER_M) << T0_DIVIDER_S);
+                  ((TIMG_DIVIDER & T0_DIVIDER_M) << T0_DIVIDER_S);
     mmio_write32(T0CONFIG_REG, tick_config);
     mmio_write32(T0LOAD_REG, 1);          /* any write reloads to 0 */
 
@@ -365,7 +385,7 @@ uint32_t plat_uptime_ms(void)
     return (uint32_t)(plat_now_ns() / 1000000ull);
 }
 
-/* Sub-tick part of the clock: TG0 counts at TIMG_CLK_HZ/TIMG_DIVIDER = 1 MHz
+/* Sub-tick part of the clock: TG0 counts at APB_CLK_HZ/TIMG_DIVIDER = 1 MHz
  * up to its alarm (10 ms) and then reloads from zero, so the elapsed
  * microseconds inside the current period are simply T0LO/T0HI.
  *
