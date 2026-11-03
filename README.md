@@ -83,6 +83,9 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   从栈底往上找第一个被改过的字节，就是它至今最深用到的栈（分母是它现在的栈多大）；
   `/proc/stack` 记的是历史最深的那一次（含已经退出的程序）。真机实测 shell 0.6 KiB、
   `spin` 0.2、`edit` 0.6 —— 8 KiB 的默认栈按实测有十几倍余量
+- **控制台就是下载线**：`tools/tosput`（Windows GUI / CLI）把宿主文件经串口
+  传进 littlefs，板上 `bin/rx` 接收，停等 ACK + 板端 CRC32 校验，零内核改动；
+  详见 `docs/FILE-TRANSFER.md`
 - **爆栈不是死刑**：栈和堆在窗口里共用一块区，程序踩出栈底时内核看堆还剩多少，
   有 8 KiB 空档就把栈翻倍（8→16 KiB）、把堆的尾巴让给它、重试那条指令，打一行
   `[pid N] stack grown to 16 KiB`；堆先吃满就照旧 fault 杀任务。PMP 仍 4 条规则
