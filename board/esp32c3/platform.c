@@ -101,25 +101,27 @@ int plat_console_getchar(void)
 
 /* Timer input clock, divided down to 1 MHz; 10000 counts per tick = 100 Hz.
  *
- * The input is the APB clock, and nothing in this port raises the SoC above
- * the clock the ROM left it at: XTAL 40 MHz divided by two, i.e. 20 MHz for
- * CPU and APB alike.  Every value here used to be written for the esp-idf
- * default of 80 MHz APB, which made the tick fire at 25 Hz instead of 100 -
- * `uptime` ran four times slow, sleep and timeouts were four times long.
+ * The input is the APB clock, and which APB this is depends on whether
+ * plat_clock_init() got the PLL up (see "CPU clock" below): 80 MHz at
+ * 160 MHz CPU, 20 MHz when it falls back to the ROM's XTAL/2.  The count
+ * rate is held at 1 MHz either way, so everything downstream - the reload
+ * value, the sub-tick microsecond maths in plat_now_ns - is clock-agnostic.
  *
- * The 20 MHz is measured, not assumed, and three instruments agree:
- *   - the alarm (10 000 counts) fires every 39.5 ms on the host's wall
- *     clock  -> timer = 253 kHz;
- *   - 640 bytes at 115200 (55.5 ms of wire time) tick the counter 15013
- *     times              -> timer = 270 kHz;
- *   - 200 000 NOPs (known CPU cycles) tick it 2633 times (~10.4 ms)
- *                          -> core = 19-20 MHz.
- * 253 kHz * 80 = 20.2 MHz, which is why the divider below is 20 and not 80.
- * If the PLL is ever brought up to 80 MHz, this constant has to go with it
- * (the tick would otherwise be four times fast). */
-#define APB_CLK_HZ     20000000u
-#define TIMG_DIVIDER   20u
-#define TICK_HZ        100u
+ * History, because the numbers are not arbitrary: the tick used to fire at
+ * 25 Hz because the divider was computed for 80 MHz APB while the chip was
+ * still on the ROM's 20 MHz.  Three instruments agreed on the 20 MHz - the
+ * 10 000-count alarm firing every 39.5 ms (253 kHz), 640 bytes of wire time
+ * (55.5 ms at 115200) ticking the counter 15013 times, and 200 000 NOPs
+ * (~10.4 ms) - and 253 kHz * 80 = 20.2 MHz.  A second bug hid behind the
+ * first: T0_DIVIDER holds the divisor itself, not divisor-1. */
+#define APB_CLK_FALLBACK_HZ   20000000u
+#define TIMG_COUNT_HZ         1000000u
+#define TICK_HZ               100u
+
+/* What the SoC clock actually came up as.  The TIMG divider above is derived
+ * from it at run time, because plat_clock_init() may or may not get the PLL
+ * up; see "CPU clock" near the bottom of this file. */
+static uint32_t apb_hz = APB_CLK_FALLBACK_HZ;
 
 #define T0CONFIG_REG   (TIMG0_BASE + 0x00)
 #define T0LO_REG       (TIMG0_BASE + 0x04)
@@ -254,7 +256,10 @@ static uint32_t tick_config;
 
 void plat_timer_init(uint32_t hz)
 {
-    tick_reload = (APB_CLK_HZ / TIMG_DIVIDER) / hz;
+    /* 1 MHz count rate whatever the APB is; the field holds the divisor. */
+    uint32_t timg_div = apb_hz / TIMG_COUNT_HZ;
+
+    tick_reload = TIMG_COUNT_HZ / hz;
 
     /* Register clock gate comes first: bit31 defaults to 0 ("registers
      * can not be read or written by software") while bits 30/29 default
@@ -301,7 +306,7 @@ void plat_timer_init(uint32_t hz)
                  | UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT
                  | UART_INT_RXFIFO_OVF);
 
-    /* Timer: APB / 20 = 1 MHz, counts up from 0 to the reload value
+    /* Timer: APB / timg_div = 1 MHz, counts up from 0 to the reload value
      * (10000 counts = 10 ms), alarm fires, counter reloads.  The divider
      * field holds the divisor itself, not divisor-1 (0 would mean 65536):
      * writing 79 gave 20 MHz/79 = 253 kHz and 19 gave 1.052 MHz, a ratio of
@@ -315,7 +320,7 @@ void plat_timer_init(uint32_t hz)
     mmio_write32(T0ALARMLO_REG, tick_reload);
     mmio_write32(T0ALARMHI_REG, 0);
     tick_config = T0_EN | T0_INCREASE | T0_AUTORELOAD | T0_ALARM_EN |
-                  ((TIMG_DIVIDER & T0_DIVIDER_M) << T0_DIVIDER_S);
+                  ((timg_div & T0_DIVIDER_M) << T0_DIVIDER_S);
     mmio_write32(T0CONFIG_REG, tick_config);
     mmio_write32(T0LOAD_REG, 1);          /* any write reloads to 0 */
 
@@ -385,7 +390,7 @@ uint32_t plat_uptime_ms(void)
     return (uint32_t)(plat_now_ns() / 1000000ull);
 }
 
-/* Sub-tick part of the clock: TG0 counts at APB_CLK_HZ/TIMG_DIVIDER = 1 MHz
+/* Sub-tick part of the clock: TG0 always counts at 1 MHz
  * up to its alarm (10 ms) and then reloads from zero, so the elapsed
  * microseconds inside the current period are simply T0LO/T0HI.
  *
@@ -584,6 +589,188 @@ uint32_t plat_block_count(void)
     return LFS_SECTORS;
 }
 
+/* ---- CPU clock: XTAL/2 (20 MHz) -> PLL (160 MHz CPU, 80 MHz APB) -----
+ *
+ * The ROM hands the image a CPU clocked from XTAL divided by two; the
+ * 160 MHz esp-idf runs at is set up by its second-stage bootloader, which a
+ * flash-loaded image never sees.  Bringing the PLL up here is what makes the
+ * APB 80 MHz instead of 20, and the core eight times faster.
+ *
+ * The sequence is esp-idf's rtc_clk_bbpll_enable -> configure ->
+ * cpu_freq_to_pll_mhz for the C3, in the same order: power the PLL up, tell
+ * the digital side which frequency to expect, let the internal I2C reach the
+ * BBPLL and start its calibration, write the analog configuration, then move
+ * the CPU clock mux.  Two things are checked before anything is used:
+ *
+ *   - the SoC state, because the register offsets are only trusted once they
+ *     describe the XTAL/2 the board measurably runs at today (SOC_CLK_SEL =
+ *     XTAL, PRE_DIV_CNT = 1; the board reads sysclk=000a8001 per=00000040
+ *     before the switch, per being CPUPERIOD_SEL = PLL/6 at +0x000).  If it
+ *     does not look like that, nothing is touched and the tick keeps working
+ *     off the 20 MHz fallback.
+ *   - the BBPLL lock bit, before the mux is moved.  Moving a mux onto a PLL
+ *     that never locked leaves the chip with no clock at all, so a failed
+ *     calibration is not fatal here: the board simply stays at 20 MHz.
+ *
+ * The BBPLL has no memory-mapped register file; its registers live on the
+ * RTC's internal I2C bus and are reached through the ROM helpers that
+ * esp-idf's own PHY code uses (esp32c3.rom.ld: rom_i2c_writeReg 0x4000195c,
+ * rom_i2c_writeReg_Mask 0x40001960, rom_i2c_readReg 0x40001954).
+ *
+ * The console survives because it is not clocked from the APB: the ROM
+ * leaves UART_SCLK_SEL on XTAL (3), and the divisor it programmed (347,
+ * i.e. 40 MHz / 115200) keeps dividing the 40 MHz crystal whatever the CPU
+ * mux does - measured on the board: sclk_sel=3 cdiv=347 before the switch,
+ * console untouched after it.  A console that had been put on the APB
+ * source would need its divisor recomputed instead, so that case is handled
+ * too, just in case a future ROM differs.
+ *
+ * What the switch is worth, verified on the real chip: the CPU frequency is
+ * not directly readable, so APB is measured against the host's wall clock
+ * through the tick.  TIMG divides the APB by 80 for a 1 MHz count rate, and
+ * `uptime` advanced 6.652 s over 6.652 s of host time: APB really is 80 MHz,
+ * and since the C3 runs APB at half the CPU clock, the core is at 160 MHz.
+ * A filesystem write of 100 KiB went from 7.2 KiB/s to 85 KiB/s with it. */
+
+#define SYSTEM_BASE           0x600C0000u
+#define SYSTEM_CPU_PER_CONF   (SYSTEM_BASE + 0x000)
+#define SYSTEM_SYSCLK_CONF    (SYSTEM_BASE + 0x058)
+
+#define CPUPERIOD_SEL_M       0x3u          /* 0 = PLL/6 (80), 1 = PLL/3 (160) */
+#define PLL_FREQ_SEL          (1u << 2)     /* 1 = 480 MHz VCO */
+#define SOC_CLK_SEL_S         10
+#define SOC_CLK_SEL_M         (0x3u << SOC_CLK_SEL_S)
+#define PRE_DIV_CNT_M         0x3FFu        /* field holds divider-1 */
+
+#define RTC_PLL_OPTIONS0      (RTC_WDT_BASE + RTC_CNTL_OPTIONS0_REG)
+#define PLL_FORCE_PD_BITS     ((1u << 6) | (1u << 8) | (1u << 10))
+                                            /* BB_I2C, BBPLL_I2C, BBPLL */
+
+#define ANA_CONF_REG          0x6000E044u
+#define ANA_I2C_BBPLL         (1u << 17)    /* clear to let I2C reach BBPLL */
+#define I2C_MST_ANA_CONF0     0x6000E040u
+#define BBPLL_STOP_FORCE_HIGH (1u << 2)
+#define BBPLL_STOP_FORCE_LOW  (1u << 3)
+
+/* BBPLL register file: block 0x66, host 0, one byte per register. */
+#define BBPLL_BLOCK           0x66
+#define BBPLL_HOST            0
+#define BBPLL_MODE_HF         4
+#define BBPLL_OC_REF_DIV      2
+#define BBPLL_OC_DIV_7_0      3
+#define BBPLL_OC_DR1          5             /* bits 2:0 */
+#define BBPLL_OC_DR3          5             /* bits 6:4 */
+#define BBPLL_OC_DCUR         6
+#define BBPLL_OC_VCO_DBIAS    9
+#define BBPLL_OR_LOCK         8
+#define BBPLL_LOCK            (1u << 7)
+
+#define ROM_I2C_WRITE      ((void (*)(uint8_t, uint8_t, uint8_t, uint8_t)) \
+                            0x4000195Cu)
+#define ROM_I2C_WRITE_MASK ((void (*)(uint8_t, uint8_t, uint8_t, uint8_t, \
+                                      uint8_t, uint8_t))0x40001960u)
+#define ROM_I2C_READ       ((uint8_t (*)(uint8_t, uint8_t, uint8_t)) \
+                            0x40001954u)
+
+#define UART_CLKDIV_REG       0x14u
+#define UART_CLK_CONF_REG     0x78u
+#define UART_SCLK_SEL_S       20
+#define UART_BAUD             115200u
+
+uint32_t plat_apb_hz(void)
+{
+    return apb_hz;
+}
+
+/* CLKDIV = int<<0 | frac<<20; the fraction is 1/16ths, so the exact divisor
+ * is (apb*16)/baud with the low four bits becoming the fraction.  Only the
+ * two fields are written - the rest of the register is reserved. */
+#define UART_CLKDIV_M         0x00F00FFFu
+
+static void uart_set_baud(uint32_t apb, uint32_t baud)
+{
+    uint32_t div = (apb << 4) / baud;
+
+    mmio_write32(UART0_BASE + UART_CLKDIV_REG, div & UART_CLKDIV_M);
+}
+
+/* UART_SCLK_SEL values (soc_periph_uart_clk_src_legacy_t): 1 = APB,
+ * 2 = RC_FAST (~17.5 MHz), 3 = XTAL (40 MHz).  The ROM console runs on
+ * XTAL, so its divisor survives an APB change; only an APB-clocked console
+ * has to be re-divided afterwards. */
+#define UART_SCLK_APB         1u
+
+static void plat_clock_init(void)
+{
+    uint32_t sysclk = mmio_read32(SYSTEM_SYSCLK_CONF);
+    uint32_t per = mmio_read32(SYSTEM_CPU_PER_CONF);
+    uint32_t clkconf = mmio_read32(UART0_BASE + UART_CLK_CONF_REG);
+    uint32_t i, locked = 0;
+
+    if (((sysclk >> SOC_CLK_SEL_S) & 3u) != 0u || (sysclk & PRE_DIV_CNT_M) != 1u) {
+        kprintf("[clk] not on XTAL/2 (sysclk=%08x per=%08x), staying at 20 MHz\n",
+                (unsigned)sysclk, (unsigned)per);
+        return;
+    }
+
+    /* 1. Power the PLL up: the three force-power-down bits are active high. */
+    mmio_write32(RTC_PLL_OPTIONS0, mmio_read32(RTC_PLL_OPTIONS0) & ~PLL_FORCE_PD_BITS);
+
+    /* 2. Digital side: a 480 MHz VCO feeding a 160 MHz CPU divider. */
+    mmio_write32(SYSTEM_CPU_PER_CONF, (per & ~CPUPERIOD_SEL_M) | 1u);
+    mmio_write32(SYSTEM_CPU_PER_CONF, mmio_read32(SYSTEM_CPU_PER_CONF) | PLL_FREQ_SEL);
+
+    /* 3. Analog side reachable, calibration started. */
+    mmio_write32(ANA_CONF_REG, mmio_read32(ANA_CONF_REG) & ~ANA_I2C_BBPLL);
+    mmio_write32(I2C_MST_ANA_CONF0,
+                 (mmio_read32(I2C_MST_ANA_CONF0) & ~BBPLL_STOP_FORCE_HIGH)
+                 | BBPLL_STOP_FORCE_LOW);
+
+    /* 4. BBPLL configuration for 480 MHz out of a 40 MHz crystal
+     * (esp-idf's table for RTC_XTAL_FREQ_40M). */
+    ROM_I2C_WRITE(BBPLL_BLOCK, BBPLL_HOST, BBPLL_MODE_HF, 0x6B);
+    ROM_I2C_WRITE(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_REF_DIV, 5u << 4);
+    ROM_I2C_WRITE(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_DIV_7_0, 8);
+    ROM_I2C_WRITE_MASK(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_DR1, 2, 0, 0);
+    ROM_I2C_WRITE_MASK(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_DR3, 6, 4, 0);
+    ROM_I2C_WRITE(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_DCUR, (2u << 6) | (1u << 4) | 3u);
+    ROM_I2C_WRITE_MASK(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_VCO_DBIAS, 1, 0, 2);
+    ROM_I2C_WRITE_MASK(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_DCUR, 5, 4, 2);
+    ROM_I2C_WRITE_MASK(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OC_DCUR, 7, 6, 1);
+
+    /* 5. Only a locked PLL may feed the CPU. */
+    for (i = 0; i < 200000u; i++) {
+        if (ROM_I2C_READ(BBPLL_BLOCK, BBPLL_HOST, BBPLL_OR_LOCK) & BBPLL_LOCK) {
+            locked = 1;
+            break;
+        }
+    }
+    if (!locked) {
+        kprintf("[clk] BBPLL did not lock, staying at 20 MHz\n");
+        return;
+    }
+
+    /* 6. Move the mux: divider 1 (PRE_DIV_CNT = 0), source = PLL.  One write,
+     * so the divider and the source never disagree for a cycle. */
+    mmio_write32(SYSTEM_SYSCLK_CONF,
+                 (sysclk & ~PRE_DIV_CNT_M & ~SOC_CLK_SEL_M)
+                 | (1u << SOC_CLK_SEL_S));
+
+    /* The tick's divider comes from apb_hz, so it may only follow a mux that
+     * really moved - otherwise the count rate would be four times off. */
+    if (((mmio_read32(SYSTEM_SYSCLK_CONF) >> SOC_CLK_SEL_S) & 3u) != 1u) {
+        kprintf("[clk] clock mux did not move, staying at 20 MHz\n");
+        return;
+    }
+    apb_hz = 80000000u;
+
+    /* 7. The console: only an APB-clocked UART needs a new divisor. */
+    if (((clkconf >> UART_SCLK_SEL_S) & 3u) == UART_SCLK_APB)
+        uart_set_baud(apb_hz, UART_BAUD);
+
+    kprintf("[clk] CPU 160 MHz, APB 80 MHz (PLL up from the ROM's XTAL/2)\n");
+}
+
 /* ---- boot ------------------------------------------------------------ */
 
 void plat_board_early(void)
@@ -612,6 +799,10 @@ void plat_board_init(void)
      * (the littlefs partition at 0x100000 fits in 2 MiB, but the record
      * should describe the real 4 MiB chip). */
     rom_flash_set_chip_size();
+
+    /* Watchdogs are off first, so a clock switch that turns out to be wrong
+     * cannot be overtaken by the ROM's one-second reset timer. */
+    plat_clock_init();
 }
 
 /* ---- power ------------------------------------------------------------ */
