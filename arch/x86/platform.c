@@ -245,10 +245,11 @@ int plat_fault_is_user(void *frame)
  * (docs/PLATFORM-DESIGN.md), and without it segments cannot express a
  * per-task boundary.  So nothing to program - the rv32 port is where
  * plat_task_protect does real work. */
-void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
-                       uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
+                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
 {
-    (void)win_base; (void)wx; (void)brk; (void)stack_low; (void)stack_top;
+    (void)win_base; (void)win_end; (void)wx; (void)brk;
+    (void)stack_low; (void)stack_top;
 }
 
 /* The trap frame layout belongs to the arch, so core hands us an opaque

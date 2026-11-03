@@ -111,7 +111,10 @@ func cmdEmutest(args []string) int {
 		{"hello_printf", "hello_printf", []string{"hello"}},
 		{"mem", "mem", []string{"heap demo"}},
 		{"uptime", "uptime", []string{"uptime:", "pid="}},
-		{"ps", "ps", []string{"cpu", "sh"}},
+		// wink is the window the task actually holds.  The shell's 8 KiB
+		// image plus the 16 KiB stack and the 4 KiB guard rounds up to
+		// 32 KiB - it used to reserve a fixed 64 KiB whatever it needed.
+		{"ps", "ps", []string{"cpu", "wink", "  32  sh"}},
 		{"crash", "crash", []string{"illegal instruction", "tos>"}},
 		{"source etc/rc", "source etc/rc", []string{"tos>"}},
 		// Devices are files, so the table has to be enumerable and entry-able,
@@ -145,6 +148,18 @@ func cmdEmutest(args []string) int {
 		{"rm missing file", "rm /nope", []string{"cannot remove /nope"}},
 		{"rm", "rm /big.bin", []string{"tos>"}},
 		{"dd after rm", "dd if=/big.bin", []string{"cannot open /big.bin"}},
+		// Windows are sized to the image, so the user area packs: five idle
+		// holders plus the shell fill all 192 KiB (6 x 32 KiB), and the next
+		// exec has to be refused with a reason.  The old fixed-slot
+		// allocator could only say "out of task windows", which on a machine
+		// with free memory reads like a leak; the largest-free-block number
+		// is what tells a full area from a fragmented one.
+		{"hold 1", "hold 60 &", []string{"tos>"}},
+		{"hold 2", "hold 60 &", []string{"tos>"}},
+		{"hold 3", "hold 60 &", []string{"tos>"}},
+		{"hold 4", "hold 60 &", []string{"tos>"}},
+		{"hold 5", "hold 60 &", []string{"tos>"}},
+		{"user area full", "hold 1", []string{"largest free block is 0 KiB"}},
 	}
 	for _, c := range checks {
 		tstart := time.Now()

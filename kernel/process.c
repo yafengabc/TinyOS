@@ -31,7 +31,6 @@
    slice is 50 ms: long enough that switches are noise, short enough that a
    spinning program is invisible. */
 #define QUANTUM     5
-#define MAX_WINDOWS 32
 
 /* Priority levels, lower number wins.  A child starts at its parent's level
  * and setprio() moves it afterwards; nothing ages, because a level is only
@@ -97,7 +96,6 @@ typedef struct proc {
     int      state;
     int      prio;          /* PRIO_*, 0 = highest */
     int      pid;
-    int      slot;          /* window slot, -1 when none */
     int      wait_pid;      /* ST_WAIT_CHILD: which child, -1 for any */
     int      exit_code;
     int      laggards;      /* children that exited without a waiter */
@@ -109,8 +107,11 @@ typedef struct proc {
 
     /* This task's slice of the flat address space: image at the bottom,
      * sbrk heap above it, stack at the top.  wx_start splits the image
-     * into non-writable code below and writable data above. */
+     * into non-writable code below and writable data above; win_size is how
+     * many bytes the allocator handed out (zero = no window, which is what
+     * a free table entry reads as). */
     uint32_t win_base;
+    uint32_t win_size;
     uint32_t wx_start;
     uint32_t stack_top;
     uint32_t heap_base;
@@ -156,11 +157,6 @@ typedef struct proc {
 static proc_t procs[MAX_PROCS];
 static proc_t *init_proc;
 static int next_pid = 1;
-
-/* Windows are handed out from a bitmap: with background jobs, siblings
- * coexist and are no longer strictly LIFO. */
-static uint32_t win_used;
-static int win_slots;
 
 /* ---- what became per-CPU ---------------------------------------------
  *
@@ -348,8 +344,8 @@ static void sched_idle(void)
  * moves the heap bound. */
 static void apply_protection(proc_t *p)
 {
-    plat_task_protect(p->win_base, p->wx_start, p->brk,
-                      p->stack_top - STACK_BYTES, p->stack_top);
+    plat_task_protect(p->win_base, p->win_base + p->win_size, p->wx_start,
+                      p->brk, p->stack_top - STACK_BYTES, p->stack_top);
 }
 
 /* Save the outgoing frame and return the frame to resume.  Callers hold the
@@ -593,23 +589,28 @@ regs_t *process_suspend(regs_t *r)
  * on PLAT_STACK_BYTES in platform.h for why each condition is there. */
 static void layout_check(void)
 {
-    uint32_t win = PLAT_APP_WINDOW;
+    uint32_t grain = PLAT_APP_GRAIN;
     uint32_t stk = PLAT_STACK_BYTES;
     uint32_t guard = PLAT_HEAP_GUARD;
-    uint32_t stack_low;
+    uint32_t area = PLAT_APP_MAX - PLAT_APP_BASE;
+    uint32_t min_win;
 
     if (stk == 0 || (stk & (stk - 1)) != 0)
         panic("task layout: stack is %u bytes, which is not a power of two", stk);
-    if (win % stk != 0)
-        panic("task layout: %u KiB window is not a multiple of the %u KiB stack",
-              win / 1024u, stk / 1024u);
-    if (win <= stk + guard)
-        panic("task layout: %u KiB window cannot hold a %u KiB stack, a %u KiB guard "
-              "and an image", win / 1024u, stk / 1024u, guard / 1024u);
-    stack_low = PLAT_APP_BASE + win - stk;
-    if (stack_low % stk != 0)
-        panic("task layout: stack at 0x%x is not aligned to its %u KiB size, so one "
-              "NAPOT entry cannot describe it", stack_low, stk / 1024u);
+    if (grain % stk != 0)
+        panic("task layout: the %u KiB grain is not a multiple of the %u KiB stack, "
+              "so stack_low would drift off its own alignment",
+              grain / 1024u, stk / 1024u);
+    if (PLAT_APP_BASE % grain != 0)
+        panic("task layout: user area starts at 0x%x, not on a %u KiB grain boundary",
+              PLAT_APP_BASE, grain / 1024u);
+    /* The smallest window still has to hold a stack, the guard hole and at
+       least one page of image - that is what "a 32 KiB window has 12 KiB
+       for the image" means. */
+    min_win = ((stk + guard + PLAT_PAGE_SIZE + grain - 1u) / grain) * grain;
+    if (min_win > area)
+        panic("task layout: a %u KiB window needs %u KiB of user area, and there "
+              "are only %u KiB", grain / 1024u, min_win / 1024u, area / 1024u);
 }
 
 void process_init(void)
@@ -631,11 +632,6 @@ void process_init(void)
      * page that is writable, every exec refused as "does not fit".  Check the
      * combination once, here, where it costs nothing. */
     layout_check();
-
-    win_used = 0;
-    win_slots = (int)((PLAT_APP_MAX - PLAT_APP_BASE) / PLAT_APP_WINDOW);
-    if (win_slots > MAX_WINDOWS)
-        win_slots = MAX_WINDOWS;
 
     plat_set_kernel_stack(KSTACK_TOP);
 }
@@ -682,38 +678,101 @@ int process_user_ok(uint32_t addr, uint32_t len)
         return 0;
     if (addr + len < addr)
         return 0;
-    return addr + len <= current->win_base + PLAT_APP_WINDOW;
+    return addr + len <= current->win_base + current->win_size;
 }
 
-/* ---- windows --------------------------------------------------------- */
-
-static int win_alloc(void)
+/* ---- windows ---------------------------------------------------------
+ *
+ * A window is sized to the image that will live in it: exec() measures the
+ * ELF (span), adds the stack and the guard hole, rounds up to the board's
+ * grain and asks for exactly that.  The shell ends up with 32 KiB on a C3
+ * instead of the 64 KiB every task used to reserve, and the difference goes
+ * to the next program.
+ *
+ * The live windows are the tasks: each proc_t records its base and size, so
+ * there is no second structure to keep in sync (and none to size for boards
+ * whose user area is 112 MiB), a task's death merges its gap back for free,
+ * and two tasks can never be handed overlapping memory.  The scan is over
+ * MAX_PROCS entries, twice per gap - 16 tasks, so "O(n^2)" is 256 compares.
+ *
+ * Caller holds no lock; everything here runs under the table lock, because
+ * an exec() on the other CPU is inserting a window at the same moment.  The
+ * window is recorded in the proc_t *inside* that lock - reserving it after
+ * the lock is dropped would let two concurrent execs pick the same gap,
+ * each seeing a table that does not yet mention the other. */
+static int win_alloc(proc_t *p, uint32_t bytes)
 {
-    /* Under the table lock: the bitmap is one word, and read-modify-write on
-     * it from two CPUs at once loses a bit - which shows up much later as
-     * "exec: out of windows" on a machine with free ones, or worse, as two
-     * tasks sharing an address window. */
-    int slot = -1;
+    uint32_t cand = PLAT_APP_BASE;
+    uint32_t end = PLAT_APP_MAX;
+    int ok = 0;
 
     spin_lock(&proc_lock);
-    for (int i = 0; i < win_slots; i++) {
-        if (!(win_used & (1u << i))) {
-            win_used |= 1u << i;
-            slot = i;
+    for (;;) {
+        uint32_t next = end;
+
+        /* The nearest window at or above `cand` bounds the gap we are
+           standing in. */
+        for (int i = 0; i < MAX_PROCS; i++) {
+            proc_t *q = &procs[i];
+            if (q->win_size != 0 && q->win_base >= cand && q->win_base < next)
+                next = q->win_base;
+        }
+        if (next - cand >= bytes) {
+            p->win_base = cand;
+            p->win_size = bytes;
+            ok = 1;
             break;
         }
+        if (next >= end)
+            break;                       /* no window above: ran out of room */
+
+        /* Too small: step over that window and look at the next gap. */
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (procs[i].win_size != 0 && procs[i].win_base == next) {
+                cand = procs[i].win_base + procs[i].win_size;
+                break;
+            }
+        }
+        if (cand >= end)
+            break;
     }
     spin_unlock(&proc_lock);
-    return slot;
+    return ok ? 0 : -1;
 }
 
-static void win_free(int slot)
+/* Longest contiguous free run, for the "no room" message: without it a
+ * fragmented area reports "out of task windows" on a machine with 40 KiB
+ * free, and the next person looks for a leak. */
+static uint32_t win_largest_free(void)
 {
-    if (slot < 0 || slot >= win_slots)
-        return;
+    uint32_t cand = PLAT_APP_BASE;
+    uint32_t end = PLAT_APP_MAX;
+    uint32_t best = 0;
+
     spin_lock(&proc_lock);
-    win_used &= ~(1u << slot);
+    for (;;) {
+        uint32_t next = end;
+
+        for (int i = 0; i < MAX_PROCS; i++) {
+            proc_t *q = &procs[i];
+            if (q->win_size != 0 && q->win_base >= cand && q->win_base < next)
+                next = q->win_base;
+        }
+        if (next - cand > best)
+            best = next - cand;
+        if (next >= end)
+            break;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (procs[i].win_size != 0 && procs[i].win_base == next) {
+                cand = procs[i].win_base + procs[i].win_size;
+                break;
+            }
+        }
+        if (cand >= end)
+            break;
+    }
     spin_unlock(&proc_lock);
+    return best;
 }
 
 /* ---- creation -------------------------------------------------------- */
@@ -747,7 +806,11 @@ static proc_t *proc_alloc(void)
 /* Hand a slot back to the table.  Two callers: a failed exec() (a claimed
  * slot that never became a task) and a dying one.  Both have to be under the
  * table lock, because on SMP the other CPU is scanning the table at the same
- * moment - a half-cleared entry can be picked up as a runnable task. */
+ * moment - a half-cleared entry can be picked up as a runnable task.
+ *
+ * Clearing win_size is what frees the memory: the live windows *are* the
+ * table (see win_alloc), so a task that stops being a task stops holding
+ * address space, and its gap merges with its neighbours on the next scan. */
 static void proc_retire(proc_t *p)
 {
     spin_lock(&proc_lock);
@@ -755,6 +818,8 @@ static void proc_retire(proc_t *p)
     p->pid = 0;
     p->parent = NULL;
     p->cpu = -1;
+    p->win_base = 0;
+    p->win_size = 0;
     spin_unlock(&proc_lock);
 }
 
@@ -879,33 +944,41 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         return NULL;
     }
     uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
-    if (span + STACK_BYTES + HEAP_GUARD > PLAT_APP_WINDOW) {
-        kprintf("exec: '%s' does not fit a %u KiB task window\n",
-                path, PLAT_APP_WINDOW / 1024u);
+    uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
+    if (span + STACK_BYTES + HEAP_GUARD > app_total) {
+        kprintf("exec: '%s' needs %u KiB, the whole user area is %u KiB\n",
+                path, (span + STACK_BYTES + HEAP_GUARD) / 1024u,
+                app_total / 1024u);
         ramdisk_release(data);
         proc_retire(p);
         return NULL;
     }
 
-    int slot = win_alloc();
-    if (slot < 0) {
-        kprintf("exec: out of task windows\n");
+    /* Size the window to this image and nothing more: a page for what the
+       image rounds up to, the stack, the guard hole.  A small program stops
+       reserving a big program's share. */
+    uint32_t win = align_up(span + STACK_BYTES + HEAP_GUARD, PLAT_APP_GRAIN);
+    if (win < PLAT_APP_GRAIN)
+        win = PLAT_APP_GRAIN;
+
+    if (win_alloc(p, win) != 0) {
+        kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
+                path, win / 1024u, win_largest_free() / 1024u);
         ramdisk_release(data);
         proc_retire(p);
         return NULL;
     }
-    uint32_t base = PLAT_APP_BASE + (uint32_t)slot * PLAT_APP_WINDOW;
+    uint32_t base = p->win_base;     /* recorded by win_alloc, under the lock */
 
     /* The loader relocates the position independent (ET_DYN) image to
        `base` and checks every write against the window. */
-    elf_set_window(base, base + PLAT_APP_WINDOW);
+    elf_set_window(base, base + win);
 
     uint32_t entry = 0;
     if (elf_load(data, size, base, &entry) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         elf_set_window(0, 0);
         ramdisk_release(data);
-        win_free(slot);
         proc_retire(p);
         return NULL;
     }
@@ -924,11 +997,10 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         strncpy(p->cwd, current->cwd, sizeof(p->cwd) - 1);
         p->cwd[sizeof(p->cwd) - 1] = '\0';
     }
-    p->slot = slot;
     p->cpu = -1;        /* memset() above zeroed it; 0 is a real CPU */
-    /* Pid allocation is under the table lock for the same reason the slot is:
-     * two exec()s on two CPUs would otherwise hand out the same number, and
-     * `wait(pid)` would then reap the wrong task. */
+    /* Pid allocation is under the table lock for the same reason the window
+     * is: two exec()s on two CPUs would otherwise hand out the same number,
+     * and `wait(pid)` would then reap the wrong task. */
     spin_lock(&proc_lock);
     p->pid = next_pid++;
     spin_unlock(&proc_lock);
@@ -958,11 +1030,12 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
        itself, which is what keeps a program from locking the console out. */
     p->prio = current ? current->prio : PRIO_HIGH;
     p->start_ns = plat_uptime_ms();
-    p->win_base = base;
+    /* win_base/win_size were recorded by win_alloc() - under the lock, so
+       nobody else can be handed this range while the image loads. */
     p->wx_start = base + (link_wx - link_lo);
     /* The stack occupies the very top of the window, so that its region is
        naturally aligned; the initial frame starts a little below. */
-    p->stack_top = base + PLAT_APP_WINDOW;
+    p->stack_top = base + win;
     p->heap_base = base + span;
     p->heap_end = p->stack_top - STACK_BYTES - HEAP_GUARD;
     p->entry = entry;
@@ -972,7 +1045,6 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     uint32_t sp = build_initial_stack(p, argv, argc);
     if (!sp) {
         kprintf("exec: out of memory\n");
-        win_free(slot);
         proc_retire(p);
         return NULL;
     }
@@ -992,7 +1064,6 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     if (sp - need < p->stack_top - STACK_BYTES) {
         kprintf("exec: '%s' needs %u bytes of stack, the window has %u\n",
                 path, need, STACK_BYTES);
-        win_free(slot);
         proc_retire(p);
         return NULL;
     }
@@ -1067,8 +1138,7 @@ static void task_release(proc_t *p)
      * return single bytes and every command would look like one letter. */
     if (tty_is_raw())
         tty_set_raw(0);
-    win_free(p->slot);
-    p->slot = -1;
+    /* The window goes back with the table entry, in proc_retire(). */
 }
 
 /* Hand a dead task's exit code to whoever waits for it: an actual waiter
@@ -1313,7 +1383,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
     if (!buf || cap < 64)
         return 0;
 
-    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums  name\n");
+    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums wink  name\n");
     if (n < 0)
         return 0;
     off = (uint32_t)n;
@@ -1350,10 +1420,10 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
         if (off >= cap - 1)
             break;
         n = ksnprintf(buf + off, cap - off,
-                      "%4d %4d %4d %s %2s %4u.%u %5u  %s\n", p->pid,
+                      "%4d %4d %4d %s %2s %4u.%u %5u %4u  %s\n", p->pid,
                       p->parent ? p->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
-                      busy / 1000u, p->name);
+                      busy / 1000u, p->win_size / 1024u, p->name);
         if (n > 0)
             off += (uint32_t)n;
     }
@@ -1366,7 +1436,7 @@ int process_dump(void)
      * bounded at 16 rows (~810 bytes), and 1 KiB is small next to the 32 KiB
      * kernel stack.  kmalloc could fail here, and "ps stops working when the
      * heap is full" is a poor answer to "what is using the heap". */
-    char buf[1024];
+    char buf[1536];
     uint32_t n = process_ps_text(buf, sizeof(buf));
     int count = 0;
 

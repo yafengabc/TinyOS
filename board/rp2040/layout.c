@@ -9,12 +9,12 @@
  *
  * The RP2040 has no MMU and no MPU: a user task runs unprivileged (so a fault
  * cannot corrupt the kernel) but with the whole flat address space visible,
- * exactly like the x86 port.  PLAT_APP_WINDOW must therefore be large enough
- * to hold the image, the heap, the stack guard and the stack: 32 KiB of window
- * leaves 12 KiB for the image and the heap once the 16 KiB stack and the
- * 4 KiB guard are accounted for.  (It used to say 16 KiB guard and a 32 KiB
- * stack here, which cannot fit at all - every exec was refused, unnoticed
- * because no Pico had a console yet.) */
+ * exactly like the x86 port.  A window is therefore just an allocation, and
+ * PLAT_APP_GRAIN is the step it is rounded to: 32 KiB leaves 12 KiB for the
+ * image and the heap once the 16 KiB stack and the 4 KiB guard are
+ * accounted for, and the 136 KiB of app area holds eight of those.  (It used
+ * to say 16 KiB guard and a 32 KiB stack here, which cannot fit at all -
+ * every exec was refused, unnoticed because no Pico had a console yet.) */
 
 const uint32_t PLAT_KERNEL_BASE = 0x20000000u;   /* SRAM reserved for the
                                                    kernel image + .bss      */
@@ -25,7 +25,7 @@ const uint32_t PLAT_APP_BASE   = 0x20020000u;
 const uint32_t PLAT_APP_MAX    = 0x20042000u;   /* 264 KiB SRAM ends here   */
 const uint32_t PLAT_RAM_TOP    = 0x20042000u;   /* same end: all SRAM is ours */
 const uint32_t PLAT_RAM_BASE   = 0x20000000u;   /* .data/.bss start of SRAM  */
-const uint32_t PLAT_APP_WINDOW = 0x00008000u;   /* 32 KiB per task          */
+const uint32_t PLAT_APP_GRAIN  = 0x00004000u;   /* 16 KiB per step: 8 fit    */
 /* Stack at the top of every task window, and the hole left under it.  See
  * kernel/platform.h for the four conditions this pair has to satisfy. */
 const uint32_t PLAT_STACK_BYTES = 16u * 1024u;

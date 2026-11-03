@@ -239,10 +239,10 @@ static void mpu_disable(uint32_t n)
  * fine: a handler taken mid-update runs privileged and access to RAM and
  * MMIO does not depend on region 0, and process_tick only reschedules on a
  * user frame. */
-void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
-                       uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
+                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
 {
-    uint32_t addr, n;
+    uint32_t addr, n, win;
 
     (void)brk;
     (void)stack_top;
@@ -252,9 +252,16 @@ void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
        worst a few bytes of .data become read-only. */
     wx = (wx + ARM_MPU_MIN_SIZE - 1u) & ~(ARM_MPU_MIN_SIZE - 1u);
 
-    /* The window is the board's PLAT_APP_WINDOW and every slot starts on a
-       multiple of it, so the base is aligned for a region of that size. */
-    mpu_region(0, win_base, PLAT_APP_WINDOW,
+    /* Windows are sized to their image now, so region 0 cannot assume one
+       board-wide size.  A single MPU region is naturally aligned and a
+       power of two: when the window is one, it covers the window exactly;
+       otherwise rounding down loses the top of the window, which only
+       matters for a port that takes this path (no current board does -
+       the RP2040 is M0+ and has no MPU at all). */
+    win = win_end - win_base;
+    while (win & (win - 1u))
+        win &= win - 1u;
+    mpu_region(0, win_base, win,
                ARM_MPU_AP_FULL | ARM_MPU_SRAM | ARM_MPU_XN);
 
     /* Cover the read-only part of the image with the fewest aligned blocks
@@ -286,10 +293,11 @@ void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
 
 #else /* TOS_ARM_M0P: no MPU, user tasks run unprivileged but unprotected. */
 
-void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
-                       uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
+                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
 {
-    (void)win_base; (void)wx; (void)brk; (void)stack_low; (void)stack_top;
+    (void)win_base; (void)win_end; (void)wx; (void)brk;
+    (void)stack_low; (void)stack_top;
 }
 
 #endif

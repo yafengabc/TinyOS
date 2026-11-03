@@ -24,11 +24,21 @@ extern const uint32_t PLAT_KERNEL_MAX;
 extern const uint32_t PLAT_APP_BASE;
 extern const uint32_t PLAT_APP_MAX;
 
-/* Bytes reserved per task inside [APP_BASE, APP_MAX).  Each task gets its
- * own window - image at the bottom, sbrk heap above it, stack at the top -
- * so a synchronous exec never overwrites its parent.  The flat model has no
- * page tables, so these windows are carved out by the kernel itself. */
-extern const uint32_t PLAT_APP_WINDOW;
+/* Allocation granularity of task windows inside [APP_BASE, APP_MAX).
+ *
+ * A window is one task's slice of the flat address space: image at the
+ * bottom, sbrk heap above it, stack at the top, so a synchronous exec never
+ * overwrites its parent.  Its size is not fixed: exec() measures the image
+ * (span), adds the stack and the guard hole, rounds up to this grain, and
+ * asks for that much.  A shell takes one or two grains, an editor three or
+ * four, and what is left over goes to whoever comes next - the flat model
+ * has no page tables, so the kernel carves these out itself.
+ *
+ * The grain has to be a multiple of PLAT_STACK_BYTES: that is what keeps
+ * every window's stack_low aligned to the stack size, which is what lets a
+ * single NAPOT PMP entry describe the stack.  It also has to be big enough
+ * to hold a stack, a guard hole and at least one page of image. */
+extern const uint32_t PLAT_APP_GRAIN;
 
 /* ---- boot ------------------------------------------------------------ */
 
@@ -217,18 +227,24 @@ int plat_adc_bits(void);
  *   [wx, brk)               data + heap     read + write, brk grows via sbrk
  *   [stack_low, stack_top)  stack           read + write
  *
- * Everything else - the kernel's own memory, MMIO, the rest of the app
- * window - is out of reach for user mode, including the hole between brk
- * and stack_low that neither region claims.  `stack_top - stack_low` must
- * be a power of two and stack_low aligned to it.
+ * Everything else - the kernel's own memory, MMIO, other tasks' windows -
+ * is out of reach for user mode, including the hole between brk and
+ * stack_low that neither region claims.  `stack_top - stack_low` must be a
+ * power of two and stack_low aligned to it.
+ *
+ * `win_end` is the end of this task's window.  It varies per task now that
+ * windows are sized to their image, and only matters to a port that
+ * describes the whole window rather than the three regions inside it (the
+ * ARMv7-M MPU, one region for "everything this task may touch"); rv32's
+ * TOR entries stop at wx and brk and ignore it.
  *
  * How closely a port can follow those bounds is its own business: an
  * ARMv7-M MPU only has naturally aligned power-of-two regions, so there the
  * heap is not cut at `brk` (it ends at the last block the window region
  * covers) and only PLAT_HEAP_GUARD bytes under the stack are a hole (see
  * docs/PLATFORM-DESIGN.md, section 8). */
-void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
-                       uint32_t stack_low, uint32_t stack_top);
+void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
+                       uint32_t brk, uint32_t stack_low, uint32_t stack_top);
 
 /* Bytes the kernel keeps unclaimed between the top of the heap and the
  * bottom of the stack: process_sbrk refuses to grow the break past
@@ -237,8 +253,10 @@ void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
  * deeper than one page, small enough to leave most of the window to the
  * heap.
  *
- * Per board, like the stack size: a 4 MiB window on the PC and a 32 KiB one
- * on the RP2040 cannot share one answer. */
+ * Per board, like the stack size: a 112 MiB user area on the PC and a
+ * 192 KiB one on the C3 cannot share one answer.  It is the floor of a
+ * window's fixed cost, so on a small board it is what decides whether a
+ * 32 KiB window is 12 KiB of image or 4. */
 extern const uint32_t PLAT_HEAP_GUARD;
 
 /* Bytes of stack at the top of each task window.
@@ -247,17 +265,19 @@ extern const uint32_t PLAT_HEAP_GUARD;
  * check in process_init() panics at boot:
  *
  *   - it is a power of two,
- *   - PLAT_APP_WINDOW is a multiple of it,
- *   - PLAT_APP_WINDOW - PLAT_STACK_BYTES leaves room for the image, the heap
- *     and PLAT_HEAP_GUARD,
- *   - PLAT_APP_BASE + PLAT_APP_WINDOW - PLAT_STACK_BYTES is aligned to it.
+ *   - PLAT_APP_GRAIN is a multiple of it,
+ *   - PLAT_APP_GRAIN - PLAT_STACK_BYTES leaves room for PLAT_HEAP_GUARD and
+ *     at least one page of image,
+ *   - PLAT_APP_BASE is aligned to it.
  *
- * The last one is what makes a single NAPOT PMP entry describe the stack
- * exactly.  The C3's windows start at 0x403AC000 - 16 KiB aligned, because
- * the kernel ends there - so a 32 KiB stack would encode as the 32 KiB
- * region *containing* the stack instead: the guard page below it becomes
- * writable and the upper half of the real stack does not (found on the real
- * chip by leaving one PMP rule out of a test program). */
+ * The last two are what make a single NAPOT PMP entry describe the stack
+ * exactly: every window starts at APP_BASE + k * GRAIN, and therefore every
+ * window's stack_low is a multiple of the stack size.  The C3's windows
+ * start at 0x403AC000 - 16 KiB aligned, because the kernel ends there - so
+ * a 32 KiB stack would encode as the 32 KiB region *containing* the stack
+ * instead: the guard page below it becomes writable and the upper half of
+ * the real stack does not (found on the real chip by leaving one PMP rule
+ * out of a test program). */
 extern const uint32_t PLAT_STACK_BYTES;
 
 /* Register frame captured when trapping from user mode.  The layout is

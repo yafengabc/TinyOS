@@ -30,9 +30,11 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - **平坦地址空间、不启用分页**（CR0.PG=0）：内核与用户程序共享一条 4 GiB 直线地址
   空间，`ring 3` + TSS 只提供特权级隔离、不提供内存保护——这与 MCU 目标
   （ESP32-C3 / RP2040）的能力边界一致
-- **每任务窗口**：创建任务时从 `[APP_BASE, APP_MAX)` 里按窗口大小（x86 为 4 MiB）
-  用位图分配一块，镜像在底部、`sbrk` 堆在中部、栈在顶部，因此父子任务各占一块、
-  互不覆盖（shell 自己的代码始终完好）
+- **每任务窗口**：`exec` 用 ELF 的 `memsz` 算出镜像大小，加上栈和守卫洞、按粒度
+  向上取整，再向分配器要这么多；分配器扫描进程表里的活窗口找第一段够大的空隙
+  （活窗口本身就是空闲表，任务一死空隙自然合并）。镜像在底部、`sbrk` 堆在中部、
+  栈在顶部，父子任务各占一块、互不覆盖。C3 上一个小程序占 32 KiB，同一个 192 KiB
+  可以是 6 个 32 KiB 任务，也可以是一个 160 KiB 的大程序。
 - ELF32 加载器：解析 `PT_LOAD`、`p_filesz/p_memsz`，把镜像拷进任务窗口并清零 `.bss`
 - **位置无关程序（PIE）**：用户程序链接为 `ET_DYN`（基址 0），内核加载时整体搬到
   该任务的窗口基址并应用 `.rel.dyn`/`.rela.dyn` 重定位。这样**同一份二进制可以在
@@ -267,7 +269,7 @@ tos> cat /dev/adc2         # 读设备文件采样（RP2040 有 5 路，C3 没�
 tos> gpio dev mode 4 out   # 配置面走 ioctl：open + ioctl(GPIO_OP_MODE)
 tos> cat readme.txt | wc   # 管道
 tos> smp            # 每个 CPU 一个 worker，看它们各自落在哪个核上
-tos> source etc/rc  # 在本进程里读一个命令文件（C3 上只有 3 个任务窗口，这是唯一安全的嵌套方式）
+tos> source etc/rc  # 在本进程里读一个命令文件（不占新窗口，C3 上最省）
 tos> run sh etc/rc  # 也可以把它当成一个程序跑：新任务、新 pid、崩溃不影响 shell
 tos> reboot         # 真复位芯片（C3 上 ROM 会报 rst:0x3 RTC_SW_SYS_RST）
 tos> exit
@@ -375,11 +377,11 @@ worker 1: cpu 1, 222 blocks in 800 ms
 smp: done
 tos> run smp &
 tos> ps
- pid ppid prio state  c cpu% cpums  name
-   1    0    0 run   0    0.7     0  sh
-   5    1    0 wait  -    0.0     0  smp
-   6    5    0 rdy   -   93.7     0  smp
-   7    5    0 run   1   86.5     0  smp
+ pid ppid prio state  c cpu% cpums wink  name
+   1    0    0 run   0    0.7     0   32  sh
+   5    1    0 wait  -    0.0     0   32  smp
+   6    5    0 rdy   -   93.7     0   32  smp
+   7    5    0 run   1   86.5     0   32  smp
 ```
 
 两个 worker 各占一个 hart（`c` 列是正在跑它的 CPU），各自接近 100% —— 是真并行，
@@ -484,13 +486,14 @@ exit 3
 
 | 写法 | 做什么 | 任务窗口 | 适合 |
 | --- | --- | --- | --- |
-| `source <file>` | 在当前 shell 进程里递归读，不 `exec` | 不占 | 嵌套脚本；C3 上跑任何东西 |
-| `run sh <file>` | `exec` 一个新的 sh，文件名作参数 | 占 1 个 | 崩溃隔离、`&`、要退出码 |
+| `source <file>` | 在当前 shell 进程里递归读，不 `exec` | 不占窗口 | 嵌套脚本；C3 上跑任何东西 |
+| `run sh <file>` | `exec` 一个新的 sh，文件名作参数 | 一个 32 KiB 窗口 | 崩溃隔离、`&`、要退出码 |
 
-`source` 不是图省事，是唯一可行的：C3 一共只有 **3 个任务窗口**（shell、前台、备用），
-一层 `run sh` 再在脚本里 `run` 一个程序就是第四个，内核只会回
-`exec: out of task windows`。嵌套深度上限 `MAX_SOURCE = 4`，预算就是那 16 KiB 栈：
-每层约 110 B（`src_t` 里的 96 B 读缓冲 + 几个局部量）。
+`source` 仍然值得推荐，因为它连窗口都不占：C3 的 192 KiB 用户区按需分配，一个新
+sh 就是 32 KiB，嵌套几层就把并发空间吃掉了（五层之后内核回
+`exec: 'x' needs a 32 KiB window, the largest free block is 0 KiB`）。嵌套深度上限
+`MAX_SOURCE = 4`，预算就是那 16 KiB 栈：每层约 110 B（`src_t` 里的 96 B 读缓冲 +
+几个局部量）。
 
 启动时 pid 1 会读一次 `etc/rc`（源文件 `files/etc/rc`，随镜像打包）。它默认是空的：
 开机自己说话的机器没法做差分测试，而这里打印的每个字节都会落在所有验收用例前面。
@@ -522,10 +525,10 @@ tos> nice 1 spin &
 tos> run spin &          # 0 级
 [3]
 tos> ps
- pid ppid prio state cpu% cpums  name
-   1    0    0 run      0.0     0  sh
-   2    1    1 rdy     51.3     0  spin
-   3    1    0 rdy    100.0     0  spin
+ pid ppid prio state  c cpu% cpums wink  name
+   1    0    0 run    -    0.0     0   32  sh
+   2    1    1 rdy    -   51.3     0   32  spin
+   3    1    0 rdy    -  100.0     0   32  spin
 ```
 
 0 级的 `spin[3]` 会先打完自己的 6 条输出，1 级的 `spin[2]` 一条都插不进来；
@@ -537,9 +540,9 @@ tos> ps
 tos> run spin &
 [2]
 tos> ps
- pid state window      ticks  name
-   1 run   0x01000000      1  sh
-   2 rdy   0x01400000     70  spin
+ pid ppid prio state  c cpu% cpums wink  name
+   1    0    0 run    -    0.0     0   32  sh
+   2    1    0 rdy    -   70.0     0   32  spin
 ```
 
 `rdy` 的意思是"可运行、这一瞬间不在 CPU 上"。`spin` 是个只烧 CPU、从不主动让出的
@@ -709,10 +712,10 @@ image 35320 / 92160 bytes, footprint ends at 0x286d4 (limit 0x400000, 3934 KiB h
 
 | 地址 | 内容 |
 | --- | --- |
-| `0x01000000`–`0x08000000` | 任务窗口区，每个任务独占 4 MiB（`PLAT_APP_WINDOW`） |
+| `0x01000000`–`0x08000000` | 任务窗口区，按需分配（步长 `PLAT_APP_GRAIN`，x86 上 64 KiB） |
 | 窗口 + 0 | ELF 代码（RX，可读可执行，不可写） |
 | 窗口 + 代码长度 向上 | ELF 数据 + `.bss` + `sbrk` 堆（RW），堆上限到栈下 16 KiB |
-| 堆顶到栈底之间 16 KiB | **空洞**：不归属任何区域，写越界当场 fault |
+| 堆顶到栈底之间 16 KiB | **空洞**：不归属任何区域，写越界当场 fault（C3 上这个洞是 4 KiB） |
 | 窗口顶部 − 32 KiB 到顶 | 8 页用户栈（RW），栈顶即窗口顶，argv 从顶部往下 256 B 开始 |
 
 没有分页、没有 CR3 切换：`exec` 只是把镜像拷到窗口里再把栈指针指好，退出时把

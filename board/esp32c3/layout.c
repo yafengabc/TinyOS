@@ -23,20 +23,29 @@ const uint32_t PLAT_KERNEL_BASE = 0x40380000;
 const uint32_t PLAT_RAM_BASE   = 0x40380000;   /* SRAM, instruction alias */
 const uint32_t PLAT_RAM_TOP    = 0x403DC710;
 
-/* Image + .bss must stay below this.  176 KiB is generous for the ~110 KiB
- * the rv32 kernel currently occupies and keeps the window area page tidy. */
+/* Image + .bss must stay below this.  176 KiB is generous for the ~144 KiB
+ * the kernel currently occupies and keeps the window area page tidy. */
 const uint32_t PLAT_KERNEL_MAX  = 0x403AC000;
 
-/* Three 64 KiB windows: 32 KiB stack at the top, a guard hole, then image
- * and sbrk heap below.  One window is the shell, one for a foreground
- * program, one spare for exec chains. */
+/* Task windows are carved out of the remaining 192 KiB and sized to their
+ * image, in 16 KiB steps: a shell takes 32 KiB, the editor 48, and the rest
+ * of the area stays usable by whatever comes next.  Stack at the top of
+ * every window, image below it, guard hole between image and stack; see
+ * kernel/platform.h for the constraints this grain has to satisfy. */
 const uint32_t PLAT_APP_BASE   = 0x403AC000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
-const uint32_t PLAT_APP_WINDOW = 0x00010000;   /* 64 KiB per task */
+const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See
- * kernel/platform.h for the four conditions this pair has to satisfy. */
+ * kernel/platform.h for the four conditions this pair has to satisfy.
+ *
+ * The guard is one page, not the 16 KiB it used to be: it is the floor of
+ * every window, and with variable windows it decides whether a 32 KiB
+ * window has 12 KiB of image space or 0.  One page still catches a stack
+ * that runs off its bottom - the hole is simply not covered by any PMP
+ * entry, so any store into it faults, and the write that overflows lands
+ * there first unless a single frame is larger than the hole. */
 const uint32_t PLAT_STACK_BYTES = 16u * 1024u;
-const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
+const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
 
 /* The littlefs partition lives on SPI flash at offset 0x80000 (the

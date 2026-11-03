@@ -16,7 +16,7 @@
  * 1 KiB is sized for the largest producer (the process table: 16 rows of ~50
  * columns plus a header).  A caller that opens all three at once costs 3 KiB
  * of the 32 KiB heap, which is why they are snapshots and not files on disk. */
-#define PROC_CAP 1024
+#define PROC_CAP 1536
 
 struct pfile {
     char    *buf;

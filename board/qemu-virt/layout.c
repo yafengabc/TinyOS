@@ -11,12 +11,12 @@ const uint32_t PLAT_KERNEL_MAX  = 0x80400000;   /* image + .bss stay in 4 MiB */
 const uint32_t PLAT_RAM_TOP     = 0x88000000;   /* the 128 MiB QEMU is given */
 const uint32_t PLAT_RAM_BASE    = 0x80000000;   /* RAM starts at the kernel */
 
-/* Each task gets a 1 MiB window: 128 MiB of RAM / 8 = 16 MiB of app space
- * is far more than the handful of programs in the filesystem need, and the
- * bump allocator in process.c never runs out. */
+/* 16 MiB of app space, handed out in 64 KiB steps: far more than the
+ * handful of programs in the filesystem need, and the interval allocator in
+ * process.c never runs out. */
 const uint32_t PLAT_APP_BASE   = 0x80400000;
 const uint32_t PLAT_APP_MAX    = 0x81400000;
-const uint32_t PLAT_APP_WINDOW = 0x00100000;   /* 1 MiB per task */
+const uint32_t PLAT_APP_GRAIN  = 0x00010000;   /* 64 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See
  * kernel/platform.h for the four conditions this pair has to satisfy. */
 const uint32_t PLAT_STACK_BYTES = 32u * 1024u;

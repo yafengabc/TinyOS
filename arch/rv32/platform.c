@@ -217,10 +217,15 @@ void plat_cpu_idle(void)
 #define PMP_TOR   0x08u
 #define PMP_NAPOT 0x18u
 
-void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
-                       uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
+                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
 {
     uint32_t size = stack_top - stack_low;
+
+    /* The window's end is implied by whichever region is highest (the
+       stack), so the TOR/NAPOT entries do not need it.  An ARM-style port
+       that describes the whole window would. */
+    (void)win_end;
 
     __asm__ volatile("csrw pmpaddr0, %0" : : "r"(win_base >> 2));
     __asm__ volatile("csrw pmpaddr1, %0" : : "r"((wx  & ~3u) >> 2));
