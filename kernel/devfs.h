@@ -70,9 +70,10 @@ const dev_t *devfs_lookup(const char *path);
  * "ours and empty", which is still not a littlefs path). */
 int         devfs_dir_count(const char *path);
 
-/* Index-th bare entry name ("gpio4" inside "/dev"), or NULL past the end.
- * Like ramdisk_list_name() the string lives in a static buffer and is
- * overwritten by the next call, so copy it before asking for the next one. */
-const char *devfs_dir_name(const char *path, uint32_t index);
+/* Index-th bare entry name ("gpio4" inside "/dev") copied into `buf`, so the
+ * caller never holds a pointer into the table.  Same contract as
+ * ramdisk_list_name(): length, 0 past the end, -1 if it does not fit. */
+int         devfs_dir_name(const char *path, uint32_t index, char *buf,
+                           int cap);
 
 #endif

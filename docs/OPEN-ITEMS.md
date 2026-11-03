@@ -180,11 +180,11 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
 
 ## 还没结的尾巴
 
-- **littlefs 在 SMP 下没有互斥**：`kernel/lfs_config.h` 没开 `LFS_THREADSAFE`，
-  两个 hart 同时读文件会共享同一份 cache 缓冲和 `lfs` 状态。单核目标无所谓；
-  `rv32smp` 上「两边各 cat 一个文件」理论上会读到对方的缓存块。修法是给
-  `ramdisk_read/write` 加一把 `spin_t`（比给整个 littlefs 加锁更省，因为
-  `bd_*` 回调已经在内核里）。目前压测没复现，但那是运气。
+- **~~littlefs 在 SMP 下没有互斥~~**（2026-11-03 已做）：`kernel/ramdisk.c` 加了一把
+  `fs_lock`，粒度是“一次 API 调用”（`cfg` 缓存 + bounce 缓冲 + 句柄表 + readdir
+  快照都是全局的，按块加锁不够）。单核上它编译成空操作，因为 tick 不会在内核态
+  切换任务；`readdir` 的名字改成拷进调用者缓冲，否则指针在锁外就失效了。
+  见 `PLATFORM-DESIGN.md` §13.5。
 - **~~`/dev` 和 `/proc` 只能 open，不能 `ls`~~**（2026-11-03 已做）：目录改成从
   设备表算出来的（`devfs_dir_count/_dir_name`），`SYS_READDIR` 按前缀路由，
   `stat` 新增 `TOS_FTYPE_CHR`，`cd /dev` 也通了。见 `PLATFORM-DESIGN.md` §14.7。

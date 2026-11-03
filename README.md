@@ -55,8 +55,9 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   目录是从设备表算出来的，所以 `ls /dev`、`cd /dev` 也成立（节点显示 `c` 和 `<dev>`）
 - **管道（IPC）**：`pipe()` + `dup2()`，内核里是环形缓冲 + 读/写端引用计数，
   空管道阻塞、写者全关返回 EOF、读者全关返回 EPIPE；`cat readme.txt | wc` 就是它
-- **双核 SMP**（`-target rv32smp`）：per-CPU 运行队列游标与内核栈、`amoswap` 自旋锁、
-  每 hart 独立 `mtvec` 和 `mtimecmp`，两个 hart 同时跑用户程序
+- **双核 SMP**（`-target rv32smp`）：per-CPU 运行队列游标与内核栈、`amoswap` 自旋锁
+  （进程表 + 文件系统各一把）、每 hart 独立 `mtvec` 和 `mtimecmp`，两个 hart 同时跑
+  用户程序
 - 用户态异常（非法指令、GPF）只终止当前进程，其他任务继续跑
 - **littlefs v2.9.3** 文件系统：构建期用 `mklfs`（同一份 littlefs 源码）打包到磁盘上的
   独立分区，运行时由内核通过 ATA 驱动挂载，支持子目录（`bin/`）、**真实写入**

@@ -247,8 +247,8 @@ static regs_t *dispatch(regs_t *r)
     case SYS_READDIR: {
         uint32_t index = sc.a0, ptr = sc.a1, len = sc.a2;
         char dir[64];
-        int dc;
-        const char *name = NULL;
+        char name[96];
+        int dc, n = 0;
 
         strncpy(dir, process_cwd_str(), sizeof(dir) - 1);
         dir[sizeof(dir) - 1] = '\0';
@@ -257,31 +257,36 @@ static regs_t *dispatch(regs_t *r)
          * is littlefs.  The root is both, so its device directories ("dev",
          * "proc") come first and the littlefs files follow - that split is
          * the one thing here that needs both enumerators, which is why it
-         * lives in the syscall and not inside either of them. */
+         * lives in the syscall and not inside either of them.
+         *
+         * Both enumerators copy into `name` under the filesystem lock; this
+         * used to hand back a pointer into a shared buffer, which another CPU
+         * could rewrite between the call and the memcpy below. */
         dc = devfs_dir_count(dir);
         if (dc >= 0) {
             if ((int)index < dc)
-                name = devfs_dir_name(dir, index);
+                n = devfs_dir_name(dir, index, name, (int)sizeof(name));
             else if (!strcmp(dir, "/"))
-                name = ramdisk_list_name("/", index - (uint32_t)dc, NULL);
+                n = ramdisk_list_name("/", index - (uint32_t)dc, name,
+                                      (int)sizeof(name));
         } else {
-            name = ramdisk_list_name(dir, index, NULL);
+            n = ramdisk_list_name(dir, index, name, (int)sizeof(name));
         }
 
-        if (!name) {
+        if (n <= 0) {
             plat_frame_set_ret(r, 0);
             return r;
         }
-        uint32_t n = (uint32_t)strlen(name) + 1;
-        if (n > len)
-            n = len;
-        if (!process_user_ok(ptr, n)) {
+        uint32_t copy = (uint32_t)n + 1;
+        if (copy > len)
+            copy = len;
+        if (!process_user_ok(ptr, copy)) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        memcpy((void *)ptr, name, n);
-        ((char *)ptr)[n - 1] = '\0';
-        plat_frame_set_ret(r, n);
+        memcpy((void *)ptr, name, copy);
+        ((char *)ptr)[copy - 1] = '\0';
+        plat_frame_set_ret(r, copy);
         return r;
     }
 

@@ -12,14 +12,16 @@
 
 void ramdisk_init(void);
 int  ramdisk_ok(void);
-uint32_t ramdisk_count(void);
 int  ramdisk_find(const char *name, uint8_t **data, uint32_t *size);
 void ramdisk_release(void *data);
-const char *ramdisk_name(uint32_t index, uint32_t *size);
-/* Directory-aware listing: count/name of entries in `dirpath` (absolute).
- * Used by SYS_READDIR now that it lists the current working directory. */
+/* Directory-aware listing: count of entries in `dirpath` (absolute), and the
+ * index-th bare entry name copied into `buf` (cap bytes).  The copy is what
+ * makes this safe on SMP: the names live in a shared snapshot, so handing out
+ * a pointer would go stale the moment the other CPU enumerated something.
+ * Returns the name length, 0 past the last entry, -1 if it does not fit. */
 int      ramdisk_list_count(const char *dirpath);
-const char *ramdisk_list_name(const char *dirpath, uint32_t index, uint32_t *size);
+int      ramdisk_list_name(const char *dirpath, uint32_t index, char *buf,
+                           int cap);
 int      ramdisk_stat(const char *path, uint32_t *size, uint8_t *type);
 int      ramdisk_df(uint32_t *total, uint32_t *used);
 

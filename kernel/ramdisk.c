@@ -1,6 +1,7 @@
 #include "ramdisk.h"
 #include "string.h"
 #include "console.h"
+#include "cpu.h"
 #include "heap.h"
 #include "platform.h"
 #include "lfs_config.h"   /* must come before lfs.h: defines LFS_NO_* + LFS_MALLOC */
@@ -51,10 +52,9 @@ static uint8_t bounce[FS_BLOCK_SIZE] __attribute__((aligned(4)));
    snapshot, so a listing can never go stale. */
 #define DENT_MAX  20
 #define DENT_NAME 32
-static struct {
-    char     name[DENT_NAME];
-    uint32_t size;
-} dents[DENT_MAX];
+/* Names only: sizes come from stat(), which asks littlefs directly rather
+   than a snapshot taken at an unknown time. */
+static char     dents[DENT_MAX][DENT_NAME];
 static int      dent_count = -1;   /* -1 while there is no snapshot */
 static int      dent_fill;         /* entries seen by the last walk  */
 static int      dent_active;       /* the walk is filling the table  */
@@ -63,9 +63,37 @@ static int      dent_overflow;     /* does not fit: walk every time  */
 static int      enum_target;
 static int      enum_index;
 static int      enum_hit;
-static uint32_t enum_size;
 static char     enum_name[96];
 static int      ok;
+
+/* One lock for the whole filesystem, held for the duration of an API call.
+ *
+ * The shared state is bigger than "the disk": littlefs keeps one set of block
+ * caches in `cfg` (read/prog/lookahead), this file adds a 4 KiB bounce buffer
+ * for unaligned sector I/O, and both the handle table and the readdir
+ * snapshot are process-independent globals.  Two harts in lfs_file_read on
+ * different files would scramble each other's cache blocks, so the unit of
+ * exclusion cannot be the block - it has to be the call.  This is what
+ * LFS_THREADSAFE would give us, plus the parts littlefs knows nothing about
+ * (handles, snapshot), which is why it lives here and not in `cfg`.
+ *
+ * On a uniprocessor this lock is a no-op, and that is correct rather than
+ * lucky: multitasking exists there, but a task only ever loses the CPU in
+ * user mode or at a blocking call (process_tick refuses to preempt a kernel
+ * frame), so no second task can observe half an lfs call.  The same two
+ * preconditions make the no-op safe, and both would have to be revisited
+ * before either changes:
+ *   - a tick that lands in kernel mode only accounts, never switches;
+ *   - nothing called here blocks (a future blocking device read has to
+ *     release the lock before it sleeps).
+ *
+ * Not held across anything that blocks: every call below is synchronous
+ * memory or block-device work, so the holder always runs to the unlock and
+ * interrupts stay on.
+ *
+ * Ordering: fs_lock -> heap_lock, because littlefs allocates through
+ * kmalloc.  Nothing takes them the other way round. */
+static spin_t fs_lock = SPIN_INIT;
 
 static ofile_t openfiles[MAX_OPEN];
 
@@ -198,9 +226,8 @@ static int enum_dir(const char *dirpath)
             /* List the directory itself, but do not descend. */
             if (dent_active) {
                 if (dent_fill < DENT_MAX) {
-                    strncpy(dents[dent_fill].name, info.name, DENT_NAME - 1);
-                    dents[dent_fill].name[DENT_NAME - 1] = '\0';
-                    dents[dent_fill].size = 0;
+                    strncpy(dents[dent_fill], info.name, DENT_NAME - 1);
+                    dents[dent_fill][DENT_NAME - 1] = '\0';
                 }
                 dent_fill++;
                 enum_index++;
@@ -209,7 +236,6 @@ static int enum_dir(const char *dirpath)
             if (enum_index == enum_target) {
                 strncpy(enum_name, info.name, sizeof(enum_name) - 1);
                 enum_name[sizeof(enum_name) - 1] = '\0';
-                enum_size = 0;
                 enum_hit = 1;
                 lfs_dir_close(&lfs, &dir);
                 return 1;
@@ -222,9 +248,8 @@ static int enum_dir(const char *dirpath)
 
         if (dent_active) {
             if (dent_fill < DENT_MAX) {
-                strncpy(dents[dent_fill].name, info.name, DENT_NAME - 1);
-                dents[dent_fill].name[DENT_NAME - 1] = '\0';
-                dents[dent_fill].size = info.size;
+                strncpy(dents[dent_fill], info.name, DENT_NAME - 1);
+                dents[dent_fill][DENT_NAME - 1] = '\0';
             }
             dent_fill++;
             enum_index++;
@@ -234,7 +259,6 @@ static int enum_dir(const char *dirpath)
         if (enum_index == enum_target) {
             strncpy(enum_name, info.name, sizeof(enum_name) - 1);
             enum_name[sizeof(enum_name) - 1] = '\0';
-            enum_size = info.size;
             enum_hit = 1;
             lfs_dir_close(&lfs, &dir);
             return 1;
@@ -249,7 +273,6 @@ static void enum_start(void)
 {
     enum_index = 0;
     enum_hit = 0;
-    enum_size = 0;
     enum_name[0] = '\0';
 }
 
@@ -335,7 +358,7 @@ int ramdisk_ok(void)
     return ok;
 }
 
-uint32_t ramdisk_count(void)
+static uint32_t count_locked(void)
 {
     if (!ok)
         return 0;
@@ -348,24 +371,24 @@ uint32_t ramdisk_count(void)
     return (uint32_t)enum_index;
 }
 
-const char *ramdisk_name(uint32_t index, uint32_t *size)
+/* The index-th name in the root snapshot (or a full walk when the snapshot
+ * does not fit).  Sizes are not part of the name API any more: `ls` gets them
+ * from stat(), which asks littlefs directly instead of trusting a snapshot
+ * taken at an unknown time. */
+static const char *name_locked(uint32_t index)
 {
     if (!ok)
         return NULL;
     if (dent_build() >= 0) {
         if ((int)index >= dent_count)
             return NULL;
-        if (size)
-            *size = dents[index].size;
-        return dents[index].name;
+        return dents[index];
     }
     enum_start();
     enum_target = (int)index;
     enum_dir("/");
     if (!enum_hit)
         return NULL;
-    if (size)
-        *size = enum_size;
     return enum_name;
 }
 
@@ -373,31 +396,29 @@ const char *ramdisk_name(uint32_t index, uint32_t *size)
  * built by dent_build(); every other directory is walked directly, which is
  * correct and cheap for the small directories TinyOS has.  Names are bare
  * entries (see enum_dir), so the caller builds stat paths itself. */
-int ramdisk_list_count(const char *dirpath)
+static int list_count_locked(const char *dirpath)
 {
     if (!ok)
         return 0;
     if (strcmp(dirpath, "/") == 0)
-        return (int)ramdisk_count();
+        return (int)count_locked();
     enum_start();
     enum_target = -1;              /* never matches: walk everything */
     enum_dir(dirpath);
     return (int)enum_index;
 }
 
-const char *ramdisk_list_name(const char *dirpath, uint32_t index, uint32_t *size)
+static const char *list_name_locked(const char *dirpath, uint32_t index)
 {
     if (!ok)
         return NULL;
     if (strcmp(dirpath, "/") == 0)
-        return ramdisk_name(index, size);
+        return name_locked(index);
     enum_start();
     enum_target = (int)index;
     enum_dir(dirpath);
     if (!enum_hit)
         return NULL;
-    if (size)
-        *size = enum_size;
     return enum_name;
 }
 
@@ -405,7 +426,7 @@ const char *ramdisk_list_name(const char *dirpath, uint32_t index, uint32_t *siz
    and fills *size/*type on success, -1 on error (e.g. ENOENT).  Used by the
    SYS_STAT syscall so `ls` can show per-entry size and type without the
    kernel walking the tree. */
-int ramdisk_stat(const char *path, uint32_t *size, uint8_t *type)
+static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
 {
     if (!ok)
         return -1;
@@ -423,7 +444,7 @@ int ramdisk_stat(const char *path, uint32_t *size, uint8_t *type)
    `used` is what littlefs has actually consumed.  Note lfs_fs_size()
    returns a *block count*, so multiply by the block size for bytes.
    Either pointer may be NULL.  Returns 0 when the filesystem is mounted. */
-int ramdisk_df(uint32_t *total, uint32_t *used)
+static int df_locked(uint32_t *total, uint32_t *used)
 {
     if (total)
         *total = (uint32_t)FS_BLOCK_SIZE * PLAT_LFS_BLOCKS;
@@ -440,7 +461,7 @@ int ramdisk_df(uint32_t *total, uint32_t *used)
 
 /* Load a whole file into a freshly kmalloc'd buffer.  Caller must call
    ramdisk_release() when done. */
-int ramdisk_find(const char *name, uint8_t **data, uint32_t *size)
+static int find_locked(const char *name, uint8_t **data, uint32_t *size)
 {
     if (!ok)
         return 0;
@@ -525,7 +546,12 @@ static int open_with(const char *path, int flags)
 
 int ramdisk_open(const char *path)
 {
-    return open_with(path, LFS_O_RDONLY);
+    int h;
+
+    spin_lock(&fs_lock);
+    h = open_with(path, LFS_O_RDONLY);
+    spin_unlock(&fs_lock);
+    return h;
 }
 
 /* Read-write, without truncating.  This is what a child gets when it inherits
@@ -534,12 +560,17 @@ int ramdisk_open(const char *path)
  * would hand it a read-only handle that fails on the first write. */
 int ramdisk_open_rw(const char *path)
 {
-    return open_with(path, LFS_O_RDWR);
+    int h;
+
+    spin_lock(&fs_lock);
+    h = open_with(path, LFS_O_RDWR);
+    spin_unlock(&fs_lock);
+    return h;
 }
 
 /* Create (or truncate) a file for writing.  Opened read-write so the
    caller can verify what it wrote. */
-int ramdisk_create(const char *path)
+static int create_locked(const char *path)
 {
     if (!ok)
         return -1;
@@ -578,14 +609,14 @@ int ramdisk_create(const char *path)
     return h;
 }
 
-uint32_t ramdisk_size(int h)
+static uint32_t size_locked(int h)
 {
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
         return 0;
     return openfiles[h].size;
 }
 
-int ramdisk_read(int h, void *buf, uint32_t len)
+static int read_locked(int h, void *buf, uint32_t len)
 {
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
         return -1;
@@ -593,7 +624,7 @@ int ramdisk_read(int h, void *buf, uint32_t len)
     return n < 0 ? -1 : (int)n;
 }
 
-int ramdisk_write(int h, const void *buf, uint32_t len)
+static int write_locked(int h, const void *buf, uint32_t len)
 {
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
         return -1;
@@ -608,7 +639,7 @@ int ramdisk_write(int h, const void *buf, uint32_t len)
 /* Move the handle's position.  A duplicated descriptor keeps the position it
  * was copied from (fd_clone), but the new littlefs handle starts at 0, so
  * "same position" has to be re-established rather than assumed. */
-int ramdisk_seek(int h, uint32_t pos)
+static int seek_locked(int h, uint32_t pos)
 {
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
         return -1;
@@ -618,11 +649,140 @@ int ramdisk_seek(int h, uint32_t pos)
     return 0;
 }
 
-void ramdisk_close(int h)
+static void close_locked(int h)
 {
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
         return;
     lfs_file_close(&lfs, &openfiles[h].f);
     kfree(openfiles[h].cache);
     memset(&openfiles[h], 0, sizeof(ofile_t));
+}
+
+/* ---- the lock boundary ------------------------------------------------
+ *
+ * Everything above is `_locked`: the body as it was, with no locking of its
+ * own, so one entry point can call another (list_name -> name, list_count ->
+ * count) without re-entering a lock that is not recursive.  Callers outside
+ * this file only ever see the wrappers below.
+ *
+ * The alternative - a lock/unlock pair inside each body - reads as less code
+ * until the first `return` in the middle of an lfs call is added and one path
+ * forgets to unlock.  One wrapper per entry point is a shape the compiler can
+ * see through: miss one and the symbol is simply missing at link time. */
+
+/* Copy the index-th name into the caller's buffer while the lock is still
+ * held.  Returning the pointer instead (what this used to do) reads as
+ * cheaper but hands out a shared static: the second CPU enumerating anything
+ * would rewrite it before the caller's memcpy. */
+int ramdisk_list_name(const char *dirpath, uint32_t index, char *buf, int cap)
+{
+    const char *name;
+    int n;
+
+    spin_lock(&fs_lock);
+    name = list_name_locked(dirpath, index);
+    n = name ? (int)strlen(name) : 0;
+    if (name && n >= cap)
+        n = -1;                 /* does not fit: caller sees EOF, not a stub */
+    else if (name)
+        memcpy(buf, name, (size_t)n + 1);
+    spin_unlock(&fs_lock);
+    return n;
+}
+
+int ramdisk_list_count(const char *dirpath)
+{
+    int n;
+
+    spin_lock(&fs_lock);
+    n = list_count_locked(dirpath);
+    spin_unlock(&fs_lock);
+    return n;
+}
+
+int ramdisk_stat(const char *path, uint32_t *size, uint8_t *type)
+{
+    int r;
+
+    spin_lock(&fs_lock);
+    r = stat_locked(path, size, type);
+    spin_unlock(&fs_lock);
+    return r;
+}
+
+int ramdisk_df(uint32_t *total, uint32_t *used)
+{
+    int r;
+
+    spin_lock(&fs_lock);
+    r = df_locked(total, used);
+    spin_unlock(&fs_lock);
+    return r;
+}
+
+int ramdisk_find(const char *name, uint8_t **data, uint32_t *size)
+{
+    int r;
+
+    spin_lock(&fs_lock);
+    r = find_locked(name, data, size);
+    spin_unlock(&fs_lock);
+    return r;
+}
+
+int ramdisk_create(const char *path)
+{
+    int h;
+
+    spin_lock(&fs_lock);
+    h = create_locked(path);
+    spin_unlock(&fs_lock);
+    return h;
+}
+
+uint32_t ramdisk_size(int h)
+{
+    uint32_t n;
+
+    spin_lock(&fs_lock);
+    n = size_locked(h);
+    spin_unlock(&fs_lock);
+    return n;
+}
+
+int ramdisk_read(int h, void *buf, uint32_t len)
+{
+    int n;
+
+    spin_lock(&fs_lock);
+    n = read_locked(h, buf, len);
+    spin_unlock(&fs_lock);
+    return n;
+}
+
+int ramdisk_write(int h, const void *buf, uint32_t len)
+{
+    int n;
+
+    spin_lock(&fs_lock);
+    n = write_locked(h, buf, len);
+    spin_unlock(&fs_lock);
+    return n;
+}
+
+int ramdisk_seek(int h, uint32_t pos)
+{
+    int r;
+
+    spin_lock(&fs_lock);
+    r = seek_locked(h, pos);
+    spin_unlock(&fs_lock);
+    return r;
+}
+
+void ramdisk_close(int h)
+{
+    spin_lock(&fs_lock);
+    close_locked(h);
+    spin_unlock(&fs_lock);
 }

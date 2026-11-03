@@ -176,9 +176,19 @@ int devfs_dir_count(const char *path)
     return n;
 }
 
-const char *devfs_dir_name(const char *path, uint32_t index)
+/* Copy one name into the caller's buffer.  -1 means it does not fit, which
+ * readdir reports as end-of-directory rather than handing back a stub. */
+static int put_name(char *buf, int cap, const char *name, size_t len)
 {
-    static char buf[DEV_NAME_MAX];
+    if (cap <= 0 || len >= (size_t)cap)
+        return -1;
+    memcpy(buf, name, len);
+    buf[len] = '\0';
+    return (int)len;
+}
+
+int devfs_dir_name(const char *path, uint32_t index, char *buf, int cap)
+{
     const char *dir = strip_slash(path);
 
     if (!*dir) {
@@ -186,23 +196,16 @@ const char *devfs_dir_name(const char *path, uint32_t index)
         uint32_t extra;
 
         if (index < (uint32_t)NS_COUNT)
-            return ns_dirs[index];
+            return put_name(buf, cap, ns_dirs[index], strlen(ns_dirs[index]));
         extra = index - (uint32_t)NS_COUNT;
         for (int i = 0; i < ndevs; i++) {
-            size_t hl;
-
             if (!first_extra_head(i))
                 continue;
             if (extra-- != 0)
                 continue;
-            hl = head_len(devs[i].name);
-            if (hl >= sizeof(buf))
-                return NULL;
-            memcpy(buf, devs[i].name, hl);
-            buf[hl] = '\0';
-            return buf;
+            return put_name(buf, cap, devs[i].name, head_len(devs[i].name));
         }
-        return NULL;
+        return 0;
     }
 
     for (int i = 0; i < ndevs; i++) {
@@ -211,7 +214,7 @@ const char *devfs_dir_name(const char *path, uint32_t index)
         if (!rest)
             continue;
         if (index-- == 0)
-            return rest;        /* already NUL-terminated in the name pool */
+            return put_name(buf, cap, rest, strlen(rest));
     }
-    return NULL;
+    return 0;
 }

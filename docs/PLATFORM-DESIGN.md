@@ -1128,6 +1128,21 @@ ordering 位。释放用 `fence rw, rw` + 普通 store。
 **锁的边界**：`proc_lock` 保护“扫一遍进程表 + 改状态”，绝不跨任何会阻塞的调用。
 调度器在 `sched_idle()` 之前必须把锁还回去，否则空闲的那个核会抱着锁去 `wfi`。
 
+**第二把锁：`fs_lock`（`kernel/ramdisk.c`）**。littlefs 的共享面比“磁盘”大：
+`cfg` 里那份 read/prog/lookahead 缓存、`ramdisk.c` 的 4 KiB bounce 缓冲、句柄表和
+readdir 快照全都是全局的。所以互斥的粒度不是块，是**一次 API 调用**——两个核各读
+一个文件，会互相冲掉对方的缓存块。
+
+- 单核上它同样是空操作，理由和 `proc_lock` 一样：任务只在用户态或阻塞点丢 CPU，
+  没有第二个任务能看到“半个 lfs 调用”。这个结论依赖两条前提，写在 `ramdisk.c`
+  的注释里：tick 落在内核态只记账不切换；锁内不阻塞（将来做阻塞读要先放锁）。
+- 写法是“内部函数 + 包装”（`count_locked` / `ramdisk_count` 那种形状），因为
+  `list_name` 要调 `name`、`list_count` 要调 `count`，而 spin 锁不可重入。入口
+  漏掉一个会链接不上，比在每个函数里手写 lock/unlock、某个 `return` 忘了放可靠。
+- 顺带把 readdir 的名字改成**拷贝进调用者的缓冲**（`ramdisk_list_name(dir, i, buf,
+  cap)`、`devfs_dir_name(...)`）。原来是返回静态缓冲的指针——锁一放开，另一个核
+  就能在调用者 memcpy 之前把它改写，等于没加锁。
+
 ### 13.6 定时器：一份时钟，两个 tick
 
 每个 hart 都需要自己的 tick（它才是抢走本核 CPU 的东西），但“现在几点”是全局的。
@@ -1318,5 +1333,3 @@ helper——能 `ls` 却不能 `cd` 的目录等于半个目录。
 - **阻塞型设备**：GPIO/ADC 都是即时返回。等按键的设备需要 `read` 返回
   "would block"，由内核统一挂起——现在的 `ST_WAIT_INPUT` / `ST_WAIT_PIPE` 是
   两条独立路径，第三条该收敛成一个通用机制。
-- **littlefs 在 SMP 下没有锁**：`lfs_config.h` 没开 `LFS_THREADSAFE`，两个核同时
-  读文件会踩同一个缓存。这是既有问题（本次没修），记在 `docs/OPEN-ITEMS.md`。
