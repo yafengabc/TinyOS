@@ -343,7 +343,7 @@ trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fau
 - 读缓冲属于源而不是 shell。`source` 把第二个文件套进第一个里，共用一个缓冲会冲掉
   外层"已读未用"的字节。`line[]` 反而可以共用——命令行在被完整解析前不会嵌套。
 - 嵌套上限 `MAX_SOURCE = 4`，每层约 110 B（`src_t` 的 96 B 读缓冲 + 局部量），
-  16 KiB 栈付得起；设上限的真正理由不是栈，是"两个脚本互相 source"这种死循环。
+  8 KiB 的默认栈付得起；设上限的真正理由不是栈，是"两个脚本互相 source"这种死循环。
 
 `exit` 在脚本里表示"结束本脚本并返回 N"（`& 255`，只有低 8 位），不关机；只有
 `script_depth == 0`（控制台）时才是 `exit(0)`。启动脚本 `files/etc/rc` 由 pid 1
@@ -421,8 +421,8 @@ ELF 头 + 6 个程序头 244 B、`.dynamic` 64 B、段头表 + `.shstrtab` 240 B
 - 内核堆峰值 = 压缩 6,548 + 解压 8,776 = 15.3 KB，占 32 KiB arena 的一半多一点
   （C3 曾经配到 64 KiB，2026-11-03 已收回，见下方"内核堆"一节）。真在意就把
   busybox 不压缩存（8,776 B，+2.2 KB flash），峰值降回 8.8 KB。
-- rp2040 的镜像预算 = 窗口 32 KiB − 栈 16 KiB − 护栏 4 KiB = 12 KiB，8.1 KB 的 busybox
-  只剩 3.9 KiB 余量（约 8 个 applet，再多就 `exec: does not fit a 32 KiB task window`）。
+- rp2040 的镜像预算 = 窗口 32 KiB − 栈 8 KiB − 护栏 4 KiB = 16 KiB，8.1 KB 的 busybox
+  只剩 7.9 KiB 余量（约 16 个 applet，再多就 `exec: does not fit`）。
 - vendored littlefs 是裁剪版，**没有 symlink**（`LFS_TYPE_SOFTLINK` 不存在），做不了
   符号链接农场。替代做法是查表回退：`process_create()` 里 `bin/<name>` 找不到就试
   `bin/busybox`，`argv[0]` 原样带过去，dispatch 按 `basename(argv[0])` 选 applet。
@@ -924,17 +924,18 @@ Pico 还没有控制台，用户程序压根没跑起来过。
 直接 panic 并说明是哪一项 —— 这类错误的表现（栈用一半 fault、守卫页可写、
 exec 全被拒）跟布局八竿子打不着，靠症状反推太贵。
 
-| 板 | 步长 `PLAT_APP_GRAIN` | 栈 | 守卫 | 最小窗口 |
+| 板 | 步长 `PLAT_APP_GRAIN` | 默认栈 | 守卫 | 最小窗口 |
 |---|---|---|---|---|
 | pc (x86) | 64 KiB | 32 KiB | 16 KiB | 64 KiB |
 | qemu-virt | 64 KiB | 32 KiB | 16 KiB | 64 KiB |
 | qemu-mps2 | 64 KiB | 32 KiB | 16 KiB | 64 KiB |
-| esp32c3 | 16 KiB | 16 KiB | 4 KiB | **32 KiB** |
-| rp2040 | 16 KiB | 16 KiB | 4 KiB | **32 KiB** |
+| esp32c3 | 16 KiB | **8 KiB** | 4 KiB | **16 KiB**（1 KiB 的映像）/ 32 KiB（shell） |
+| rp2040 | 16 KiB | **8 KiB** | 4 KiB | **16 KiB**（1 KiB 的映像）/ 32 KiB（shell） |
 
-窗口本身按镜像大小现算（`span + 栈 + 守卫` 按步长取整），C3 上 shell 占 32 KiB、
-`edit`（`.bss` 9.9 KiB）占 48 KiB；栈和守卫是**每个窗口的固定成本**，所以它们
-才是决定小任务能不能便宜的那两个数——实测见 §8.9。
+窗口本身按镜像大小现算（`span + 默认栈 + 守卫` 按步长取整），C3 上 shell 占 32 KiB、
+`edit`（`.bss` 9.9 KiB）占 32 KiB、`hold` 这种 300 字节的程序占 16 KiB；栈和守卫是
+**每个窗口的固定成本**，所以它们才是决定小任务能不能便宜的那两个数——栈从 16 KiB
+降到 8 KiB 之后 `edit` 从 48 掉到 32、小工具从 32 掉到 16（见 §8.9）。
 
 真机复验：C3 `prot stack` 现在报 `store access fault at ... (address 0x403c3fff)`，
 `scripts/esp-c3/accept.py` 18/18；x86/rv32/arm 的 smoke 与 compat 全绿。x86 代价
@@ -992,6 +993,50 @@ unused        34128  ( 33 KiB)   ← 原 2,048
 把每一帧都算进去了。第一版它读成 0.3 KiB——编译器发现数组只有两个字节被读，
 把 2 KiB 的帧换成了两个标量；加一句把数组地址交给空 `asm` 的语句（让对象必须
 有地址）才把帧留住。这种"测量工具自己被优化掉"的坑，只有拿已知量去校才看得见。
+
+##### 8.9.1 默认 8 KiB + 程序自己声明（2026-11-03 晚）
+
+同一天的第二轮把上面第二个结论处理掉了：**默认降到 8 KiB，需要大栈的程序在源码
+里声明**。声明走 ELF note，不动 PMP：
+
+```
+程序：TOS_STACK(16 * 1024);        // user/lib.h，文件作用域一次
+  -> .note.tos  (24 B: namesz=7 descsz=4 type=1 "TinyOS" + u32)
+  -> user.ld 给它一个 PT_NOTE 段（分配段 lld 自动建）
+  -> exec 在算窗口之前读它（elf_tos_stack），窗口 = span + 声明的栈 + 守卫
+```
+
+四条边界，都在 `exec` 里被检查，越界直接拒绝并报出数字：
+
+- **2 的幂、不小于一页、整除 `PLAT_APP_GRAIN`**。这是 PMP/MPU 能描述的集合：
+  NAPOT 要求"2 的幂且按自身对齐"，窗口起点在步长边界、长度是步长整数倍，所以
+  只要栈整除步长，`stack_low` 天然对齐，**一条 PMP 规则都不用改**。C3 因此可以
+  要 4/8/16 KiB，不能要 24，也不能超过 16（那会让 `stack_top` 落到 32 KiB 半区
+  的错误一侧，就是 §8.8 那个真机 bug 的另一面）。
+- 超限时**拒绝而不是取整**：悄悄取整会让"栈溢出"这个症状失去唯一的线索。
+- 每个任务各存一份 `proc_t.stack_size`，`apply_protection()` 每次切换都按它重编
+  PMP，所以同一台机器上 8 KiB 和 16 KiB 的栈可以并存。
+- `exec` 里原来那条"映像比栈大就拒绝"的启发式**删掉了**：`dd` 是 12.8 KiB 映像、
+  0.5 KiB 栈足迹，按旧规则它在 8 KiB 默认下根本起不来（`needs 10784 bytes of
+  stack, the window has 8192`）。留下的只有硬要求：初始帧 + 256 B 的 trap 边距
+  必须装得进栈。
+
+真机（C3，`ps` 的 wink/stk 列）：
+
+| 程序 | 栈 | 窗口 | 高水位 |
+|---|---|---|---|
+| `sh` | 8 KiB（默认） | 32 KiB | 0.6 KiB |
+| `hold` | 8 KiB（默认） | **16 KiB**（原来 32） | 0.2 KiB |
+| `stk 6` | **16 KiB**（声明） | 32 KiB | 12.3 KiB |
+
+`hold` 那一行就是这次改动的全部意义：300 字节的程序原来占掉 1/6 的用户区，现在
+占 1/12，192 KiB 里的并发数从 5–6 提到 12（`emutest` 里就是 10 个 `hold` 加 shell
+填满）。`stk` 那一行是反向证明：声明 16 KiB 后六层递归（12.3 KiB）真的跑起来了，
+说明 note 被读到、PMP 按非默认尺寸编码正确。
+
+顺带修掉一条测试漂移：`scripts/esp-c3/accept.py` 还在等 banner 里的 `littlefs:`
+（`729b98e` 就删了这行日志）和 `ls` 输出里的 `bin/sh`（`ls` 早就只列一层），两项
+长期 FAIL 掩盖了别的失败；现在 24/24。
 
 ### RP2040
 

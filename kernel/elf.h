@@ -25,6 +25,13 @@ int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
               uint32_t *mem_end_out, uint32_t *entry_out,
               uint32_t *writable_from_out);
 
+/* How much stack the program asks for, read from the note its image carries
+ * (user/lib.h's TOS_STACK(), placed in .note.tos and linked into a PT_NOTE
+ * segment by user/user.ld).  *bytes_out is 0 when the image says nothing,
+ * which means "whatever the board's default is".  Returns -1 if the image
+ * is not a readable ELF32; callers that got this far already know better. */
+int elf_tos_stack(const uint8_t *data, uint32_t size, uint32_t *bytes_out);
+
 /* Select the task window [lo, hi) the loader may write into.  process.c
  * sets this before every load; the loader never writes outside it. */
 void elf_set_window(uint32_t lo, uint32_t hi);

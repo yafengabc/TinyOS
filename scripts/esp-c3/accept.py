@@ -88,12 +88,15 @@ def main():
     boot = b.boot() if not args.no_reset else b.read_until_prompt(3.0)
     # The file count is not asserted: the flash filesystem keeps whatever an
     # earlier run wrote, so a board that has been used holds more than the 14
-    # files the build packs.
+    # files the build packs.  The mount itself is covered by "ls" below - the
+    # banner stopped printing a "littlefs:" line when the boot log was
+    # trimmed, and this check kept looking for it.
     check(results, "boot: banner + filesystem + prompt", boot,
           want=("TinyOS - a tiny multi-platform operating system",
-                "littlefs:", "tick self-check", "TinyOS shell"))
+                "arena", "tick self-check", "TinyOS shell"))
     for name, line, want in [
-        ("ls lists the programs", "ls", ("bin/sh", "readme.txt")),
+        # `ls` lists one level: a directory shows as "bin/", not "bin/sh".
+        ("ls lists the programs", "ls", ("bin/", "readme.txt")),
         ("hello runs", "hello", ("hello",)),
         ("hello_printf runs", "hello_printf", ()),
         ("mem reports", "mem", ()),
@@ -122,8 +125,10 @@ def main():
           want=("abracadabra",))
 
     # Command files: the same parser with a file as its input source.  `source`
-    # runs in this process on purpose - the C3 has three task windows, so a
-    # shell that execs a script which runs a program is one window too many.
+    # runs in this process on purpose - it costs no window at all, while a
+    # shell that execs a script which execs a program spends one window per
+    # level (the C3 has 192 KiB of them, so twelve 16 KiB windows, which is
+    # plenty - but nesting is still how a recursive script eats the board).
     # The script is written by wfile so the image needs no extra entry.
     check(results, "wfile writes a script", b.cmd("wfile s.sh hello"),
           want=("s.sh",))

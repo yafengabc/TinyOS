@@ -28,15 +28,22 @@ const uint32_t PLAT_RAM_TOP    = 0x403DC710;
 const uint32_t PLAT_KERNEL_MAX  = 0x403AC000;
 
 /* Task windows are carved out of the remaining 192 KiB and sized to their
- * image, in 16 KiB steps: a shell takes 32 KiB, the editor 48, and the rest
- * of the area stays usable by whatever comes next.  Stack at the top of
- * every window, image below it, guard hole between image and stack; see
- * kernel/platform.h for the constraints this grain has to satisfy. */
+ * image, in 16 KiB steps: a shell takes 32 KiB, the editor 32, a 1 KiB tool
+ * 16, and the rest of the area stays usable by whatever comes next.  Stack
+ * at the top of every window, image below it, guard hole between image and
+ * stack; see kernel/platform.h for the constraints this grain has to
+ * satisfy. */
 const uint32_t PLAT_APP_BASE   = 0x403AC000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
 const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See
  * kernel/platform.h for the four conditions this pair has to satisfy.
+ *
+ * 8 KiB is the default, not a ceiling: a program that needs more says so in
+ * its image (TOS_STACK(), up to the grain), and `ps`'s stk column is what
+ * says whether the default was right.  Every real program measured under
+ * 1 KiB, and the default is the floor of every window, so halving it is
+ * what lets a 4 KiB image run in 16 KiB instead of 32.
  *
  * The guard is one page, not the 16 KiB it used to be: it is the floor of
  * every window, and with variable windows it decides whether a 32 KiB
@@ -44,7 +51,7 @@ const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
  * that runs off its bottom - the hole is simply not covered by any PMP
  * entry, so any store into it faults, and the write that overflows lands
  * there first unless a single frame is larger than the hole. */
-const uint32_t PLAT_STACK_BYTES = 16u * 1024u;
+const uint32_t PLAT_STACK_BYTES = 8u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
 

@@ -15,8 +15,16 @@
  *
  * The buffers are volatile so no optimisation level can decide they are dead
  * and drop two thirds of the frames.  The tightest budget this can produce is
- * depth * 2 KiB, which is why the tests use a depth well under the 16 KiB
- * stack: overflow here would be measuring the guard page, not the stack. */
+ * depth * 2 KiB, which is why the tests use a depth well under the stack:
+ * overflow here would be measuring the guard page, not the stack.
+ *
+ * This is also the program that proves a task can ask for its own stack: the
+ * board default is 8 KiB and six frames do not fit in that, so the note below
+ * asks for 16 and exec() sizes this task's window accordingly.  Without it,
+ * `stk 6` would fault into the guard hole - which is exactly the failure the
+ * mechanism exists to let a program avoid declaring nothing. */
+
+TOS_STACK(16 * 1024);
 
 static int burn(int depth, int ms)
 {
@@ -45,8 +53,9 @@ int main(int argc, char **argv)
 
     if (depth < 1)
         depth = 1;
-    /* 6 frames of 2 KiB is 12 KiB: below the 16 KiB stack, and deep enough
-       that a measurement which misses whole frames is obvious. */
+    /* 6 frames of 2 KiB is 12 KiB: below the 16 KiB this program asks for,
+       and deep enough that a measurement which misses whole frames is
+       obvious. */
     if (depth > 6)
         depth = 6;
     if (ms < 0)

@@ -15,6 +15,17 @@ SECTIONS
         *(.rodata*)
     }
 
+    /* What the program asks of the loader (TOS_STACK(), see user/lib.h): an
+       ELF note, in read-only memory next to .rodata, and in a PT_NOTE
+       segment of its own because the linker gives every allocated .note.*
+       section one.  kernel/elf.c reads it out of the file before the task
+       window is sized - the stack is part of that cost - so it never has to
+       be reachable at run time.  Twenty-four bytes, and span is rounded to a
+       page anyway. */
+    .note.tos : ALIGN(4) {
+        KEEP(*(.note.tos))
+    }
+
     /* .data.rel.ro and relatives hold relocated pointers; keep them with
        writable data so the kernel can patch them after copying.  The
        32-byte alignment matters to the ARM port: it describes the

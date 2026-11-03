@@ -32,9 +32,13 @@ static void stack(void)
     uint32_t here = (uint32_t)&probe;   /* somewhere near the stack top */
 
     puts("writing below the bottom of the stack\n");
-    /* 32 KiB of stack, then the hole the kernel keeps under it, so this
-       lands in memory nobody owns.  (Asking for a 64 KiB local array would
-       be simpler but the optimiser throws the array away.) */
+    /* 40 KiB below the top clears the largest stack any board hands out
+       (32 KiB, plus the guard under it), so this is memory the task does not
+       own: the hole under the stack where the window has room for it,
+       another task's window where it does not.  Either way it is outside
+       every PMP entry this task has, which is what the test needs.
+       (Asking for a 64 KiB local array would be simpler but the optimiser
+       throws the array away.) */
     *(volatile char *)(here - 40960u) = 1;
 }
 

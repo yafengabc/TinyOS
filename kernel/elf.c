@@ -17,6 +17,7 @@ void elf_set_window(uint32_t lo, uint32_t hi)
 
 #define PT_LOAD    1
 #define PT_DYNAMIC 2
+#define PT_NOTE    4
 #define PF_X       1
 #define PF_W       2
 #define EM_386     3
@@ -237,6 +238,69 @@ int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
        the first fetch. */
     if (writable_from_out)
         *writable_from_out = (wlo == 0xFFFFFFFFu) ? hi : wlo;
+    return 0;
+}
+
+/* ---- what the program says about itself -------------------------------
+ *
+ * A program can ask for a particular stack instead of taking the board's
+ * default: user/lib.h's TOS_STACK() drops an ELF note in .note.tos, user.ld
+ * gives that section its own PT_NOTE segment, and this walks it.  It has to
+ * be read before the window is sized - the stack is part of the window's
+ * cost - and it is a request, not a fact, so process.c validates it against
+ * what the port can describe (a power of two that divides the grain).
+ *
+ * The name has to match: a toolchain is free to add .note.ABI-tag or
+ * .note.gnu.property, and those must never be mistaken for a request. */
+#define TOS_NOTE_STACK 1
+
+static uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+int elf_tos_stack(const uint8_t *data, uint32_t size, uint32_t *bytes_out)
+{
+    const Elf32_Ehdr *eh;
+
+    if (bytes_out)
+        *bytes_out = 0;
+    if (header_ok(data, size, &eh) != 0)
+        return -1;
+
+    for (uint32_t i = 0; i < eh->e_phnum; i++) {
+        const Elf32_Phdr *ph = phdr_at(data, eh, i);
+        uint32_t off, end;
+
+        if (ph->p_type != PT_NOTE)
+            continue;
+        if (ph->p_offset > size || ph->p_filesz > size - ph->p_offset)
+            continue;
+        off = ph->p_offset;
+        end = off + ph->p_filesz;
+
+        /* A note is three words of header, then the name and the
+           descriptor, each padded to four bytes. */
+        while (off <= end && end - off >= 12) {
+            uint32_t namesz   = le32(data + off);
+            uint32_t descsz   = le32(data + off + 4);
+            uint32_t type     = le32(data + off + 8);
+            uint32_t name_off = off + 12;
+            uint32_t desc_off = name_off + ((namesz + 3u) & ~3u);
+            uint32_t next     = desc_off + ((descsz + 3u) & ~3u);
+
+            if (next < desc_off || next > end)
+                break;      /* truncated, or a length that cannot be true */
+            if (type == TOS_NOTE_STACK && namesz >= 6 && descsz >= 4 &&
+                memcmp(data + name_off, "TinyOS", 6) == 0) {
+                if (bytes_out)
+                    *bytes_out = le32(data + desc_off);
+                return 0;
+            }
+            off = next;
+        }
+    }
     return 0;
 }
 

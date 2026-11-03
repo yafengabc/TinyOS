@@ -112,11 +112,11 @@ func cmdEmutest(args []string) int {
 		{"mem", "mem", []string{"heap demo"}},
 		{"uptime", "uptime", []string{"uptime:", "pid="}},
 		// wink is the window the task actually holds.  The shell's 8 KiB
-		// image plus the 16 KiB stack and the 4 KiB guard rounds up to
+		// image plus the 8 KiB stack and the 4 KiB guard rounds up to
 		// 32 KiB - it used to reserve a fixed 64 KiB whatever it needed.
 		// stk is the stack high-water mark: exec() fills the stack with 0xCC
 		// and ps scans up for the first byte that changed, so this column is
-		// the only measurement of how much of the 16 KiB stack is guesswork.
+		// the only measurement of how much of the stack is guesswork.
 		{"ps", "ps", []string{"cpums wink stk", "  32 "}},
 		// Four frames of 2 KiB, parked at the bottom: the number ps reports
 		// has to land in the eights.  A scanner that never looked, or that
@@ -136,8 +136,9 @@ func cmdEmutest(args []string) int {
 		{"ls /proc", "ls /proc", []string{"uptime", "ps", "mem", "stack"}},
 		// The record is taken when a task dies, not sampled: stk burned 8.3
 		// KiB and exited during the wait above, and this still reports it.
-		// That is the number that decides whether PLAT_STACK_BYTES is right,
-		// so it has to survive the program it belongs to.
+		// That is the number a program is supposed to read before choosing
+		// its own TOS_STACK(), so it has to survive the program it belongs
+		// to.
 		{"proc stack", "cat /proc/stack", []string{"high-water", "8.", "stk"}},
 		{"cd /dev", "cd /dev", []string{"/dev tos>"}},
 		{"ls (in /dev)", "ls", []string{"gpio4"}},
@@ -165,17 +166,27 @@ func cmdEmutest(args []string) int {
 		{"rm missing file", "rm /nope", []string{"cannot remove /nope"}},
 		{"rm", "rm /big.bin", []string{"tos>"}},
 		{"dd after rm", "dd if=/big.bin", []string{"cannot open /big.bin"}},
-		// Windows are sized to the image, so the user area packs: five idle
-		// holders plus the shell fill all 192 KiB (6 x 32 KiB), and the next
-		// exec has to be refused with a reason.  The old fixed-slot
-		// allocator could only say "out of task windows", which on a machine
-		// with free memory reads like a leak; the largest-free-block number
-		// is what tells a full area from a fragmented one.
+		// Windows are sized to the image, so the user area packs: ten idle
+		// holders at 16 KiB each plus the shell's 32 KiB fill all 192 KiB,
+		// and the next exec has to be refused with a reason.  The holders
+		// used to be 32 KiB because every task reserved a 16 KiB stack;
+		// the default is 8 KiB now, so a 300-byte program gets a 16 KiB
+		// window and the area holds twice as many.  The old fixed-slot
+		// allocator could only say "out of task windows", which on a
+		// machine with free memory reads like a leak; the
+		// largest-free-block number is what tells a full area from a
+		// fragmented one.
 		{"hold 1", "hold 60 &", []string{"tos>"}},
+		{"ps (small window)", "ps", []string{"  16 "}},
 		{"hold 2", "hold 60 &", []string{"tos>"}},
 		{"hold 3", "hold 60 &", []string{"tos>"}},
 		{"hold 4", "hold 60 &", []string{"tos>"}},
 		{"hold 5", "hold 60 &", []string{"tos>"}},
+		{"hold 6", "hold 60 &", []string{"tos>"}},
+		{"hold 7", "hold 60 &", []string{"tos>"}},
+		{"hold 8", "hold 60 &", []string{"tos>"}},
+		{"hold 9", "hold 60 &", []string{"tos>"}},
+		{"hold 10", "hold 60 &", []string{"tos>"}},
 		{"user area full", "hold 1", []string{"largest free block is 0 KiB"}},
 	}
 	for _, c := range checks {

@@ -4,6 +4,34 @@
 #include "types.h"
 #include "tos.h"      /* TOS_PIN_*, the pin modes gpio_mode() takes */
 
+/* How much stack this program needs, when the board's default is not it.
+ *
+ *     TOS_STACK(16 * 1024);      -- at file scope, once per program
+ *
+ * The number travels inside the image as an ELF note (user.ld gives .note.tos
+ * a PT_NOTE segment of its own) and the kernel reads it *before* it sizes the
+ * task window, so this is not a reservation made at run time - it decides how
+ * big a window the program gets at all.  A program that recurses (a parser
+ * walking a tree, an editor rendering a long line) asks for more; a program
+ * that uses 0.3 KiB and would otherwise reserve 8 gets its window back.
+ *
+ * It must be a power of two, at least one page, and no bigger than the
+ * board's task-window grain (16 KiB on the C3 and the RP2040, 64 KiB on the
+ * PC and the QEMU boards) - that is what the MMU-less protection units can
+ * describe.  Anything else is refused at exec time, naming the number, and
+ * the program does not start.
+ *
+ * Choose the number by measuring, not by taste: `ps` prints the high-water
+ * mark in its stk column, so run the program and read what it actually used.
+ */
+#define TOS_STACK(bytes)                                                     \
+    __attribute__((section(".note.tos"), used, aligned(4)))                  \
+    static const struct {                                                    \
+        unsigned namesz, descsz, type;                                       \
+        char     name[8];                                                    \
+        unsigned stack_bytes;                                                \
+    } tos_stack_note = { 7u, 4u, 1u, "TinyOS", (unsigned)(bytes) }
+
 /* system calls */
 int  write(int fd, const void *buf, int len);
 int  read(int fd, void *buf, int len);

@@ -16,10 +16,13 @@
 #define MAX_ARGS    12
 #define MAX_FDS     12
 
-/* Both live in the board's layout.c: the size of the window decides what
- * fits, and the port that maps them (rv32 PMP, ARM MPU) needs the same
- * numbers.  process_init() checks the combination. */
-#define STACK_BYTES PLAT_STACK_BYTES
+/* The board's default stack size, from layout.c.  It is what a task gets
+ * when its image does not ask for anything else; a program can ask with
+ * TOS_STACK() (see elf_tos_stack) and the answer lives in proc_t.stack_size,
+ * because one board now runs tasks with different stacks at the same time.
+ * process_init() checks that the default still works with the grain and the
+ * guard; exec() checks each request against the same rules. */
+#define DEFAULT_STACK PLAT_STACK_BYTES
 
 /* Byte written over a new task's stack, and the value stack_used() looks for.
  * 0xCC is the usual x86 int3 fill; any constant works, the only requirement
@@ -124,6 +127,7 @@ typedef struct proc {
     uint32_t win_size;
     uint32_t wx_start;
     uint32_t stack_top;
+    uint32_t stack_size;    /* this task's stack: DEFAULT_STACK or its own request */
     uint32_t heap_base;
     uint32_t heap_end;
     uint32_t entry;
@@ -355,7 +359,7 @@ static void sched_idle(void)
 static void apply_protection(proc_t *p)
 {
     plat_task_protect(p->win_base, p->win_base + p->win_size, p->wx_start,
-                      p->brk, p->stack_top - STACK_BYTES, p->stack_top);
+                      p->brk, p->stack_top - p->stack_size, p->stack_top);
 }
 
 /* Save the outgoing frame and return the frame to resume.  Callers hold the
@@ -596,11 +600,14 @@ regs_t *process_suspend(regs_t *r)
 }
 
 /* Cheap sanity check of the task layout, run once at boot.  See the comment
- * on PLAT_STACK_BYTES in platform.h for why each condition is there. */
+ * on PLAT_STACK_BYTES in platform.h for why each condition is there.  This
+ * checks the *default* stack; a program that asks for its own (TOS_STACK)
+ * is checked against the same rules in exec(), because one bad image must
+ * not be able to boot-loosen the board. */
 static void layout_check(void)
 {
     uint32_t grain = PLAT_APP_GRAIN;
-    uint32_t stk = PLAT_STACK_BYTES;
+    uint32_t stk = DEFAULT_STACK;
     uint32_t guard = PLAT_HEAP_GUARD;
     uint32_t area = PLAT_APP_MAX - PLAT_APP_BASE;
     uint32_t min_win;
@@ -851,7 +858,7 @@ static uint32_t build_initial_stack(proc_t *p, char *const argv[], int argc)
     if (argc > MAX_ARGS)
         return 0;
 
-    uint32_t stack_low = p->stack_top - STACK_BYTES;
+    uint32_t stack_low = p->stack_top - p->stack_size;
     /* Leave a little headroom at the very top: some programs treat argv[]
        as writable storage and grow it upwards through the initial frame. */
     uint32_t sp = p->stack_top - 256;
@@ -953,11 +960,34 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
         proc_retire(p);
         return NULL;
     }
+    /* What the image says about its own stack, read before the window is
+       sized because the stack is the largest single line item in it.  The
+       default is the board's; a request replaces it only when the port can
+       describe that size - PMP NAPOT and MPU regions are powers of two, and
+       stack_low has to stay aligned to its own size, which is why the grain
+       has to be a multiple of it.  A request the port cannot honour is
+       refused loudly: silently rounding it would leave a program that
+       overflowed its stack with no clue which of the two numbers lied. */
+    uint32_t stk = DEFAULT_STACK;
+    uint32_t asked = 0;
+    if (elf_tos_stack(data, size, &asked) == 0 && asked != 0) {
+        if ((asked & (asked - 1u)) != 0 || asked < PLAT_PAGE_SIZE ||
+            PLAT_APP_GRAIN % asked != 0) {
+            kprintf("exec: '%s' asks for a %u-byte stack; this board needs a "
+                    "power of two from %u to %u KiB\n",
+                    path, asked, PLAT_PAGE_SIZE / 1024u, PLAT_APP_GRAIN / 1024u);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+        stk = asked;
+    }
+
     uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
     uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
-    if (span + STACK_BYTES + HEAP_GUARD > app_total) {
+    if (span + stk + HEAP_GUARD > app_total) {
         kprintf("exec: '%s' needs %u KiB, the whole user area is %u KiB\n",
-                path, (span + STACK_BYTES + HEAP_GUARD) / 1024u,
+                path, (span + stk + HEAP_GUARD) / 1024u,
                 app_total / 1024u);
         ramdisk_release(data);
         proc_retire(p);
@@ -967,7 +997,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     /* Size the window to this image and nothing more: a page for what the
        image rounds up to, the stack, the guard hole.  A small program stops
        reserving a big program's share. */
-    uint32_t win = align_up(span + STACK_BYTES + HEAP_GUARD, PLAT_APP_GRAIN);
+    uint32_t win = align_up(span + stk + HEAP_GUARD, PLAT_APP_GRAIN);
     if (win < PLAT_APP_GRAIN)
         win = PLAT_APP_GRAIN;
 
@@ -1044,10 +1074,14 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
        nobody else can be handed this range while the image loads. */
     p->wx_start = base + (link_wx - link_lo);
     /* The stack occupies the very top of the window, so that its region is
-       naturally aligned; the initial frame starts a little below. */
+       naturally aligned; the initial frame starts a little below.  Its size
+       is this task's own now, and every later use - protection, the argv
+       block, the poison fill, the high-water scan - goes through
+       stack_size so the four cannot drift apart. */
     p->stack_top = base + win;
+    p->stack_size = stk;
     p->heap_base = base + span;
-    p->heap_end = p->stack_top - STACK_BYTES - HEAP_GUARD;
+    p->heap_end = p->stack_top - stk - HEAP_GUARD;
 
     /* Fill the stack with a poison byte before anything uses it, so the
        deepest address the program ever wrote to can be recovered later: the
@@ -1055,7 +1089,7 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
        mark (see stack_used()).  Done here, before build_initial_stack()
        writes argv on top, so the arguments count as usage - they are memory
        the program can see. */
-    memset((void *)(p->stack_top - STACK_BYTES), STACK_POISON, STACK_BYTES);
+    memset((void *)(p->stack_top - stk), STACK_POISON, stk);
     p->entry = entry;
     p->brk = p->heap_base;
     set_name(p, path);
@@ -1072,16 +1106,23 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
        exception taken by a user task pushes its 8-word hardware frame (and
        then the kernel's 80-byte regs_t) below a stack pointer that can be
        as high as the initial frame.  256 bytes is what that needs, and it
-       has to be untouched by ordinary stack use, so a program that uses a
-       lot of stack must be refused here instead of faulting on its first
-       interrupt.  The guess comes from the image's .bss: the shell keeps
-       its line buffer there, at the lowest address .bss is loaded to. */
+       has to be untouched by ordinary stack use, so the initial frame plus
+       that margin has to fit inside the stack or the task must be refused
+       here instead of faulting on its first interrupt.
+       
+       This used to also refuse any program whose image was bigger than the
+       stack, on the theory that a big program probably needs a big stack.
+       That was a guess, and now that a program states its own stack the
+       guess is wrong in the one direction that matters: `dd` is a 12.8 KiB
+       image with a 0.5 KiB stack footprint (ps's stk column), and refusing
+       it for having too little stack is refusing it for being small.  What
+       is left is the only hard requirement - the initial frame fits - and
+       everything else is the program's own business, measured with stk and
+       declared with TOS_STACK(). */
     uint32_t need = (argv_block_start(p, argc) - sp) + 256u;
-    if (link_hi - link_lo > need)
-        need = link_hi - link_lo;
-    if (sp - need < p->stack_top - STACK_BYTES) {
-        kprintf("exec: '%s' needs %u bytes of stack, the window has %u\n",
-                path, need, STACK_BYTES);
+    if (sp - need < p->stack_top - stk) {
+        kprintf("exec: '%s' needs %u bytes of stack for its arguments and the "
+                "initial frame, the stack is %u\n", path, need, stk);
         proc_retire(p);
         return NULL;
     }
@@ -1433,12 +1474,12 @@ static uint32_t stack_used(const proc_t *p)
     const uint8_t *low;
     uint32_t i = 0;
 
-    if (p->win_size == 0 || p->stack_top == 0 || STACK_BYTES == 0)
+    if (p->win_size == 0 || p->stack_top == 0 || p->stack_size == 0)
         return 0;
-    low = (const uint8_t *)(p->stack_top - STACK_BYTES);
-    while (i < STACK_BYTES && low[i] == STACK_POISON)
+    low = (const uint8_t *)(p->stack_top - p->stack_size);
+    while (i < p->stack_size && low[i] == STACK_POISON)
         i++;
-    return STACK_BYTES - i;
+    return p->stack_size - i;
 }
 
 /* Format the process table into `buf`, returning the bytes written.
@@ -1456,8 +1497,9 @@ static uint32_t stack_used(const proc_t *p)
  * running it right now ("-" when it is not on one): on a two-hart build it is
  * what makes two tasks both saying "run" readable, and it is how a program
  * checks that it migrated.  `stk` is the stack high-water mark in KiB with
- * one decimal - the number that says whether the board's PLAT_STACK_BYTES is
- * the right size rather than a guess. */
+ * one decimal - the number that says whether the stack this task was given
+ * (the board default, or its own TOS_STACK() request) is the right size
+ * rather than a guess. */
 uint32_t process_ps_text(char *buf, uint32_t cap)
 {
     uint32_t off;

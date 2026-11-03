@@ -259,10 +259,21 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
  * 32 KiB window is 12 KiB of image or 4. */
 extern const uint32_t PLAT_HEAP_GUARD;
 
-/* Bytes of stack at the top of each task window.
+/* Bytes of stack at the top of a task window, for tasks that do not ask for
+ * anything else.
  *
- * A board must pick a value for which ALL of these hold, or the task layout
- * check in process_init() panics at boot:
+ * A program can ask for a different size with TOS_STACK() in its own source
+ * (user/lib.h): the number travels in its image as an ELF note, exec() reads
+ * it before sizing the window, and keeps it only if the port can describe it
+ * - a power of two, at least one page, that divides PLAT_APP_GRAIN.  That is
+ * the whole vocabulary the hardware has: rv32 encodes the stack as one NAPOT
+ * PMP entry (power of two, aligned to its own size) and an ARMv7-M MPU region
+ * has the same shape.  Because every window starts on a grain boundary and is
+ * a whole number of grains long, a stack size that divides the grain is
+ * always aligned to itself without the allocator doing anything.
+ *
+ * The DEFAULT has to satisfy all of these, or the layout check in
+ * process_init() panics at boot:
  *
  *   - it is a power of two,
  *   - PLAT_APP_GRAIN is a multiple of it,
@@ -271,13 +282,17 @@ extern const uint32_t PLAT_HEAP_GUARD;
  *   - PLAT_APP_BASE is aligned to it.
  *
  * The last two are what make a single NAPOT PMP entry describe the stack
- * exactly: every window starts at APP_BASE + k * GRAIN, and therefore every
- * window's stack_low is a multiple of the stack size.  The C3's windows
- * start at 0x403AC000 - 16 KiB aligned, because the kernel ends there - so
- * a 32 KiB stack would encode as the 32 KiB region *containing* the stack
- * instead: the guard page below it becomes writable and the upper half of
- * the real stack does not (found on the real chip by leaving one PMP rule
- * out of a test program). */
+ * exactly.  The C3's windows start at 0x403AC000 - 16 KiB aligned, because
+ * the kernel ends there - so a 32 KiB stack would encode as the 32 KiB
+ * region *containing* the stack instead: the guard page below it becomes
+ * writable and the upper half of the real stack does not (found on the real
+ * chip by leaving one PMP rule out of a test program).  The same test is why
+ * TOS_STACK() cannot ask for more than the grain.
+ *
+ * The default is the floor of every window, which is why it should be small:
+ * measured high-water marks (ps's stk column) are under 1 KiB for every
+ * program shipped, so 8 KiB on the small boards leaves a program that needs
+ * more to say so, and a program that needs less to run in half the window. */
 extern const uint32_t PLAT_STACK_BYTES;
 
 /* Register frame captured when trapping from user mode.  The layout is
