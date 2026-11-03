@@ -17,13 +17,15 @@
  * whole rather than losing everything past the first line, and typing
  * still works the same.  The x86 and qemu ports keep polling from the
  * tick and just see a deeper type-ahead. */
-/* 1 KiB for the whole queue, i.e. four maximum-length lines.  This one is
+/* 2 KiB for the whole queue, i.e. eight maximum-length lines.  This one is
  * type-ahead, not rate: a pasted batch of commands is queued here while
  * the shell runs the previous one, so the depth decides how many lines a
- * paste may carry before the tail is dropped.  Four is what a 1 KiB total
- * buys while keeping TTY_LINE_MAX at 256 - the shell's own line buffer is
- * 256 too, so shrinking the line instead would truncate long commands. */
-#define TTY_Q_LINES 4
+ * paste may carry before the tail is dropped.  Eight covers a pasted
+ * script-sized batch; four was measured to drop the tail of anything past
+ * five lines.  The line length stays at 256 - the shell's own line buffer
+ * is 256 too, so shrinking the line would truncate long commands instead
+ * of dropping whole ones, which is harder to notice. */
+#define TTY_Q_LINES 8
 #define TTY_LINE_MAX 256
 
 static char q[TTY_Q_LINES][TTY_LINE_MAX];
@@ -42,6 +44,7 @@ static int  pending_len;
 #define CTRL_CONT 2
 static int ctrl_c, ctrl_z, ctrl_bs;
 static int ctrl_age;               /* ticks a pending ^C has waited */
+static int cr_seen;                /* the previous cooked byte was a CR */
 
 /* ---- raw mode --------------------------------------------------------
  * A full-screen program needs every keystroke, including the ESC and the
@@ -68,6 +71,7 @@ static int  raw_on;
 
 void tty_set_raw(int on)
 {
+    cr_seen = 0;
     if (on) {
         /* Drop a half-typed command: it belongs to the shell, and the
          * editor's first keystroke must not complete it. */
@@ -115,6 +119,7 @@ static void tty_char(char c)
         if (c == 28)
             ctrl_bs = 1;
         pending_len = 0;
+        cr_seen = 0;
         console_echo("^C\n", 3);
         return;
     }
@@ -133,16 +138,29 @@ static void tty_char(char c)
         return;
     }
 
-    if (c == '\r')
+    /* CR and LF both end a line, but a terminal or a paste usually sends
+     * them as a pair.  Without swallowing the second half, every pasted
+     * line publishes an empty line as well: the shell answers each with a
+     * bare prompt, and the empty lines take queue slots away from the
+     * commands behind them (measured: a 12-line CRLF paste ran 5 commands
+     * where the same paste with LF alone ran 9). */
+    if (c == '\r') {
+        cr_seen = 1;
         c = '\n';
+    } else if (c == '\n' && cr_seen) {
+        cr_seen = 0;
+        return;
+    } else {
+        cr_seen = 0;
+    }
 
     if (c == '\n') {
         console_echo("\n", 1);
         /* A full queue drops the line - the reader is too far behind for
            more type-ahead to mean anything.  The count is what makes the
            queue hold TTY_Q_LINES lines: an empty slot as the full marker
-           would waste one, and with four slots that is a quarter of the
-           type-ahead a paste gets. */
+           would waste one, and with a paste that is a whole line of
+           type-ahead. */
         if (q_cnt < TTY_Q_LINES) {
             int n = pending_len < TTY_LINE_MAX - 1 ? pending_len : TTY_LINE_MAX - 1;
             memcpy(q[q_tail], pending, (size_t)n);

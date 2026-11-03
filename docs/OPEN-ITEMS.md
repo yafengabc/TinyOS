@@ -232,15 +232,16 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
    在 trap 里执行、中断关着，UART0 的接收 FIFO 就这样被饿到溢出。
 4. 修复：USJ 发送改成环形缓冲 + `SERIAL_IN_EMPTY` 中断（永不阻塞，
    没有主机就填满即丢）；USJ 接收中断（`SERIAL_OUT_RECV_PKT`）；raw 环
-   256 B → 1 KiB、cooked 4 行（1 KiB）；`process_console_kick()` 让接收中断
+   256 B → 1 KiB、cooked 8 行（2 KiB）；`process_console_kick()` 让接收中断
    直接唤醒阻塞的读者，而不是等下一个 tick。
 5. 结果：64 KiB 传输 64 s → 9.4 s，**1.0 → 7.0 KiB/s**；`accept.py` 24/24。
-6. 收尾：三个队列都收到 1 KiB。raw 环按"最坏调度延迟 = QUANTUM 5 tick =
-   50 ms，115200 只走 576 B"定；USJ 发送环 4 KiB 是按"没人插 USB"设的，
-   缩到 1 KiB 无影响；cooked 行队列从 16 行变 4 行，代价是粘贴预输入深度
-   掉到 **5 行**（4 行排队 + 1 行直接交给 shell）。实测：256 KiB 传输
-   7.1 KiB/s CRC 通过、64 KiB 7.0 KiB/s、`accept.py` 24/24。C3 `.bss`
-   105 984 → 96 720 B。
+6. 收尾：各队列按实测约束收缩。raw 环按"最坏调度延迟 = QUANTUM 5 tick =
+   50 ms，115200 只走 576 B"定到 1 KiB；USJ 发送环 4 KiB 是按"没人插 USB"
+   设的，缩到 1 KiB 无影响；cooked 行队列 16 → 8 行（2 KiB），实测粘 9 行
+   能全跑、12 行丢尾巴。顺带修了两个真 bug：环形判满用"空槽当满"白丢一个
+   槽位；`\r\n` 被当成两个换行给每行多塞一个空行（粘 12 行 CRLF 只跑 5 行，
+   修后与 `\n` 一致跑 9 行）。实测：256 KiB 传输 7.1 KiB/s、64 KiB 7.1 KiB/s
+   CRC 通过、`accept.py` 24/24。C3 `.bss` 105 984 → 97 760 B。
 
 **尾巴**：本机只插了 CH343（COM13 = UART0），原生 USB 口没线，所以 USJ 的
 RX 中断和 TX 环只在代码层对称实现，没在真机跑到主机侧。插线后要验：用新出现
