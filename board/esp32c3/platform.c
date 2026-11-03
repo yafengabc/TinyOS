@@ -52,6 +52,9 @@ static int uart_rx_count(void)
 void usj_init(void);
 void usj_putc(char c);
 int  usj_getchar(void);
+void usj_irq_init(void);
+void usj_irq_service(void);
+void usj_flush(void);
 
 void plat_console_init(void)
 {
@@ -72,6 +75,7 @@ void plat_console_flush(void)
 {
     while (uart_tx_count() > 0)
         ;
+    usj_flush();
 }
 
 /* Echo paces itself against this instead of blocking in putc(): the drain
@@ -160,8 +164,15 @@ int plat_console_getchar(void)
  * on line 2 arrives as 0x80000002, verified on the real chip). */
 #define TG0_T0_SRC       32u
 #define UART0_SRC        21u   /* ETS_UART0_INTR_SOURCE */
+#define USJ_SRC          26u   /* ETS_USB_SERIAL_JTAG_INTR_SOURCE */
 #define CPU_LINE_TICK    2u
 #define CPU_LINE_UART    3u
+#define CPU_LINE_USJ     4u
+/* NB: third_party/esp32c3-soc/interrupts.h is NOT the C3's table - it is
+ * missing the Bluetooth sources and numbers everything six lower (its
+ * UART0 reads 15).  The numbers here are the real C3 ones: 21 and 32 are
+ * verified on the chip, and 26 follows the same esp-idf file USJ shares
+ * that spacing with (UART0, UART1, LEDC, EFUSE, TWAI, USJ). */
 #define INT_ENABLE_REG   (INTMTX_BASE + 0x104)
 #define INT_PRI_REG(n)   (INTMTX_BASE + 0x114 + 4 * (n))
 #define INT_THRESH_REG   (INTMTX_BASE + 0x194)
@@ -211,10 +222,20 @@ void plat_timer_init(uint32_t hz)
     mmio_write32(INT_THRESH_REG, 1);
     mmio_write32(INT_ENABLE_REG, mmio_read32(INT_ENABLE_REG) | (1u << CPU_LINE_TICK));
 
-    /* Console input on its own line, see the UART_INT_* comment above. */
+    /* Console input on its own line, see the UART_INT_* comment above.
+     * The USB-Serial/JTAG takes a third line for the same reason: its RX
+     * is one 64-byte USB packet per interrupt, and picking that up at the
+     * next tick (64 B/tick = 6.4 KiB/s) was what pinned the file transfer
+     * to 1 KiB/s.  Line 4, like the others - level type is the reset
+     * default of the TYPE register, priority 1. */
     mmio_write32(UART0_MAP_REG, CPU_LINE_UART);
     mmio_write32(INT_PRI_REG(CPU_LINE_UART), 1);
     mmio_write32(INT_ENABLE_REG, mmio_read32(INT_ENABLE_REG) | (1u << CPU_LINE_UART));
+
+    mmio_write32(INTMTX_BASE + 4 * USJ_SRC, CPU_LINE_USJ);
+    mmio_write32(INT_PRI_REG(CPU_LINE_USJ), 1);
+    mmio_write32(INT_ENABLE_REG, mmio_read32(INT_ENABLE_REG) | (1u << CPU_LINE_USJ));
+    usj_irq_init();               /* route first, then enable the source */
 
     mmio_write32(UART_CONF1_REG,
                  (mmio_read32(UART_CONF1_REG) & ~0x1FFu) | UART_RX_FULL_THRHD);
@@ -282,12 +303,17 @@ int plat_irq_is_tick(uint32_t line)
 
 /* The receive-timeout bit is a latch, not a level: it stays set until it is
  * written back, so the interrupt would re-fire immediately on return and
- * starve every task (symptom: keystrokes echo but nothing executes). */
+ * starve every task (symptom: keystrokes echo but nothing executes).  The
+ * USJ packet bit behaves the same from the software side - the trap
+ * handler drains first (tty_poll), then acks here, so a packet arriving
+ * in between re-latches and fires again. */
 void plat_irq_service(uint32_t line)
 {
     if (line == CPU_LINE_UART)
         mmio_write32(UART_INT_CLR_REG,
                      UART_INT_RXFIFO_FULL | UART_INT_RXFIFO_TOUT);
+    if (line == CPU_LINE_USJ)
+        usj_irq_service();
 }
 
 uint32_t plat_uptime_ms(void)

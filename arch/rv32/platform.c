@@ -55,13 +55,18 @@ regs_t *trap_handler(regs_t *f)
 
         if (!plat_irq_is_tick(line)) {
             /* A board interrupt that is not the clock - on the C3 that is
-             * console input.  Drain it and go straight back to whatever we
-             * interrupted: running the tick path here would spend a time
-             * slice and advance the clock once per received byte.  Drain
-             * first, acknowledge second: the timeout bit latches, and
-             * acking before the FIFO is empty lets it set again. */
+             * console input (UART0 on one line, the USB-Serial/JTAG packet
+             * source on another).  Drain it and go straight back to
+             * whatever we interrupted: running the tick path here would
+             * spend a time slice and advance the clock once per received
+             * byte.  Drain first, acknowledge second: the timeout bit
+             * latches, and acking before the FIFO is empty lets it set
+             * again.  Then hand the fresh bytes to whoever is blocked
+             * reading them - waiting for the next tick would cap every
+             * console transfer at 100 handovers per second. */
             tty_poll();
             plat_irq_service(line);
+            process_console_kick();
             return f;
         }
 

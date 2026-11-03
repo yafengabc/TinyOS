@@ -17,7 +17,8 @@
 | 7 | 每程序栈（默认 8 KiB + `TOS_STACK`） | 做，ELF note 通道，PMP 规则数不变 | 内核 +~60 行；小工具窗口 32→16 KiB | **已合并**（`PLATFORM-DESIGN.md` §8.9.1） |
 | 8 | 每程序堆（`TOS_HEAP`，note type=2） | 做，与栈同一个通道，无 2 的幂约束（TOR） | 窗口公式 + 堆一项；脚本引擎直接受益 | **已合并**（`PLATFORM-DESIGN.md` §8.9.3） |
 | 9 | 控制台传文件（`tosput` + `rx`） | 做，行协议 + 停等 + 板端 CRC32，零内核改动 | `tools/tosput` + `user/rx.c` | **已合并**（`docs/FILE-TRANSFER.md`） |
-| 10 | 串口 RX 突发上限 ~128 B/tick | 调研：tick 轮询 + 硬件 FIFO，超了丢字节（含 `\n`）；USJ 是否有 NAK 流控待查 | 传文件吞吐被钉在 ~1 KiB/s | 已绕过（宿主分段 96 B/30 ms）；内核侧可做：更快轮询 / 中断驱动 RX / 查 USJ 流控 |
+| 10 | 串口 RX 突发上限 ~128 B/tick | **原诊断错了**：UART0 接收早已中断驱动；真凶是 `usj_putc` 无 USB 主机时每字节空转超时，而内核打印关中断，把 UART0 排空一起饿死 | 已改成 USJ 发送环 4 KiB + IN_EMPTY 中断、USJ 接收中断、raw 环 4 KiB、中断里唤醒读者 | **已合并**；吞吐 1.0 → 7.0 KiB/s（理论 8.6）。原生 USB 两路中断未上真机（本机只插 CH343），见 §10 |
+| 11 | 传文件窗口化（不等 ACK 连发 N 块） | 未评估：当前 7.0 KiB/s 已是 115200+base64 的 81%，窗口化只能再挤 ~19% | 协议 + 板端乱序/重排逻辑 | 待评估（优先级低） |
 
 ---
 
@@ -207,12 +208,39 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
 - **SMP 没有任务亲和性**：一条共享队列，任务会在核之间迁移（`smp` 程序会报
   `cpu 1 then 0`）。要绑核就加 `proc_t.affinity` + `sched_pick()` 过滤，
   属于策略，先没做。
-- **C3 的原生 USB（USJ）控制台**：代码在，真机没插线验证过。
+- **C3 的原生 USB（USJ）控制台**：RX 中断和 TX 环都已实现，但本机只插了
+  CH343，主机侧没验过（见 §10 尾巴）。
 - **SPI1 硬件页编程（PP）没通**：写走 ROM，不阻塞。
 - **README 说「默认 `-Oz`」是错的**：`internal/build/build.go` 的 `TOS_OPT` 默认 `-O2`
   （真机才建议 `-Oz`）。改哪一边等你定。
 - `0x40380C00 / 0x3FC80C00 / 0x3FC8F000 / sp-256` 处 store→load 读回 `0x60000000`，
   疑似 flash cache 保留区，未解。
+
+## 10. 控制台 RX/TX 与传文件吞吐（已合并，原生 USB 待验）
+
+真机排查过程（2026-11-03，C3/COM13）：
+
+1. 现象：`tosput` 传文件停在 chunk 0；板子回 `NAK 0 r1[...]`，片段从 base64
+   第 120 字符开始 = **行首 128 字符丢失**；python 探针同样的字节却全通。
+2. 一度怀疑 USJ 中断没使能——回读 `INT_ENA=4`（bit 2 已开）、`INT_RAW=8`
+   （`SERIAL_IN_EMPTY` 上电默认置位，未使能），使能是对的。**顺带发现
+   `third_party/esp32c3-soc/interrupts.h` 不是 C3 的表**：它少掉蓝牙那 6 个
+   源，整体偏移（UART0 读出来是 15，真机是 21）。真值：UART0=21、USJ=26、
+   TG0_T0=32，后两个与真机验证过的 21/32 同间距。
+3. 决定性实验：把 `usj_putc()` 临时改成直接 return，10/10 块连续全通。
+   所以真凶是**无 USB 主机时 `usj_putc` 每字节空转 40000 次超时**；内核打印
+   在 trap 里执行、中断关着，UART0 的接收 FIFO 就这样被饿到溢出。
+4. 修复：USJ 发送改成 4 KiB 环形缓冲 + `SERIAL_IN_EMPTY` 中断（永不阻塞，
+   没有主机就填满即丢）；USJ 接收中断（`SERIAL_OUT_RECV_PKT`）；raw 环
+   256 B → 4 KiB、cooked 16 行；`process_console_kick()` 让接收中断直接唤醒
+   阻塞的读者，而不是等下一个 tick。
+5. 结果：64 KiB 传输 64 s → 9.4 s，**1.0 → 7.0 KiB/s**；`accept.py` 24/24。
+
+**尾巴**：本机只插了 CH343（COM13 = UART0），原生 USB 口没线，所以 USJ 的
+RX 中断和 TX 环只在代码层对称实现，没在真机跑到主机侧。插线后要验：用新出现
+的 COM 口传一遍文件；`cat` 一个大文件确认输出不缺字；`INT_RAW` 里
+`SERIAL_IN_EMPTY` 是否按包触发（若 TX 环不排空，症状是**只在该口静默**，
+UART0 不受影响）。
 
 ## 建议的讨论顺序
 

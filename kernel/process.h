@@ -26,6 +26,13 @@ regs_t  *process_exit(regs_t *r, int code);
 /* Called by the arch on every timer tick, with the interrupted frame. */
 void     process_tick(regs_t *r);
 
+/* Hand queued console input to a blocked reader.  The tick calls it once
+ * per tick; a board that receives console input by interrupt calls it
+ * right after the drain so the reader wakes immediately (see the C3's
+ * UART0 / USB-Serial/JTAG lines).  Trap context, no frame in, no frame
+ * out: the woken task simply joins the run queue. */
+void     process_console_kick(void);
+
 /* Trap exit: gives the CPU away if the slice is over. */
 regs_t  *process_resched(regs_t *r);
 

@@ -455,6 +455,44 @@ static regs_t *done(regs_t *r, int32_t val)
     return r;
 }
 
+/* Hand queued console input to whoever is blocked reading it.  The tick
+ * calls this once per tick; the boards that drive console RX from a real
+ * interrupt (the C3's UART0 and USB-Serial/JTAG lines) also call it from
+ * the interrupt, right after the drain, so a blocked reader is woken the
+ * moment its bytes land instead of at the next tick - a transfer runs at
+ * the speed of the wire, not at 100 Hz.
+ *
+ * Same rule as process_tick: only meaningful on the CPU that owns the
+ * console.  Runs in trap context either way, and never on behalf of the
+ * current task, so it needs no frame and returns nothing. */
+void process_console_kick(void)
+{
+    if (tty_is_raw()) {
+        /* Raw reader: hand over whatever arrived, a keystroke at a time.
+         * An editor wants the byte before the next tick, not after a
+         * newline that will never come. */
+        if (tty_raw_ready()) {
+            for (int i = 0; i < MAX_PROCS; i++) {
+                proc_t *p = &procs[i];
+                if (p->state != ST_WAIT_INPUT)
+                    continue;
+                int n = tty_take_raw((char *)p->in_buf, (int)p->in_len);
+                make_ready(p, n);
+                break;
+            }
+        }
+    } else if (tty_line_ready()) {
+        for (int i = 0; i < MAX_PROCS; i++) {
+            proc_t *p = &procs[i];
+            if (p->state != ST_WAIT_INPUT)
+                continue;
+            int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
+            make_ready(p, n);
+            break;
+        }
+    }
+}
+
 void process_tick(regs_t *r)
 {
     uint64_t now;
@@ -484,30 +522,7 @@ void process_tick(regs_t *r)
     if (cpu_id() == 0) {
         tty_poll();
         console_echo_tick();
-        if (tty_is_raw()) {
-            /* Raw reader: hand over whatever arrived, a keystroke at a time.
-             * An editor wants the byte before the next tick, not after a
-             * newline that will never come. */
-            if (tty_raw_ready()) {
-                for (int i = 0; i < MAX_PROCS; i++) {
-                    proc_t *p = &procs[i];
-                    if (p->state != ST_WAIT_INPUT)
-                        continue;
-                    int n = tty_take_raw((char *)p->in_buf, (int)p->in_len);
-                    make_ready(p, n);
-                    break;
-                }
-            }
-        } else if (tty_line_ready()) {
-            for (int i = 0; i < MAX_PROCS; i++) {
-                proc_t *p = &procs[i];
-                if (p->state != ST_WAIT_INPUT)
-                    continue;
-                int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
-                make_ready(p, n);
-                break;
-            }
-        }
+        process_console_kick();
 
         /* Control characters act on the foreground task - whoever is blocked
            reading the console - which is exactly the job the two shells above
@@ -1923,7 +1938,10 @@ static regs_t *block_on_pipe(regs_t *r, struct pipe *p, int dir,
 static regs_t *console_read(regs_t *r, uint32_t ptr, uint32_t len)
 {
     if (tty_is_raw()) {
-        uint32_t room = len < 128 ? len : 128;
+        /* The cap bounds one handover, not the transfer: with the 4 KiB
+         * raw queue a bulk reader (user/rx.c) is woken per receive
+         * interrupt and drains what is there. */
+        uint32_t room = len < 1024 ? len : 1024;
         if (!tty_raw_ready())
             return process_block_read(r, ptr, room);
         return done(r, (uint32_t)tty_take_raw((char *)ptr, (int)room));

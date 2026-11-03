@@ -10,12 +10,10 @@ package main
 //	...
 //	send "E <crc32hex>\n"         wait for "DONE <crc32hex> <total>"
 //
-// Chunks are 128 bytes: a D-line is then ~180 characters, which fits
-// through the kernel's tick-polled UART path without pacing (the C3
-// loses bytes past ~350 characters of unbroken burst).  Stop-and-wait is
-// still the protocol: while rx is
-// inside write() programming a flash block, the board cannot drain its
-// tty queue, so the sender must be silent until the ACK comes back.
+// Chunks are 512 bytes, sent as one ~700-character base64 line.  Stop-
+// and-wait is the protocol: while rx is inside write() programming a
+// flash block, the board is not reading, so the sender must be silent
+// until the ACK comes back.
 
 import (
 	"bufio"
@@ -32,8 +30,7 @@ import (
 )
 
 const (
-	chunkSize  = 512 // well under one tick of UART FIFO on the board; see
-	// the NAK story in docs/PLATFORM-DESIGN.md §8.10
+	chunkSize  = 1024 // one flash write per chunk on the board
 	readyWait  = 8 * time.Second
 	ackWait    = 4 * time.Second
 	ackRetries = 3
@@ -85,23 +82,30 @@ func OpenSender(name string, baud int,
 	return &Sender{port: p, logf: logf, progress: progress, cancel: cancel}, nil
 }
 
-// writePaced sends a protocol line in small pieces with gaps between
-// them.  The kernel polls the UART from a 100 Hz tick and the C3's RX
-// FIFO is 128 bytes, so an uninterrupted burst longer than about 300
-// characters overruns it: bytes are lost, the newline with them, and rx
-// never sees a line at all.  96 bytes per piece under 12 ms keeps the
-// FIFO below its depth at every point in time; the stop-and-wait ACK is
-// what already bounds the rest.
+// writePaced sends a protocol line in pieces with small gaps.  When the
+// board drained its console from a 100 Hz tick, an unbroken burst longer
+// than about 300 characters overran the 128-byte receive FIFO and rx
+// never saw the newline; that forced 96 characters every 30 ms and a
+// ~1 KiB/s ceiling.  The kernel now hands console input to a blocked
+// reader from the receive interrupt (not the next tick) and the raw queue
+// is 4 KiB, so a chunk line can go out in a handful of writes.
+//
+// Every write is checked: the Windows driver may accept only part of a
+// buffer, and a silently short write costs a whole retransmitted chunk.
 func (s *Sender) writePaced(line []byte) error {
-	const piece = 96
-	const gap = 30 * time.Millisecond
+	const piece = 256
+	const gap = 1 * time.Millisecond
 	for off := 0; off < len(line); off += piece {
 		end := off + piece
 		if end > len(line) {
 			end = len(line)
 		}
-		if _, err := s.port.Write(line[off:end]); err != nil {
+		n, err := s.port.Write(line[off:end])
+		if err != nil {
 			return err
+		}
+		if n != end-off {
+			return fmt.Errorf("short write: %d of %d bytes", n, end-off)
 		}
 		if end < len(line) {
 			time.Sleep(gap)
@@ -260,6 +264,9 @@ func (s *Sender) SendFile(localPath, remotePath string) error {
 				return errAborted
 			}
 			payload := []byte(fmt.Sprintf("D %d %d %s\n", seq, n, enc.EncodeToString(block)))
+			if os.Getenv("TOSPUT_DEBUG") != "" {
+				s.logf("chunk %d attempt %d: %d-byte line", seq, attempt+1, len(payload))
+			}
 			if err := s.writePaced(payload); err != nil {
 				return err
 			}
@@ -277,7 +284,11 @@ func (s *Sender) SendFile(localPath, remotePath string) error {
 					break
 				}
 				if strings.HasPrefix(resp, "NAK") || strings.HasPrefix(resp, "ERR") {
+					s.logf("board said %q on chunk %d (attempt %d)", resp, seq, attempt+1)
 					break // retry the chunk
+				}
+				if os.Getenv("TOSPUT_DEBUG") != "" {
+					s.logf("ignoring %q while waiting for ACK %d", resp, seq)
 				}
 				// anything else (stale shell noise) is ignored
 			}

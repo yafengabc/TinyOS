@@ -10,7 +10,15 @@
  * lose the lines after the first: the shell reads them one at a time and
  * answers each.  The queue holds whole lines only; a half-typed line has
  * its own buffer and joins the queue on the newline. */
-#define TTY_Q_LINES 8
+/* Both consoles now land their bytes from real receive interrupts (the C3
+ * routes UART0 and the USB-Serial/JTAG packet interrupt each to its own
+ * CPU line), so the queue absorbs a burst the instant it arrives instead
+ * of one tick's worth.  That makes a big ring worth its memory: a transfer
+ * program (user/rx.c) can be handed a whole flash-write's worth of bytes
+ * while the sender keeps going, and typing still works the same.  The
+ * x86 and qemu ports keep polling from the tick and just see a deeper
+ * type-ahead. */
+#define TTY_Q_LINES 16
 #define TTY_LINE_MAX 256
 
 static char q[TTY_Q_LINES][TTY_LINE_MAX];
@@ -39,7 +47,7 @@ static int ctrl_age;               /* ticks a pending ^C has waited */
  * Signals still work (^C has to be able to kill a wedged editor); the mode
  * belongs to the console, not to the process, and process.c drops it when
  * the reading task dies so the shell gets its line discipline back. */
-#define RAW_Q 256
+#define RAW_Q 4096
 static char raw_q[RAW_Q];
 static int  raw_head, raw_tail;        /* ring: head == tail means empty */
 static int  raw_on;
@@ -146,10 +154,12 @@ static void tty_char(char c)
 
 void tty_poll(void)
 {
-    /* Drain everything the device has: a burst arriving between two ticks
-       must be cooked in the same tick, or the echo and the answers drift
-       apart. */
-    for (int i = 0; i < 4 * TTY_LINE_MAX; i++) {
+    /* Drain everything the device has: a burst arriving between two
+       drains must be cooked in the same drain, or the echo and the
+       answers drift apart.  The bound only guards against a device that
+       never runs dry - a 4 KiB raw queue is the most that can be waiting,
+       so twice that is safely above anything reachable. */
+    for (int i = 0; i < 2 * RAW_Q; i++) {
         int c = plat_console_getchar();
         if (c < 0)
             return;

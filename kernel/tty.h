@@ -5,11 +5,14 @@
 
 /* Console line discipline.
  *
- * Input is polled from the timer tick (neither the 16550 nor the PS/2 port
- * is wired to an interrupt here), cooked into a single line buffer, and
- * collected by whoever is reading.  Cooking happens whether or not anybody
- * is reading, so typing echoes immediately and no process has to sit in the
- * kernel spinning on the UART while others wait for the CPU.
+ * Input arrives however the board delivers it: from the timer tick where
+ * the device is polled (x86, qemu), or from the board's own receive
+ * interrupt (the C3 routes UART0 and the USB-Serial/JTAG packet source
+ * each to its own CPU line).  Either way the bytes are cooked into a
+ * single line buffer and collected by whoever is reading.  Cooking
+ * happens whether or not anybody is reading, so typing echoes immediately
+ * and no process has to sit in the kernel spinning on the UART while
+ * others wait for the CPU.
  *
  * One line of type-ahead: anything typed while a line is already waiting is
  * dropped, not queued.  A burst (a paste, or a script feeding several lines

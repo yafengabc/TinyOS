@@ -35,8 +35,8 @@
  * transfer is detected, not assumed.
  */
 
-#define CHUNK 512
-#define LINE_MAX 768              /* "D nnnn 684 b64" fits with room    */
+#define CHUNK 1024
+#define LINE_MAX 1536             /* "D nnnn 1368 b64" fits with room   */
 #define B64_MAX ((CHUNK + 2) / 3 * 4)
 
 static int fd = -1;
