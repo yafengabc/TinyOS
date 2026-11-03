@@ -81,6 +81,17 @@ regs_t *trap_handler(regs_t *f)
     }
 
     if (from_user(f)) {
+        /* A load or store that ran off the bottom of the stack may be the
+         * stack running out rather than a bug: the guard hole under it is
+         * exactly where the first byte past the end lands.  If the task's
+         * window still has heap slack, the stack is doubled into it and the
+         * instruction is retried - it faulted before writing, so there is
+         * nothing to undo.  Everything else (and a growth that the port
+         * cannot encode, or that the heap is in the way of) dies as before. */
+        if ((cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT) &&
+            process_stack_grow(f->mtval, f->sp))
+            return f;
+
         /* A user program trapped: kill it and keep the system alive. */
         kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
                 cause_name(cause), f->mepc);

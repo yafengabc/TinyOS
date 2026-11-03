@@ -127,7 +127,10 @@ typedef struct proc {
     uint32_t win_size;
     uint32_t wx_start;
     uint32_t stack_top;
-    uint32_t stack_size;    /* this task's stack: DEFAULT_STACK or its own request */
+    uint32_t stack_size;    /* this task's stack right now: the board's
+                             * default, its own TOS_STACK() request, or what
+                             * a stack fault grew it to (see
+                             * process_stack_grow) */
     uint32_t heap_base;
     uint32_t heap_end;
     uint32_t entry;
@@ -1437,6 +1440,73 @@ uint32_t process_sbrk(uint32_t bytes)
     return old;
 }
 
+/* The stack is a soft limit.  Called from a port's user-fault path when a
+ * load or store left the stack: if the address it wanted is still inside the
+ * task's own window, the stack is doubled into the heap's unused tail and
+ * the instruction is retried.  Nothing is reserved for this ahead of time -
+ * a window is sized for the stack the program asked for, and the slack
+ * between the break and the guard belongs to the heap until the stack needs
+ * it, which is the whole point: the two share one region.
+ *
+ * Two conditions are not negotiable:
+ *
+ *   - the new low has to be encodable.  PMP NAPOT (rv32) and MPU regions
+ *     describe a power of two aligned to itself, so the sizes reachable from
+ *     here are 2x, and only while stack_top is a multiple of it.  That is
+ *     what keeps the rule count at four and lets an 8 KiB task and a 16 KiB
+ *     task share the machine.
+ *   - the heap must not be in the way: brk + guard has to stay below the new
+ *     low, so the hole that turns the *next* overflow into a fault instead of
+ *     a silent overwrite keeps its board size.
+ *
+ * Returning 1 means the faulting instruction can be re-executed unchanged:
+ * it was refused before it wrote anything.  0 leaves the decision to the
+ * caller, which kills the task exactly as it always did. */
+int process_stack_grow(uint32_t addr, uint32_t sp)
+{
+    proc_t *p = current;
+    uint32_t old, want, low;
+
+    if (!p || p->win_size == 0 || p->stack_size == 0)
+        return 0;
+
+    old = p->stack_size;
+    want = old << 1;
+    if (want < old)
+        return 0;
+
+    /* The stack pointer itself has to have left the region.  A stray pointer
+     * into the hole while sp is still inside the stack is a bug in the
+     * program, not a stack that ran out, and handing it 8 KiB more would
+     * simply hide the bug - and shrink the heap of a program that did not
+     * ask for it. */
+    if (sp >= p->stack_top - old)
+        return 0;
+
+    if ((p->stack_top % want) != 0)
+        return 0;                            /* the port cannot describe it */
+
+    low = p->stack_top - want;
+    if (addr < low)
+        return 0;                            /* deeper than one step reaches */
+
+    if (p->brk + HEAP_GUARD > low)
+        return 0;                            /* the heap is in the way */
+
+    /* Poison the new strip before it becomes writable: stack_used() scans up
+     * from the bottom and would otherwise report the heap's leftovers as
+     * stack the program had used. */
+    memset((void *)low, STACK_POISON, p->stack_top - old - low);
+
+    p->stack_size = want;
+    p->heap_end = low - HEAP_GUARD;
+    apply_protection(p);
+
+    kprintf("\n[pid %d] stack grown to %u KiB, heap ceiling %u KiB\n",
+            p->pid, want / 1024u, (p->heap_end - p->heap_base) / 1024u);
+    return 1;
+}
+
 /* Fixed width: the kernel formatter has no %-5s, and adding one would cost
  * more than padding five strings. */
 static const char *state_name(int st)
@@ -1496,10 +1566,12 @@ static uint32_t stack_used(const proc_t *p)
  * its share of the machine since the task started.  The `c` column is the CPU
  * running it right now ("-" when it is not on one): on a two-hart build it is
  * what makes two tasks both saying "run" readable, and it is how a program
- * checks that it migrated.  `stk` is the stack high-water mark in KiB with
- * one decimal - the number that says whether the stack this task was given
- * (the board default, or its own TOS_STACK() request) is the right size
- * rather than a guess. */
+ * checks that it migrated.  `stk/sz` is the stack high-water mark in KiB with
+ * one decimal over the stack the task has *now*: the board default, a
+ * TOS_STACK() request, or the 2x a fault handed it when its window had heap
+ * slack to spare (process_stack_grow).  The numerator is the number that says
+ * whether the size is right; the denominator says which size is being
+ * judged. */
 uint32_t process_ps_text(char *buf, uint32_t cap)
 {
     uint32_t off;
@@ -1509,7 +1581,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
     if (!buf || cap < 64)
         return 0;
 
-    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums wink stk  name\n");
+    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums wink stk/sz  name\n");
     if (n < 0)
         return 0;
     off = (uint32_t)n;
@@ -1550,12 +1622,16 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
 
         if (off >= cap - 1)
             break;
+        /* The stack size is whatever this task holds right now, so it is
+           printed as is: the formatter has no left-justified width, and a
+           column that shifts by one character when a stack doubles is a
+           small price for not printing "%-2u" on the console. */
         n = ksnprintf(buf + off, cap - off,
-                      "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u  %s\n", p->pid,
+                      "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n", p->pid,
                       p->parent ? p->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
                       busy / 1000u, p->win_size / 1024u,
-                      stk10 / 10u, stk10 % 10u, p->name);
+                      stk10 / 10u, stk10 % 10u, p->stack_size / 1024u, p->name);
         if (n > 0)
             off += (uint32_t)n;
     }

@@ -114,15 +114,18 @@ func cmdEmutest(args []string) int {
 		// wink is the window the task actually holds.  The shell's 8 KiB
 		// image plus the 8 KiB stack and the 4 KiB guard rounds up to
 		// 32 KiB - it used to reserve a fixed 64 KiB whatever it needed.
-		// stk is the stack high-water mark: exec() fills the stack with 0xCC
-		// and ps scans up for the first byte that changed, so this column is
-		// the only measurement of how much of the stack is guesswork.
-		{"ps", "ps", []string{"cpums wink stk", "  32 "}},
+		// stk/sz is the stack high-water mark over the stack the task holds
+		// right now: exec() fills the stack with 0xCC and ps scans up for the
+		// first byte that changed, so the numerator is the only measurement
+		// of how much of the stack is guesswork, and the denominator is the
+		// size being judged (the default, a TOS_STACK() request, or what a
+		// fault grew it to).
+		{"ps", "ps", []string{"cpums wink stk/sz", "  32 "}},
 		// Four frames of 2 KiB, parked at the bottom: the number ps reports
 		// has to land in the eights.  A scanner that never looked, or that
 		// counted frames the compiler dropped, would read 0.3.
 		{"stk 4", "stk 4 3000 &", []string{"tos>"}},
-		{"ps (stk)", "ps", []string{"  32    8."}},
+		{"ps (stk)", "ps", []string{"  32    8.", "/16  stk"}},
 		// Let the parked task exit before the window tests below: they fill
 		// the user area exactly, so a leftover task would refuse the fifth
 		// hold and the failure would look like a window bug.
@@ -140,6 +143,22 @@ func cmdEmutest(args []string) int {
 		// its own TOS_STACK(), so it has to survive the program it belongs
 		// to.
 		{"proc stack", "cat /proc/stack", []string{"high-water", "8.", "stk"}},
+		// The other half of the stack story.  deep declares nothing, runs off
+		// the default 8 KiB, and the kernel doubles the stack into the heap's
+		// unused tail instead of killing it - so the program that could not
+		// have known its depth survives, and the journal it wrote below the
+		// break is intact, which is what says the growth stopped where it
+		// should have.
+		{"deep grows", "deep 6 100", []string{"stack grown to 16 KiB", "journal intact"}},
+		{"deep (parked)", "deep 6 3000 &", []string{"tos>"}},
+		{"ps (grown)", "ps", []string{"  32   12."}},
+		{"wait out deep", "hold 3", []string{"tos>"}},
+		// The heap can take the slack first, and then the stack has nowhere to
+		// grow: 8 KiB of malloc moves the break to the ceiling, so the same
+		// overflow is a real fault again and the task dies as it used to.
+		// Sharing one region means the first claim wins - which is exactly
+		// why TOS_STACK() still exists for a program that cannot risk it.
+		{"deep, heap in the way", "deep 6 0 8", []string{"store access fault", "tos>"}},
 		{"cd /dev", "cd /dev", []string{"/dev tos>"}},
 		{"ls (in /dev)", "ls", []string{"gpio4"}},
 		{"cd /", "cd /", []string{"tos>"}},

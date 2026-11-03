@@ -119,11 +119,12 @@ static uint32_t fmt_lfs(char *b, uint32_t cap)
 
 /* The stack question, answered with a number instead of a guess: the board
  * default (PLAT_STACK_BYTES) is what a task gets unless its image carries a
- * TOS_STACK() note, and it is the biggest single line item in a window.  If
- * the deepest stack any program has ever used is a tenth of it, that tenth
- * is what the default should be - or what that one program should ask for.
- * Reported in KiB with one decimal because the interesting values here are
- * 0.6 and 1.2, not 0 and 1. */
+ * TOS_STACK() note or it faults past the bottom and has its stack doubled
+ * (process_stack_grow).  It is the biggest single line item in a window, so
+ * if the deepest stack any program has ever used is a tenth of it, that tenth
+ * is what the default should be - or what that one program should ask for, if
+ * it cannot rely on growing.  Reported in KiB with one decimal because the
+ * interesting values here are 0.6 and 1.2, not 0 and 1. */
 static uint32_t fmt_stack(char *b, uint32_t cap)
 {
     char name[12];
@@ -134,7 +135,7 @@ static uint32_t fmt_stack(char *b, uint32_t cap)
     off = put(b, cap, off, "stack high-water mark\n");
     off = put(b, cap, off, "  peak    %3u.%u KiB  by %s\n",
               d10 / 10u, d10 % 10u, used ? name : "-");
-    off = put(b, cap, off, "  default %3u KiB per task, or what its image asks\n",
+    off = put(b, cap, off, "  default %3u KiB, or what the image asks, grown on a fault\n",
               PLAT_STACK_BYTES / 1024u);
     return off;
 }

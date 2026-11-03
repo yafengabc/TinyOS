@@ -189,10 +189,10 @@ tos> nice 1 spin &
 tos> run spin &
 [3]
 tos> ps
- pid ppid prio state  c cpu% cpums wink stk  name
-   1    0    0 run    -    0.0     0   32   0.6  sh
-   2    1    1 rdy    -   51.3     0   32   0.2  spin
-   3    1    0 rdy    -  100.0     0   32   0.2  spin
+ pid ppid prio state  c cpu% cpums wink stk/sz  name
+   1    0    0 run    -    0.0     0   32    0.6/8  sh
+   2    1    1 rdy    -   51.3     0   32    0.2/8  spin
+   3    1    0 rdy    -  100.0     0   32    0.2/8  spin
 ```
 
 | 列 | 含义 |
@@ -203,7 +203,7 @@ tos> ps
 | `cpu%` | 最近一段的 CPU 占用 |
 | `cpums` | 累计 CPU 毫秒 |
 | `wink` | 这个任务实际占用的窗口（KiB）。窗口按需分配，镜像越大占得越多；8 KiB 默认栈下，300 字节的程序是 16、shell 是 32、`edit` 也是 32；空闲窗口不进这一列 |
-| `stk` | 栈高水位（KiB，一位小数）：这个任务至今最深用到的栈。`exec` 把整块栈填 `0xCC`，从底部往上找第一个被改过的字节就是答案。实测 shell 0.6、`spin` 0.2、`stk 6` 12.3；历史上最深的那次记在 `cat /proc/stack`。这个数就是给程序选 `TOS_STACK()` 的依据：8 KiB 默认够不够，看它 |
+| `stk/sz` | 分子是栈高水位（KiB，一位小数）：这个任务至今最深用到的栈。`exec` 把整块栈填 `0xCC`，从底部往上找第一个被改过的字节就是答案。实测 shell 0.6、`spin` 0.2、`stk 6` 12.3；历史上最深的那次记在 `cat /proc/stack`。分母是这个任务**现在**的栈：板子的默认值、它自己 `TOS_STACK()` 要的，或者踩出栈底后内核翻倍给它的（内核会打一行 `[pid N] stack grown to 16 KiB`）。分子是"够不够"的唯一依据，分母说明在给哪个尺寸打分 |
 
 ### 2.4 实测：级间是什么样子
 

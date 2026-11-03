@@ -104,6 +104,14 @@ uint32_t process_ps_text(char *buf, uint32_t cap);
  * right number?" - see the stk column of ps for the live value. */
 uint32_t process_stack_peak(char *name, uint32_t cap);
 
+/* Called by a port's user-fault path when a load or store ran off the bottom
+ * of the stack (`addr` is the address it wanted, `sp` the user stack pointer
+ * at the time).  If the task's window still has heap slack, the stack is
+ * doubled into it and the protection is reprogrammed; the caller then retries
+ * the instruction, which faulted before writing anything.  Returns 1 when the
+ * fault was handled, 0 when it is a real fault and the task must die. */
+int process_stack_grow(uint32_t addr, uint32_t sp);
+
 /* Current working directory of the calling task.  chdir()/getcwd() and the
  * directory-relative open/stat/readdir syscalls ride on this. */
 const char *process_cwd_str(void);

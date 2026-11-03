@@ -20,9 +20,10 @@
  *
  * This is also the program that proves a task can ask for its own stack: the
  * board default is 8 KiB and six frames do not fit in that, so the note below
- * asks for 16 and exec() sizes this task's window accordingly.  Without it,
- * `stk 6` would fault into the guard hole - which is exactly the failure the
- * mechanism exists to let a program avoid declaring nothing. */
+ * asks for 16 and exec() sizes this task's window accordingly.  Without it
+ * this task would depend on the *other* mechanism (process_stack_grow): it
+ * would fault at 8 KiB and be handed 16 only if its window still had heap
+ * slack.  user/deep.c is that path, and it is why this one keeps the note. */
 
 TOS_STACK(16 * 1024);
 
