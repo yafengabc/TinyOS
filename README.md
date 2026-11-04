@@ -63,6 +63,9 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   目录是从设备表算出来的，所以 `ls /dev`、`cd /dev` 也成立（节点显示 `c` 和 `<dev>`）
 - **管道（IPC）**：`pipe()` + `dup2()`，内核里是环形缓冲 + 读/写端引用计数，
   空管道阻塞、写者全关返回 EOF、读者全关返回 EPIPE；`cat readme.txt | wc` 就是它
+- **Python 子集解释器**（`bin/py`，普通用户程序）：缩进分块、函数与递归、
+  `list`/`dict`/`str`、异常按 Python 的样子报。自带 arena（引用计数回收），
+  在 ESP32-C3 上跑百行脚本。详见下文「Python 子集解释器」
 - **双核 SMP**（`-target rv32smp`）：per-CPU 运行队列游标与内核栈、`amoswap` 自旋锁
   （进程表 + 文件系统各一把）、每 hart 独立 `mtvec` 和 `mtimecmp`，两个 hart 同时跑
   用户程序
@@ -504,6 +507,12 @@ int main(int argc, char *argv[])
 然后 `tos build`。构建工具会自动编译 `user/*.c` 里除 `lib.c`/`syscall.c` 外的每个文件，
 链接成 ELF 并放进 littlefs 镜像的 `bin/foo`，shell 里直接输入 `foo` 就能运行。
 
+程序大到写不下一个文件时，把它拆成 `user/<name>/` 目录：目录里的每个 `.c` 是一部分，
+整个目录链接成**一个**程序 `bin/<name>`。这样解释器那样的几千行代码是一个任务，
+而不是几千个任务。目录里还可以放一个 `opt` 文件，写一个编译优化级别给这个程序
+单独用（`-Oz` 会让 RV32 代码在 QEMU 的 TCG 下慢约 100 倍，所以只有需要压体积的
+程序才这么写，内核不用）。
+
 普通数据文件放到 `files/` 下（可以带子目录），会以同样的相对路径出现在 littlefs 里，
 用 `cat` 读取。
 
@@ -563,6 +572,63 @@ sh 就是 32 KiB，嵌套几层就把并发空间吃掉了。嵌套深度上限 
 
 完整语法、限制表和实测输出见 `docs/SHELL-GUIDE.md` §1；体积与内存的取舍另见
 `docs/SCRIPT-DESIGN.md`。
+
+## Python 子集解释器
+
+`bin/py` 是一个**用户程序**（不是内核功能）：它有自己的任务窗口、自己的堆、自己
+的栈，和 `sh` 一样是 `exec` 出来的普通任务，`^C` 也能打断它。
+
+```sh
+py demo.py            # 跑一个文件
+py -c print(1 + 2)    # 跑一行
+py -v demo.py         # 顺便打印 arena 用了多少
+```
+
+实现的语言是 Python 的一个子集，够写小程序，不够写整个 Python：
+
+| 有 | 没有 |
+| --- | --- |
+| 缩进分块（`if`/`elif`/`else`、`while`、`for`、`def`） | `try`/`except`、`with`、`class`、装饰器 |
+| `int`（32 位）、`str`、`list`、`dict`、`bool`、`None` | 浮点（三个目标都没有 FPU）、元组、`set`、字节串 |
+| `+ - * / %`、比较、`and`/`or`/`not`、`in` | `**`、位运算、`//`、切片的步长 |
+| 赋值、增强赋值（`+=` 等）、`del`、`break`/`continue`/`return` | `global`/`nonlocal`（作用域规则见下）、`lambda` |
+| 函数（位置参数 + 关键字参数）、递归、闭包 | 生成器、异步、解包赋值 |
+| 内建：`print len range str int type bool abs sum min max list dict` | `open`、`input`、`zip`、`map`、`sorted` |
+| 方法：`list.append/pop/insert/remove/index/clear`，`dict.get/keys/values/items/pop`，`str.upper/lower/strip/split/join/replace/find` | `list.sort`、`dict.setdefault`、字符串格式化 |
+| 异常按 Python 的样子报（`NameError: name 'x' is not defined` + 出错的行） | 异常对象、`try` |
+
+几个刻意偏离 Python 的地方：
+
+- **`/` 是整数除法**。三个目标都没有浮点硬件，64 位除法的辅助函数链接不上，
+  所以整数一律 32 位，`/` 向零截断（`7 / 2 == 3`）。
+- **没有 `global`**。Python 里函数体赋值的名字一律是局部的，要改全局得写
+  `global`。这里改成：**名字已经绑定在哪里就改哪里**，否则在本层新建。
+  于是计数器那种写法不需要 `global`。
+- **`dict` 按插入顺序**（和 Python 3.7 一样）。它内部是一个按插入序排列的数组，
+  不是哈希表：几十个键的线性查找就是一次缓存行内的查找，顺序比复杂度值钱。
+- **循环引用不回收**。对象是引用计数的，`a = []; a.append(a)` 会泄漏。
+  这是有意的取舍：循环收集器需要根集合和标记阶段，而脚本进程退出时内核会把整个
+  窗口收回去。
+
+内存是这件事的主要约束。解释器自带一个 arena（**不是** TLSF）：语法树、token
+列表、名字文本和脚本建出来的对象都住在里面。arena 是任务堆的一次 `sbrk`，
+大小由 `TOS_HEAP(96 * 1024)` 声明 —— C3 上那是一个 144 KiB 的窗口，
+192 KiB 的用户区里剩下的正好是 shell 的 32 KiB。
+
+实测（ESP32-C3，`rv32emu-c`）：
+
+| 脚本 | arena 物理占用 |
+| --- | --- |
+| `demo.py`（100 行，算术/字符串/列表/字典/循环/函数/递归） | 83 KiB |
+| `pytest.py` + `pytest2.py`（75 条断言） | 各约 70 KiB |
+
+arena 里最贵的是语法树和 token 列表：它们永不释放，所以用**无块头的永久分配**
+（`py_alloc_perm`），省掉每个块 16 字节的块头和按 16 字节取整的浪费 —— 树节点
+48 字节就真的只占 48 字节。
+
+`files/demo.py` 是功能演示，`files/pytest.py` 和 `files/pytest2.py` 是断言套件
+（`py pytest.py` 的输出每行一条，最后一行是 `checks: N failed: 0`）。
+两者都随镜像打包，也是 `tostest emutest` 的回归项。
 
 ## 进程与调度
 

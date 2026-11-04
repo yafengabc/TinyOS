@@ -224,6 +224,16 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
 - **SPI1 硬件页编程（PP）没通**：写走 ROM，不阻塞。
 - **README 说「默认 `-Oz`」是错的**：`internal/build/build.go` 的 `TOS_OPT` 默认 `-O2`
   （真机才建议 `-Oz`）。改哪一边等你定。
+  （2026-11-04 补：全局默认值仍不动，但**按程序**可以单独指定 —— `user/<name>/opt`
+  文件里写一个优化级别，只对这个程序生效。Python 解释器用它 `-Oz`：镜像从 35 KB
+  降到 27 KB，而 RV32 的 `-Oz` 在 QEMU TCG 下慢 100 倍这件事只跟**代码形状**有关，
+  内核保持 `-O2` 就不会踩到。）
+- **解释器的 arena 为什么不是 TLSF**（已决，2026-11-04）：TLSF 回答的是"这一块
+  内存从哪来"，解释器缺的是另一半"这一块什么时候该还"——那是引用计数。
+  引进 TLSF 约 1000 行 / 4-6 KiB flash，会改掉全系统 malloc 的语义（波及
+  `bench`/`mem`/`wheap`），而且仍然不解决循环引用。实际做法：解释器自带一个
+  arena（一级 size class + bump），配合引用计数；树和 token 用**无块头的永久分配**
+  （`py_alloc_perm`），省掉每块 16 字节的块头。详见 README「Python 子集解释器」。
 - `0x40380C00 / 0x3FC80C00 / 0x3FC8F000 / sp-256` 处 store→load 读回 `0x60000000`，
   疑似 flash cache 保留区，未解。
 

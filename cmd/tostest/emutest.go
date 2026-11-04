@@ -147,6 +147,18 @@ func cmdEmutest(args []string) int {
 		{"script", "source etc/demo.sh", []string{"[script] if-ok",
 			"[script] capture-ok", "[script] loop 2", "[script] after-loop i=3",
 			"[script] break-at-2", "[script] done"}},
+		// The Python interpreter, end to end: a file in the ramdisk, parsed
+		// and run on the target, with the numbers the script prints checked
+		// so a parser change that stops looping cannot pass unnoticed.
+		// The interpreter, end to end: a file in the ramdisk, parsed and
+		// run on the target.  The demo shows the features; the test file
+		// makes the claims, and its summary line is the one that has to
+		// read "failed: 0" - a parser change that stops looping or a
+		// container that starts lying cannot pass unnoticed.
+		{"python demo", "py demo.py", []string{"sum: 13", "list: [0, 1, 2, 3, 4]",
+			"fib(10): 55", "done"}},
+		{"python tests", "py pytest.py", []string{"failed: 0"}},
+		{"python tests 2", "py pytest2.py", []string{"failed: 0"}},
 		// Devices are files, so the table has to be enumerable and entry-able,
 		// not just openable.  This is the only target tested end to end with
 		// peripherals behind it, so it is the one place /dev is not empty.
