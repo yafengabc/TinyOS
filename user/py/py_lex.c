@@ -15,24 +15,18 @@
  * Tabs are rejected rather than guessed at: CPython refuses to mix tabs
  * and spaces, and a program that means one thing on one machine and
  * another on the next is worse than one that is refused.
+ *
+ * The text of a token points into the source buffer.  The old lexer
+ * copied every name and every string into an arena block of its own,
+ * which cost more than the tokens did: a hundred-line script has several
+ * hundred tokens, and each copy was a header and a rounding on top of
+ * the characters.
  */
 
-#include "py_parse.h"
-#include "py_str.h"
+#include "py_lex.h"
 #include "py_mem.h"
+#include "lib.h"
 
-static py_token *tok_head;
-static py_token *tok_tail;
-static uint32_t cur_line = 1;
-
-/* The indent stack: the column of each open block level. */
-static uint32_t indents[32];
-static int nindents;
-static int paren_depth;
-
-/* Error state.  The lexer has its own, separate from the parser's: a
- * syntax error can come from either, and the parser folds the two together
- * when it reports. */
 static const char *lex_err_msg;
 static uint32_t lex_err_line;
 
@@ -47,37 +41,42 @@ static void set_error(const char *msg, uint32_t line)
     }
 }
 
+/* The indent stack: the column of each open block level. */
+static uint32_t indents[32];
+static int nindents;
+static int paren_depth;
+static uint32_t cur_line;
+
+/* The token array being filled. */
+static py_token *toks;
+static uint32_t ntoks;
+static uint32_t ctoks;
+static const char *src_base;
+
+/* Add a token.  The array grows by doubling; a token is 16 bytes, so
+ * the copies are cheap next to the per-token allocations this replaced. */
 static py_token *new_token(uint8_t kind, uint8_t op, uint32_t line)
 {
-    /* The token list is released when the parse is done, but the tokens
-     * themselves are scattered through the arena and the text they carry
-     * has to stay for the tree - so they are permanent blocks, and the
-     * list is given back as a whole (see py_lex_free). */
-    py_token *t = (py_token *)py_alloc_perm((uint32_t)sizeof(py_token));
-    if (!t)
-        return 0;
+    if (ntoks == ctoks) {
+        uint32_t ncap = ctoks ? ctoks * 2 : 128;
+        py_token *nt = (py_token *)py_alloc(ncap * (uint32_t)sizeof(py_token));
+        if (!nt)
+            return 0;
+        if (ntoks)
+            memcpy(nt, toks, ntoks * sizeof(py_token));
+        if (toks)
+            py_free_auto(toks);
+        toks = nt;
+        ctoks = ncap;
+    }
+    py_token *t = &toks[ntoks++];
     t->kind = kind;
     t->op = op;
-    t->line = line;
-    t->next = 0;
-    if (tok_tail)
-        tok_tail->next = t;
-    else
-        tok_head = t;
-    tok_tail = t;
+    t->line = (uint16_t)line;
+    t->len = 0;
+    t->ival = 0;
+    t->text = 0;
     return t;
-}
-
-/* Copy `n` bytes into a fresh arena block and NUL terminate it, so the
- * token owns its text. */
-static char *dup_text(const char *s, uint32_t n)
-{
-    char *d = (char *)py_alloc(n + 1);
-    if (!d)
-        return 0;
-    memcpy(d, s, n);
-    d[n] = 0;
-    return d;
 }
 
 /* The keyword table.  A short list, so a linear scan is fine and the
@@ -141,8 +140,8 @@ static int lex_line(const char **pp, const char *end)
      * without closing it.
      *
      * The comment text still has to be consumed.  Leaving it there would
-     * make the caller read the same line again, forever: nothing about
-     * the line would change, so no token would ever be produced. */
+     * make the caller read the same line again, forever: nothing about the
+     * line would change, so no token would ever be produced. */
     if (p >= end || *p == '\n' || *p == '\r' || *p == '#') {
         if (p < end && *p == '#') {
             while (p < end && *p != '\n')
@@ -206,22 +205,20 @@ static int lex_line(const char **pp, const char *end)
                 p++;
             uint32_t n = (uint32_t)(p - s);
             uint8_t kw = keyword_id(s, n);
+            py_token *t;
             if (kw != PY_K_NONE) {
-                if (!new_token(PY_T_KEYWORD, kw, cur_line))
-                    return 0;
+                t = new_token(PY_T_KEYWORD, kw, cur_line);
             } else {
-                py_token *t = new_token(PY_T_NAME, 0, cur_line);
-                if (!t)
-                    return 0;
-                t->text = dup_text(s, n);
-                if (!t->text)
-                    return 0;
+                t = new_token(PY_T_NAME, 0, cur_line);
             }
+            if (!t)
+                return 0;
+            t->text = s;
+            t->len = (uint16_t)n;
             continue;
         }
 
         if (is_digit(*p)) {
-            const char *s = p;
             int32_t v = 0;
             while (p < end && is_digit(*p)) {
                 v = v * 10 + (*p - '0');
@@ -231,7 +228,6 @@ static int lex_line(const char **pp, const char *end)
             if (!t)
                 return 0;
             t->ival = v;
-            (void)s;
             continue;
         }
 
@@ -253,9 +249,8 @@ static int lex_line(const char **pp, const char *end)
             py_token *t = new_token(PY_T_STR, 0, cur_line);
             if (!t)
                 return 0;
-            t->text = dup_text(s, n);
-            if (!t->text)
-                return 0;
+            t->text = s;
+            t->len = (uint16_t)n;
             p++;                /* the closing quote */
             continue;
         }
@@ -332,7 +327,7 @@ static int lex_line(const char **pp, const char *end)
     return 1;
 }
 
-py_token *py_lex_all(const char *src, uint32_t len)
+int py_lex_all(const char *src, uint32_t len, py_tokens *out)
 {
     const char *p = src;
     const char *end = src + len;
@@ -340,14 +335,21 @@ py_token *py_lex_all(const char *src, uint32_t len)
     cur_line = 1;
     lex_err_msg = 0;
     lex_err_line = 0;
-    tok_head = tok_tail = 0;
+    ntoks = 0;
     nindents = 0;
     paren_depth = 0;
     indents[0] = 0;
+    src_base = src;
 
     while (p < end) {
-        if (!lex_line(&p, end))
+        if (!lex_line(&p, end)) {
+            if (toks)
+                py_free_auto(toks);
+            toks = 0;
+            ctoks = 0;
+            ntoks = 0;
             return 0;
+        }
     }
 
     /* Close every open block, then end the file. */
@@ -360,5 +362,9 @@ py_token *py_lex_all(const char *src, uint32_t len)
         return 0;
     if (!new_token(PY_T_EOF, 0, cur_line))
         return 0;
-    return tok_head;
+
+    out->toks = toks;
+    out->n = ntoks;
+    out->cap = ctoks;
+    return 1;
 }

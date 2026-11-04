@@ -86,7 +86,12 @@ var Targets = map[string]Target{
 	// it over the real partition, PLAT_LFS_BLOCKS = 896 blocks = 3.5 MiB.
 	// That is what keeps the flashed artifact at 300 KiB while the
 	// filesystem still gets the whole 4 MiB part.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 48 * 1024},
+	// The heap has to hold one decompressed program image while it is
+	// being copied into the task window, so it has to be bigger than
+	// the biggest program: the Python interpreter is 31 KiB raw.  The
+	// 56 KiB sits in the SRAM that was unused between the end of .bss
+	// and the first task window, so it costs the board nothing.
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 56 * 1024},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
 

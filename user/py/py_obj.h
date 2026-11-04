@@ -35,26 +35,21 @@ typedef enum {
 
 typedef struct py_obj py_obj;
 typedef struct py_value py_value;
-typedef struct py_env py_env;
-typedef struct py_node py_node;
+typedef struct py_scope py_scope;
 
 /* A call in progress.  Builtins take one of these rather than a plain
  * argument array, because a builtin may want keyword arguments too
  * (print(x, sep="-")).  Defined in py_eval.h. */
 struct py_call;
 
-/* A function object: a name, an argument count, and a body to run.  The
- * body is a scope node; see py_ast.h.  `closure` is the environment the
- * def appeared in, so a function defined inside another function still
- * sees the names around it.  `def` is the syntax tree node the function
- * came from - it holds the parameter names, which the caller needs and
- * which are not worth copying into every function object. */
+/* A function object: the code it runs and the scope it was defined in.
+ * The closure is what makes a nested function work - it sees the names
+ * of the scope it was written in.  The parameter names live in the code
+ * object, so they are not copied into every function object. */
 typedef struct py_func {
-    char *name;
-    int argc;
-    struct py_scope *body;
-    py_env *closure;
-    py_node *def;
+    const char *name;
+    uint32_t code;         /* the index into the program's code objects */
+    py_scope *closure;
 } py_func;
 
 /* A string: bytes and a length.  Strings are immutable and their bytes are

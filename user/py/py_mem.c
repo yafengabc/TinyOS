@@ -6,6 +6,7 @@
 
 #include "py_mem.h"
 
+
 /* Every block carries its size, so py_free_auto() can find the class again
  * without the caller remembering what it asked for.  The header sits in
  * front of the payload, so the payload stays 8-aligned when the arena is.
@@ -38,6 +39,35 @@ _Static_assert(sizeof(block_t) >= sizeof(void *) + 8,
 static char *arena_base;
 static char *arena_ptr;
 static char *arena_end;
+
+/* The arena is not claimed in one bite.  The interpreter's main() takes
+ * a small starting chunk and the bump pointer asks for another 4 KiB
+ * only when it runs out, so the break stays below the heap ceiling while
+ * the script is small.
+ *
+ * This matters beyond memory thrift: on rv32 the kernel grows a task's
+ * stack into the heap's unused tail when a store runs off the bottom
+ * (process_stack_grow).  A program that pins the break at the ceiling
+ * on startup makes that impossible, and the next deep expression dies
+ * instead of being given another 8 KiB.  The heap and the stack are
+ * meant to share this region - see the comment above process_sbrk(). */
+#define PY_ARENA_CHUNK 4096u
+
+extern void *sbrk(int bytes);
+
+static int grow_arena(uint32_t bytes)
+{
+    uint32_t need = (bytes + PY_ARENA_CHUNK - 1u) & ~(PY_ARENA_CHUNK - 1u);
+    char *p = (char *)sbrk((int)need);
+    /* A refused sbrk leaves the break alone.  It can also succeed at an
+     * address that is not where this arena ends (if somebody else moved
+     * the break); the bump pointer needs one contiguous region, so that
+     * is a failure too. */
+    if (!p || p != arena_end)
+        return 0;
+    arena_end = p + need;
+    return 1;
+}
 
 static block_t *freelist[PY_NCLASS];
 static block_t *oversize_list;
@@ -84,7 +114,8 @@ static void *bump(uint32_t bytes)
      * or a struct with 64-bit fields on some targets. */
     uint32_t off = (uint32_t)(arena_ptr - arena_base);
     uint32_t pad = (8u - (off & 7u)) & 7u;
-    if ((uint32_t)(arena_end - arena_ptr) < bytes + pad)
+    if ((uint32_t)(arena_end - arena_ptr) < bytes + pad &&
+        !grow_arena(bytes + pad))
         return 0;
     char *p = arena_ptr + pad;
     arena_ptr = p + bytes;

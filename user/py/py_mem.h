@@ -2,10 +2,9 @@
  *
  * The user-space allocator cannot be used for this.  lib.c's malloc() is a
  * bump allocator: free() does nothing, and every growth moves the break by
- * at least 4096 bytes.  An interpreter that parses a program and then runs it
- * allocates thousands of small, short-lived objects (a token, an AST node, a
- * string, a list cell), so it needs an allocator that actually reuses
- * memory.
+ * at least 4096 bytes.  An interpreter that compiles a program and then runs
+ * it allocates many short-lived objects (a string, a list cell, a call's
+ * argument array), so it needs an allocator that actually reuses memory.
  *
  * This is not TLSF, and the difference is deliberate.
  *
@@ -77,12 +76,11 @@ void *py_alloc(uint32_t size);
 /* A block that is never freed, and whose size is exactly what was asked
  * for: no header, no rounding to a size class.
  *
- * This is for the two things that make up most of what a script costs and
- * are never released: the syntax tree and the token list.  A header is 16
- * bytes on every block, so a 48-byte tree node really occupies 64 - a
- * third of the arena spent on bookkeeping.  The permanent blocks have
- * neither the header nor the rounding, and the arena they take is never
- * given back because they are never released.
+ * This is for what a compiled script keeps for its whole life: the token
+ * array, the bytecode of each code object and the interned names.  A
+ * header is 16 bytes on every block, and these are allocated once in a
+ * few large pieces, so neither the header nor the rounding buys anything.
+ * The arena they take is never given back because they are never released.
  *
  * The pointer is 8-aligned like every other block. */
 void *py_alloc_perm(uint32_t size);

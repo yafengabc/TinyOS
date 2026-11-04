@@ -3,8 +3,9 @@
  *     py script.py        run a file
  *     py -c "print(1)"    run a line
  *
- * The interpreter needs an arena: the syntax tree, the token list and every
- * object the script builds live in it.  The arena is one sbrk() of the heap
+ * The interpreter needs an arena: the token array, the bytecode, the
+ * name and constant pools and every object the script builds live in it.
+ * The arena starts as one sbrk() of the heap
  * the kernel reserved for this task, which is what the TOS_HEAP note below
  * asks for - the kernel reads the note before it sizes the task window, so
  * the room is reserved rather than hunted for.
@@ -19,8 +20,9 @@
 #include "lib.h"
 #include "py_mem.h"
 #include "py_obj.h"
-#include "py_parse.h"
-#include "py_eval.h"
+#include "py_lex.h"
+#include "py_code.h"
+#include "py_rt.h"
 #include "py_str.h"
 
 /* How much heap the interpreter wants, and how much stack.
@@ -29,22 +31,22 @@
  * window is big enough for the arena and the recursion even though the
  * interpreter's own image is small.
  *
- * The heap is what a script costs: the syntax tree, the token list, the
- * text of the names and the objects the script builds all live in the
- * interpreter's arena.  Measured on the ESP32-C3: a hundred-line script
- * takes about 83 KiB of it, headers and rounding included, so 96 KiB holds
- * a script of that size with room to spare.
+ * The heap is what a script costs: the token array, the bytecode, the
+ * name and constant pools and the objects the script builds all live in
+ * the interpreter's arena.  Measured on the ESP32-C3, a hundred-line
+ * script needs 60 KiB of it including headers and rounding.  The arena
+ * grows on demand from a 32 KiB start, so a small script does not pin
+ * the break at the heap ceiling (see py_mem.c).
  *
- * The stack is 16 KiB because the evaluator recurses once per Python call
- * and once per node of the tree, and the parser recurses once per level of
- * nesting.  The board default of 8 KiB is enough for a flat script and
- * not for a deep one.
+ * The stack is 16 KiB: the compiler is a recursive-descent walk over the
+ * expression, and the VM recurses once per Python call.  The board
+ * default of 8 KiB is enough for a flat script and not for a deep one.
  *
  * Together with the image and the guard hole these make a 128 KiB window
  * on the ESP32-C3, whose whole user area is 192 KiB.  The interpreter is
  * the first program on this system that needs a window of that size; the
  * window goes back to the area when the script ends. */
-TOS_HEAP(96 * 1024);
+TOS_HEAP(64 * 1024);
 TOS_STACK(16 * 1024);
 
 /* The script, kept so an error can quote the line it happened on. */
@@ -52,28 +54,19 @@ static const char *src_text;
 static uint32_t src_len;
 static const char *src_name;
 
-/* Claim the task's heap for the interpreter's arena.
+/* Take a starting chunk for the arena.
  *
- * The kernel does not tell a program how big its heap is, so the size is
- * found by asking for more than there is: sbrk() refuses and leaves the
- * break alone, and a smaller request succeeds.  The first size that fits is
- * the one taken, and it is taken in one piece - the arena is a single
- * region, not a series of 4 KiB steps. */
+ * Deliberately small: the arena grows on demand (see py_mem.c), so a
+ * one-line script does not have to pin the whole heap.  Leaving the
+ * break below the heap ceiling is what lets the kernel grow this
+ * task's stack if a deep expression needs it.  A refused sbrk() leaves
+ * the break alone, so stepping down costs nothing. */
 static uint32_t claim_heap(void **base_out)
 {
-    void *base = sbrk(0);
-    if (!base)
-        return 0;
-
-    /* Steps of 4 KiB, from generous to tight.  A coarse ladder would leave
-     * part of the heap unused, and on a board whose heap is the difference
-     * between a script that parses and one that does not, every kilobyte
-     * counts.  A refused sbrk leaves the break alone, so trying many sizes
-     * is free. */
-    for (uint32_t size = 128u * 1024u; size >= 4096u; size -= 4096u) {
-        void *old = sbrk(size);
+    for (uint32_t size = 32u * 1024u; size >= 4096u; size -= 4096u) {
+        void *old = sbrk((int)size);
         if (old) {
-            *base_out = base;
+            *base_out = old;
             return size;
         }
     }
@@ -184,26 +177,42 @@ int main(int argc, char **argv)
     src_len = len;
     src_name = name;
 
-    py_scope *mod = py_parse(code, len);
-    if (!mod) {
-        printf("  File \"%s\", line %u\n", name, py_err_line());
-        printf("SyntaxError: %s\n", py_err_msg() ? py_err_msg() : "invalid syntax");
-        if (verbose)
-            printf("arena after parse: %u B (peak %u B, %u blocks)\n",
-                   py_mem_used(), py_mem_peak(), py_mem_live_blocks());
+    /* The source becomes tokens, the tokens become bytecode, and the
+     * bytecode runs.  The tokens are the only thing that exists in
+     * between: there is no tree, so a script that used to cost forty
+     * kilobytes of syntax tree costs a couple of kilobytes of code. */
+    py_tokens toks;
+    toks.toks = 0;
+    toks.n = 0;
+    toks.cap = 0;
+    if (!py_lex_all(code, len, &toks)) {
+        printf("  File \"%s\", line %u\n", name, py_lex_err_line());
+        printf("SyntaxError: %s\n",
+               py_lex_err_msg() ? py_lex_err_msg() : "invalid syntax");
         return 1;
     }
 
-    if (verbose)
-        printf("arena after parse: %u B (peak %u B, %u blocks)\n",
+    py_prog *prog = py_compile(&toks);
+    if (!prog) {
+        printf("  File \"%s\", line %u\n", name, py_compile_error_line());
+        printf("SyntaxError: %s\n",
+               py_compile_error() ? py_compile_error() : "invalid syntax");
+        return 1;
+    }
+
+    if (verbose) {
+        printf("bytecode: %u instructions, %u B (%u code objects)\n",
+               py_prog_insns(prog), py_prog_bytes(prog), prog->ncodes);
+        printf("arena after compile: %u B (peak %u B, %u blocks)\n",
                py_mem_used(), py_mem_peak(), py_mem_live_blocks());
+    }
 
     int rc = 0;
-    if (py_run(mod) != 0) {
+    if (py_vm_run(prog) != 0) {
         printf("Traceback (most recent call last):\n");
-        printf("  File \"%s\", line %u\n", name, py_eval_line());
-        show_line(py_eval_line());
-        printf("%s\n", py_eval_error());
+        printf("  File \"%s\", line %u\n", name, py_vm_error_line());
+        show_line(py_vm_error_line());
+        printf("%s\n", py_vm_error());
         rc = 1;
     }
 

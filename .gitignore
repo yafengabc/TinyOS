@@ -30,3 +30,6 @@ __pycache__/
 # only to read from.  It is ~15 MB of sparse checkout and must never be
 # committed into TinyOS.  See docs/ZEPHYR-REFERENCE.md for how to fetch it.
 /third_party/zephyr/
+
+# Host-side debugging harness for the interpreter (not a board program).
+/tmp/
