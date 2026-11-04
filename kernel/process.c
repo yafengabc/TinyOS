@@ -722,6 +722,58 @@ int process_console_reader(void)
     return 0;
 }
 
+/* The job a blocked task is waiting for, or 0.  This is the second thing ^C
+ * may aim at: `run spin` is CPU-bound and never reads, so it is not a console
+ * reader, but it is what the user is looking at and what ^C has to stop.  A
+ * pipeline has two such children and the first is taken; a script's shell
+ * waiting on its own child could be picked - the console reader keeps
+ * priority over both, and the OS has no notion of a job that would settle
+ * which shell owns the terminal. */
+static int foreground_job(void)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == ST_WAIT_CHILD && procs[i].wait_pid > 0)
+            return procs[i].wait_pid;
+    }
+    return 0;
+}
+
+/* Who ^C stops.  In order: whoever is reading the console; the job a blocked
+ * parent waits for; and last the task that outranks the shell on the CPU.
+ *
+ * The last one is not a catch-all, it is the way back from a runaway
+ * promoted job.  `nice 0 spin &` neither reads nor waits, so nothing else
+ * ever names it, and at level 0 it keeps the shell from running at all -
+ * without this, ^C would have no target and the only exit would be a reset.
+ * The listing is by priority, so a machine whose only task is the shell
+ * yields 0 and the key expires as it always did.
+ *
+ * The first task is never a target: it is what reports the kill (and
+ * process_signal refuses it anyway). */
+int process_ctrl_target(void)
+{
+    int pid = process_console_reader();
+
+    if (pid > 0 && (!init_proc || pid != init_proc->pid))
+        return pid;
+
+    pid = foreground_job();
+    if (pid > 0 && (!init_proc || pid != init_proc->pid))
+        return pid;
+
+    proc_t *best = NULL;
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *p = &procs[i];
+
+        if (p == init_proc || (p->state != ST_READY && p->state != ST_RUNNING))
+            continue;
+        if (!best || p->prio < best->prio ||
+            (p->prio == best->prio && p->cpu_ms > best->cpu_ms))
+            best = p;
+    }
+    return best ? (int)best->pid : 0;
+}
+
 /* Validate a user pointer against the current task's window.  Without an
  * MMU this is a range check, not a security boundary: see PLATFORM-DESIGN. */
 int process_user_ok(uint32_t addr, uint32_t len)
@@ -1122,9 +1174,15 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
     }
     for (int i = 0; i < 3; i++)
         if (p->fds[i].type == FD_NONE)
-            p->fds[i].type = FD_CONSOLE;    /* Children inherit: a task cannot spawn something more important than
-       itself, which is what keeps a program from locking the console out. */
-    p->prio = current ? current->prio : PRIO_HIGH;
+            p->fds[i].type = FD_CONSOLE;
+
+    /* Children inherit: a task cannot spawn something more important than
+       itself, which is what keeps a program from locking the console out.
+       The first task starts at NORMAL and not at the top, so that level 0
+       means something: it is where `nice 0` puts a job that has to run on
+       time, and an inherited level would leave that knob with nothing above
+       the shell to reach. */
+    p->prio = current ? current->prio : PRIO_NORMAL;
     p->start_ns = plat_uptime_ms();
     /* win_base/win_size were recorded by win_alloc() - under the lock, so
        nobody else can be handed this range while the image loads. */
@@ -1215,14 +1273,23 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
  * nice itself without knowing its pid.  Climbing above the caller's own
  * level is refused rather than policed: with no aging, a program that could
  * promote itself above the shell would own the console, and the only honest
- * way to keep that from happening in ~40 bytes is to not allow it. */
+ * way to keep that from happening in ~40 bytes is to not allow it.
+ *
+ * The first task is the exception, and the whole of it: the shell may place
+ * a child above itself, which is how `nice 0 samp` gets a 1 ms job the CPU
+ * ahead of everything else.  It is the user's own keystroke, the task that
+ * asked is not the one that gets promoted, and ^C still reaches the job
+ * (process_ctrl_target falls back to the task a blocked parent waits for,
+ * and then to whatever outranks the shell), so a promoted job cannot outlive
+ * the terminal that started it.  Nothing a normal program does gets this - a
+ * child it promotes is promoted by it, not by the shell. */
 int process_setprio(int pid, int prio)
 {
     proc_t *t;
 
     if (prio < 0 || prio >= PRIO_LEVELS)
         return -1;
-    if (current && prio < current->prio)
+    if (current && prio < current->prio && current != init_proc)
         return -1;
 
     if (pid == 0) {

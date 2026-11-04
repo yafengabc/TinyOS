@@ -54,7 +54,9 @@ int      process_exec(regs_t *r, const char *path, char *const argv[], int argc)
 
 int      process_current_pid(void);
 /* Move a task to another priority level (0 = highest, 2 = lowest).  A task
- * cannot climb above the caller's own level.  pid 0 means the caller. */
+ * cannot climb above the caller's own level, except that the first task
+ * (the shell) may place a child anywhere - that is how a 1 ms job is given
+ * the CPU ahead of everything else.  pid 0 means the caller. */
 int      process_setprio(int pid, int prio);
 uint32_t process_sbrk(uint32_t bytes);
 int      process_dump(void);
@@ -73,6 +75,10 @@ regs_t  *process_suspend(regs_t *r);
 /* pid of the task blocked reading the console, or 0 when none is.  That is
  * the foreground task as far as the terminal is concerned. */
 int      process_console_reader(void);
+
+/* Who ^C / ^Z act on: the console reader, else the job a blocked parent
+ * waits for, else the task that outranks the shell.  0 when nothing does. */
+int      process_ctrl_target(void);
 
 /* Is [addr, addr+len) inside the current task's window?  Replaces the old
  * page-table probe: the flat model only has range checks. */

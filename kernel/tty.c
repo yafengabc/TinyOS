@@ -239,9 +239,13 @@ int tty_take_line(char *dst, int max)
 
 void tty_ctrl_deliver(void)
 {
-    /* Nobody at the console (an idle tick, or only background tasks): the
-       keys had no target either, so drop them. */
-    int pid = process_console_reader();
+    /* The console reader is the foreground task in the usual sense; a job a
+     * blocked parent waits for is the same task one level up (`run spin`
+     * never reads, so without it ^C could not stop one at all); and the task
+     * outranking the shell is what is left when a promoted job neither
+     * reads nor waits.  Only when none of the three exists - an idle tick,
+     * or only the shell at its prompt - is there nothing to deliver to. */
+    int pid = process_ctrl_target();
 
     if (ctrl_bs || ctrl_c) {
         if (pid > 0) {
