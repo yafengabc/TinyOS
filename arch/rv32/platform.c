@@ -63,11 +63,18 @@ regs_t *trap_handler(regs_t *f)
              * latches, and acking before the FIFO is empty lets it set
              * again.  Then hand the fresh bytes to whoever is blocked
              * reading them - waiting for the next tick would cap every
-             * console transfer at 100 handovers per second. */
+             * console transfer at the tick rate. */
             tty_poll();
             plat_irq_service(line);
             process_console_kick();
-            return f;
+
+            /* The kick can have made a more important task runnable, and
+             * "a wake-up preempts" has to mean here too, not "within one
+             * tick": returning the frame unconditionally made an early
+             * wake-up wait for the timer.  process_resched() is the same
+             * call the tick path ends with, and it is a branch when
+             * nothing is pending. */
+            return process_resched(f);
         }
 
         plat_timer_tick();
