@@ -330,6 +330,69 @@ rp2040），C3 上直接报错说明原因而不是撞 OOM；(b) 给 `bench` 换
 性能基准目前用 rv32emu-c 自带的 `rv32emu-bench.exe`（`check` / `tinyos`），
 它在宿主侧计量，不受这个限制。
 
+## 12. Berry 评估：要不要换成现成的嵌入式脚本语言（2026-11-04，实测）
+
+问的是「评估一下 berry 脚本」。Berry（`berry-lang/berry`，MIT，1103 次提交，
+最后提交 2026-10-10）是真实存在的嵌入式脚本语言：**单遍编译器 + 寄存器式 VM**，
+ANSI C99 写的，语法像 Python（Lua 血统，`end` 收尾、`map` 不是 `dict`、
+`for x : list`），有类（单继承 + 运算符重载）、闭包（upvalue）、lambda、
+异常（raise/try/catch）、模块系统、**标记-清除 GC**、字节码文件（可固化进
+flash）、C FFI。生态上 Tasmota32（ESP32）每月 20 万次下载，M5Stack 在用。
+
+### 不引用它的数字，自己按 C3 的目标编一遍
+
+它 README 说「解释器核心 < 40 KiB」，那是 ARMCC + Cortex-M4 + Thumb 的测量。
+按我们的目标（rv32imc、clang、`-Oz`、freestanding）实测：
+
+| | Berry（实测） | 我们的 `py`（实测） |
+| --- | --- | --- |
+| 源码行数 | 24,416 | ~5,500 |
+| 核心 `.text` + `.rodata` | **95.7 KiB**（`-O2` 反而 116.7 KiB） | **24.9 KiB** |
+| 依赖的 hosted libc 头 | 11 个（assert/ctype/limits/math/setjmp/stdarg/stdio/stdlib/string/inttypes/time） | 0 |
+| 软浮点 | 需要 compiler-rt 的 `__addsf3` 等约 20 个 | 不需要（整数 32 位） |
+| 垃圾回收 | 标记-清除（能收循环引用） | 引用计数（循环引用泄漏，有意） |
+| 22 行脚本的程序体积 | **605 B 字节码**（可固化进 flash → 0 RAM） | **~8 KiB** AST+token（常驻 RAM） |
+| 类 / 闭包 / 模块 / 异常 | 有 | 无 |
+
+移植代价比「写个 port」大：为它编出一份 freestanding libc shim 要补 11 个标准头
+和一堆符号（memchr/abort/isnan/LLONG_MAX/inttypes.h/time.h…），异常机制要
+`setjmp`/`longjmp`，文件 API 要 `be_fopen` 一族，浮点要 compiler-rt 的软浮点 ——
+**而 TinyOS 连内核都没有软浮点**（`kernel/libgcc.c` 只有 329 行整数辅助），
+用户态连 `assert.h` 都没有。Berry 默认 `BE_INTGER_TYPE=2`（long long）和
+`BE_USE_SINGLE_FLOAT=0`（double），这两个默认值在我们三个目标上都得改；
+即使把 `BE_USE_FLOATS` 关掉，`be_code.c` 的 `exp2const` 仍会拉进 `__eqdf2`。
+
+### 结论：不换，但有一条该抄
+
+**不换的理由**：
+1. **体积**：核心 95.7 KiB 是我们的 3.8 倍。C3 用户区一共 192 KiB，Berry 光镜像
+   就吃掉一半（96 KiB），加上 8 KiB 栈 + 4 KiB 洞，堆只剩约 4 KiB —— 正好是它
+   宣传的「< 4 KiB heap」，但那样只够跑很小的脚本，而且和 shell（32 KiB）、
+   其他任务挤在一起。我们的 27.6 KiB 镜像 + 96 KiB arena 是能共存的设计。
+2. **语法不是 Python**：`end` 收尾、`map`、`for x : list`、没有缩进块。用户要的是
+   Python 子集，换过去等于换一门语言。
+3. **它的强项（类、闭包、模块、GC、浮点）恰是这个尺寸下最不需要的**；而它的
+   软浮点和 hosted libc 依赖是这个尺寸下最负担不起的。
+
+**该抄的一条**：**单遍编译器直接产字节码，根本不建 AST**。这是我们最大的短板，
+而且是架构级的、不是优化细节：我们 100 行脚本的 AST+token 常驻 45 KiB RAM，
+Berry 是 605 B 字节码（固化进 flash 后 RAM 占用为 0）。其次是寄存器式 VM
+（算术不反复 push/pop，我们的树遍历每个节点都是一次函数调用），再次是常量
+在编译期构造好放只读段（我们的字符串字面量每个都是一次堆分配且永不释放）。
+
+**不抄的**：标记-清除 GC（引用计数够用，循环引用泄漏是有意的：脚本进程退出时
+窗口整个收回）、浮点（C3 无 FPU）。
+
+**如果一定要用**：只能当用户程序（`bin/berry`），需要写一个 TinyOS port
+（`be_os_malloc` → 我们的 arena、`be_writebuffer` → `write(1,…)`、
+`be_fopen` 一族 → `open/read`、`be_readstring` → 读控制台、异常 → `setjmp`），
+浮点必须关掉并补软浮点或改 `exp2const`，窗口按 96 KiB 镜像算，脚本要在主机上
+先编成 `.bc` 放进 `files/`（正好契合「ramdisk 里放脚本」这个已有模式）。
+
+**给下一步的启示**：想把解释器在 C3 上跑更长的脚本，第一个动作不是把
+`py_node` 从 48 字节压到 36，而是**改成编译到字节码**（树只活在编译期，
+跑的时候只有字节码）。这是 Berry 唯一值得抄的地方。
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
