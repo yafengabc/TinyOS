@@ -1,6 +1,12 @@
 # Build output (root only -- internal/build/ is source code)
 /build/
 
+# Scratch space for long-running builds: TMP/TEMP/GOTMPDIR point here when a
+# tool runs bash non-interactively (they are empty in that environment and Go
+# then tries to build under C:\Windows), so it fills with ~165 MB of go-build
+# directories.  Nothing here is a source file.
+/.tmp/
+
 # Compiled artifacts
 /*.img
 *.o
