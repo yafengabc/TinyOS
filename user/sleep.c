@@ -6,11 +6,14 @@
  * samp's sampling interval and deep's second argument are all milliseconds,
  * so a `sleep` in seconds would be the one odd unit on the console.
  *
- * A program rather than a shell builtin so that it composes like everything
- * else the shell starts: `sleep 500 &` is a background task the scheduler
- * can be watched against, `nice 0 sleep 500 &` is a high-priority one, and ^C
- * has something to interrupt.  A builtin would park the shell itself and none
- * of those would be reachable.
+ * The console's `sleep` is this program, not a shell builtin, so it
+ * composes like everything else the shell starts: `sleep 500 &` is a
+ * background task the scheduler can be watched against, `nice 0 sleep 500 &`
+ * is a high-priority one, and ^C has something to interrupt (the shell is
+ * waiting on a real child, and init itself is deliberately not a signal
+ * target).  Inside a script `sleep N` is handled by sh with a bare
+ * SYS_SLEEP instead, because a sampling loop cannot pay for an exec per
+ * sample; `run sleep N` and `sleep N &` still land here.
  *
  * The upper bound is checked here rather than left to the kernel, which
  * clamps at an hour: a silent clamp turns `sleep 5400000` into a lie about

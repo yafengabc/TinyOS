@@ -1,37 +1,154 @@
 #include "lib.h"
 
 #define MAX_ARGS   8
-/* `source` nests in this process, so the only limit is the 16 KiB stack. */
+#define LINE_MAX   256
+/* `source` nests in this process, so the only real limit is the stack. */
 #define MAX_SOURCE 4
+/* Script text lives in one pool.  A `source` appends its file after the
+ * caller's and gives the bytes back on return, so a `source` inside a loop
+ * does not grow anything - the reason for not using malloc(), whose bump
+ * allocator has no free().  Only MAX_SOURCE layers are ever alive at once. */
+#define POOL_MAX   4096
+#define MAX_LINES  64
+#define MAX_BLOCKS 8
+#define MAX_VARS   8
+#define VAR_NAME   12
+#define VAR_VAL    96
+/* A `while` whose condition never changes would own the shell forever, and
+ * unlike a program there is no task to ^C.  Cut it off with a message. */
+#define MAX_ITER   10000
 
-/* A command line, sized to what the kernel's line discipline will hand over
- * in one piece (TTY_LINE_MAX).  At 128 the shell silently cut anything longer
- * before the kernel ever saw the arguments. */
-static char line[256];
-/* Note: this is our own storage.  The argv passed to main() only has room
-   for the arguments the kernel actually created, so do not reuse it. */
+/* One parser, two sources: the console hands over one line at a time, a
+ * script is sliced into lines from the pool.  Both go through expand() and
+ * run_command(), so a variable works the same way typed and in a file. */
+static char line[LINE_MAX];
 static char *args[MAX_ARGS];
 
-/* Where command lines come from.  A script is the same command loop reading
- * a different source with the prompt turned off - one parser, one dispatcher,
- * two sources.  Anything richer (variables, if/while) would be a second
- * language with a second set of bugs, and every byte of it comes out of the
- * same 64 KiB window the program's heap lives in. */
-typedef struct {
-    int  fd;                    /* -1: the console */
-    int  pos, len;
-    /* A file read returns up to len bytes, not one line, so the splitting
-     * happens here.  The buffer belongs to the source, not to the shell:
-     * `source` nests a second file inside the first and must not stomp on
-     * the bytes the outer one has already read but not yet used. */
-    char buf[96];
-} src_t;
+static char pool[POOL_MAX];
+static int  pool_used;
 
-static src_t console = { -1, 0, 0, { 0 } };
-/* How many scripts are open.  Two things key off this: `exit` means "end
- * this script" rather than "end the machine", and a runaway `source` chain
- * has to be cut before it eats the 16 KiB stack. */
+struct var {
+    char name[VAR_NAME];
+    char val[VAR_VAL];
+};
+static struct var vars[MAX_VARS];
+static int nvars;
+
 static int script_depth;
+static int last_status;         /* $? and the exit code of a script's `exit` */
+
+/* ---- small helpers ---------------------------------------------------- */
+
+static void sh_err(const char *s)
+{
+    /* fd 2, not puts(): an error about a redirection or a capture must not
+     * land in the file (or the pipe) fd 1 was just pointed at. */
+    write(2, s, (int)strlen(s));
+}
+
+/* No snprintf in the tiny libc that user programs link, and putint() writes
+ * straight to the console.  Conditions and `incr` need an integer as text. */
+static void str_num(char *buf, int v)
+{
+    char tmp[12];
+    int n = 0, i = 0;
+    unsigned int u;
+
+    if (v < 0) {
+        buf[i++] = '-';
+        u = 0u - (unsigned int)v;   /* no -INT_MIN overflow on RV32 either */
+    } else {
+        u = (unsigned int)v;
+    }
+    do {
+        tmp[n++] = (char)('0' + u % 10);
+        u /= 10;
+    } while (u);
+    while (n)
+        buf[i++] = tmp[--n];
+    buf[i] = '\0';
+}
+
+static int name_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static char *var_find(const char *name)
+{
+    for (int i = 0; i < nvars; i++)
+        if (!strcmp(vars[i].name, name))
+            return vars[i].val;
+    return 0;
+}
+
+static void var_set(const char *name, const char *val)
+{
+    if (!val)
+        val = "";
+    for (int i = 0; i < nvars; i++) {
+        if (!strcmp(vars[i].name, name)) {
+            int n = 0;
+            while (val[n] && n < VAR_VAL - 1) {
+                vars[i].val[n] = val[n];
+                n++;
+            }
+            vars[i].val[n] = '\0';
+            return;
+        }
+    }
+    if (nvars >= MAX_VARS) {
+        sh_err("sh: out of variables\n");
+        return;
+    }
+    int n = 0;
+    while (name[n] && n < VAR_NAME - 1) {
+        vars[nvars].name[n] = name[n];
+        n++;
+    }
+    vars[nvars].name[n] = '\0';
+    n = 0;
+    while (val[n] && n < VAR_VAL - 1) {
+        vars[nvars].val[n] = val[n];
+        n++;
+    }
+    vars[nvars].val[n] = '\0';
+    nvars++;
+}
+
+/* True when the first word of `s` is exactly `w`.  Never writes to `s`:
+ * scan_block() uses it to look ahead at lines that may never be executed. */
+static int word_eq(const char *s, const char *w)
+{
+    while (*s == ' ' || *s == '\t')
+        s++;
+    while (*w) {
+        if (*s != *w)
+            return 0;
+        s++;
+        w++;
+    }
+    return *s == '\0' || *s == ' ' || *s == '\t';
+}
+
+static char *skip_word(char *s)
+{
+    while (*s == ' ' || *s == '\t')
+        s++;
+    while (*s && *s != ' ' && *s != '\t')
+        s++;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    return s;
+}
+
+static char *skip_space(char *s)
+{
+    while (*s == ' ' || *s == '\t')
+        s++;
+    return s;
+}
 
 static int split(char *s, char *out[], int max)
 {
@@ -50,55 +167,20 @@ static int split(char *s, char *out[], int max)
     return n;
 }
 
-/* One line from either source, without its terminator.  -1 is end of input;
- * 0 is an empty line, which is not the same thing - conflating the two ended
- * every script at its first blank line.  The console source never returns -1,
- * it blocks instead. */
-static int src_line(src_t *s, char *out, int max)
+static void app_str(char *out, int *n, int cap, const char *s)
 {
-    if (s->fd < 0)
-        return getline(out, max);
-
-    int n = 0, trunc = 0;
-    for (;;) {
-        if (s->pos >= s->len) {
-            int r = read(s->fd, s->buf, sizeof(s->buf));
-            if (r <= 0) {
-                /* EOF.  A partial last line still counts, hence the -1. */
-                if (!n)
-                    return -1;
-                out[n] = '\0';
-                return n;
-            }
-            s->len = r;
-            s->pos = 0;
-        }
-        char c = s->buf[s->pos++];
-        if (c == '\n')
-            break;
-        if (c == '\r')
-            continue;
-        if (n < max - 1) {
-            out[n++] = c;
-        } else {
-            trunc = 1;              /* keep eating up to the newline */
-        }
-    }
-    out[n] = '\0';
-    /* Cutting a script line in silence is how argbuf[64] hid a bug for a
-     * week; a script cannot be retyped, so say so. */
-    if (trunc)
-        puts("sh: script line too long, truncated\n");
-    return n;
+    while (*s && *n < cap - 1)
+        out[(*n)++] = *s++;
 }
 
-/* Being told nothing at all is the worst answer when a name is wrong. */
 static void cannot_open(const char *path)
 {
     puts("sh: cannot open ");
     puts(path);
     puts("\n");
 }
+
+/* ---- command help ----------------------------------------------------- */
 
 static void cmd_help(void)
 {
@@ -108,12 +190,12 @@ static void cmd_help(void)
     puts("  pwd                print the working directory\n");
     puts("  cat <file>         print a file\n");
     puts("  edit <file>        full screen editor (^S save, ^X exit)\n");
-    puts("  echo [args...]     print arguments\n");
+    puts("  echo [args...]     print arguments (builtin)\n");
     puts("  hello              demo program\n");
     puts("  mem                heap / sbrk demo\n");
     puts("  crash              run an illegal instruction (kills that process)\n");
     puts("  uptime             real time since boot (hardware clock)\n");
-    puts("  sleep <ms>         wait without using the CPU\n");
+    puts("  sleep <ms>         wait without using the CPU (builtin in scripts)\n");
     puts("  gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)\n");
     puts("  adc [chan] [n]     sample the analog inputs\n");
     puts("  smp                run one worker per CPU, in parallel\n");
@@ -129,12 +211,22 @@ static void cmd_help(void)
     puts("  echo 1 > /dev/gpio4  pins and ADC channels are files: write to\n");
     puts("                     drive, cat to read, `gpio dev` for ioctl\n");
     puts("  cmd > file         send stdout to a file or a device\n");
+    puts("  A | B              send A's stdout to B's stdin\n");
     puts("  run <prog> [args]  run a program from /bin\n");
     puts("  run <prog> ... &   run it in the background\n");
-    puts("  run sh <file>      run the commands in a file, as a task\n");
-    puts("  source <file>      run the commands in a file, in this shell\n");
+    puts("  run sh <file>      run a script as a task\n");
+    puts("  source <file>      run a script in this shell\n");
     puts("  nice <n> <prog> .. run it at priority n (0 high, 2 low)\n");
     puts("  prio <pid> <n>     move a running task to priority n\n");
+    puts("Script syntax (in a script file; see docs/SHELL-GUIDE.md):\n");
+    puts("  name=text          set a variable (also `name=$(prog args)`)\n");
+    puts("  incr name [n]      add n (default 1) to an integer variable\n");
+    puts("  $name  ${name}  $? text substitution; $(prog) captures stdout\n");
+    puts("  if <a> == <b>     also != -eq -ne -lt -gt -le -ge, -n a, -z a\n");
+    puts("  else / fi         optional else branch / end of if\n");
+    puts("  while <cond>      loop while the condition holds\n");
+    puts("  done / break      end of loop / leave the innermost loop\n");
+    puts("  true / false      set $? to 0 / 1\n");
     puts("  help               this text\n");
     puts("  exit [code]        shut TinyOS down (end the script, in a script)\n");
 }
@@ -153,34 +245,39 @@ static void print_prompt(void)
     }
 }
 
+/* ---- spawning programs ------------------------------------------------ */
+
 /* exec only spawns a child; the caller decides whether to wait for it. */
 static int spawn(char *argv[], int argc)
 {
     char path[64];
-    path[0] = '\0';
+
     strcpy(path, "bin/");
     if (strlen(path) + strlen(argv[0]) >= sizeof(path)) {
         puts("sh: name too long\n");
         return -1;
     }
     strcpy(path + 4, argv[0]);
-
     return exec(path, argv, argc);
 }
 
 static int run_program(char *argv[], int argc, int bg)
 {
     int pid = spawn(argv, argc);
-    if (pid < 0)
-        return pid;     /* the kernel already said why */
-
+    if (pid < 0) {
+        last_status = 127;         /* the kernel already said why */
+        return pid;
+    }
     if (bg) {
         puts("[");
         putint(pid);
         puts("]\n");
+        last_status = 0;
         return 0;
     }
-    return wait(pid);
+    int rc = wait(pid);
+    last_status = rc < 0 ? 127 : rc;
+    return rc;
 }
 
 /* Start a program at a lower (or equal) priority level.  exec only spawns,
@@ -198,29 +295,19 @@ static void run_nice(char *argv[], int argc, int bg, int lvl)
         puts("[");
         putint(pid);
         puts("]\n");
+        last_status = 0;
     } else {
-        wait(pid);
+        int rc = wait(pid);
+        last_status = rc < 0 ? 127 : rc;
     }
 }
 
-static int run_script(const char *path);
-
 /* A | B: run two programs with a pipe between them.
- *
- *   pipe(f)            two descriptors, read end first
- *   dup2(f[1], 1)      our stdout is the pipe now
- *   exec(A)            the child inherits that table, so its fd 1 is the pipe
- *   close(1)           we are back on the console
- *   dup2(f[0], 0)      our stdin is the read end
- *   exec(B)
  *
  * The shell does the wiring because a child cannot run code between exec()
  * and its first instruction.  It also has to close both of its own copies
  * afterwards: a pipe's EOF means "every write end is gone", and the shell
- * holding one would keep `B` waiting forever.
- *
- * Background pipelines (`A | B &`) are not supported: the `&` would have to
- * decide which of the two it applies to, and the answer is neither. */
+ * holding one would keep `B` waiting forever. */
 static void run_pipeline(char *left, char *right)
 {
     char *largv[MAX_ARGS], *rargv[MAX_ARGS];
@@ -252,6 +339,7 @@ static void run_pipeline(char *left, char *right)
         /* Left side never started: the read end has no writer, so nobody
          * would ever send EOF to the right side.  Drop it all. */
         close(fds[0]);
+        last_status = 127;
         return;
     }
 
@@ -268,36 +356,24 @@ static void run_pipeline(char *left, char *right)
     /* Wait for both, in the order they were started: the left one finishing
      * is what gives the right one its EOF. */
     wait(lpid);
-    if (rpid >= 0)
-        wait(rpid);
-}
-
-static void sh_err(const char *s)
-{
-    /* fd 2, not puts(): an error about the redirection must not land in the
-     * file the redirection just opened. */
-    write(2, s, (int)strlen(s));
+    if (rpid >= 0) {
+        int rc = wait(rpid);
+        last_status = rc < 0 ? 127 : rc;
+    }
 }
 
 static int run_command(char *s);
+static int run_script(const char *path);
 
 /* `cmd > file` and `cmd > /dev/gpio4`.
  *
- * The shell wires its own fd 1, runs the command, and closes it again - the
- * kernel turns close(1) back into the console.  A spawned child inherits fd 1
- * (see fd_clone in process.c), so the redirection reaches the program without
- * the shell passing it anything, which is the only way it can work: a child
- * cannot run code between exec() and its first instruction.
- *
  * create() first, open() second.  `>` means truncate for a regular file; a
- * device node refuses create() (there is no creating /dev/gpio4 from user
- * space) and opens fine on the retry. */
+ * device node refuses create() and opens fine on the retry. */
 static int run_redirect(char *cmd, char *target)
 {
     int fd, rc;
 
-    while (*target == ' ' || *target == '\t')
-        target++;
+    target = skip_space(target);
     if (!*target) {
         sh_err("sh: nothing after '>'\n");
         return -1;
@@ -324,15 +400,285 @@ static int run_redirect(char *cmd, char *target)
     return rc;
 }
 
+/* ---- substitution ----------------------------------------------------- */
+
+static int expand(const char *in, char *out, int cap, int allow_capture);
+
+/* `$(prog args)` is the shell's own pipe, not `A | B`: fd 1 is pointed at
+ * the write end, the program is spawned, and this shell reads the read end
+ * to EOF into the substitution text.  Reading *before* wait() is not an
+ * optimisation - the pipe holds 2048 bytes and a producer that fills it
+ * blocks, so a shell that waited first would deadlock with its own child.
+ *
+ * Everything printed on this path goes to fd 2: fd 1 is the pipe, and a
+ * `puts()` here would be mistaken for the program's output. */
+static int capture_program(char *av[], int ac, char *out, int cap)
+{
+    int fds[2], n = 0, overflow = 0, pid = -1;
+
+    if (pipe(fds) < 0) {
+        sh_err("sh: no descriptors left for $(...)\n");
+        last_status = 127;
+        goto done;
+    }
+    if (dup2(fds[1], 1) < 0) {
+        sh_err("sh: cannot connect $(...) to stdout\n");
+        close(fds[0]);
+        close(fds[1]);
+        last_status = 127;
+        goto done;
+    }
+    if (strlen(av[0]) >= 60) {  /* spawn() prints to fd 1 on this one */
+        sh_err("sh: program name too long in $(...)\n");
+        close(1);
+        close(fds[0]);
+        close(fds[1]);
+        last_status = 127;
+        goto done;
+    }
+    pid = spawn(av, ac);
+    close(1);                   /* restore our stdout, drop our writer */
+    close(fds[1]);
+
+    /* From here only the child holds a write end, so EOF means it is gone. */
+    {
+        char buf[64];
+        int r;
+        while ((r = read(fds[0], buf, sizeof(buf))) > 0) {
+            for (int i = 0; i < r; i++) {
+                char c = buf[i];
+                if (c == '\n' || c == '\r')
+                    c = ' ';
+                if (n < cap - 1)
+                    out[n++] = c;
+                else
+                    overflow = 1;   /* keep draining, or the child blocks */
+            }
+        }
+    }
+    close(fds[0]);
+    if (pid >= 0) {
+        int rc = wait(pid);
+        last_status = rc < 0 ? 127 : rc;
+    } else {
+        last_status = 127;
+    }
+    if (overflow)
+        sh_err("sh: $(...) output truncated\n");
+
+done:
+    out[n] = '\0';
+    while (n > 0 && out[n - 1] == ' ')
+        out[--n] = '\0';
+    return n;
+}
+
+/* The command inside `$(...)` may itself mention variables.  `subst` is a
+ * static scratch buffer precisely because this is a stack-light path that
+ * already lives under nested scripts; capture_program() splits it in place. */
+static char subst[LINE_MAX];
+
+static int capture(const char *text, char *out, int cap)
+{
+    char *av[MAX_ARGS];
+    int n = 0;
+
+    expand(text, subst, sizeof(subst), 0);   /* variables, no nested $(...) */
+    int ac = split(subst, av, MAX_ARGS);
+    if (ac == 0) {
+        out[0] = '\0';
+        return 0;
+    }
+
+    /* The two builtins with an obvious text answer do not need a task.  A
+     * program does, and goes through the pipe above. */
+    if (!strcmp(av[0], "echo")) {
+        for (int i = 1; i < ac; i++) {
+            if (i > 1)
+                app_str(out, &n, cap, " ");
+            app_str(out, &n, cap, av[i]);
+        }
+        out[n] = '\0';
+        last_status = 0;
+        return n;
+    }
+    if (!strcmp(av[0], "pwd")) {
+        char buf[64];
+        if (getcwd(buf, sizeof(buf)) > 0)
+            app_str(out, &n, cap, buf);
+        out[n] = '\0';
+        last_status = 0;
+        return n;
+    }
+    return capture_program(av, ac, out, cap);
+}
+
+/* $name, ${name}, $?, $(cmd).  No quoting and no nested $(...) - this is a
+ * command language, not an expression language, and every byte of a second
+ * parser comes out of the same window the program's heap lives in. */
+static int expand(const char *in, char *out, int cap, int allow_capture)
+{
+    int n = 0;
+
+    while (*in && n < cap - 1) {
+        if (*in != '$') {
+            out[n++] = *in++;
+            continue;
+        }
+        in++;
+        if (*in == '\0') {
+            out[n++] = '$';
+            break;
+        }
+        if (*in == '?') {
+            char buf[12];
+            str_num(buf, last_status);
+            app_str(out, &n, cap, buf);
+            in++;
+            continue;
+        }
+        if (*in == '(' && allow_capture) {
+            const char *start = ++in;
+            while (*in && *in != ')')
+                in++;
+            if (!*in) {
+                sh_err("sh: missing ')' in $(...)\n");
+                break;
+            }
+            int len = (int)(in - start);
+            if (len >= LINE_MAX)
+                len = LINE_MAX - 1;
+            char raw[LINE_MAX], got[LINE_MAX];
+            memcpy(raw, start, (size_t)len);
+            raw[len] = '\0';
+            int room = cap - 1 - n;
+            if (room < 0)
+                room = 0;
+            /* capture() always gets a full-size buffer: it keeps draining
+             * the pipe past a short result, and that needs somewhere to
+             * write (and a valid out[0]) even when the caller has no room. */
+            int g = capture(raw, got, (int)sizeof(got));
+            if (g > room)
+                g = room;
+            memcpy(out + n, got, (size_t)g);
+            n += g;
+            in++;                   /* past ')' */
+            continue;
+        }
+        /* $name / ${name} */
+        char name[VAR_NAME];
+        int k = 0, braces = 0;
+        if (*in == '{') {
+            braces = 1;
+            in++;
+        }
+        while (*in && name_char(*in) && k < VAR_NAME - 1)
+            name[k++] = *in++;
+        name[k] = '\0';
+        if (braces) {
+            while (*in && *in != '}')
+                in++;
+            if (*in == '}')
+                in++;
+        } else if (k == 0) {
+            /* `$ ` or a `$(` in a context that forbids substitution: keep
+             * the character as data, and move on - standing still here
+             * would spin forever. */
+            out[n++] = *in++;
+            continue;
+        }
+        char *v = var_find(name);
+        app_str(out, &n, cap, v ? v : "");
+    }
+    out[n] = '\0';
+    if (*in)
+        sh_err("sh: line too long after substitution\n");
+    return n;
+}
+
+/* ---- command dispatch ------------------------------------------------- */
+
+/* Sleep is a builtin inside a script and a program on the console.
+ *
+ * A script that samples every millisecond cannot afford an exec + ELF
+ * relocation per sample.  But a builtin parks the shell itself, and the
+ * kernel deliberately refuses to signal init_proc (`process_signal` returns
+ * -1 for it, and `process_ctrl_target` skips it), so a `source` script's
+ * builtin sleep cannot be interrupted by ^C at all.  Keeping the console
+ * path as a real child preserves the foreground-job rule: the shell is
+ * ST_WAIT_CHILD, `foreground_job()` finds the sleeper, and ^C takes it.
+ * `sleep 500 &`, `nice 2 sleep 500` and `run sleep 500` are programs too.
+ * Echo has the same two paths; not blocking, it is harmless either way. */
+static int builtin_sleep(const char *arg)
+{
+    /* Same words as bin/sleep, byte for byte: tests and scripts that look
+     * for the rejection message must not care which path handled it. */
+    const char *s = arg;
+    long v = 0;
+
+    if (!*s) {
+        puts("usage: sleep <ms>   (max 3600000)\n");
+        last_status = 1;
+        return -1;
+    }
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9')
+            break;
+        v = v * 10 + (*s - '0');
+        if (v > 3600000)
+            break;                  /* keep the rest for the message below */
+    }
+    if (v > 3600000) {
+        puts("sleep: longer than 3600000 ms: ");
+        puts(arg);
+        puts("\n");
+        last_status = 1;
+        return -1;
+    }
+    if (*s) {
+        puts("sleep: not a number of milliseconds: ");
+        puts(arg);
+        puts("\n");
+        last_status = 1;
+        return -1;
+    }
+    sleep((int)v);
+    last_status = 0;
+    return -1;
+}
+
+/* The console has no script body to jump back to: a control word typed at
+ * the prompt is a mistake, not a command to be handed to /bin. */
+static int control_word(const char *w)
+{
+    return !strcmp(w, "if") || !strcmp(w, "while") || !strcmp(w, "else") ||
+           !strcmp(w, "fi") || !strcmp(w, "done") || !strcmp(w, "break");
+}
+
 /* Run one command line.  Returns -1 to keep going, or the code the shell
  * should end with (`exit`). */
 static int run_command(char *s)
 {
-    char *p = s;
-    while (*p == ' ' || *p == '\t')
-        p++;
+    char *p = skip_space(s);
     if (!*p || *p == '#')       /* blank line or comment */
         return -1;
+
+    /* `name=value` is checked before '>' and '|': the right hand side has
+     * already been substituted and may contain either character as data. */
+    {
+        char *q = p;
+        while (*q && *q != ' ' && *q != '\t' && *q != '=') {
+            if (!name_char(*q))
+                break;
+            q++;
+        }
+        if (*q == '=' && q > p && (q - p) < VAR_NAME) {
+            *q = '\0';
+            var_set(p, skip_space(q + 1));
+            last_status = 0;
+            return -1;
+        }
+    }
 
     /* A redirect is split off first: what is left may still be a pipeline,
      * and `a | b > f` should send the whole pipeline to the file. */
@@ -371,6 +717,7 @@ static int run_command(char *s)
 
     if (!strcmp(args[0], "help")) {
         cmd_help();
+        last_status = 0;
     } else if (!strcmp(args[0], "cd")) {
         /* A builtin, not a program: cwd is per process, so a child that
          * changed directory would take the change with it when it exits. */
@@ -379,6 +726,9 @@ static int run_command(char *s)
             puts("cd: no such directory: ");
             puts(dst);
             puts("\n");
+            last_status = 1;
+        } else {
+            last_status = 0;
         }
     } else if (!strcmp(args[0], "pwd")) {
         char buf[64];
@@ -386,26 +736,25 @@ static int run_command(char *s)
             puts(buf);
             puts("\n");
         }
+        last_status = 0;
     } else if (!strcmp(args[0], "rm")) {
-        /* A builtin rather than a /bin program: one syscall per name and a
-         * message, which a separate 500-byte binary would not improve.  It
-         * also runs before the fork, so `rm` cannot be made to fail for
-         * interesting reasons on a full filesystem. */
         if (ac < 2) {
             puts("usage: rm <file>...\n");
+            last_status = 1;
         } else {
+            last_status = 0;
             for (int i = 1; i < ac; i++)
                 if (unlink(args[i]) < 0) {
                     puts("rm: cannot remove ");
                     puts(args[i]);
                     puts("\n");
+                    last_status = 1;
                 }
         }
     } else if (!strcmp(args[0], "ps")) {
         /* Through /proc, not through the ps() syscall: the syscall writes
          * straight to the console, so `ps > f` would print on the terminal
-         * and leave the file empty.  Reading the file means the redirect
-         * works and there is one implementation of the table, not two. */
+         * and leave the file empty. */
         int fd = open("/proc/ps");
         if (fd < 0) {
             ps();               /* no /proc on this build: old path */
@@ -416,6 +765,7 @@ static int run_command(char *s)
                 write(1, buf, n);
             close(fd);
         }
+        last_status = 0;
     } else if (!strcmp(args[0], "exit")) {
         /* On the console `exit` ends the machine; in a script it ends the
          * script, because "quit the whole system" is never what a script
@@ -429,37 +779,68 @@ static int run_command(char *s)
         puts("rebooting...\n");
         reboot();           /* does not return */
     } else if (!strcmp(args[0], "source")) {
-        /* In this process on purpose: see run_script().  The name is copied
-         * out of `line` first because the nested script reuses that buffer. */
+        /* In this process on purpose: the C3 has three task windows in
+         * total.  The name is copied because the nested script uses the
+         * same command buffer. */
         char name[64];
         if (ac < 2) {
             puts("usage: source <file>\n");
+            last_status = 1;
         } else if (strlen(args[1]) >= sizeof(name)) {
             puts("sh: name too long\n");
+            last_status = 1;
         } else {
             strcpy(name, args[1]);
-            if (run_script(name) < 0)
+            int r = run_script(name);
+            if (r < 0)
                 cannot_open(name);
+            last_status = r < 0 ? 1 : r;
         }
     } else if (!strcmp(args[0], "run")) {
-        if (ac < 2) {
+        if (ac < 2)
             puts("usage: run <program> [args...]\n");
-        } else {
+        else
             run_program(&args[1], ac - 1, bg);
-        }
     } else if (!strcmp(args[0], "nice")) {
-        /* nice <level> <program> [args...] [&] */
         int lvl = ac > 1 ? atoi(args[1]) : -1;
         if (ac < 3 || lvl < 0 || lvl > 2)
             puts("usage: nice <0-2> <program> [args...] [&]\n");
         else
             run_nice(&args[2], ac - 2, bg, lvl);
     } else if (!strcmp(args[0], "prio")) {
-        /* prio <pid> <level>: move a task that is already running */
         if (ac != 3) {
             puts("usage: prio <pid> <0-2>  (0 highest, 2 lowest)\n");
         } else if (setprio(atoi(args[1]), atoi(args[2])) < 0) {
             puts("prio: no such task, or a level you cannot set\n");
+        }
+    } else if (control_word(args[0]) && !script_depth) {
+        sh_err("sh: if/while/else/fi/done/break need a script\n");
+        last_status = 1;
+    } else if (!strcmp(args[0], "sleep") && !bg && script_depth > 0) {
+        return builtin_sleep(ac > 1 ? args[1] : "");
+    } else if (!strcmp(args[0], "echo") && !bg) {
+        for (int i = 1; i < ac; i++) {
+            if (i > 1)
+                putchar(' ');
+            puts(args[i]);
+        }
+        putchar('\n');
+        last_status = 0;
+    } else if (!strcmp(args[0], "true")) {
+        last_status = 0;
+    } else if (!strcmp(args[0], "false")) {
+        last_status = 1;
+    } else if (!strcmp(args[0], "incr")) {
+        char buf[12];
+        char *v = ac > 1 ? var_find(args[1]) : 0;
+        int d = ac > 2 ? atoi(args[2]) : 1;
+        if (ac < 2 || !v) {
+            sh_err("sh: incr <name> [delta]\n");
+            last_status = 1;
+        } else {
+            str_num(buf, atoi(v) + d);
+            var_set(args[1], buf);
+            last_status = 0;
         }
     } else {
         /* exec failure details (not found / corrupt / ...) are reported
@@ -469,47 +850,285 @@ static int run_command(char *s)
     return -1;
 }
 
-/* Read and run a file of command lines, in this process: no exec, no new
- * window, no new pid.  That is not a shortcut, it is the only thing that
- * works on the C3: it has three task windows in total (shell, foreground,
- * spare), so a shell running a script that sources another script that runs
- * any program at all is one window too many - measured, the answer is
- * "exec: out of task windows".  `run sh <file>` still exists for the
- * console, where a separate task is what you want (crash isolation, `&`).
- *
- * `line` is shared with the outer level.  That is safe because a command
- * line is fully parsed before anything can nest, and the caller has no use
- * for it afterwards; `source` copies its argument out for the same reason. */
+/* ---- script engine ---------------------------------------------------- */
+
+typedef struct {
+    char kind;                  /* 'i' = if, 'w' = while */
+    int  start;                 /* line index of the keyword */
+    int  elsei;                 /* if: index of else, or -1 */
+    int  end;                   /* index of fi / done */
+} block_t;
+
+/* Look ahead to the matching terminator.  Blocks are resolved once, when
+ * opened, so a false branch and `break` can jump straight past their body
+ * without expanding or running a single line of it (important: a condition
+ * with $(...) must not run a program inside a branch that is not taken). */
+static int scan_block(char *lines[], int n, int start, char kind,
+                      int *elsei, int *end)
+{
+    int depth = 0;
+    *elsei = -1;
+    *end = -1;
+    for (int j = start + 1; j < n; j++) {
+        if (word_eq(lines[j], "if") || word_eq(lines[j], "while")) {
+            depth++;
+        } else if (word_eq(lines[j], "else")) {
+            if (depth == 0 && kind == 'i' && *elsei < 0)
+                *elsei = j;
+        } else if (word_eq(lines[j], "fi") || word_eq(lines[j], "done")) {
+            if (depth == 0) {
+                if ((kind == 'i' && word_eq(lines[j], "fi")) ||
+                    (kind == 'w' && word_eq(lines[j], "done"))) {
+                    *end = j;
+                    return 0;
+                }
+                return -1;      /* mismatched terminator */
+            }
+            depth--;
+        }
+    }
+    return -1;
+}
+
+/* One condition, no boolean operators and no quoting.  Text comparison is
+ * the default; -eq/-ne/-lt/-gt/-le/-ge use atoi(), so `-gt` on "1.234"
+ * compares 1 - fine for the /proc numbers a script is likely to read. */
+static int eval_cond(char *s)
+{
+    char *t[4];
+    int n = split(s, t, 4);
+
+    if (n == 0)
+        return 0;
+    if (n == 1) {
+        if (!strcmp(t[0], "-n") || !strcmp(t[0], "-z")) {
+            sh_err("sh: -n/-z need an argument\n");
+            return 0;
+        }
+        return t[0][0] != '\0' && strcmp(t[0], "0") != 0;
+    }
+    if (n == 2 && !strcmp(t[0], "-n"))
+        return t[1][0] != '\0';
+    if (n == 2 && !strcmp(t[0], "-z"))
+        return t[1][0] == '\0';
+    if (n == 3) {
+        const char *op = t[1];
+        int a = atoi(t[0]), b = atoi(t[2]);
+        if (!strcmp(op, "==")) return !strcmp(t[0], t[2]);
+        if (!strcmp(op, "!=")) return  strcmp(t[0], t[2]) != 0;
+        if (!strcmp(op, "-eq")) return a == b;
+        if (!strcmp(op, "-ne")) return a != b;
+        if (!strcmp(op, "-lt")) return a <  b;
+        if (!strcmp(op, "-gt")) return a >  b;
+        if (!strcmp(op, "-le")) return a <= b;
+        if (!strcmp(op, "-ge")) return a >= b;
+    }
+    sh_err("sh: bad condition\n");
+    return 0;
+}
+
+/* Read the whole file into the pool and slice it into lines.  The console
+ * cannot do this: it is an endless stream, which is why control statements
+ * need a file.  Returns the line count, -1 when the file will not open,
+ * -2 for a script that does not fit (already reported). */
+static int load_script(const char *path, char *lines[], int maxlines, int *mark)
+{
+    int fd = open(path);
+    if (fd < 0)
+        return -1;
+
+    *mark = pool_used;
+    int room = POOL_MAX - pool_used - 2;
+    if (room <= 0) {
+        close(fd);
+        sh_err("sh: script text pool full\n");
+        return -2;
+    }
+    char *base = pool + pool_used;
+    int total = 0;
+    while (total < room) {
+        int r = read(fd, base + total, room - total);
+        if (r <= 0)
+            break;
+        total += r;
+    }
+    if (total == room) {
+        char extra;
+        if (read(fd, &extra, 1) > 0) {
+            close(fd);
+            sh_err("sh: script too long\n");
+            pool_used = *mark;
+            return -2;
+        }
+    }
+    close(fd);
+    base[total] = '\0';
+    pool_used += total + 1;
+
+    int n = 0;
+    char *p = base;
+    while (p < base + total) {
+        char *s = p;
+        while (p < base + total && *p != '\n' && *p != '\r')
+            p++;
+        if (p < base + total) {
+            *p++ = '\0';
+            /* CRLF is one terminator, not an extra empty line. */
+            if (p < base + total && (*p == '\n' || *p == '\r'))
+                *p++ = '\0';
+        }
+        char *q = skip_space(s);
+        if (!*q || *q == '#')
+            continue;           /* blank and comment lines cost no slot */
+        if (n >= maxlines) {
+            sh_err("sh: too many script lines\n");
+            pool_used = *mark;
+            return -2;
+        }
+        lines[n++] = s;
+    }
+    return n;
+}
+
+/* Run a file of command lines in this process: no exec, no new window, no
+ * new pid.  On the C3 there are only three task windows in total, and a
+ * shell running a script that sources another script that runs a program
+ * would need one too many.  `run sh <file>` still exists for the console,
+ * where a separate task is what you want (crash isolation, `&`). */
 static int run_script(const char *path)
 {
     if (script_depth >= MAX_SOURCE) {
-        /* Not an "cannot open" - the file may be fine, there is just no room
-         * left to nest.  Returning 0 keeps that distinction at the callers. */
+        /* Not "cannot open" - the file may be fine, there is just no room
+         * left to nest.  Returning 0 keeps that distinction at the caller. */
         puts("sh: scripts nested too deep\n");
         return 0;
     }
 
-    src_t s;
-    s.fd = open(path);
-    if (s.fd < 0)
-        return -1;
-    s.pos = s.len = 0;
-    script_depth++;
+    char *lines[MAX_LINES];
+    block_t stk[MAX_BLOCKS];
+    int mark, n = load_script(path, lines, MAX_LINES, &mark);
+    if (n < 0)
+        return n;
 
-    int code = 0;
-    for (;;) {
-        int n = src_line(&s, line, sizeof(line));
-        if (n < 0)
-            break;
-        int r = run_command(line);
+    script_depth++;
+    int code = 0, i = 0, sp = 0, revisit = 0, iters = 0;
+    char cmd[LINE_MAX];
+
+    while (i < n) {
+        if (strlen(lines[i]) >= LINE_MAX) {
+            sh_err("sh: script line too long, truncated\n");
+            /* Cut the source too, so expand() does not report the same line
+             * a second time as "too long after substitution". */
+            lines[i][LINE_MAX - 1] = '\0';
+        }
+        expand(lines[i], cmd, sizeof(cmd), 1);
+        char *head = skip_space(cmd);
+        if (!*head || *head == '#') {
+            i++;
+            continue;
+        }
+
+        if (word_eq(head, "if") || word_eq(head, "while")) {
+            char kind = word_eq(head, "while") ? 'w' : 'i';
+            int elsei, end;
+            if (sp >= MAX_BLOCKS ||
+                scan_block(lines, n, i, kind, &elsei, &end) < 0) {
+                sh_err("sh: unterminated if/while (or nested too deep)\n");
+                code = 2;
+                break;
+            }
+            /* `done` jumps back to the `while` line to re-evaluate its
+             * condition against variables the body just changed.  Reuse the
+             * block instead of pushing it a second time. */
+            if (revisit && sp > 0 && stk[sp - 1].kind == 'w' &&
+                stk[sp - 1].start == i) {
+                revisit = 0;
+                block_t *b = &stk[sp - 1];
+                int cond = eval_cond(skip_word(head));
+                if (++iters > MAX_ITER) {
+                    sh_err("sh: loop limit exceeded\n");
+                    code = 2;
+                    break;
+                }
+                if (cond) {
+                    i = b->start + 1;
+                } else {
+                    sp--;
+                    i = b->end + 1;
+                }
+                continue;
+            }
+            block_t b;
+            b.kind = kind;
+            b.start = i;
+            b.elsei = elsei;
+            b.end = end;
+            stk[sp++] = b;
+            int cond = eval_cond(skip_word(head));
+            if (cond) {
+                i++;
+            } else if (kind == 'i' && elsei >= 0) {
+                i = elsei + 1;      /* run the else branch, keep the block */
+            } else {
+                sp--;
+                i = end + 1;
+            }
+            continue;
+        }
+
+        if (word_eq(head, "else")) {
+            /* Reached only when the true branch ran: skip to after `fi`. */
+            if (sp > 0 && stk[sp - 1].kind == 'i') {
+                i = stk[sp - 1].end + 1;
+                sp--;
+            } else {
+                sh_err("sh: else without if\n");
+                i++;
+            }
+            continue;
+        }
+        if (word_eq(head, "fi")) {
+            if (sp > 0 && stk[sp - 1].kind == 'i')
+                sp--;
+            else
+                sh_err("sh: fi without if\n");
+            i++;
+            continue;
+        }
+        if (word_eq(head, "done")) {
+            if (sp > 0 && stk[sp - 1].kind == 'w') {
+                revisit = 1;
+                i = stk[sp - 1].start;
+            } else {
+                sh_err("sh: done without while\n");
+                i++;
+            }
+            continue;
+        }
+        if (word_eq(head, "break")) {
+            int j = sp - 1;
+            while (j >= 0 && stk[j].kind != 'w')
+                j--;
+            if (j < 0) {
+                sh_err("sh: break outside a loop\n");
+                i++;
+            } else {
+                i = stk[j].end + 1;
+                sp = j;             /* drop the loop and everything inside */
+            }
+            continue;
+        }
+
+        int r = run_command(cmd);
         if (r >= 0) {
             code = r;
             break;
         }
+        i++;
     }
 
     script_depth--;
-    close(s.fd);
+    pool_used = mark;           /* give the bytes back to a nested source */
     return code;
 }
 
@@ -534,12 +1153,14 @@ int main(int argc, char *argv[])
     if (getpid() == 1)
         run_script("etc/rc");
 
+    char cmd[LINE_MAX];
     for (;;) {
         print_prompt();
         /* -1 is end of input; on the console it never happens, the read
          * blocks until somebody types something. */
-        if (src_line(&console, line, sizeof(line)) < 0)
+        if (getline(line, sizeof(line)) < 0)
             continue;
-        run_command(line);
+        expand(line, cmd, sizeof(cmd), 1);
+        run_command(cmd);
     }
 }

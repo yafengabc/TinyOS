@@ -111,11 +111,12 @@ func cmdEmutest(args []string) int {
 		{"hello_printf", "hello_printf", []string{"hello"}},
 		{"mem", "mem", []string{"heap demo"}},
 		{"uptime", "uptime", []string{"uptime:", "pid="}},
-		// A program, not a builtin, so this covers exec, the ST_WAIT_SLEEP
-		// path and the prompt coming back.  The ms on this check's own log
-		// line is the timing assertion: 500 means it really waited.
+		// A program on the console, a builtin inside a script: this covers
+		// exec + ST_WAIT_SLEEP and keeps ^C able to find a foreground job
+		// (init itself is deliberately unkillable).  The ms on this check's
+		// own log line is the timing assertion: 500 means it really waited.
 		{"sleep", "sleep 500", []string{"tos>"}},
-		// The kernel quietly clamps at an hour; the program refuses instead
+		// The kernel quietly clamps at an hour; both paths refuse instead
 		// of letting a measurement come out wrong by 59 minutes.
 		{"sleep too long", "sleep 99999999", []string{"longer than 3600000 ms"}},
 		// wink is the window the task actually holds.  The shell's 8 KiB
@@ -139,6 +140,13 @@ func cmdEmutest(args []string) int {
 		{"wait out stk", "hold 3", []string{"tos>"}},
 		{"crash", "crash", []string{"illegal instruction", "tos>"}},
 		{"source etc/rc", "source etc/rc", []string{"tos>"}},
+		// The script fixture exercises the whole language in one pass:
+		// $(...) over a pipe, if/else, while/incr/break, a builtin sleep,
+		// a program call and a two-program pipeline.  It is also the guard
+		// against a parser change that silently stops looping.
+		{"script", "source etc/demo.sh", []string{"[script] if-ok",
+			"[script] capture-ok", "[script] loop 2", "[script] after-loop i=3",
+			"[script] break-at-2", "[script] done"}},
 		// Devices are files, so the table has to be enumerable and entry-able,
 		// not just openable.  This is the only target tested end to end with
 		// peripherals behind it, so it is the one place /dev is not empty.

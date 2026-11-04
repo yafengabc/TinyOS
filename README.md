@@ -509,33 +509,60 @@ int main(int argc, char *argv[])
 
 ## 脚本
 
-shell 认得出命令文件，语法与你在控制台敲的**完全一样**——同一个 `split`、同一个
-派发函数，只是换了个输入源（`src_t`）并把提示符关掉。`#` 起注释，空行跳过，
-行尾 `&` 放后台，`exit N` 结束脚本并返回 N（在控制台才是关机）：
+命令文件由同一个 `run_command()` 解释，但比控制台多三样东西：**变量**、
+**用管道取回程序输出**、**成块的控制语句**。控制台也认变量和 `$(...)`
+（方便当场调试），只有 `if` / `while` / `done` 这类需要跳回开头的语句必须写在
+文件里：
 
 ```sh
-# a script, any name under the filesystem root
-echo [rc] hello from the boot script
-uptime
-run sh other.sh &
-exit 3
+# files/etc/demo.sh（节选；随镜像打包，也是 tostest emutest 的回归夹具）
+name=$(echo tiny)          # echo / pwd 直接给文本；其他名字走 bin/<prog>
+t=$(cat /proc/uptime)      # fd 1 接 pipe → spawn → 读到 EOF → wait
+if $t != 0
+    echo [script] capture-ok
+fi
+hello                      # 调用程序
+echo abc def | wc          # 两个程序之间的管道
+i=0
+while $i -lt 3
+    echo [script] loop $i
+    incr i
+    sleep 10               # 脚本内的内建，不占任务窗口
+done
+echo [script] done
 ```
+
+`$(...)` 里只放一条简单命令（内部可以有 `$var`，不支持 `|` / `>` / 嵌套）；
+结果里的换行变空格、尾部空白去掉，超过 255 B 会明说截断。条件只有一次比较：
+`==` / `!=` / `-eq` / `-ne` / `-lt` / `-gt` / `-le` / `-ge` / `-n a` / `-z a`，
+`break` 可以从 `if` 里跳出最内层 `while`，`else` 可省。变量 8 个（值 95 B），
+`$?` 是上一条命令的退出码；`incr` 是唯一的算术。
+
+**`sleep` / `echo` 只在脚本里内建**：每毫秒采样一次不能为一次 `sleep 1` 付一次
+exec + ELF 重定位。但内建会停住 shell 自己，而内核拒绝向 init 投递信号，
+`source` 脚本里的长 sleep 因此收不到 `^C`。所以控制台上的 `sleep 3000`、
+`sleep 500 &`、`nice 2 sleep 500`、`run sleep 500` 仍走 `bin/sleep` 程序；
+脚本里需要可中断的长等待也请写 `run sleep N`。
 
 两种跑法，区别只在"要不要多一个任务"：
 
 | 写法 | 做什么 | 任务窗口 | 适合 |
 | --- | --- | --- | --- |
-| `source <file>` | 在当前 shell 进程里递归读，不 `exec` | 不占窗口 | 嵌套脚本；C3 上跑任何东西 |
+| `source <file>` | 在当前 shell 进程里递归读文件，不 `exec` | 不占窗口 | 嵌套脚本；C3 上跑任何东西 |
 | `run sh <file>` | `exec` 一个新的 sh，文件名作参数 | 一个 32 KiB 窗口 | 崩溃隔离、`&`、要退出码 |
 
 `source` 仍然值得推荐，因为它连窗口都不占：C3 的 192 KiB 用户区按需分配，一个新
-sh 就是 32 KiB，嵌套几层就把并发空间吃掉了（五层之后内核回
-`exec: 'x' needs a 32 KiB window, the largest free block is 0 KiB`）。嵌套深度上限
-`MAX_SOURCE = 4`，预算就是那 8 KiB 默认栈：每层约 110 B（`src_t` 里的 96 B 读缓冲 +
-几个局部量）。
+sh 就是 32 KiB，嵌套几层就把并发空间吃掉了。嵌套深度上限 `MAX_SOURCE = 4`；
+脚本整份读进 **4 KiB 静态池**（`source` 追加、返回时退回，所以循环里反复 source
+不会累积），每个脚本最多 64 行、单行 256 B，块嵌套 8 层，`while` 最多回跳
+10000 次——脚本跑在 shell 自己身上，没有独立任务可供 `^C` 收拾，死循环得兜住。
+`exit N` 结束脚本并返回 N（在控制台才是关机），`source` 的返回值进 `$?`。
 
 启动时 pid 1 会读一次 `etc/rc`（源文件 `files/etc/rc`，随镜像打包）。它默认是空的：
 开机自己说话的机器没法做差分测试，而这里打印的每个字节都会落在所有验收用例前面。
+
+完整语法、限制表和实测输出见 `docs/SHELL-GUIDE.md` §1；体积与内存的取舍另见
+`docs/SCRIPT-DESIGN.md`。
 
 ## 进程与调度
 

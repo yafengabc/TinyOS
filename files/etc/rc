@@ -1,9 +1,10 @@
 # /etc/rc - commands the init shell reads once, before the first prompt.
 #
-# The syntax is the console's, because it is the same parser: one command per
-# line, '#' starts a comment, a trailing '&' backgrounds a command, blank
-# lines are ignored.  `exit N` ends the script with code N instead of
-# shutting the machine down.
+# One command per line, '#' starts a comment, a trailing '&' backgrounds a
+# command, blank lines are ignored.  `exit N` ends the script with code N
+# instead of shutting the machine down.  Commands are the console's (same
+# parser), plus variables, $(prog) capturing a program's stdout over a pipe,
+# and if/else/fi + while/done/break blocks.  See docs/SHELL-GUIDE.md section 1.
 #
 # `source <file>` runs another script in this process; `run sh <file>` runs
 # one as a separate task (a new pid, a new window - and the C3 has only three

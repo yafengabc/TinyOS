@@ -12,12 +12,12 @@ TinyOS shell commands:
   pwd                print the working directory
   cat <file>         print a file
   edit <file>        full screen editor (^S save, ^X exit)
-  echo [args...]     print arguments
+  echo [args...]     print arguments (builtin)
   hello              demo program
   mem                heap / sbrk demo
   crash              run an illegal instruction (kills that process)
   uptime             real time since boot (hardware clock)
-  sleep <ms>         wait without using the CPU
+  sleep <ms>         wait without using the CPU (builtin in scripts)
   gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)
   adc [chan] [n]     sample the analog inputs
   smp                run one worker per CPU, in parallel
@@ -33,51 +33,168 @@ TinyOS shell commands:
   echo 1 > /dev/gpio4  pins and ADC channels are files: write to
                      drive, cat to read, `gpio dev` for ioctl
   cmd > file         send stdout to a file or a device
+  A | B              send A's stdout to B's stdin
   run <prog> [args]  run a program from /bin
   run <prog> ... &   run it in the background
-  run sh <file>      run the commands in a file, as a task
-  source <file>      run the commands in a file, in this shell
+  run sh <file>      run a script as a task
+  source <file>      run a script in this shell
   nice <n> <prog> .. run it at priority n (0 high, 2 low)
   prio <pid> <n>     move a running task to priority n
+Script syntax (in a script file; see docs/SHELL-GUIDE.md):
+  name=text          set a variable (also `name=$(prog args)`)
+  incr name [n]      add n (default 1) to an integer variable
+  $name  ${name}  $? text substitution; $(prog) captures stdout
+  if <a> == <b>     also != -eq -ne -lt -gt -le -ge, -n a, -z a
+  else / fi         optional else branch / end of if
+  while <cond>      loop while the condition holds
+  done / break      end of loop / leave the innermost loop
+  true / false      set $? to 0 / 1
   help               this text
   exit [code]        shut TinyOS down (end the script, in a script)
 ```
 
-命令分两类：**内建**（`help`、`cd`、`pwd`、`rm`、`ps`、`exit`、`reboot`、
-`source`、`run`、`nice`、`prio`，由 shell 自己解释）和**程序**（`bin/` 下的每个
-ELF：`ls`、`cat`、`sleep`……）。两者在命令行上没有区别——不是内建的名字会被当成
-`bin/<名字>` 去 exec，所以 `hello alpha` 和 `run hello alpha` 等价，
-`sleep 500 &` 和 `run sleep 500 &` 也等价。**`sleep` 故意做成程序而不是内建**：
-内建会占住 shell 自己，`&`、`nice`、`prio`、`^C` 就都碰不到它了。
+命令分三类：**内建**（`help`、`cd`、`pwd`、`rm`、`ps`、`exit`、`reboot`、
+`source`、`run`、`nice`、`prio`，以及脚本用的 `incr`、`true`、`false`）、
+**脚本内内建 + 控制台/后台程序**（`echo`、`sleep`）和**程序**（`bin/` 下的每个
+ELF：`ls`、`cat`、`uptime`……）。不是内建的名字会被当成 `bin/<名字>` 去
+exec，所以 `hello alpha` 和 `run hello alpha` 等价。
+
+**为什么 `sleep` 有两条路径**：脚本里每毫秒采样一次时，为一次 `sleep 1`
+付一次 exec + ELF 重定位是不可接受的。但内建会停住 shell 自己，而内核**明确拒绝
+向 init 投递信号**（`process_signal()` 对 `init_proc` 返回 -1，
+`process_ctrl_target()` 也跳过它），所以 `source` 脚本里的内建 sleep 一旦很长，
+`^C` 就再也收不回来了。因此条件很明确：**只在脚本里（`script_depth > 0`）、
+且不带 `&` 时内建**；控制台上敲 `sleep 3000`、`sleep 500 &`、
+`nice 2 sleep 500`、`run sleep 500` 全部仍是 `bin/sleep` 程序。控制台的前台
+sleep 因此保住了 `^C`：shell 阻塞在 `wait()`，属于
+`foreground_job()` 能找到的目标，实测发 0x03 后立刻 `[pid N] killed` 并回到提示符。
+`echo` 也分两条路（不带 `&` 是内建），但它不阻塞，没有这层顾虑。
 
 `sleep` 的单位是**毫秒**（内核 ABI、唤醒它的 tick、`samp` 的采样间隔都是毫秒），
-上限 3600000 ms——这是内核夹断的那个值，程序先拒绝，免得静默地少睡。
+上限 3600000 ms——这是内核夹断的那个值，两条路径都先拒绝，免得静默地少睡。
 
 ---
 
 ## 1. 脚本
 
-### 1.1 语法：就是控制台
+脚本 = 命令文件 + 三样控制台没有的东西：**变量**、**命令替换**、**成块的控制语句**。
+控制台也认变量和 `$(...)`（方便当场调试），只有 `if` / `while` / `else` / `fi` /
+`done` / `break` 需要文件——`while` 必须能跳回开头，而控制台是一条不会回头的流；
+把这些关键字敲在提示符里会得到 `sh: if/while/else/fi/done/break need a script`。
 
-脚本没有第二种语法。shell 用同一个 `split()`、同一个派发函数读文件，
-只是换了个输入源并把提示符关掉：
+实现上没有新系统调用、没有 AST、没有 `malloc()`：整个脚本一次读进 4 KiB 静态池，
+按行切开后用行号跳转；`source` 把文件追加到池尾、返回时把池指针退回去，所以循环里
+反复 `source` 不会长胖。命令分发仍是控制台那个 `run_command()`。代价是 `bin/sh`
+从 7.0 KiB 变成 17.7 KiB ELF（压缩后 14.5 KiB），`ps` 里的窗口仍是 **32 KiB**，
+跑过脚本后的栈高水位 `0.6/8 → 1.6/8`。
 
-- 一行一个命令；**空行跳过**；**`#` 在行首时整行是注释**——只认行首，命令中间的
-  `#` 会被当成普通参数传给程序（`echo a #b` 打印 `a #b`）；
-- 行尾的 `&` 让命令进后台，和控制台一样；
-- `exit [N]` 在脚本里表示**结束本脚本**并返回 N（只保留低 8 位，`N & 255`）；
-  只有在控制台（不在任何脚本里）时它才是关机。
+### 1.1 变量与替换（控制台和脚本通用）
 
-```sh
-# a script, any name under the filesystem root
-echo [rc] hello from the boot script
-uptime
+| 写法 | 做什么 |
+| --- | --- |
+| `name=text` | 赋值；右边是**已经展开过的整段文本**，可以有空格 |
+| `$name` / `${name}` | 取值，未定义即空串 |
+| `$?` | 上一条命令的退出码（exec 失败是 127） |
+| `$(prog args)` | 捕获一条命令的 stdout，见 §1.2 |
+| `incr name [n]` | 把变量当整数加 n（默认 1） |
+| `true` / `false` | 只把 `$?` 置成 0 / 1 |
 
-run sh other.sh &
-exit 3
+第一个词里出现 `=` 且左边是标识符才算赋值（`dd of=f bs=1` 不是）。变量名最长
+11 B、值最长 95 B，一共 8 个变量。**没有引号、没有算术表达式、没有布尔运算**：
+`incr` 是循环里唯一的算术。这是"简单脚本"，不是第二门语言。
+
+```
+tos> x=$(cat /proc/uptime)
+tos> echo x-is-$x
+x-is-0.004
+tos> echo braces=${x}
+braces=0.004
 ```
 
-### 1.2 两种跑法
+`$?` 在**展开时**取值：`echo status=$?` 先展开再执行 echo，所以拿到的是上一条命令
+的状态，echo 自己随后把它置 0。同理 `false` 后面紧跟 `echo ... $?` 打印 1。
+
+### 1.2 `$(...)`：把程序输出接进脚本
+
+`$(prog args)` 是 shell 自己接的一根 pipe：fd 1 指向写端 → spawn `bin/prog` →
+shell 关掉自己那份写端 → 把读端**读到 EOF** → 才 `wait(pid)`。先读完再 wait 不是
+优化：内核 pipe 只有 2048 B，写满的生产者会阻塞，先 wait 的 shell 会和自己的孩子
+死锁。读到的换行变空格、尾部空白去掉，结果直接拼进所在行。
+
+```sh
+name=$(echo tiny)        # echo / pwd 是内建，直接给文本，不 spawn
+t=$(cat /proc/uptime)    # 程序输出经 pipe 回到脚本，t = 0.005
+if $t != 0
+    echo [script] capture-ok
+fi
+```
+
+边界（都是刻意的）：
+
+- `$(...)` 里只放**一条简单命令**：不支持 `|`、`>`、嵌套 `$(...)`；里面可以有 `$var`。
+- 输出超过 255 B 打印 `sh: $(...) output truncated`，但会继续把管道抽干——截断的是
+  脚本看到的文本，不是让生产者卡住。
+- 捕获程序的退出码进 `$?`；`$(false)` 得到空串且 `$?=1`。
+- 程序若从 stdin 读（如 `$(wc)`）会读控制台并阻塞；要统计文件内容请用 `A | B`。
+
+`A | B` 仍在：两个程序经另一根 pipe 串起来（`echo abc def | wc` → `1 2 8`），
+和 `$(...)` 的区别是消费者是程序还是脚本自己。
+
+### 1.3 控制语句（只在脚本里）
+
+```sh
+if <a> == <b>
+    ...
+else                # 可省
+    ...
+fi
+
+while <cond>
+    ...
+    break           # 可省，可以从 if 里跳
+done
+```
+
+条件只有一个比较，没有 `&&` / `||` / 引号：
+
+| 形式 | 含义 |
+| --- | --- |
+| `a == b` / `a != b` | 字符串比较（`strcmp`） |
+| `a -eq/-ne/-lt/-gt/-le/-ge b` | 整数比较（`atoi`；`-gt 0` 看 `"1.234"` 时算 1） |
+| `-n a` / `-z a` | 非空 / 为空 |
+| `a`（单个词） | 非空且不是 `0` |
+
+`while` 的条件**每轮重算**（`done` 跳回 `while` 那一行而不是只判一次），所以
+`incr` 改过的变量能终止循环。块在打开时就先扫到匹配的 `fi` / `done`：条件为假
+直接跳过去，假分支里的行既不展开也不执行——包括其中的 `$(...)`。缩进只是好看，
+解析器跳前导空白。未定义变量展开成空串会让 `if $x == y` 变成 ` == y`，报
+`sh: bad condition` 并当作假；判空请用 `-n` / `-z`。
+
+块嵌套上限 8 层，循环最多回跳 **10000** 次，超了报 `sh: loop limit exceeded`
+并结束脚本：脚本跑在 shell 自己身上，没有独立任务可供 `^C` 收拾，死循环得自己兜住。
+
+### 1.4 内置命令与后台
+
+脚本里高频的小命令不该每次付一次 exec + ELF 重定位。**只有脚本里的**
+`sleep` / `echo` 是内建：
+
+```sh
+i=0
+while $i -lt 3
+    echo [script] loop $i
+    incr i
+    sleep 10          # 脚本内：内建，三次循环零个新任务
+done
+```
+
+控制台上敲的 `sleep 3000`、`sleep 500 &`、`nice 2 sleep 500`、`run sleep 500`
+仍走 `bin/sleep` 程序；`echo ... &` 同理。理由见开头：**内建会停住 shell 自己，
+而 init 是不可投递信号的目标**，`source` 脚本里一句长 sleep 会让 `^C` 找不到任何
+目标。所以脚本里需要"可被 ^C 打断的长等待"时写 `run sleep 3000`——它仍是普通
+前台子任务；短采样循环才用内建。两条路径的输入校验和报错文字一致，
+`tostest emutest` 的 sleep 检查覆盖的就是控制台那条。
+
+### 1.5 两种跑法
 
 | 写法 | 做什么 | 任务窗口 | 适合 |
 | --- | --- | --- | --- |
@@ -87,46 +204,31 @@ exit 3
 选哪个的判断只有一条：**要不要多一个任务**。
 
 - `run sh <file>` = `exec("bin/sh", {"sh", file})`。脚本跑飞只会带走那个 sh，
-  shell 毫发无损；它也是一个普通任务，可以 `&` 进后台，退出码经 `wait()` 返回
-  （shell 目前不打印子任务的退出码）。
+  shell 毫发无损；它也是一个普通任务，可以 `&` 进后台，退出码经 `wait()` 返回。
 - `source <file>` 是在 shell 自己的身体里读文件。没有隔离——脚本里一句 `reboot`
-  就是真重启，一个 crash 也一样（crash 的非法指令只杀当前任务，而"当前任务"
-  就是你的 shell）。它换来的是**不占任务窗口**。
+  就是真重启，一个 crash 也一样。它换来的是**不占任务窗口**。
 
 为什么"不占窗口"重要：**ESP32-C3 一共只有 3 个任务窗口**（shell、前台、备用）。
-`run sh a.sh` 自己吃掉一个，a.sh 里再跑一个程序就是第三个，再嵌一层内核只会回
-`exec: out of task windows`——这是真机实测的结论，QEMU 上窗口宽裕，完全看不出来。
-所以**在 C3 上写嵌套脚本一律用 `source`**。
+所以**在 C3 上写嵌套脚本一律用 `source`**。`run sh etc/demo.sh` 在只有 shell 的
+干净系统上也实测跑通了，但脚本里再嵌一层程序就可能回
+`exec: ... largest free block is 0 KiB`。
 
-### 1.3 路径与参数
+### 1.6 路径、参数与嵌套
 
 - `<file>` 是**文件系统根的相对路径**，带不带前导 `/` 都行：`source etc/rc` 与
   `source /etc/rc` 等价（实测）。
-- `run sh <file>` 里只有 `sh` 这个名字吃 `bin/` 前缀，文件名参数原样传给 sh，
-  所以同样写 `run sh etc/rc`。
-- 脚本**不能带自己的参数**：`run sh a.sh foo` 里 `foo` 会被 sh 忽略（它只读 `argv[1]`）。
-  需要参数化的话，用 `wfile` 生成脚本内容。
-- 文件名（含路径）上限 63 字节；命令行上限 256 字节。脚本行超过 256 字节会被
-  **截断并明说**：`sh: script line too long, truncated`——脚本不能重打，所以不静默。
+- `run sh <file>` 里只有 `sh` 这个名字吃 `bin/` 前缀，文件名参数原样传给 sh。
+- 脚本**不能带自己的参数**：`run sh a.sh foo` 里 `foo` 会被 sh 忽略（它只读
+  `argv[1]`）。需要参数化的话，在脚本里 `name=...` 或用 `wfile` 生成内容。
+- 文件名（含路径）上限 63 字节；命令行上限 256 字节。
+- `source` 嵌套上限 **`MAX_SOURCE = 4`** 层（控制台算第 0 层），到顶报
+  `sh: scripts nested too deep`。设上限的真正理由不是栈（实测跑完整个 demo.sh
+  是 `1.6/8` KiB），而是**两个脚本互相 `source` 这种死循环**。
+- `exit [N]` 在脚本里**结束本脚本**并返回 N（只保留低 8 位）；只有在控制台
+  （不在任何脚本里）时它才是关机。`source` 的返回值就是 `$?`，实测
+  `wfile exit.sh exit 7` + `source exit.sh` + `echo $?` → `7`，shell 还在。
 
-### 1.4 嵌套与深度
-
-`source` 可以嵌套：a.sh 里 `source b.sh`，b.sh 里再 `source c.sh`……
-上限 **`MAX_SOURCE = 4`** 层（控制台本身算第 0 层），到顶报：
-
-```
-tos> source a.sh          # a→b→c→d→e 五层链
-sh: scripts nested too deep
-```
-
-实测：四层链（a→b→c→d）正常执行，第五个 `source` 被拒，深层文件不再打开，
-外层脚本从下一行继续。设上限的真正理由不是栈（每层约 110 B，8 KiB 默认栈付得起），
-而是**两个脚本互相 `source` 这种死循环**。
-
-`run sh` 的嵌套不受这个数管，它受**任务窗口**管：每层一个窗口，x86/rv32
-足够宽裕，C3 的 192 KiB 在按需分配 + 8 KiB 默认栈下能装 12 个 16 KiB 的窗口。
-
-### 1.5 启动脚本 `etc/rc`
+### 1.7 启动脚本 `etc/rc`
 
 pid 1 的 shell 在打出 banner、第一个提示符**之前**读一次 `files/etc/rc`
 （随 `tos build` 打包进镜像，板上路径 `etc/rc`）。注意：
@@ -137,31 +239,56 @@ pid 1 的 shell 在打出 banner、第一个提示符**之前**读一次 `files/
   测试，而这里打印的每个字节都会落在所有验收用例前面。想加启动动作，把
   `files/etc/rc` 里的示例行取消注释，或者写自己的，然后重新 `tos build`。
 
-### 1.6 错误报告
+### 1.8 限制与错误报告
 
-- `source nosuch` / `run sh nosuch` → `sh: cannot open nosuch`（点名的就是你给的路径）；
-- 嵌套超限 → `sh: scripts nested too deep`；
-- 行太长 → `sh: script line too long, truncated`；
-- 脚本里某个命令 exec 失败（比如 `bin/` 下没有这个名字）→ 由内核报具体原因
-  （not found / corrupt / out of task windows），shell 不重复打印。
+| 限制 | 值 |
+| --- | --- |
+| 脚本文本池（所有嵌套脚本合计） | 4096 B |
+| 单个脚本行数（空行 / 注释不计） | 64 |
+| 单行 / 展开后的命令行 | 256 B |
+| 变量 | 8 个，名 11 B，值 95 B |
+| 块嵌套 / while 回跳 | 8 层 / 10000 次 |
 
-### 1.7 一个完整的例子
+- `source nosuch` / `run sh nosuch` → `sh: cannot open nosuch`；
+- 池满 / 行太多 / 行太长 → `sh: script text pool full` / `too many script lines` /
+  `script line too long, truncated`（脚本不能重打，所以不静默截断）；
+- 缺 `fi` / `done`、`else` / `break` 用错地方 → 点名报错并结束该脚本；
+- 脚本里某个命令 exec 失败 → 由内核报具体原因（not found / corrupt / out of
+  task windows），shell 不重复打印。
 
-```sh
-# files/etc/rc —— 开机把低优先级的采集任务挂到后台，然后交出控制台
-nice 2 bench &          # 2 级（最低）跑基准，不挡 shell
-echo [rc] up and running
+### 1.9 一个完整的例子
+
+`files/etc/demo.sh` 随镜像打包，也是 `tostest emutest` 的回归夹具，覆盖变量、
+`$(...)`、if/else、while/incr/break、内建 sleep、程序调用与两段管道：
+
+```
+tos> source etc/demo.sh
+[script] name=tiny
+[script] if-ok
+[script] uptime=0.005
+[script] capture-ok
+hello from ring 3!
+pid=3 argc=1 uptime=6 ms
+  argv[0] = "hello"
+1 2 8
+[script] loop 0
+[script] loop 1
+[script] loop 2
+[script] after-loop i=3
+[script] break-at-2
+[script] after-break j=2
+[script] false-status=1
+[script] done
+tos>
 ```
 
-调试脚本不用重烧镜像——板上现写：
+调试短脚本不用重烧镜像——板上现写（`wfile <file> <内容>` 一次写一行）：
 
 ```
 tos> wfile t.sh echo hello from a script
 tos> source t.sh
 hello from a script
 ```
-
-（`wfile <file> <内容>` 写一行；要多行脚本就分几次写不同文件，或 `source` 串起来。）
 
 ---
 
@@ -278,7 +405,10 @@ setprio(0, 2);             /* 我是后台任务，自降为最低 */
 - **睡眠中的后台任务收不回来**：第三级只挑 `rdy`/`run` 的，`nice 0 sleep 3600000 &`
   既不占 CPU 也不被等，`^C` 找不到它，只能等它醒（它也不会把 shell 锁死，因为
   睡着的任务不拿 CPU）。**前台的 `sleep` 不一样**，它走第二级——shell 正 `wait`
-  着它，所以 `^C` 立刻生效。
+  着它，所以 `^C` 立刻生效（控制台的 `sleep` 因此始终是程序）。
+- **脚本里的内建 `sleep` 收不回来**：`source` 脚本运行时"当前任务"就是 init 本身，
+  `process_signal()` 拒绝向 init 投递信号，`^C` 的三级目标也跳过它。短采样 sleep
+  无所谓；脚本里需要可中断的长等待就写 `run sleep N`，它变回普通前台子任务。
 - **自降升不回的是程序，不是 shell**：一个程序把自己降到 2 级之后升不回去
   （越过不了自己的级别）。shell 是这条规则的唯一例外——它可以把任何任务提到
   任何级别，包括把自降后的自己提回来。所以 `prio 1 2` 之后
@@ -294,9 +424,16 @@ setprio(0, 2);             /* 我是后台任务，自降为最低 */
 ## 3. 速查
 
 ```
-source <file>              在本 shell 里跑命令文件（不占窗口，C3 首选）
-run sh <file>              起新任务跑命令文件（隔离、可 &、有退出码）
+source <file>              在本 shell 里跑脚本（不占窗口，C3 首选）
+run sh <file>              起新任务跑脚本（隔离、可 &、有退出码）
 run sh <file> &            后台跑脚本
+name=text                  变量；$name / ${name} / $? 取值
+name=$(prog args)          用管道捕获程序 stdout
+incr name [n]              整数加 n（默认 1）
+if <cond> / else / fi      条件；== != -eq -ne -lt -gt -le -ge -n -z
+while <cond> / done        循环；break 跳出最内层
+true / false               把 $? 置 0 / 1
+A | B                      两个程序之间的管道
 nice <0-2> <prog> [&]      以指定级别启动
 prio <pid> <0-2>           移动在跑的任务（只能向下或平级）
 exit [N]                   结束脚本（返回 N&255）；控制台上才是关机
@@ -308,7 +445,10 @@ reboot                     真复位
 | 优先级 | 3 级，0 最高，继承父任务，不能升过调用者 |
 | 时间片 | 1 ms（1000 Hz tick × QUANTUM 1） |
 | 调度 | 级间严格从高到低；级内轮转；唤醒即抢占（trap 收尾切换） |
-| `source` 嵌套 | ≤ 4 层（每层约 110 B 栈） |
-| 脚本行 / 文件名 | ≤ 256 B（截断会报错）/ ≤ 63 B |
+| `source` 嵌套 | ≤ 4 层（跑完 demo.sh 的栈高水位 1.6/8 KiB） |
+| 脚本池 / 行数 / 行宽 | 4096 B（嵌套合计）/ 64 行 / 256 B |
+| 变量 / 块 / 循环 | 8 个（值 95 B）/ 8 层 / 10000 次回跳 |
+| 脚本文件名 | ≤ 63 B |
+| 脚本示例 / 回归夹具 | `files/etc/demo.sh`，`tostest emutest` 的 `script` 检查 |
 | 启动脚本 | `files/etc/rc`，仅 pid 1 读一次，默认空 |
 | 任务总数 | 16（`MAX_PROCS`）；C3 任务窗口只有 3 个 |

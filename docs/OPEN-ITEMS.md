@@ -106,6 +106,17 @@ rv32 `-Oz` 下 `.text` 恰好持平（28,936 B，代码不同但总量相抵—�
 PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 → source 跑通、
 点名报错、`run sh etc/rc`）。rv32 + x86 smoke 全过。
 
+> **2026-11-04 扩展成脚本语言**：`$(prog)` 经 pipe 取回 stdout、`$var`/`$?`、
+> `if/else/fi` + `while/done/break` + `incr`、`true/false`，脚本内 `sleep`/`echo`
+> 内建。为此把整份脚本读进 4 KiB 静态池（`source` 追加、返回时退回池指针），
+> 按行号跳转，不再用 `src_line()` 的流式文件读——因为内核没有 lseek，
+> `while` 没有别的办法回到开头。`bin/sh` 从 7.0 → 17.7 KiB ELF
+> （LZ4TOS 后 14.5 KiB，x86 实测），窗口仍 32 KiB，跑完 demo.sh 的栈高水位
+> 1.6/8 KiB。**新踩的坑**：内建 sleep 会停住 init，而 `process_signal()` 明确
+> 拒绝 init，所以 `^C` 收不回来；最终把内建严格限制在脚本内，控制台仍走
+> `bin/sleep`，实测 0x03 立刻 `[pid N] killed`。回归夹具 `files/etc/demo.sh`
+> 由 `tostest emutest` 的 `script` 检查覆盖。详见 `SHELL-GUIDE.md` §1。
+
 ## 6. 单文件多入口 vs 共享库（只评估，见 PLATFORM-DESIGN §7.1）
 
 > **2026-11-02 复测并补测**：数字已更新（树变了：sh 从 2,680 长到 4,264 B），
