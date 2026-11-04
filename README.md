@@ -219,16 +219,16 @@ go run ./cmd/tostest emu test      # 启动 esp32c3 内核 + uptime/ls 冒烟
 $env:TOS_EMU = "C:\path\to\rv32emu.exe"    # 例如用 Go 版做差分测试
 ```
 
-> **为什么一律带 `-clk wall`**（`tostest` 的三个入口已经默认加上）：模拟器自
-> `4e8cf59` 起默认按**指令数**驱动定时器，一条指令等于一个 TIMG 计数。对固件基准
-> 这是对的，对 TinyOS 不是——模拟的 C3 报 20 MHz（PLL 寄存器为 0，见启动时的
-> `[clk]` 行），于是 tick 落在每 ~1000 条指令一次，而它代替的 160 MHz 芯片是每
-> 16 万条一次，**密了 160 倍**。时间片恰好是一个 tick，用户程序在两次切换之间连
-> 一次 syscall 都走不完：内核能打印到 `starting /bin/sh ...`，然后停在那里，且
-> `exceptions=0`——它从未发出第一个 `ecall`。手工跑时也别忘了这个参数；判据很
-> 简单，`tick self-check` 显示 2 而不是 1、并且能看到 shell 提示符，就说明时钟对
-> 了。模拟器的指令语义本身没问题（`rv32emu-bench.exe check` 四个负载与 QEMU +
-> 独立参考模型全部一致）。
+> **时钟**：模拟器早先按「一条指令一个 TIMG 计数」驱动定时器，而且完全忽略
+> `T0CONFIG` 的 13:28 分频字段——TinyOS 按读到的 APB（20 MHz，PLL 寄存器为 0
+> 时退回 XTAL/2）写入除数 20，模拟器却当成 1，于是 tick 密了 20 倍；时间片
+> 恰好是一个 tick，用户程序在两次切换之间连一次 syscall 都走不完。症状是内核
+> 打印到 `starting /bin/sh ...` 就停，`exceptions=0`——从未发出第一个 `ecall`。
+> 现在模拟器默认走主机墙钟、分频字段生效、三个时基各按自己的频率计数（TIMG
+> 按 APB 20 MHz、SYSTIMER 16 MHz、RTC 慢钟 136 kHz），默认参数即可启动，
+> `tick self-check` 显示 1。`-clk insn` 保留按指令计时的可复现模式；`tostest`
+> 的三个入口仍显式带 `-clk wall`，对旧版模拟器二进制同样成立。指令语义一直
+> 没问题：`rv32emu-bench.exe check` 四个负载与 QEMU + 独立参考模型全部一致。
 
 为什么 QEMU 只做功能验证、不做性能：QEMU 的 TCG 在 store 落到已翻译的代码页时
 会作废整个 TB，`memcpy` 每次迭代都要重新翻译同一段循环——实测同 5 个 TB 被翻译了
