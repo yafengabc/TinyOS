@@ -73,29 +73,34 @@ type Target struct {
 }
 
 var Targets = map[string]Target{
-	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk", RamdiskSectors: 600},
-	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded", RamdiskSectors: 600},
+	// The kernel heap has to hold one decompressed program image at a
+	// time: exec() unpacks the program into a kernel buffer before it
+	// copies it into the task window.  The default 32 KiB is enough for
+	// the small tools, but not for the Python interpreter, whose image is
+	// tens of kilobytes.  A board that can spare the room says so here.
+	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk", RamdiskSectors: 600, HeapBytes: 256 * 1024},
+	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 256 * 1024},
 	// The shipped littlefs image is small (600 sectors = 300 KiB, same as
 	// every other target): the kernel mounts it with block_count=0 (take
 	// the size from the image superblock) and calls lfs_fs_grow to stretch
 	// it over the real partition, PLAT_LFS_BLOCKS = 896 blocks = 3.5 MiB.
 	// That is what keeps the flashed artifact at 300 KiB while the
 	// filesystem still gets the whole 4 MiB part.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600},
-	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600},
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 48 * 1024},
+	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
 
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what
 	// the spin lock is made of (arch/rv32/platform.c), and the plain rv32
 	// target keeps rv32imc so the ESP32-C3's ISA stays the reference.
-	"rv32smp": {Name: "rv32smp", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "embedded", RamdiskSectors: 600, CPUs: 2},
+	"rv32smp": {Name: "rv32smp", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "embedded", RamdiskSectors: 600, CPUs: 2, HeapBytes: 256 * 1024},
 
 	// rv32nc = rv32im, no C extension: the same machine as rv32 without
 	// compressed instructions.  Exists so the cost/benefit of RVC can be
 	// measured per release (see docs/SIZE-NOTES.md if present); the ELF
 	// links identically, only the encoding differs.
-	"rv32nc": {Name: "rv32nc", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32im", FSBacking: "embedded", RamdiskSectors: 600},
+	"rv32nc": {Name: "rv32nc", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32im", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 256 * 1024},
 }
 
 // Builder compiles and links everything and writes build/tinyos.img.
@@ -812,10 +817,20 @@ func (b *Builder) buildUser() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A program is either one .c file (user/hello.c -> bin/hello) or a
+	// directory of .c files (user/py/*.c -> bin/py).  The directory form
+	// exists because an interpreter does not fit in one file, and splitting
+	// it into user/py_lex.c and user/py_parse.c would otherwise make two
+	// programs out of one.  A directory wins over a same-named file.
 	var progs []string
+	var dirs []string
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".c") {
+		if e.IsDir() {
+			dirs = append(dirs, name)
+			continue
+		}
+		if !strings.HasSuffix(name, ".c") {
 			continue
 		}
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" {
@@ -824,6 +839,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		progs = append(progs, strings.TrimSuffix(name, ".c"))
 	}
 	sort.Strings(progs)
+	sort.Strings(dirs)
 
 	for _, prog := range progs {
 		src := filepath.Join(udir, prog+".c")
@@ -832,6 +848,55 @@ func (b *Builder) buildUser() ([]string, error) {
 		tasks = append(tasks, task{fn: func() error {
 			return b.compile(srcCopy, objCopy, incs, userPIEFlags...)
 		}})
+	}
+
+	// One object per source in the directory.  The object path carries the
+	// directory name so two programs cannot overwrite each other's objects
+	// (the same bug that once made esp32c3 and rv32 share one .o).
+	dirObjs := map[string][]string{}
+	for _, dir := range dirs {
+		srcs, err := filepath.Glob(filepath.Join(udir, dir, "*.c"))
+		if err != nil {
+			return nil, err
+		}
+		if len(srcs) == 0 {
+			continue // not a program directory; nothing to link
+		}
+		sort.Strings(srcs)
+		outDir := filepath.Join(b.BuildDir, "user", dir)
+		// The objects of a directory program go in a directory of their
+		// own, so create it before the compile tasks run.
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return nil, err
+		}
+
+		// A program may ask for its own optimisation level by putting one
+		// in an "opt" file next to its sources.  The flag goes after the
+		// default in the command line, and the last -O wins.
+		//
+		// The Python interpreter asks for -Oz: its image is tens of
+		// kilobytes and has to fit in a task window on a microcontroller
+		// whose whole user area is 192 KiB.  The kernel stays at -O2,
+		// because -Oz on RV32 is what makes QEMU's TCG re-translate every
+		// loop (see ccFlags) - that is a property of the emulator, not of
+		// the code, and the interpreter is not what runs the kernel.
+		flags := userPIEFlags
+		if raw, err := os.ReadFile(filepath.Join(udir, dir, "opt")); err == nil {
+			if s := strings.TrimSpace(string(raw)); s != "" {
+				flags = append(append([]string{}, flags...), s)
+				b.logf("      OPT %s %s\n", dir, s)
+			}
+		}
+
+		for _, src := range srcs {
+			base := strings.TrimSuffix(filepath.Base(src), ".c")
+			obj := filepath.Join(outDir, base+".o")
+			dirObjs[dir] = append(dirObjs[dir], obj)
+			srcCopy, objCopy, flagsCopy := src, obj, flags
+			tasks = append(tasks, task{fn: func() error {
+				return b.compile(srcCopy, objCopy, incs, flagsCopy...)
+			}})
+		}
 	}
 
 	if err := b.runTasks(tasks); err != nil {
@@ -851,6 +916,19 @@ func (b *Builder) buildUser() ([]string, error) {
 		}
 		b.logf("      LD  bin/%s\n", prog)
 		bins = append(bins, prog)
+	}
+	for _, dir := range dirs {
+		objs := dirObjs[dir]
+		if len(objs) == 0 {
+			continue
+		}
+		out := filepath.Join(b.BuildDir, "user", "bin", dir)
+		all := append(append([]string{}, commonObjs...), objs...)
+		if err := b.linkPIE(all, filepath.Join(udir, "user.ld"), out); err != nil {
+			return nil, err
+		}
+		b.logf("      LD  bin/%s\n", dir)
+		bins = append(bins, dir)
 	}
 	return bins, nil
 }
