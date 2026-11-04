@@ -35,6 +35,76 @@ char *strcpy(char *dst, const char *src)
     return dst;
 }
 
+/* The functions below are the ones include/string.h promises but used to
+ * live only in kernel/string.c, which user programs do not link.  A user
+ * program that included <string.h> and called memcmp() got an undefined
+ * symbol at link time - the header said the function was there and the
+ * linker said otherwise.  They are here so the header is true for user
+ * land too.  --gc-sections drops the ones a program does not use, so this
+ * costs nothing in a binary that does not call them. */
+
+char *strncpy(char *dst, const char *src, size_t n)
+{
+    char *d = dst;
+    while (n && *src) {
+        *d++ = *src++;
+        n--;
+    }
+    while (n--)
+        *d++ = 0;
+    return dst;
+}
+
+char *strchr(const char *s, int c)
+{
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char *)s;
+        if (!*s)
+            return NULL;
+    }
+}
+
+char *strrchr(const char *s, int c)
+{
+    const char *last = NULL;
+    for (;; s++) {
+        if (*s == (char)c)
+            last = s;
+        if (!*s)
+            break;
+    }
+    return (char *)last;
+}
+
+size_t strspn(const char *s, const char *accept)
+{
+    size_t n = 0;
+    while (s[n] && strchr(accept, s[n]))
+        n++;
+    return n;
+}
+
+size_t strcspn(const char *s, const char *reject)
+{
+    size_t n = 0;
+    while (s[n] && !strchr(reject, s[n]))
+        n++;
+    return n;
+}
+
+char *strstr(const char *hay, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (!n)
+        return (char *)hay;
+    for (; *hay; hay++) {
+        if (*hay == *needle && !strncmp(hay, needle, n))
+            return (char *)hay;
+    }
+    return NULL;
+}
+
 void *memcpy(void *dst, const void *src, size_t n)
 {
     unsigned char *d = dst;
@@ -69,6 +139,19 @@ void *memset(void *dst, int c, size_t n)
     while (n--)
         *d++ = (unsigned char)c;
     return dst;
+}
+
+int memcmp(const void *a, const void *b, size_t n)
+{
+    const unsigned char *x = a;
+    const unsigned char *y = b;
+    while (n--) {
+        if (*x != *y)
+            return (int)*x - (int)*y;
+        x++;
+        y++;
+    }
+    return 0;
 }
 
 int atoi(const char *s)
