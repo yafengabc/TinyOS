@@ -50,7 +50,7 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
   外加 `clock/getcpu/gpio/adc/pipe/dup2/ioctl`
-- **抢占式调度**：时间片轮转（50 ms）、`exec` 创建子任务、`wait` 收退出码、
+- **抢占式调度**：时间片轮转（1 ms）、`exec` 创建子任务、`wait` 收退出码、
   `read/wait/sleep` 阻塞而不忙等；只在用户态帧上抢占，内核调用不会被撕裂
 - **真实时钟**：`uptime`/`clock_ns()` 读硬件自由运行计数器（CLINT `mtime`、
   ESP32-C3 的 TG0、Cortex-M 的 SysTick），不是数指令；纳秒级分辨率，单调不回退
@@ -402,10 +402,10 @@ smp: done
 tos> run smp &
 tos> ps
  pid ppid prio state  c cpu% cpums wink stk  name
-   1    0    0 run   0    0.7     0   32   0.6  sh
-   5    1    0 wait  -    0.0     0   32   0.5  smp
-   6    5    0 rdy   -   93.7     0   32   0.4  smp
-   7    5    0 run   1   86.5     0   32   0.4  smp
+   1    0    1 run   0    0.7     0   32   0.6  sh
+   5    1    1 wait  -    0.0     0   32   0.5  smp
+   6    5    1 rdy   -   93.7     0   32   0.4  smp
+   7    5    1 run   1   86.5     0   32   0.4  smp
 ```
 
 两个 worker 各占一个 hart（`c` 列是正在跑它的 CPU），各自接近 100% —— 是真并行，
@@ -532,31 +532,32 @@ tos> run hello deep      # 前台：shell 阻塞在 wait 里，直到 hello 退�
 tos> run spin &          # 后台：立刻回到提示符，[pid] 是子任务
 ```
 
-调度是**三级优先级（0 最高）+ 级内时间片轮转**，50 ms 一片，由定时器 tick 驱动。
-唤醒也抢占：级别更高的任务被叫醒（输入行到达、sleep 到点、子任务退出）时立刻标记
-重新调度，切换仍在 trap 收尾完成。**只在用户态帧上抢占**：
+调度是**三级优先级（0 最高）+ 级内时间片轮转**，1 ms 一片（1000 Hz tick），由定时器
+tick 驱动。唤醒也抢占：级别更高的任务被叫醒（输入行到达、sleep 到点、子任务退出）时
+立刻标记重新调度，切换仍在 trap 收尾完成。**只在用户态帧上抢占**：
 trap 落进内核态时（比如 syscall 执行中），那次内核调用一定跑完——内核栈上压着
 它的调用帧，中途换走就再也接不回来了。
 
-级别是继承的，且只能下调：`nice <0-2> <prog>` 以指定级别启动一个程序，
-`prio <pid> <0-2>` 移动一个在跑的任务，谁也不能把自己抬得比 shell（0 级）更高。
-级间是严格的——高一级只要有一个任务可运行，低一级一个 tick 都拿不到；
-没有 aging，饿死是刻意的行为。验证方法：
+级别是继承的，且默认只有 `NORMAL(1)`：`nice <0-2> <prog>` 以指定级别启动一个程序，
+`prio <pid> <0-2>` 移动一个在跑的任务。**只有 shell 能往 0 级放东西**（`nice 0`），
+普通程序既不能把自己也不能把子任务抬到 shell 之上——0 级是留给实时任务的，
+"有它就轮不到别人"；其余一律只能往下调。级间是严格的——高一级只要有一个任务
+可运行，低一级一个 tick 都拿不到；没有 aging，饿死是刻意的行为。验证方法：
 
 ```
-tos> nice 1 spin &
+tos> nice 2 spin &       # 2 级（LOW）
 [2]
-tos> run spin &          # 0 级
+tos> nice 0 spin &       # 0 级（实时）
 [3]
 tos> ps
  pid ppid prio state  c cpu% cpums wink stk  name
-   1    0    0 run    -    0.0     0   32   0.6  sh
-   2    1    1 rdy    -   51.3     0   32   0.2  spin
+   1    0    1 run    -    0.0     0   32   0.6  sh
+   2    1    2 rdy    -    0.1     0   32   0.2  spin
    3    1    0 rdy    -  100.0     0   32   0.2  spin
 ```
 
-0 级的 `spin[3]` 会先打完自己的 6 条输出，1 级的 `spin[2]` 一条都插不进来；
-它一退出，`spin[2]` 立刻补上。把两行反过来（都是 0 级）则是标准的 50/50 轮转。
+0 级的 `spin[3]` 会先打完自己的 6 条输出，2 级的 `spin[2]` 一条都插不进来；
+它一退出，`spin[2]` 立刻补上。把两行都发成 0 级则是标准的 50/50 轮转。
 
 `ps` 显示 pid、ppid、优先级、状态、CPU 占用和程序名：
 
@@ -565,8 +566,8 @@ tos> run spin &
 [2]
 tos> ps
  pid ppid prio state  c cpu% cpums wink stk  name
-   1    0    0 run    -    0.0     0   32   0.6  sh
-   2    1    0 rdy    -   70.0     0   32   0.2  spin
+   1    0    1 run    -    0.0     0   32   0.6  sh
+   2    1    1 rdy    -   70.0     0   32   0.2  spin
 ```
 
 `rdy` 的意思是"可运行、这一瞬间不在 CPU 上"。`spin` 是个只烧 CPU、从不主动让出的
@@ -855,7 +856,9 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 
 ## 已知限制（有意保持简单）
 
-- 单核、无优先级：时间片轮转（50 ms），没有 nice / 实时优先级，也没有 SMP。
+- 时间片 1 ms（1000 Hz tick）。三级优先级没有 aging，高一级只要有人可运行，低一级
+  就一个 tick 都拿不到；`nice 0` 把任务放到实时级，它能一直占着 CPU，靠 `Ctrl-C`
+  收回（见上）。
 - 进程表固定 16 项，窗口槽位按板子算（x86 28 个）。`wait()` 只回传退出码，
   多个子任务并发退出时，退出码不保证和 pid 一一对应（没有 per-child 状态队列，
   也没有僵尸队列）。
