@@ -1471,7 +1471,15 @@ int process_signal(int pid, int sig)
     if (!victim || victim == init_proc)
         return -1;
 
-    if (victim == current) {
+    /* "Same as current" only means "on this CPU" while it is actually
+     * running.  sched_switch() idles without clearing `current`, so a task
+     * asleep with the CPU parked beside it is still `current` - and taking
+     * the deferred branch there put the SIGKILL in kill_pending, to be acted
+     * on at a trap exit the sleeper would not reach for another three
+     * seconds.  Measured: ^C on a foreground `sleep 3000` did nothing until
+     * the nap was over.  A blocked task has no live frame to protect; block()
+     * copied its registers into ->saved before switching away. */
+    if (victim == current && victim->state == ST_RUNNING) {
         if (sig == SIGKILL)
             victim->kill_pending = 1;
         else if (sig == SIGSTOP)
@@ -1480,10 +1488,16 @@ int process_signal(int pid, int sig)
     }
 
     if (sig == SIGKILL) {
+        int was_current = (victim == current);
+
         kprintf("\n[pid %d] killed\n", pid);
         /* The caller keeps the CPU; the victim simply never runs again.
            Its exit code reaches a waiting parent through laggards. */
         task_kill(victim, 137);
+        /* The CPU was only parked next to it, not inside it: stop pointing
+           at a slot that is now free, the way process_exit() does. */
+        if (was_current)
+            current = NULL;
         return 0;
     }
 
