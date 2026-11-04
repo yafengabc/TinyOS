@@ -61,6 +61,15 @@ def main():
         if not p.exists():
             sys.exit(f"missing {p}: build the esp32c3 target first")
 
+    if args.keep_fs:
+        # The kernel and the user programs are flashed separately, so this
+        # leaves whatever bin/* the board already had - including an rx from
+        # an older build, which fails a transfer in a way that looks exactly
+        # like lost UART bytes (see docs/FILE-TRANSFER.md).  The READY
+        # handshake catches it; say it here so it is not reached.
+        print("[keep-fs] user programs on the board are NOT updated "
+              "(only safe if the ramdisk did not change)")
+
     esptool(args.port, "--after", "no-reset", "write-flash", "0x0", str(KERNEL))
     if not args.keep_fs:
         esptool(args.port, "--after", "no-reset", "write-flash", hex(FS_OFFSET), str(FS))

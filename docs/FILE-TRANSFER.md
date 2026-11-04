@@ -21,7 +21,7 @@ ASCII 行帧 + 停等流控，base64（raw，无填充）编码：
 ```
 宿主                              板（rx /path）
  "rx /path\n"            ->  shell exec rx；ttyraw(1)；create（TRUNC）
-                         <-  "READY\n"
+                         <-  "READY <chunk>\n"
  "D <seq> <len> <b64>\n" ->  解码、写文件
                          <-  "ACK <seq>\n"   /  "NAK <seq> r<原因>\n"
  ...                     （seq 重复 = ACK 丢了，重答不重写）
@@ -37,6 +37,37 @@ ASCII 行帧 + 停等流控，base64（raw，无填充）编码：
   而不只是线路。宿主的 `hash/crc32.ChecksumIEEE` 与之同多项式。
 - ^C（0x03）在任何时刻杀掉 rx——tty 在读任务死亡时自动恢复行律；半截文件
   留在盘上，但结束时的 CRC 让"传坏了"是可检出的，而不是被默认。
+
+## `READY` 里为什么要带块大小（陈旧镜像的教训）
+
+内核（`0x0`）和文件系统镜像（`0x80000`）是**分开烧**的，`flash.py --keep-fs`
+只写内核。于是板子很容易跑着一个**旧构建的 `rx`**，而宿主用的是新协议。这个
+组合没有任何显式错误，只有一串看不懂的 NAK：
+
+- 旧 `rx`（`8310a29`）是 `CHUNK 512 / LINE_MAX 768`，新协议发的是 1024 字节块
+  的 **1377 字符**行。
+- `read_line()` 在 `len >= LINE_MAX - 1` 时返回 -1，于是**前 768 个字符被丢掉**；
+  而 `expected_seq == 0` 时该分支**静默不回复**。
+- 剩下的 609 字符（从 base64 中间开始）被当成下一条行 → `NAK 0 r1[H3bx...]`。
+
+现场测量（`RAW_Q` 是 1 KiB 还是 2 KiB 毫无影响）：
+
+```
+[raw] in=1377 drop=0 take=1377 | uart bytes=1378 irq=38 ovf=0
+```
+
+**内核一个字节都没丢**：1378 字节进了 38 次接收中断，raw 环 `in=1377 /
+drop=0`，全部交给读者，硬件 FIFO 溢出计数 `ovf=0`。丢字节的是那个旧 `rx`
+自己的行缓冲——按"中断没收到/环不够大"去修只会白改一遍。
+
+所以 `READY` 现在带上块大小（= 协议版本），两个宿主工具都在握手时就比对：
+
+```
+FAILED: board's rx does not report its chunk size (stale filesystem image): flash without --keep-fs
+```
+
+`NAK` 的 `r1` 也补了 `n=<行长>`，下次再看到"片段从中间开始"能立刻判断是
+截断（`n` 正好等于某个上限）还是真丢字节。
 
 ## 尺寸的来历：曾经的瓶颈在内核的**输出**路径
 

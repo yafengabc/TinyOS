@@ -16,7 +16,7 @@
  * without hardware handshaking.
  *
  *     host                          rx
- *      ---------------------------> "READY\n"
+ *      ---------------------------> "READY <chunk>\n"
  *      "D <seq> <len> <b64>\n"  --> decode, write to the file
  *      <--------------------------- "ACK <seq>\n"   or "NAK <seq>\n"
  *      ...
@@ -158,7 +158,14 @@ int main(int argc, char **argv)
         printf("ERR cannot create %s\n", argv[1]);
         return 1;
     }
-    printf("READY\n");
+    /* The chunk size doubles as the protocol version.  A host that sends
+     * 1024-byte chunks to an rx built for 512 gets every line truncated at
+     * LINE_MAX, and the tail is then parsed as a fresh line - "NAK r1" whose
+     * fragment starts in the middle of the base64.  That is exactly what a
+     * stale filesystem image looks like from the host side (the kernel and
+     * the user programs are flashed separately), so the number goes on the
+     * wire and the host can refuse instead of retransmitting forever. */
+    printf("READY %d\n", CHUNK);
 
     for (;;) {
         int len = read_line(line);
@@ -181,7 +188,7 @@ int main(int argc, char **argv)
             int hl = len < 20 ? len : 20;
             memcpy(head, line, (size_t)hl);
             head[hl] = '\0';
-            printf("NAK %d r1[%s]\n", expected_seq, head);
+            printf("NAK %d r1[%s] n=%d\n", expected_seq, head, len);
             continue;
         }
 

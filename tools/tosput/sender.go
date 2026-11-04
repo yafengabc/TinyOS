@@ -5,12 +5,18 @@ package main
 // The board runs user/rx.c; this file speaks its language over a plain
 // 115200 8N1 serial port:
 //
-//	send "rx <path>\n"            wait for "READY"
+//	send "rx <path>\n"            wait for "READY <chunk>"
 //	send "D <seq> <len> <b64>\n"  wait for "ACK <seq>" (or "NAK" -> resend)
 //	...
 //	send "E <crc32hex>\n"         wait for "DONE <crc32hex> <total>"
 //
-// Chunks are 512 bytes, sent as one ~700-character base64 line.  Stop-
+// The chunk size in READY is the protocol version.  The kernel and the user
+// programs are flashed separately (--keep-fs), so a board can easily be
+// running an rx from an older build; a mismatched chunk size means every
+// line gets truncated and the protocol degenerates into NAKs that look like
+// lost bytes.  Refusing up front turns that into a one-line diagnosis.
+//
+// Chunks are 1024 bytes, sent as one ~1377-character base64 line.  Stop-
 // and-wait is the protocol: while rx is inside write() programming a
 // flash block, the board is not reading, so the sender must be silent
 // until the ACK comes back.
@@ -23,6 +29,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -239,6 +246,16 @@ func (s *Sender) SendFile(localPath, remotePath string) error {
 		}
 		switch {
 		case strings.HasPrefix(line, "READY"):
+			f := strings.Fields(line)
+			if len(f) < 2 {
+				return errors.New("board's rx does not report its chunk size " +
+					"(stale filesystem image): flash without --keep-fs")
+			}
+			if v, err := strconv.Atoi(f[1]); err != nil || v != chunkSize {
+				return fmt.Errorf("board's rx speaks %s-byte chunks, this tool %d "+
+					"(stale filesystem image): flash without --keep-fs",
+					f[1], chunkSize)
+			}
 			ready = true
 		case strings.HasPrefix(line, "ERR"):
 			return fmt.Errorf("board: %s", line)
