@@ -80,13 +80,22 @@ static int cr_seen;                /* the previous cooked byte was a CR */
  *
  * How deep the queue has to be: the receive interrupt hands bytes straight
  * to a blocked reader (process_console_kick), so the queue only fills while
- * that reader is out of the CPU - at worst one QUANTUM, which is one 1 ms
- * tick (process.c), and the wire delivers 12 bytes in that time at 115200.
- * The 1 KiB below is what the old 50 ms slice needed; it has been left alone
- * because the transfer path was just traced end to end and nothing there
- * overflowed, but it is now an order of magnitude more than the schedule can
- * ask for. */
-#define RAW_Q 1024
+ * that reader is out of the CPU.  With a 1 ms slice (process.c) a reader that
+ * is merely preempted costs one tick, i.e. 12 bytes at 115200; the depth that
+ * matters is the reader that is *running* and not reading - rx committing a
+ * chunk to flash, an editor repainting.
+ *
+ * Measured, not derived (user/rawsink.c + scripts/esp-c3/rawstorm.py): a
+ * reader that goes away for a burst keeps exactly RAW_Q - 1 bytes, and the
+ * 128-byte hardware FIFO adds nothing to that, because the receive interrupt
+ * empties the FIFO into this ring as it goes.  So this number *is* the whole
+ * buffer, and 511 vs 1023 bytes is 44 vs 89 ms of wire at 115200.
+ *
+ * 512 is enough because the file protocol is stop-and-wait and rx writes the
+ * chunk *before* it answers: the sender is waiting for the ACK exactly while
+ * the flash is busy, so nothing arrives during the one unbounded stall.  A
+ * 64 KiB transfer verifies at the same 7.7 KiB/s as it did at 1024. */
+#define RAW_Q 512
 static char raw_q[RAW_Q];
 static int  raw_head, raw_tail;        /* ring: head == tail means empty */
 static int  raw_on;

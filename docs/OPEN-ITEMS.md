@@ -17,7 +17,7 @@
 | 7 | 每程序栈（默认 8 KiB + `TOS_STACK`） | 做，ELF note 通道，PMP 规则数不变 | 内核 +~60 行；小工具窗口 32→16 KiB | **已合并**（`PLATFORM-DESIGN.md` §8.9.1） |
 | 8 | 每程序堆（`TOS_HEAP`，note type=2） | 做，与栈同一个通道，无 2 的幂约束（TOR） | 窗口公式 + 堆一项；脚本引擎直接受益 | **已合并**（`PLATFORM-DESIGN.md` §8.9.3） |
 | 9 | 控制台传文件（`tosput` + `rx`） | 做，行协议 + 停等 + 板端 CRC32，零内核改动 | `tools/tosput` + `user/rx.c` | **已合并**（`docs/FILE-TRANSFER.md`） |
-| 10 | 串口 RX 突发上限 ~128 B/tick | **原诊断错了**：UART0 接收早已中断驱动；真凶是 `usj_putc` 无 USB 主机时每字节空转超时，而内核打印关中断，把 UART0 排空一起饿死 | 已改成 USJ 发送环 4 KiB + IN_EMPTY 中断、USJ 接收中断、raw 环 1 KiB、中断里唤醒读者 | **已合并**；吞吐 1.0 → 7.0 KiB/s（理论 8.6）。原生 USB 两路中断未上真机（本机只插 CH343），见 §10 |
+| 10 | 串口 RX 突发上限 ~128 B/tick | **原诊断错了**：UART0 接收早已中断驱动；真凶是 `usj_putc` 无 USB 主机时每字节空转超时，而内核打印关中断，把 UART0 排空一起饿死 | 已改成 USJ 发送环 4 KiB + IN_EMPTY 中断、USJ 接收中断、raw 环 1 KiB（按实测缩回 512，见下）、中断里唤醒读者 | **已合并**；吞吐 1.0 → 7.0 KiB/s（理论 8.6）。原生 USB 两路中断未上真机（本机只插 CH343），见 §10 |
 | 11 | 传文件窗口化（不等 ACK 连发 N 块） | 未评估：当前 7.0 KiB/s 已是 115200+base64 的 81%，窗口化只能再挤 ~19% | 协议 + 板端乱序/重排逻辑 | 待评估（优先级低） |
 
 ---
@@ -236,8 +236,13 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
    直接唤醒阻塞的读者，而不是等下一个 tick。
 5. 结果：64 KiB 传输 64 s → 9.4 s，**1.0 → 7.0 KiB/s**；`accept.py` 24/24。
 6. 收尾：各队列按实测约束收缩。raw 环按"最坏调度延迟 = 一个 QUANTUM，
-   当时是 5 tick = 50 ms，115200 只走 576 B"定到 1 KiB（现在 QUANTUM = 1 tick
-   = 1 ms，1 KiB 已超配一个数量级，见 FILE-TRANSFER.md）；USJ 发送环 4 KiB 是按"没人插 USB"
+   当时是 5 tick = 50 ms，115200 只走 576 B"定到 1 KiB；`QUANTUM` 改到 1 ms 后
+   这个理由只剩 12 B，2026-11-04 直接量了一次（`user/rawsink.c` +
+   `scripts/esp-c3/rawstorm.py`：读者睡过一个 4 KiB 突发再排空，捞回多少就是
+   多少），512 → 511 B、1024 → 1023 B，差值恰好 512，**硬件 FIFO 不叠加**
+   （中断一直在把 FIFO 搬进环）。缩到 **512 B**：stop-and-wait 下 `rx` 是
+   `write()` 完才回 ACK，写 flash 期间线上没有数据，44 ms 的窗口足够；
+   64 KiB 传输在 512 下 3/3 verified，7.7 KiB/s 不变。USJ 发送环 4 KiB 是按"没人插 USB"
    设的，缩到 1 KiB 无影响；cooked 行队列改成 1 KiB 字节池（2 字节长度 +
    内容），短命令只占 9 字节，实测粘 100 行全跑完。顺带修了三个真 bug：
    环形判满用"空槽当满"白丢一个槽位；`\r\n` 被当成两个换行（粘 12 行 CRLF

@@ -89,7 +89,7 @@ FAILED: board's rx does not report its chunk size (stale filesystem image): flas
 |---|---|---|
 | USJ 发送环形缓冲 1 KiB + `SERIAL_IN_EMPTY` 中断 | `board/esp32c3/usj_console.c` | 控制台**永不**阻塞在 USB 上；没有主机就填满即丢（和 UART 满发送器同性质） |
 | USJ 接收中断（`SERIAL_OUT_RECV_PKT` = bit 2，INTMTX source 26 → CPU line 4） | 同上 + `board/esp32c3/platform.c` | 原生 USB 那路的输入也即时排空 |
-| raw 环 256 B → 1 KiB，cooked 队列 → 1 KiB 字节池 | `kernel/tty.c` | 一次突发整段落进队列，不必按 tick 切片（两个队列的来历见下） |
+| raw 环 256 B → 512 B（当时定 1 KiB，后按实测缩回，见下），cooked 队列 → 1 KiB 字节池 | `kernel/tty.c` | 一次突发整段落进队列，不必按 tick 切片（两个队列的来历见下） |
 | `process_console_kick()`，接收中断里直接交数据给阻塞的读者 | `kernel/process.c`、`arch/rv32/platform.c` | 读者不再等下一个 tick 才被唤醒（原来每 tick 一次 = 吞吐天花板） |
 | 单次交接上限 128 → 1024 B | `kernel/process.c` | 配合大环，批量读的程序一次拿到更多 |
 
@@ -97,13 +97,18 @@ FAILED: board's rx does not report its chunk size (stale filesystem image): flas
 
 - **块 1024 B，D 行 ~1366 字符**，一次发完（`writePaced` 按 256 字符一段、
   1 ms 间隔，纯属保险；USB-UART 桥自己会按 115200 节流）。
-- **raw 环 1 KiB 的来历**：接收中断把字节直接交给阻塞的读者，环只在读者等待
-  被调度时积压。1 KiB 原本是按"5 tick = 50 ms、115200 走 576 B"定的（约 1.8 倍
-  余量）；`QUANTUM` 改成 1 tick = 1 ms 之后，这个理由给出的数字只有 12 B。
-  它没有跟着缩，是因为尺子变了：读者在 `write()` 里写 flash 的那几毫秒并不在
-  `read()` 上，环是那段时间唯一的缓冲，而"几百字节"和"1 KiB"的差别是 768 字节
-  `.bss`，换不来任何可测的东西，却要重跑一次刚验过的传输路径。要缩就按
-  `scripts/esp-c3/pace.py` 量出高水位再缩，别按推理缩。**cooked 行队列**是另一回事——它管粘贴时的
+- **raw 环 512 B，实测容量 511 B（44 ms 线速）**：接收中断把字节直接交给阻塞
+  的读者，环只在读者不在 `read()` 上时积压。`QUANTUM` 改成 1 ms 之后，被抢占
+  一次的代价只有 12 B，真正要覆盖的是读者**正在跑、不读**的那段时间。
+  原来按"5 tick = 50 ms、115200 走 576 B"定的 1 KiB 因此超配了一个数量级。
+  缩之前先量（`user/rawsink.c` + `scripts/esp-c3/rawstorm.py`）：读者睡过一整
+  个 4 KiB 突发再排空，能捞回来多少就是多少——`RAW_Q 512` 捞回 511、
+  `1024` 捞回 1023，差值恰好 512。**128 B 硬件 FIFO 一点都不额外算**，因为接收
+  中断一直在把 FIFO 搬进环里；环满即丢，`head == tail` 的空/满判据再吃掉 1 字节。
+  512 够用的理由是协议本身：`rx` 先把块 `write()` 进 flash、**然后**才回 ACK，
+  而主机在等 ACK，正好是写 flash 期间线上没有新数据——唯一无界的那段停顿被
+  stop-and-wait 挡住了。64 KiB 传输在 512 下 3/3 verified，**7.7 KiB/s 与
+  1024 时完全一致**。**cooked 行队列**是另一回事——它管粘贴时的
   预输入深度，现在是 1 KiB 的字节池（每条 2 字节长度 + 内容），实测粘 100 行
   短命令全部执行；
   `\r\n` 也只算一个换行，否则每行会多塞一个空行、把命令挤出队列。
