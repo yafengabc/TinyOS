@@ -394,7 +394,7 @@ go run ./cmd/tostest smoke -target rv32smp
 
 ```
 tos> smp
-smp: 2 CPU(s), tick 100 Hz, this task on cpu 0
+smp: 2 CPU(s), tick 1000 Hz, this task on cpu 0
 smp: starting 2 worker(s), 800 ms each
 worker 0: cpu 0, 167 blocks in 800 ms
 worker 1: cpu 1, 222 blocks in 800 ms
@@ -454,7 +454,7 @@ wfile / sh`，参数传递、`exec`、`sbrk`、后台 `spin &` 抢占、`exit` �
 | trap 帧 | `regs_t` 20 个字号 = 80 B：r4–r11 + `exc/vec/hw/kern_sp` + 硬件帧副本（`exc/vec/...` 与 `start.S` 的 `FR_*` 共享，`regs.h` 有编译期尺寸校验） |
 | 首次进用户态 | `arm_enter_user()` 发布帧后主动 `svc`，由 `arm_svc` 的 pending 分支换成任务帧（EXC_RETURN 只在异常返回路径上有效） |
 | 栈切换 | `arm_resume` 按 EXC_RETURN 的 S 位决定是否重设 PSP，并恢复 MSP/r4–r11 |
-| 定时器 | SysTick @25 MHz 参考时钟，100 Hz；**优先级必须高于 SVCall**，否则阻塞在 syscall 里的 `wfi` 永远等不到 tick |
+| 定时器 | SysTick @25 MHz 参考时钟，1000 Hz；**优先级必须高于 SVCall**，否则阻塞在 syscall 里的 `wfi` 永远等不到 tick |
 | 块设备 | 与 rv32 相同的 `.data.ramdisk`（`.incbin` 嵌入），`plat_block_*` 直接内存拷贝 |
 | 缺的运行时 | `kernel/libgcc.c` 补 `__aeabi_memcpy4/8`、`__aeabi_memset/memmove`，以及按 EABI 返回 `r0:r1`/`r2:r3` 的 `__aeabi_*divmod` |
 
@@ -859,7 +859,7 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 - 进程表固定 16 项，窗口槽位按板子算（x86 28 个）。`wait()` 只回传退出码，
   多个子任务并发退出时，退出码不保证和 pid 一一对应（没有 per-child 状态队列，
   也没有僵尸队列）。
-- 控制台输入由 tick 轮询（100 Hz）而不是 UART 中断：16550 的 16 字节 FIFO 够打字和
+- 控制台输入由 tick 轮询（1 ms）而不是 UART 中断：16550 的 16 字节 FIFO 够打字和
   行级粘贴，但高速灌数据会丢；行编辑只有一行的 type-ahead。回显会在"安静 tick"才放行，
   所以后台程序持续输出时，你打的字可能要等一两行才显示出来；键入跨多个 tick 时，
   后台输出仍可能落在两批回显之间（还没有行编辑器，`Ctrl-C`/`Ctrl-D` 不起作用）。
@@ -911,7 +911,7 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
 
 任一条不成立就 `KERNEL PANIC: kernel stack overflow`（或
 `kernel stack out of bounds: sp=...`）然后停机，而不是让 CPU 跳到空内存。代价是
-每 10 ms 一次比较，`.text` 几十字节。
+每 1 ms 一次比较，`.text` 几十字节。
 
 ## 许可
 

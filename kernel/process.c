@@ -40,10 +40,31 @@ static uint32_t stack_used(const struct proc *p);
  * hole (rv32 PMP, ARM MPU) needs the same number. */
 #define HEAP_GUARD  PLAT_HEAP_GUARD
 
-/* Ticks a task may run before the timer takes the CPU away.  At 100 Hz a
-   slice is 50 ms: long enough that switches are noise, short enough that a
-   spinning program is invisible. */
-#define QUANTUM     5
+/* Ticks a task may run before the timer takes the CPU away.  One tick at
+   1000 Hz (main.c) makes a slice 1 ms.
+
+   The slice is a fairness knob, not a latency knob: a task that blocks is
+   woken by the interrupt that satisfied it, and a task above the current one
+   preempts at the next trap exit.  What the slice bounds is how long an
+   already-runnable task at the same level waits, and that grows with the
+   number of them - measured on the C3 with scripts/esp-c3/schedlat.py, the
+   prompt behind no, one, two and three CPU-bound `spin` tasks came back in
+   31, 92, 199 and 293 ms at a 50 ms slice, and in 31, 31, 31, 31 ms at 1 ms
+   (the 31 ms floor is the console path, not the scheduler).
+
+   The tick, not the slice, is what a sampler needs: at 1000 Hz a sleep(1)
+   loop samples every millisecond exactly - user/samp.c reports 1000 of 1000
+   samples at 1 ms - and with two same-priority CPU-bound tasks beside it the
+   worst gap is 2 ms, against 11 ms with a 5 ms slice.
+
+   What that costs, measured as the same ALU work in three builds of the same
+   tree: 100 Hz/1 tick 30101 ms, 1000 Hz/5 ticks 30586 ms, 1000 Hz/1 tick
+   31059 ms.  So a 1000 Hz tick is 1.6% of the machine and the 1 ms slice
+   another 1.6%, both only while a task is CPU-bound.  Skipping the no-op
+   "switch" to the task already running recovered 0.03%, which is why
+   sched_switch() still looks the way it always did: at this rate the price
+   is fetching the tick path's code, not the bookkeeping in it. */
+#define QUANTUM     1
 
 /* Priority levels, lower number wins.  A child starts at its parent's level
  * and setprio() moves it afterwards; nothing ages, because a level is only
@@ -1593,7 +1614,7 @@ static uint32_t stack_used(const proc_t *p)
  *
  * Column notes: the window address says nothing here (every task has the same
  * one, slots are process.c's business) and a raw tick count made CPU time
- * look tiny: one tick is 10 ms of CPU but the task runs for a 50 ms slice
+ * look tiny: one tick is 1 ms of CPU but the task runs for a whole slice
  * including the timer's own work.  cpums is the time spent on the CPU, cpu%
  * its share of the machine since the task started.  The `c` column is the CPU
  * running it right now ("-" when it is not on one): on a two-hart build it is

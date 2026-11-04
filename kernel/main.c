@@ -25,8 +25,10 @@ void kmain(void)
     plat_init();
 
     /* The scheduler runs off this tick: it is what preempts a task, wakes
-       sleepers and hands console input to whoever is reading. */
-    plat_timer_init(100);
+       sleepers and hands console input to whoever is reading.  1000 Hz so
+       that sleep(1) means 1 ms and a sampler can keep a millisecond
+       cadence - see the QUANTUM note in process.c for what that costs. */
+    plat_timer_init(1000);
 
     heap_init();
     ramdisk_init();

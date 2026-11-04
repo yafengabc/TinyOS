@@ -134,9 +134,9 @@ int plat_console_getchar(void)
 
 /* ---- timer / interrupts ---------------------------------------------- */
 
-void     plat_timer_init(uint32_t hz) { (void)hz; timer_init(); }
+void     plat_timer_init(uint32_t hz) { timer_init(hz); }
 uint64_t plat_ticks(void)             { return timer_ticks(); }
-uint32_t plat_tick_hz(void)           { return 100; }
+uint32_t plat_tick_hz(void)           { return timer_hz(); }
 
 void plat_irq_enable(void)  { sti(); }
 void plat_irq_disable(void) { cli(); }

@@ -235,8 +235,9 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
    256 B → 1 KiB、cooked 1 KiB 字节池；`process_console_kick()` 让接收中断
    直接唤醒阻塞的读者，而不是等下一个 tick。
 5. 结果：64 KiB 传输 64 s → 9.4 s，**1.0 → 7.0 KiB/s**；`accept.py` 24/24。
-6. 收尾：各队列按实测约束收缩。raw 环按"最坏调度延迟 = QUANTUM 5 tick =
-   50 ms，115200 只走 576 B"定到 1 KiB；USJ 发送环 4 KiB 是按"没人插 USB"
+6. 收尾：各队列按实测约束收缩。raw 环按"最坏调度延迟 = 一个 QUANTUM，
+   当时是 5 tick = 50 ms，115200 只走 576 B"定到 1 KiB（现在 QUANTUM = 1 tick
+   = 1 ms，1 KiB 已超配一个数量级，见 FILE-TRANSFER.md）；USJ 发送环 4 KiB 是按"没人插 USB"
    设的，缩到 1 KiB 无影响；cooked 行队列改成 1 KiB 字节池（2 字节长度 +
    内容），短命令只占 9 字节，实测粘 100 行全跑完。顺带修了三个真 bug：
    环形判满用"空槽当满"白丢一个槽位；`\r\n` 被当成两个换行（粘 12 行 CRLF

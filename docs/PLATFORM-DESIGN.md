@@ -291,9 +291,10 @@ trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fau
 
 ### 6.3 抢占与抢占边界
 
-- PIT / CLINT 每 10 ms 一次 tick；`process_tick()` 记 CPU 时间、唤醒睡够的、
+- PIT / CLINT / TIMG 每 1 ms 一次 tick；`process_tick()` 记 CPU 时间、唤醒睡够的、
   把凑满的输入行交给等待者，然后给当前任务扣一个配额。
-- 配额 `QUANTUM = 5`（50 ms）用完置 `need_resched`，trap 收尾时切换。
+- 配额 `QUANTUM = 1`（1 ms）用完置 `need_resched`，trap 收尾时切换。1000 Hz 的
+  代价实测是同一段纯算术变慢 1.6%，1 ms 片再加 1.6%（都是"有任务在算"时才付）。
 - **唤醒也能抢占**：`make_ready()` 发现被唤醒任务的级别高于当前任务时直接置
   `need_resched`，切换同样等到 trap 收尾才发生。典型场景：一个 0 级任务在 tty 上
   睡着，一行输入到达的当拍它就拿回 CPU，而不是等 2 级的后台任务把这一片用完。
@@ -644,7 +645,7 @@ qemu-system-arm -machine mps2-an385 -kernel build/kernel-arm.elf
 硬件：SSRAM 4 MiB @`0x00000000`（代码，镜像加载地址就是 0，向量表头两个字号是
 初始 MSP 与复位向量）、SRAM 4 MiB @`0x20000000`（`.data`/`.bss`/内核栈/用户窗口）、
 CMSDK UART0 @`0x40004000`（DATA/STATE/CTRL/BAUD）、SysTick @`0xE000E010`（25 MHz
-参考时钟，100 Hz 中断）。
+参考时钟，1000 Hz 中断）。
 
 异常模型：Thread 模式（PSP）跑任务，Handler 模式（MSP）跑内核，`svc #0` 进内核；
 用户任务是非特权的（`CONTROL.nPRIV=1`），靠 §5.2 的 MPU 区域限制可达范围。
@@ -809,7 +810,7 @@ TIMG0 → INTMTX 线 2 → vectored 槽 2，全链在实板上跑通，内核
 - handler：每次 tick 都要 `INT_CLR` + **重写 CONFIG 的 ALARM_EN**（触发即自清零，
   AUTORELOAD 不恢复它，否则只来一拍）。完全静默的 handler（无任何 UART 访问）
   可以无限维持。
-- handler **必须保存/恢复它碰过的所有寄存器**：100 Hz 的 tick 落进主循环
+- handler **必须保存/恢复它碰过的所有寄存器**：1 ms 的 tick 落进主循环
   `putc` 内部毁掉 t1/t2/t3 就能把主循环冻住。内核 `trap_entry` 全量保存帧，
   天然满足。
 - C3 的 ROM 交接时 `mstatus.MIE = 1`（qemu 复位后是 0），`_start` 里显式
@@ -1249,8 +1250,9 @@ USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定
 - 队列尺寸按实测的约束定，而不是越大越好：
   - **raw 环** 256 B → 1 KiB、单次交接 128 → 1024 B。接收中断直接把字节交给
     阻塞的读者（`process_console_kick`），环只在读者等待被调度时积压，最坏
-    一个 `QUANTUM` = 5 tick = 50 ms；115200 8N1 下这 50 ms 只到 576 B，所以
-    1 KiB 有约 1.8 倍余量。起初设的 4 KiB 是 3.5 倍余量，纯属浪费。
+    一个 `QUANTUM`；1 KiB 是按"5 tick = 50 ms、115200 走 576 B"定的，所以有
+    约 1.8 倍余量。现在 `QUANTUM = 1 tick = 1 ms`（走 12 B），1 KiB 变成了
+    一个数量级的超配，但传输路径刚端到端验过，没有顺手动它。
   - **cooked 行队列是 1 KiB 字节池**，不再是定长槽。每条记录 = 2 字节长度 +
     内容（含 NUL），所以一条短命令只占 9 字节：1 KiB 能排 **一百多条短命令**
     （实测粘 100 行 `uptime` 全跑完），代价是最长行（255 字符）只放得下 3 条。
@@ -1295,7 +1297,7 @@ USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定
 | 文件系统 | littlefs，块大小 4096，相同文件树 |
 | ELF 错误文案 | 相同 |
 | exec | spawn，返回子任务 pid；`wait(pid)` 取退出码 |
-| 调度 | 时间片轮转，50 ms；只在用户态帧上抢占 |
+| 调度 | 时间片轮转，1 ms；只在用户态帧上抢占 |
 | 时钟 | `clock_ns()` 来自自由运行计数器，单调；`cpus` 字段是编译期 CPU 数 |
 | 描述符 | 0/1/2 是控制台，其余从 3 起分配；`FD_NONE/FD_CONSOLE/FD_FILE/FD_PIPE_R/FD_PIPE_W` 五种 |
 | 管道 | 空且仍有写者 → 阻塞；写者全关 → `read` 返回 0（EOF）；读者全关 → `write` 返回 -1（EPIPE）；缓冲 2 KiB |

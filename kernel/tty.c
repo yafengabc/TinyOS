@@ -80,11 +80,12 @@ static int cr_seen;                /* the previous cooked byte was a CR */
  *
  * How deep the queue has to be: the receive interrupt hands bytes straight
  * to a blocked reader (process_console_kick), so the queue only fills while
- * that reader is waiting to be scheduled - at worst one QUANTUM, 5 ticks =
- * 50 ms (process.c).  A raw reader asks for one byte per read(), so every
- * byte costs it a wake-up; the wire meanwhile delivers 576 bytes in those
- * 50 ms at 115200.  1 KiB covers that with margin, and anything bigger is
- * memory that no achievable baud rate and quantum can use. */
+ * that reader is out of the CPU - at worst one QUANTUM, which is one 1 ms
+ * tick (process.c), and the wire delivers 12 bytes in that time at 115200.
+ * The 1 KiB below is what the old 50 ms slice needed; it has been left alone
+ * because the transfer path was just traced end to end and nothing there
+ * overflowed, but it is now an order of magnitude more than the schedule can
+ * ask for. */
 #define RAW_Q 1024
 static char raw_q[RAW_Q];
 static int  raw_head, raw_tail;        /* ring: head == tail means empty */

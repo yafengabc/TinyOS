@@ -116,7 +116,6 @@ int plat_console_getchar(void)
  * first: T0_DIVIDER holds the divisor itself, not divisor-1. */
 #define APB_CLK_FALLBACK_HZ   20000000u
 #define TIMG_COUNT_HZ         1000000u
-#define TICK_HZ               100u
 
 /* What the SoC clock actually came up as.  The TIMG divider above is derived
  * from it at run time, because plat_clock_init() may or may not get the PLL
@@ -253,12 +252,17 @@ static void uart_rx_ovf_check(void)
 
 static uint32_t tick_reload;
 static uint32_t tick_config;
+static uint32_t cfg_tick_hz = 100u;   /* what plat_timer_init was asked for */
 
 void plat_timer_init(uint32_t hz)
 {
     /* 1 MHz count rate whatever the APB is; the field holds the divisor. */
     uint32_t timg_div = apb_hz / TIMG_COUNT_HZ;
 
+    /* Remember the rate rather than a constant: process_tick() divides it
+     * to account CPU time and uptime() reports it, so a board that answers
+     * from a #define would lie the moment the rate changed. */
+    cfg_tick_hz = hz;
     tick_reload = TIMG_COUNT_HZ / hz;
 
     /* Register clock gate comes first: bit31 defaults to 0 ("registers
@@ -355,7 +359,7 @@ uint64_t plat_ticks(void)
 
 uint32_t plat_tick_hz(void)
 {
-    return TICK_HZ;
+    return cfg_tick_hz;
 }
 
 /* Which routed line is the clock.  Everything else the board wires up is
