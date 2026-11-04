@@ -291,6 +291,24 @@ UART0 不受影响）。
 **100.1 Hz**（15 s 窗口比值 0.9989）。推导与三个独立仪器的读数见
 PLATFORM-DESIGN §8.6「时钟：这颗芯片只跑 20 MHz」。
 
+## 11. `tostest bench` 在 esp32c3 上跑不了（2026-11-04 发现，待定）
+
+现象：`bench` 和 `bench 4 1` 都打印 `bench: out of memory`。
+
+原因不是模拟器，是窗口：C3 的任务窗口按 16 KiB 步进，镜像向上对齐到 4 KiB 页，
+8 KiB 默认栈 + 4 KiB guard 之后只剩 4 KiB，而 2.1 KiB 的 `bench` 镜像对齐后正好
+占满 → sbrk 堆为 0，`malloc(4)` 就失败。`bench` 是少数真的 `malloc` 的用户程序，
+别的（`ls`/`cat`/`hello`/`hold`）都不用堆，所以没暴露。`-clk wall` 与否无关。
+
+而且修不了太大的：`tostest bench` 的默认负载是 4 KiB × 64 = 256 KiB，两缓冲区
+512 KiB，而 C3 的用户区总共只有 192 KiB（`APP_MAX - APP_BASE`），`TOS_HEAP` 也
+救不回来。选项：(a) `tostest bench` 只用于窗口更大的目标（qemu-virt 64 KiB /
+rp2040），C3 上直接报错说明原因而不是撞 OOM；(b) 给 `bench` 换一套小负载的
+参数并在 C3 上声明 `TOS_HEAP`。
+
+性能基准目前用 rv32emu-c 自带的 `rv32emu-bench.exe`（`check` / `tinyos`），
+它在宿主侧计量，不受这个限制。
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。

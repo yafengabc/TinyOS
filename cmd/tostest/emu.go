@@ -150,9 +150,24 @@ func emuSmoke() int {
 	return 0
 }
 
+// startEmulator boots a kernel under RV32EMU-C with the console wired to our
+// pipe.
+//
+// -clk wall is not a detail.  Since 4e8cf59 the emulator drives the guest
+// timer from the instruction count by default, which is the right model for
+// a firmware benchmark and the wrong one for TinyOS: the emulated chip
+// reports 20 MHz (the PLL registers are zero, see the [clk] line), so the
+// instruction-driven TIMG fires about every 1000 instructions, while the
+// 160 MHz part it stands in for fires every 160000.  Our slice is one tick,
+// so at that density the scheduler switches context between almost every
+// pair of instructions of the guest and a program never gets through a
+// syscall sequence - the C3 kernel hangs before printing its first line.
+// With -clk wall the TIMG counts host microseconds, the tick rate is what
+// the guest programmed (1000 Hz), and a millisecond is a millisecond again.
 func startEmulator(emu, elf, ramdisk string) (*session, error) {
 	cmd := exec.Command(emu, "-elf", elf, "-ramdisk", ramdisk,
-		"-rxdelay", "5000000", "-rxrate", "64", "-rxperiod", "20000")
+		"-rxdelay", "5000000", "-rxrate", "64", "-rxperiod", "20000",
+		"-clk", "wall")
 	return startSession(cmd, true)
 }
 
