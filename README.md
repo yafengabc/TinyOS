@@ -220,13 +220,17 @@ $env:TOS_EMU = "C:\path\to\rv32emu.exe"    # 例如用 Go 版做差分测试
 ```
 
 > **时钟**：模拟器早先按「一条指令一个 TIMG 计数」驱动定时器，而且完全忽略
-> `T0CONFIG` 的 13:28 分频字段——TinyOS 按读到的 APB（20 MHz，PLL 寄存器为 0
-> 时退回 XTAL/2）写入除数 20，模拟器却当成 1，于是 tick 密了 20 倍；时间片
-> 恰好是一个 tick，用户程序在两次切换之间连一次 syscall 都走不完。症状是内核
-> 打印到 `starting /bin/sh ...` 就停，`exceptions=0`——从未发出第一个 `ecall`。
-> 现在模拟器默认走主机墙钟、分频字段生效、三个时基各按自己的频率计数（TIMG
-> 按 APB 20 MHz、SYSTIMER 16 MHz、RTC 慢钟 136 kHz），默认参数即可启动，
-> `tick self-check` 显示 1。`-clk insn` 保留按指令计时的可复现模式；`tostest`
+> `T0CONFIG` 的 13:28 分频字段——TinyOS 按读到的 APB 写入除数，模拟器却当成 1，
+> 于是 tick 密了 20 倍；时间片恰好是一个 tick，用户程序在两次切换之间连一次
+> syscall 都走不完。症状是内核打印到 `starting /bin/sh ...` 就停，`exceptions=0`
+> ——从未发出第一个 `ecall`。现在默认走主机墙钟、分频字段生效、三个时基各按
+> 自己的频率计数，默认参数即可启动，`tick self-check` 显示 1。
+>
+> 时钟树本身也建模了：`SYSTEM_SYSCLK_CONF` / `SYSTEM_CPU_PER_CONF` 复位为真机
+> 读数（XTAL/2，20 MHz），BBPLL 的 I2C 寄存器文件应答锁定位，所以内核的
+> `plat_clock_init()` 能走完整个 PLL 启动序列，打印 `[clk] CPU 160 MHz, APB 80 MHz`
+> ——与真机一致。TIMG 的计数率因此从时钟树推导，而不是写死 20 MHz：APB 变了，
+> 模拟器与固件仍然对同一个数。`-clk insn` 保留按指令计时的可复现模式；`tostest`
 > 的三个入口仍显式带 `-clk wall`，对旧版模拟器二进制同样成立。指令语义一直
 > 没问题：`rv32emu-bench.exe check` 四个负载与 QEMU + 独立参考模型全部一致。
 
