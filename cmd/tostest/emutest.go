@@ -111,6 +111,13 @@ func cmdEmutest(args []string) int {
 		{"hello_printf", "hello_printf", []string{"hello"}},
 		{"mem", "mem", []string{"heap demo"}},
 		{"uptime", "uptime", []string{"uptime:", "pid="}},
+		// A program, not a builtin, so this covers exec, the ST_WAIT_SLEEP
+		// path and the prompt coming back.  The ms on this check's own log
+		// line is the timing assertion: 500 means it really waited.
+		{"sleep", "sleep 500", []string{"tos>"}},
+		// The kernel quietly clamps at an hour; the program refuses instead
+		// of letting a measurement come out wrong by 59 minutes.
+		{"sleep too long", "sleep 99999999", []string{"longer than 3600000 ms"}},
 		// wink is the window the task actually holds.  The shell's 8 KiB
 		// image plus the 8 KiB stack and the 4 KiB guard rounds up to
 		// 32 KiB - it used to reserve a fixed 64 KiB whatever it needed.

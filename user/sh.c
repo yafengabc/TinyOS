@@ -113,6 +113,7 @@ static void cmd_help(void)
     puts("  mem                heap / sbrk demo\n");
     puts("  crash              run an illegal instruction (kills that process)\n");
     puts("  uptime             real time since boot (hardware clock)\n");
+    puts("  sleep <ms>         wait without using the CPU\n");
     puts("  gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)\n");
     puts("  adc [chan] [n]     sample the analog inputs\n");
     puts("  smp                run one worker per CPU, in parallel\n");

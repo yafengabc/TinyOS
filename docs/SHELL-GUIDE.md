@@ -7,14 +7,32 @@
 ```
 tos> help
 TinyOS shell commands:
-  ls                 list files in the ramdisk
+  ls [dir|file]      list a directory, or show a file
+  cd [dir]           change directory (default /)
+  pwd                print the working directory
   cat <file>         print a file
+  edit <file>        full screen editor (^S save, ^X exit)
   echo [args...]     print arguments
   hello              demo program
   mem                heap / sbrk demo
   crash              run an illegal instruction (kills that process)
-  uptime             time since boot
+  uptime             real time since boot (hardware clock)
+  sleep <ms>         wait without using the CPU
+  gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)
+  adc [chan] [n]     sample the analog inputs
+  smp                run one worker per CPU, in parallel
+  reboot             reset the machine and boot again
+  df                 filesystem usage
+  dd of=f bs=n count=n  write n blocks of a test pattern; with
+                     if=f instead of of= read back and verify
+  rm <file>...       remove files
+  free               RAM map and kernel heap usage
   ps                 list tasks
+  cat /proc/ps       the same table as a file (also /proc/mem,
+                     /proc/uptime) - `ps > f` writes it to f
+  echo 1 > /dev/gpio4  pins and ADC channels are files: write to
+                     drive, cat to read, `gpio dev` for ioctl
+  cmd > file         send stdout to a file or a device
   run <prog> [args]  run a program from /bin
   run <prog> ... &   run it in the background
   run sh <file>      run the commands in a file, as a task
@@ -22,13 +40,18 @@ TinyOS shell commands:
   nice <n> <prog> .. run it at priority n (0 high, 2 low)
   prio <pid> <n>     move a running task to priority n
   help               this text
-  reboot             reset the machine and boot again
   exit [code]        shut TinyOS down (end the script, in a script)
 ```
 
-命令分两类：**内建**（`ls` 之外上面列出的这些，由 shell 自己解释）和
-**程序**（`bin/` 下的每个 ELF）。两者在命令行上没有区别——不是内建的名字
-会被当成 `bin/<名字>` 去 exec，所以 `hello alpha` 和 `run hello alpha` 等价。
+命令分两类：**内建**（`help`、`cd`、`pwd`、`rm`、`ps`、`exit`、`reboot`、
+`source`、`run`、`nice`、`prio`，由 shell 自己解释）和**程序**（`bin/` 下的每个
+ELF：`ls`、`cat`、`sleep`……）。两者在命令行上没有区别——不是内建的名字会被当成
+`bin/<名字>` 去 exec，所以 `hello alpha` 和 `run hello alpha` 等价，
+`sleep 500 &` 和 `run sleep 500 &` 也等价。**`sleep` 故意做成程序而不是内建**：
+内建会占住 shell 自己，`&`、`nice`、`prio`、`^C` 就都碰不到它了。
+
+`sleep` 的单位是**毫秒**（内核 ABI、唤醒它的 tick、`samp` 的采样间隔都是毫秒），
+上限 3600000 ms——这是内核夹断的那个值，程序先拒绝，免得静默地少睡。
 
 ---
 
