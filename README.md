@@ -152,6 +152,13 @@ include/             freestanding 的 stdint/stdbool/string/inttypes 头
 > **格式决策**：用户程序保持**标准 ELF32 ET_DYN + 重定位表 + LZ4TOS 信封**。
 > 曾评估过的 MiniELF（TOSX，28 字节头）因丢掉 ELF 结构与重定位、无法跨板分发二进制
 > 而**未采用**，相关代码（`internal/build/minielf.go`、`cmd/mkmini`）只作参考保留。
+>
+> 链接完成后 `internal/build/TrimELFSections()` 会把**段头表连同 `.shstrtab` 一起裁掉**：
+> `kernel/elf.c` 只走程序头表找 `PT_LOAD` / `PT_NOTE` / `PT_DYNAMIC`，从不读 `e_shoff`。
+> 四个 ELF 头字段清零、文件截到「程序头能触达的最后一个字节」，产物仍是合法 ELF32。
+> 代价是 `build/user/bin/*` 不再能直接 `readelf` / `objdump -d`（`-s` 早已去掉符号）；
+> 内核 `build/kernel-*.elf` 不受影响，反汇编照旧。实测 36 个程序原始减
+> 12 088 B、LZ4TOS 后减 7 149 B，同时把 `exec` 的解压缓冲（`raw_size`）也压小了。
 
 ## 环境准备
 

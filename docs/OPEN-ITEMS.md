@@ -232,8 +232,8 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
   内存，分组把它从 9,352 B 压到 2,888–4,760 B。
 
 **待定**：上不上？如果上，推荐**分组打包**而不是全塞一个。
-另外有一条正交的零架构改动可以先做：段头表 240 B/文件、`kernel/elf.c`
-从不读 `e_shoff`，清零 + 截断即省 **−12.1%**。
+另外那条正交的零架构改动**已做**（2026-11-06，见 §16）：段头表 + `.shstrtab`
+一起裁掉，实测 36 个程序省 12 088 B 原始 / 7 149 B LZ4TOS。
 
 ---
 
@@ -654,9 +654,90 @@ QEMU 三目标 smoke 与 compat 全过。**XIP 下擦写 flash 会自毁的担�
 模拟器还缺一层建模；主仓 gitlink 也被该提交从 `6909215` 退回 `4e8cf59`。
 这两件事独立推进，本次不提交 gitlink、不推子模块。
 
+## 16. 用户 ELF 段头表裁剪（2026-11-06，已落地）与输出锁暂缓
+
+### 输出锁：改动带回真实时间回归，本轮不落地
+
+Review `9dd076e` 时发现 `console.c` 五处 `spin_trylock` 失败就整行/整次丢弃，
+`process.c` 的 `FD_CONSOLE` 仍无条件返回 `len`。单核上 `spin_trylock()` 恒成功，
+丢输出只在双核发生；而 ARM 的 `plat_spin_acquire()` 带 `SPIN_LIMIT`，无界自旋
+确实挂过板（关中断等锁 / 持有者等本核的设备中断）。试图按「中断侧 trylock、
+任务侧有界等待 + 返回真实字节数」分类修复，最小实现只 +48 B 内核代码，
+**却在 C3 真机上让 `priotest` 1 hog 稳定 FAIL**：
+
+| 镜像（同一块板，逐次整片烧） | 内核代码地址 | 1 hog normal / nice 0 | priotest |
+| --- | --- | --- | --- |
+| HEAD 原版 | `0x42010528` | 999~1000 / 1000 | PASS 2/2 |
+| HEAD + **仅段头裁剪** | `0x42010528` | 999~1000 / 1000 | PASS 2/2 |
+| 新 console + 未裁剪 ELF | `0x420105b0` | 989 / 986 | FAIL 2/2 |
+| 新 console（最小版）+ 裁剪 | `0x42010558` | 988~989 / 986 | FAIL 2/2 |
+| 新 console（完整版）+ 裁剪 | `0x420105b0` | 989~990 / 985~987 | FAIL 4/4 |
+
+0/2/3 hogs 各档在新镜像里仍正常（3 hogs 的 nice 0 是 1000/1000），
+`clocktest` b=996.59（console 实验镜像）与基线 996.65 一致，时钟没变；坏的只有 1 hog 那约 1% 的采样窗口。
+`user/samp.c` 顶部注释本来就写着：「a tick landing between the read and the
+call quietly costs a whole millisecond, about 1% of samples」。结论是
+**XIP 内核代码布局一变，0 级采样器的相位窗口就翻面**，与段头裁剪无关
+（表中第二行 PASS 是直接证据）。
+
+本轮按「不带着回归上线」把 console / process 改动全部回退，只交付裁剪。
+要落地这条得先解决布局敏感性：把新增代码放进排在热路径之后的独立 section，
+或让 `samp` / `priotest` 的测量不再依赖启动相位，或用
+`#if PLAT_MAX_CPUS > 1` 让单核产物与 HEAD 逐字节相同。另开任务跟进。
+
+### 段头表：程序头能触达之外的字节全部不要
+
+`kernel/elf.c` 的一切都走程序头表：`header_ok()` 只校验 `e_phoff/e_phnum`，
+`elf_probe()` 找 `PT_LOAD`，`elf_tos_note()` 找 `PT_NOTE`，
+`apply_relocations()` 走 `PT_DYNAMIC` + `vaddr_to_off()`；**`e_shoff` 从未被读**。
+`-s` 能去掉符号表，去不掉段头表本身，而它后面还挂着只为它存在的 `.shstrtab`。
+
+`internal/build/TrimELFSections()` 接在 `linkPIE()` 之后：只处理「ELF32 小端、
+段头表正好在文件尾、且没有任何程序头指向尾部」这一种形状，把
+`e_shoff` / `e_shentsize` / `e_shnum` / `e_shstrndx` 四个字段清零，
+文件截到「所有程序头 `p_offset+p_filesz` 的最大值」——`.shstrtab` 和填充
+一起消失，产物仍是合法 ELF32（`debug/elf` 能打开、程序头完好）。
+布局不符就原样保留：省几百字节不值得一个加载不了的程序。
+
+实测（esp32c3 目标，36 个真正进镜像的程序，`TestL2Sizes` 同一口径）：
+
+| | 原始 ELF | LZ4TOS 后 |
+| --- | --- | --- |
+| 裁剪前 | 123 404 B | 91 678 B |
+| 裁剪后 | 111 316 B | 84 529 B |
+| **省** | **12 088 B** | **7 149 B** |
+
+`bin/py` 31 500 → 31 014 B，也就是 `exec` 的 `raw_size` 解压缓冲同步变小
+（C3 内核堆只有 56 KiB）。真机 `df`：littlefs Used **233 472 → 221 184 B**，
+可用多出 12 KiB。FS 镜像本身仍是固定 300 KiB，省下的是块空间而不是镜像文件体积。
+
+代价：`build/user/bin/*` 不能再 `readelf` / `objdump -d`（`-s` 早已去掉符号，
+实用价值有限）；内核 `build/kernel-*.elf` 完全不受影响，反汇编照旧。
+新增 Go 测试 `TestTrimELFSections`（合成 ELF、幂等、三种「不该动」的布局）
+与 `TestStagedProgramsHaveNoSections`（校验上次构建真正进镜像的产物）。
+
+验证：9 目标 build、`go test -count=1 ./...` / `go vet` / `go build`、
+QEMU `x86` / `rv32` / `arm` / `rv32smp` smoke 全 OK，`compat` COMPAT OK。
+一个测试顺序陷阱：`smoke` 默认命令里有 `wfile demo.txt ...`，x86 的
+`build/tinyos.img` 是持久磁盘镜像，跑完会留下 `demo.txt`；紧接着跑
+`compat -no-build` 就会拿带这个文件的 x86 当基准，`ls` 假 FAIL。
+让 compat 自己重建三目标（或先重建 x86）即可。
+
+### 真机（COM4，整片重烧；镜像与构建产物 SHA256 逐字节一致）
+
+3 次冷启动逐字节一致（各 593 B、无 panic、无 `[exit pid=]`）；
+`df` 数字如上；`source etc/demo.sh` 全标记；`py demo.py` sum:13 / fib(10):55；
+`pytest.py` 54/0、`pytest2.py` 21/0；`sleep 3000` + ^C `[pid 19] killed`；
+crash / deep / `dd pattern verified` / 管道；回显突发 0/9、200 字符长行
+400 个 X；**`priotest` PASS 2/2**（1/2/3 hogs 的 nice 0 全 1000/1000）；
+`transtest` 3/3 CRC、`rawstorm` 511 B / lost 0、`clocktest` b=995.75
+（交付态实测，与 A/B 阶段的 996.59 / 基线 996.65 同一水平）、`tosput` 32 KiB CRC 过。
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
-2. **段头表裁剪**：正交、十行改动、−12.4%，谁都不挡——下一个最便宜的动作。
-3. ~~`script` 先合、`sched-prio` 后 rebase~~（2026-11-02 已按此顺序完成）。
-4. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
+2. ~~段头表裁剪~~（2026-11-06 已做，§16；+12 KiB littlefs 可用空间）。
+3. **控制台输出锁**（§16 上半）：需要布局稳定的实现，别直接改 `console.c` /
+   `process.c` 就发版，先解决 `priotest` 的相位敏感性。
+4. ~~`script` 先合、`sched-prio` 后 rebase~~（2026-11-02 已按此顺序完成）。
+5. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
