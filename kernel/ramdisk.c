@@ -559,54 +559,6 @@ static int df_locked(uint32_t *total, uint32_t *used)
     return ok ? 0 : -1;
 }
 
-/* Load a whole file into a freshly kmalloc'd buffer.  Caller must call
-   ramdisk_release() when done. */
-static int find_locked(const char *name, uint8_t **data, uint32_t *size)
-{
-    if (!ok)
-        return 0;
-
-    lfs_file_t f;
-    struct lfs_file_config fc;
-    uint8_t filebuf[FS_CACHE_SIZE];
-
-    memset(&fc, 0, sizeof(fc));
-    fc.buffer = filebuf;
-    if (lfs_file_opencfg(&lfs, &f, name, LFS_O_RDONLY, &fc) < 0)
-        return 0; /* normal miss (ENOENT): caller reports it */
-
-    uint32_t sz = (uint32_t)lfs_file_size(&lfs, &f);
-    uint8_t *buf = kmalloc(sz ? sz : 1);
-    if (!buf) {
-        kprintf("find %s: kmalloc(%u) failed\n", name, sz);
-        lfs_file_close(&lfs, &f);
-        return 0;
-    }
-
-    uint32_t got = 0;
-    while (got < sz) {
-        lfs_ssize_t n = lfs_file_read(&lfs, &f, buf + got, sz - got);
-        if (n <= 0)
-            break;
-        got += (uint32_t)n;
-    }
-    lfs_file_close(&lfs, &f);
-
-    if (got != sz) {
-        kprintf("find %s: short read %u/%u\n", name, got, sz);
-        kfree(buf);
-        return 0;
-    }
-    *data = buf;
-    *size = sz;
-    return 1;
-}
-
-void ramdisk_release(void *data)
-{
-    kfree(data);
-}
-
 /* Shared body of every open.  The flags decide read-only, read-write or
  * truncating; everything else (a cache buffer, a free handle, the size) is
  * the same and used to be copied three times. */
@@ -837,16 +789,6 @@ int ramdisk_df(uint32_t *total, uint32_t *used)
 
     spin_lock(&fs_lock);
     r = df_locked(total, used);
-    spin_unlock(&fs_lock);
-    return r;
-}
-
-int ramdisk_find(const char *name, uint8_t **data, uint32_t *size)
-{
-    int r;
-
-    spin_lock(&fs_lock);
-    r = find_locked(name, data, size);
     spin_unlock(&fs_lock);
     return r;
 }

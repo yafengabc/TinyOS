@@ -268,22 +268,26 @@ static int write_file(const char *name, const char *src)
         int clen = lz4_compress_block(data, (int)flen, comp);
 
         uint32_t span = 0, stack = 0, heap = 0;
-        int have_hint = elf_window_hint(data, (size_t)flen,
-                                        &span, &stack, &heap) == 0;
-        uint32_t hdrlen = have_hint ? LZ4_WRAP_HEADER_V1 : LZ4_WRAP_HEADER;
+        /* The kernel only loads hinted envelopes: it has to reserve the
+           window before it can decompress into it.  An ELF we cannot read
+           is a build error, not a file to ship with a legacy header. */
+        if (elf_window_hint(data, (size_t)flen, &span, &stack, &heap) != 0) {
+            fprintf(stderr, "mklfs: cannot derive a window hint for %s\n", name);
+            free(comp);
+            rc = -1;
+            goto out;
+        }
         uint8_t hdr[LZ4_WRAP_HEADER_V1];
         memset(hdr, 0, sizeof(hdr));
         memcpy(hdr, "LZ4TOS", 6);
-        if (have_hint) {
-            hdr[6] = LZ4_WRAP_HINT_BIT;
-            put_u32(hdr + 16, span);
-            put_u32(hdr + 20, stack);
-            put_u32(hdr + 24, heap);
-        }
+        hdr[6] = LZ4_WRAP_HINT_BIT;
+        put_u32(hdr + 16, span);
+        put_u32(hdr + 20, stack);
+        put_u32(hdr + 24, heap);
         put_u32(hdr + 8, (uint32_t)flen);
         put_u32(hdr + 12, (uint32_t)clen);
 
-        if (lfs_file_write(&lfs, &file, hdr, (lfs_size_t)hdrlen) != (lfs_ssize_t)hdrlen ||
+        if (lfs_file_write(&lfs, &file, hdr, (lfs_size_t)LZ4_WRAP_HEADER_V1) != (lfs_ssize_t)LZ4_WRAP_HEADER_V1 ||
             lfs_file_write(&lfs, &file, comp, (lfs_size_t)clen) != (lfs_ssize_t)clen) {
             fprintf(stderr, "mklfs: short write on %s\n", name);
             rc = -1;
@@ -291,11 +295,8 @@ static int write_file(const char *name, const char *src)
         free(comp);
         if (rc == 0) {
             char extra[64];
-            if (have_hint)
-                snprintf(extra, sizeof(extra), "  hint %u/%u/%u",
-                         span, stack, heap);
-            else
-                extra[0] = '\0';
+            snprintf(extra, sizeof(extra), "  hint %u/%u/%u",
+                     span, stack, heap);
             printf("  %-20s %7ld -> %7d bytes (%.0f%%)%s\n", name, flen, clen,
                    100.0 * clen / (flen ? flen : 1), extra);
         }

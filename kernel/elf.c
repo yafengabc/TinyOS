@@ -100,6 +100,27 @@ typedef struct {
 #define R_SYM(info)  ((info) >> 8)
 #define R_TYPE(info) ((info) & 0xFF)
 
+/* ---- a view over the ELF image ---------------------------------------
+ *
+ * exec() decompresses the raw ELF into the task window, then slides every
+ * PT_LOAD segment down to its link address.  After that, file offset N
+ * lives wherever the segment containing it was moved - not at win+N.
+ * This is the one place that translation happens: relocation, dynamic
+ * table and entry-point code all read through view_at().  Program headers
+ * are copied out before the slide so they survive having the ELF header
+ * overwritten by the first segment. */
+#define ELF_MAX_PHDR 16
+
+typedef struct {
+    uint8_t     *win;          /* the task window holding the image */
+    uint32_t     size;         /* raw ELF byte count */
+    uint32_t     win_size;     /* window byte count */
+    Elf32_Ehdr   eh;
+    Elf32_Phdr   ph[ELF_MAX_PHDR];
+    uint32_t     phnum;
+    uint32_t     link_lo;
+} elf_view_t;
+
 /* ------------------------------------------------------------------ */
 /* writes are plain stores: the flat model has no address translation  */
 /* ------------------------------------------------------------------ */
@@ -116,14 +137,6 @@ static int user_range_ok(uint32_t va, uint32_t len)
     if (va + len < va) /* overflow */
         return 0;
     return va + len <= g_win_hi;
-}
-
-static int copy_to_user(uint32_t va, const void *src, uint32_t len)
-{
-    if (!user_range_ok(va, len))
-        return -1;
-    memcpy((void *)va, src, len);
-    return 0;
 }
 
 static int zero_user(uint32_t va, uint32_t len)
@@ -317,14 +330,78 @@ int elf_tos_note(const uint8_t *data, uint32_t size,
     return 0;
 }
 
-/* Convert a virtual address inside the image to an offset in `data`.
- * Program headers give the vaddr -> file offset mapping for PT_LOAD
- * segments; the dynamic table lives inside one of them. */
-static int vaddr_to_off(const uint8_t *data, const Elf32_Ehdr *eh, uint32_t va,
-                        uint32_t *off_out)
+/* ---- view construction ------------------------------------------------ */
+
+static int view_read_header(const uint8_t *p, uint32_t size, elf_view_t *v)
 {
-    for (uint32_t i = 0; i < eh->e_phnum; i++) {
-        const Elf32_Phdr *ph = phdr_at(data, eh, i);
+    if (size < sizeof(Elf32_Ehdr))
+        return -1;
+    memcpy(&v->eh, p, sizeof(v->eh));
+    if (v->eh.e_ident[0] != 0x7F || v->eh.e_ident[1] != 'E' ||
+        v->eh.e_ident[2] != 'L' || v->eh.e_ident[3] != 'F')
+        return -1;
+    if (v->eh.e_ident[4] != ELFCLASS32)
+        return -1;
+    if (v->eh.e_phentsize != sizeof(Elf32_Phdr))
+        return -1;
+    if (v->eh.e_phnum == 0 || v->eh.e_phnum > ELF_MAX_PHDR)
+        return -1;
+    uint32_t ph_end = v->eh.e_phoff +
+                      (uint32_t)v->eh.e_phnum * sizeof(Elf32_Phdr);
+    if (ph_end > size)
+        return -1;
+
+    v->phnum = v->eh.e_phnum;
+    memcpy(v->ph, p + v->eh.e_phoff, v->phnum * sizeof(Elf32_Phdr));
+    v->link_lo = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < v->phnum; i++)
+        if (v->ph[i].p_type == PT_LOAD && v->ph[i].p_vaddr < v->link_lo)
+            v->link_lo = v->ph[i].p_vaddr;
+    return v->link_lo == 0xFFFFFFFFu ? -1 : 0;
+}
+
+static int view_init(elf_view_t *v, uint8_t *win, uint32_t size,
+                     uint32_t win_size)
+{
+    memset(v, 0, sizeof(*v));
+    v->win = win;
+    v->size = size;
+    v->win_size = win_size;
+    return view_read_header(win, size, v);
+}
+
+/* Where a run of raw file bytes can be read *now*.  Every PT_LOAD segment
+   has been moved to `p_vaddr - link_lo`, so a file offset is translated
+   through the segment that owns it.  Reading one entry at a time (which is
+   what the callers do) keeps this independent of whether a whole table
+   happens to fit inside a single segment. */
+static int view_at(elf_view_t *v, uint32_t off, uint32_t len,
+                   const uint8_t **out)
+{
+    if (off > v->size || len > v->size - off)
+        return -1;
+    for (uint32_t i = 0; i < v->phnum; i++) {
+        const Elf32_Phdr *ph = &v->ph[i];
+        if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
+            continue;
+        if (off < ph->p_offset || off + len > ph->p_offset + ph->p_filesz)
+            continue;
+        uint32_t dst = ph->p_vaddr - v->link_lo + (off - ph->p_offset);
+        if (dst > v->win_size || len > v->win_size - dst)
+            return -1;
+        *out = v->win + dst;
+        return 0;
+    }
+    return -1;
+}
+
+/* Convert a link-time virtual address inside the image to a file offset.
+   Program headers give the vaddr -> file offset mapping for PT_LOAD
+   segments; the dynamic table lives inside one of them. */
+static int vaddr_to_off_view(elf_view_t *v, uint32_t va, uint32_t *off_out)
+{
+    for (uint32_t i = 0; i < v->phnum; i++) {
+        const Elf32_Phdr *ph = &v->ph[i];
         if (ph->p_type != PT_LOAD)
             continue;
         if (va >= ph->p_vaddr && va < ph->p_vaddr + ph->p_filesz) {
@@ -336,31 +413,34 @@ static int vaddr_to_off(const uint8_t *data, const Elf32_Ehdr *eh, uint32_t va,
 }
 
 /* Apply the image's relocation entries.  `bias` = actual_base - link_base. */
-static int apply_relocations(const uint8_t *data, uint32_t size,
-                             const Elf32_Ehdr *eh, uint32_t bias)
+static int apply_relocations_view(elf_view_t *v, uint32_t bias)
 {
-    for (uint32_t i = 0; i < eh->e_phnum; i++) {
-        const Elf32_Phdr *ph = phdr_at(data, eh, i);
+    for (uint32_t i = 0; i < v->phnum; i++) {
+        const Elf32_Phdr *ph = &v->ph[i];
         if (ph->p_type != PT_DYNAMIC)
             continue;
-        if (ph->p_offset + ph->p_filesz > size)
+        if (ph->p_offset + ph->p_filesz > v->size)
             return -1;
 
-        const Elf32_Dyn *dyn = (const Elf32_Dyn *)(data + ph->p_offset);
         uint32_t ndyn = ph->p_filesz / sizeof(Elf32_Dyn);
-
         uint32_t rela = 0, relasz = 0, relaent = sizeof(Elf32_Rela);
         uint32_t rel = 0, relsz = 0, relent = 8;
 
         for (uint32_t d = 0; d < ndyn; d++) {
-            if (dyn[d].d_tag == DT_NULL)
+            const uint8_t *dp;
+            if (view_at(v, ph->p_offset + d * sizeof(Elf32_Dyn),
+                        sizeof(Elf32_Dyn), &dp) != 0)
+                return -1;
+            Elf32_Dyn de;
+            memcpy(&de, dp, sizeof(de));
+            if (de.d_tag == DT_NULL)
                 break;
-            switch (dyn[d].d_tag) {
-            case DT_RELA:    rela = dyn[d].d_val; break;
-            case DT_RELASZ:  relasz = dyn[d].d_val; break;
-            case DT_RELAENT: relaent = dyn[d].d_val; break;
-            case DT_REL:     rel = dyn[d].d_val; break;
-            case DT_RELSZ:   relsz = dyn[d].d_val; break;
+            switch (de.d_tag) {
+            case DT_RELA:    rela = de.d_val; break;
+            case DT_RELASZ:  relasz = de.d_val; break;
+            case DT_RELAENT: relaent = de.d_val; break;
+            case DT_REL:     rel = de.d_val; break;
+            case DT_RELSZ:   relsz = de.d_val; break;
             default: break;
             }
         }
@@ -371,22 +451,25 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
 
         /* dt_val holds a *virtual address*; convert to a file offset. */
         uint32_t rela_off = 0, rel_off = 0;
-        if (rela && vaddr_to_off(data, eh, rela, &rela_off) != 0) {
+        if (rela && vaddr_to_off_view(v, rela, &rela_off) != 0) {
             kprintf("elf: DT_RELA at 0x%x not mapped\n", rela);
             return -1;
         }
-        if (rel && vaddr_to_off(data, eh, rel, &rel_off) != 0) {
+        if (rel && vaddr_to_off_view(v, rel, &rel_off) != 0) {
             kprintf("elf: DT_REL at 0x%x not mapped\n", rel);
             return -1;
         }
 
         /* .rela.dyn (explicit addend) */
         if (rela && relasz) {
-            if (rela_off + relasz > size)
+            if (rela_off + relasz > v->size)
                 return -1;
             for (uint32_t o = 0; o + sizeof(Elf32_Rela) <= relasz; o += relaent) {
+                const uint8_t *rp;
+                if (view_at(v, rela_off + o, sizeof(Elf32_Rela), &rp) != 0)
+                    return -1;
                 Elf32_Rela r;
-                memcpy(&r, data + rela_off + o, sizeof(r));
+                memcpy(&r, rp, sizeof(r));
 
                 uint32_t type = R_TYPE(r.r_info);
                 if (type == R_RISCV_NONE || type == R_386_NONE)
@@ -426,15 +509,18 @@ static int apply_relocations(const uint8_t *data, uint32_t size,
 
         /* .rel (implicit addend) */
         if (rel && relsz) {
-            if (rel_off + relsz > size) {
+            if (rel_off + relsz > v->size) {
                 kprintf("elf: .rel past end (off=0x%x sz=0x%x size=0x%x)\n",
-                        rel_off, relsz, size);
+                        rel_off, relsz, v->size);
                 return -1;
             }
             for (uint32_t o = 0; o + 8 <= relsz; o += relent) {
+                const uint8_t *rp;
+                if (view_at(v, rel_off + o, 8, &rp) != 0)
+                    return -1;
                 uint32_t r_offset, r_info;
-                memcpy(&r_offset, data + rel_off + o, 4);
-                memcpy(&r_info, data + rel_off + o + 4, 4);
+                memcpy(&r_offset, rp, 4);
+                memcpy(&r_info, rp + 4, 4);
 
                 uint32_t type = R_TYPE(r_info);
                 if (type == R_386_NONE)
@@ -485,13 +571,11 @@ static const char *machine_name(uint16_t m)
     }
 }
 
-int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
-             uint32_t *entry_out)
+/* Shared tail: check machine/type, work out the bias, clear .bss (the
+   segments have already been placed in the window), apply relocations and
+   hand back the entry point. */
+static int load_view(elf_view_t *v, uint32_t load_base, uint32_t *entry_out)
 {
-    const Elf32_Ehdr *eh;
-    if (header_ok(data, size, &eh) != 0)
-        return -1;
-
 #if defined(__riscv)
     const uint16_t expected_machine = EM_RISCV;
 #elif defined(__i386__)
@@ -499,46 +583,33 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
 #elif defined(__arm__)
     const uint16_t expected_machine = EM_ARM;
 #else
-    const uint16_t expected_machine = eh->e_machine;
+    const uint16_t expected_machine = v->eh.e_machine;
 #endif
-    if (eh->e_machine != expected_machine) {
+    if (v->eh.e_machine != expected_machine) {
         /* Worth a message: the symptom is a working kernel that refuses every
            program on a filesystem built for another architecture, and
            "not a valid ELF32 program" sends you looking at the image. */
         kprintf("elf: program is machine %u (%s), this kernel runs machine %u (%s)\n",
-                eh->e_machine, machine_name(eh->e_machine),
+                v->eh.e_machine, machine_name(v->eh.e_machine),
                 expected_machine, machine_name(expected_machine));
         return -1;
     }
 
-    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN)
+    if (v->eh.e_type != ET_EXEC && v->eh.e_type != ET_DYN)
         return -1;
 
-    /* Work out how to map link-time addresses to real ones.
-     *
-     * ET_EXEC: the image must run where it was linked -> bias 0.
-     * ET_DYN : the image is linked at 0, so a link-time address A must be
-     *          placed at load_base + A.  Relocation r_offset values follow
-     *          the same rule.  bias is the additive constant for *addresses*
-     *          stored inside the image (which are also 0-based). */
-    uint32_t link_lo = 0xFFFFFFFFu;
-    for (uint32_t i = 0; i < eh->e_phnum; i++) {
-        const Elf32_Phdr *ph = phdr_at(data, eh, i);
-        if (ph->p_type == PT_LOAD && ph->p_vaddr < link_lo)
-            link_lo = ph->p_vaddr;
-    }
-    if (link_lo == 0xFFFFFFFFu)
-        return -1;
-
+    /* ET_EXEC: the image must run where it was linked -> bias 0.
+       ET_DYN : the image is linked at 0, so a link-time address A must be
+                placed at load_base + A.  bias = load_base - link_lo. */
     uint32_t bias = 0;
-    if (eh->e_type == ET_DYN)
-        bias = load_base - link_lo;
+    if (v->eh.e_type == ET_DYN)
+        bias = load_base - v->link_lo;
 
-    for (uint32_t i = 0; i < eh->e_phnum; i++) {
-        const Elf32_Phdr *ph = phdr_at(data, eh, i);
+    for (uint32_t i = 0; i < v->phnum; i++) {
+        const Elf32_Phdr *ph = &v->ph[i];
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
             continue;
-        if (ph->p_offset + ph->p_filesz > size) {
+        if (ph->p_offset + ph->p_filesz > v->size) {
             kprintf("elf: segment %u out of file\n", i);
             return -1;
         }
@@ -553,22 +624,61 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
                     i, dst, ph->p_memsz);
             return -1;
         }
-        if (copy_to_user(dst, data + ph->p_offset, ph->p_filesz) != 0)
-            return -1;
+        /* the segment is already at dst; only .bss remains */
         if (ph->p_memsz > ph->p_filesz) {
             if (zero_user(dst + ph->p_filesz, ph->p_memsz - ph->p_filesz) != 0)
                 return -1;
         }
     }
 
-    if (apply_relocations(data, size, eh, bias) != 0)
+    if (apply_relocations_view(v, bias) != 0)
         return -1;
 
-    uint32_t entry = eh->e_entry + bias;
+    uint32_t entry = v->eh.e_entry + bias;
     if (!user_range_ok(entry, 1)) {
         kprintf("elf: entry 0x%x outside app window\n", entry);
         return -1;
     }
     *entry_out = entry;
     return 0;
+}
+
+/* Load an image that was decompressed straight into the task window.
+ *
+ * `win` holds the raw ELF as one linear byte stream (a LZ4 match may look
+ * back 64 KiB into already-produced output, so the decompressor cannot skip
+ * the ELF header or scatter segments as it goes).  This function copies the
+ * headers out, slides every PT_LOAD to `p_vaddr - link_lo`, then clears
+ * .bss, applies relocations and returns the entry point.  All 36 staged
+ * programs have been checked to have forward-only, non-overlapping slides. */
+int elf_load(uint8_t *win, uint32_t size, uint32_t win_size,
+             uint32_t load_base, uint32_t *entry_out)
+{
+    elf_view_t v;
+    if (view_init(&v, win, size, win_size) != 0)
+        return -1;
+
+    uint32_t prev_dst_end = 0;
+    for (uint32_t i = 0; i < v.phnum; i++) {
+        const Elf32_Phdr *ph = &v.ph[i];
+        if (ph->p_type != PT_LOAD || ph->p_memsz == 0)
+            continue;
+        if (ph->p_offset + ph->p_filesz > v.size) {
+            kprintf("elf: segment %u out of file\n", i);
+            return -1;
+        }
+        uint32_t dst = ph->p_vaddr - v.link_lo;
+        uint32_t src = ph->p_offset;
+        /* A destination below its source means a forward memmove cannot
+           clobber the source of a later segment.  Anything else needs a
+           different traversal order; refuse it rather than corrupt data. */
+        if (dst > src || dst < prev_dst_end ||
+            dst > v.win_size || ph->p_memsz > v.win_size - dst) {
+            kprintf("elf: segment %u cannot be placed in the window\n", i);
+            return -1;
+        }
+        memmove(v.win + dst, v.win + src, ph->p_filesz);
+        prev_dst_end = dst + ph->p_filesz;
+    }
+    return load_view(&v, load_base, entry_out);
 }

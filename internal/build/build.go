@@ -99,12 +99,14 @@ var Targets = map[string]Target{
 	// it over the real partition, PLAT_LFS_BLOCKS = 896 blocks = 3.5 MiB.
 	// That is what keeps the flashed artifact at 300 KiB while the
 	// filesystem still gets the whole 4 MiB part.
-	// The heap has to hold one decompressed program image while it is
-	// being copied into the task window, so it has to be bigger than the
-	// biggest program: the Python interpreter is 31 KiB raw.  With XIP the
-	// kernel window is down to 128 KiB and the task area is up to 15
-	// windows, so the 56 KiB is affordable; checkLayout() fails the build
-	// if it ever stops fitting.
+	// The heap does not hold program images any more: exec() streams the LZ4
+	// block straight into the task window, so the peak is littlefs's working
+	// set - measured on C3 at 768 B after boot and 1 024 B after a `py run`,
+	// where the same numbers used to be 28 424 and 54 752 B.  16 KiB is
+	// generous for that and leaves most of the 128 KiB kernel window idle.
+	// (It used to be 56 KiB, sized to hold the largest raw image - the Python
+	// interpreter at 31 KiB - while it was being decompressed in the heap.)
+	// checkLayout() fails the build if the kernel stops fitting.
 	//
 	// 14 process slots: the board's task area gives 12 x 16 KiB windows, so
 	// a 16-entry table (792 bytes each) carried two slots that could never
@@ -112,20 +114,22 @@ var Targets = map[string]Target{
 	// are waiting to be reaped is the real ceiling.  XipFlashBase is what
 	// selects board/esp32c3/kernel-xip.ld; set it to 0 for the all-RAM
 	// layout.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 56 * 1024, MaxProcs: 14, XipFlashBase: 0x40000},
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 16 * 1024, MaxProcs: 14, XipFlashBase: 0x40000},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
-// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
-// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
-// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
-// The M33 user programs are bigger than the RV32 ones: bin/sh is a
-// 19,884-byte ELF that compresses to 15,632 bytes.  exec() holds the
-// compressed buffer (ramdisk_find) AND the decompression buffer at the
-// same time, so the 32 KiB default arena fails right at the first shell;
-// the biggest program (py) needs ~49 KiB.  60 KiB (was 64) still leaves
-// that with an 11 KiB margin and keeps .bss below PLAT_KERNEL_MAX
-// (0x20020000) - the panel's DMA row buffer (3.8 KiB in lcd_st7789.c)
-// had to come out of the same 128 KiB budget.
+	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
+	// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
+	// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
+	// The M33 user programs are bigger than the RV32 ones: bin/sh is a
+	// 19,884-byte ELF that compresses to 15,632 bytes.  The 60 KiB below was
+	// sized when exec() held the compressed buffer AND the decompression
+	// buffer at once, so the 32 KiB default arena failed at the first shell
+	// and the biggest program (py) wanted ~49 KiB.  Streaming exec made that
+	// reasoning obsolete - the heap now only carries littlefs's working set -
+	// but the value is left alone until an rp2350 board can confirm a smaller
+	// one, and .bss still has to stay below PLAT_KERNEL_MAX (0x20020000): the
+	// panel's DMA row buffer (3.8 KiB in lcd_st7789.c) comes out of the same
+	// 128 KiB budget.
 	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024},
 
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not

@@ -12,8 +12,6 @@
 
 void ramdisk_init(void);
 int  ramdisk_ok(void);
-int  ramdisk_find(const char *name, uint8_t **data, uint32_t *size);
-void ramdisk_release(void *data);
 /* Directory-aware listing: count of entries in `dirpath` (absolute), and the
  * index-th bare entry name copied into `buf` (cap bytes).  The copy is what
  * makes this safe on SMP: the names live in a shared snapshot, so handing out

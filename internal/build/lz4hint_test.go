@@ -142,15 +142,6 @@ func TestMklfsWindowHint(t *testing.T) {
 		t.Skip("no staged ELF programs")
 	}
 
-	// A file that looks like an ELF to looks_like_elf() but is not a
-	// parseable ELF32 must fall back to the old 16-byte envelope.
-	stale := "\x7fELF-not-a-real-program"
-	stalePath := filepath.Join(stage, "bin", "stale")
-	if err := os.WriteFile(stalePath, []byte(stale), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	names = append(names, "bin/stale")
-
 	img := filepath.Join(dir, "lfs.img")
 	args := append([]string{img, "307200", stage}, names...)
 	if b, err := exec.Command(mklfs, args...).CombinedOutput(); err != nil {
@@ -189,13 +180,35 @@ func TestMklfsWindowHint(t *testing.T) {
 			t.Errorf("%s: hint %v, want %v", name, v, want)
 		}
 	}
-	if _, ok := got["bin/stale"]; ok {
-		t.Error("an unparseable ELF got a hint; it must keep the old 16-byte envelope")
-	}
 	if len(got) != len(elfs) {
 		t.Errorf("image reports %d hints, want %d", len(got), len(elfs))
 	}
 	t.Logf("verified %d window hints", len(got))
+}
+
+// The kernel no longer has a legacy 16-byte-envelope loader, so an ELF that
+// cannot yield a window hint must stop the build instead of producing a file
+// exec() would refuse at runtime.
+func TestMklfsRejectsUnhintableELF(t *testing.T) {
+	dir := t.TempDir()
+	mklfs := windowHintTool(t, dir)
+	stage := filepath.Join(dir, "stage", "bin")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(stage, "stale")
+	if err := os.WriteFile(bad, []byte("\x7fELF-not-a-real-program"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	img := filepath.Join(dir, "lfs.img")
+	out, err := exec.Command(mklfs, img, "307200", filepath.Join(dir, "stage"),
+		"bin/stale").CombinedOutput()
+	if err == nil {
+		t.Fatalf("mklfs accepted an unparseable ELF:\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("cannot derive a window hint")) {
+		t.Fatalf("mklfs failed for the wrong reason:\n%s", out)
+	}
 }
 
 // TestWindowHintSpanIsNotFileSize pins down why original_size cannot stand

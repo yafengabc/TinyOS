@@ -3,19 +3,20 @@
 
 #include "types.h"
 
-/* Load a user program image.
+/* Load a user program image that was decompressed directly into its task
+ * window.
  *
- * The loader accepts both ET_EXEC (fixed address) and ET_DYN (position
- * independent).  For ET_DYN the image is relocated to `load_base`; the
- * segment contents and any R_* relocations found in .rela.dyn are adjusted
- * accordingly.  `entry_out` receives the absolute entry address.
- *
- * Every write is bounds-checked against the window selected with
+ * `win` initially holds the raw ELF file as one linear byte stream; this
+ * call slides every PT_LOAD segment to `p_vaddr - link_lo`, clears .bss and
+ * applies the R_* relocations found in .rel/.rela.dyn.  The position
+ * independent (ET_DYN) image is relocated to `load_base` and `entry_out`
+ * receives the absolute entry address.  `win_size` bounds every placement,
+ * and every write is also checked against the window selected with
  * elf_set_window(), so a corrupt image can never touch the kernel.
  *
  * Returns 0 on success, -1 on error. */
-int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
-             uint32_t *entry_out);
+int elf_load(uint8_t *win, uint32_t size, uint32_t win_size,
+             uint32_t load_base, uint32_t *entry_out);
 
 /* Same, but reports the lowest and highest addresses the image touches,
  * plus the lowest address of any writable segment (the code/data split the
