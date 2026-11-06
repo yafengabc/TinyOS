@@ -1041,6 +1041,60 @@ i386 上就是这样漂移出了幽灵进程）。
 - **`MaxProcs` 降到 6**：省 1.6 KiB，但少一个槽就少一个后台任务，
   而 8 已经是"shell + 前台子进程 + 2 后台"的舒适下界。
 
+## 21. 一个 16 KiB 窗口的 shell：做得到（2026-11-07，原型已上板）
+
+问题：`bin/sh` 现在要 **32 KiB 窗口**（镜像 20 464 + 栈 8 192 + 守卫 4 096 = 32 752，
+离 32 KiB 只剩 16 字节）。能不能把脚本解释器摘出去，只留 `exec`/`source` 这种
+启动脚本必需的东西，压进**一个** 16 KiB 窗口？
+
+### 窗口预算是硬的
+
+    16 384 = 镜像 + 栈 + 守卫(4 KiB)  →  镜像 ≤ 8 192
+
+栈和守卫都有下限（一个页，而且要能用一个 NAPOT/MPU region 描述），
+所以 8 KiB 是 `TOS_STACK(4K)` 之后的镜像预算。`user/msh.c` 就是按这个预算写的原型。
+
+| | 全文 text | rodata | bss | span | 窗口 |
+|---|---|---|---|---|---|
+| `bin/sh`（-O2） | 10 766 | 4 623 | 5 008 | 20 464 | 32 KiB |
+| `bin/sh`（-Oz） | 7 924 | 4 537 | 5 008 | 17 552 | 32 KiB |
+| `bin/msh`（-O2, rv32） | 2 696 | 331 | 2 656 | **6 016** | **16 KiB** |
+| `bin/msh`（-O2, rp2040） | — | — | — | **7 808** | **16 KiB** |
+
+真机（C3，`ps`）：`4  1  1  wait  -  ...  16  1.6/4  msh` —— 窗口 16 KiB、
+栈高水位 1.6 KiB / 申请 4 KiB，跑的是嵌套 `source` 这条最深路径。
+
+### 保留 / 砍掉
+
+保留：读行、分词、`name=value`、`$name`/`${name}`/`$?`、`#` 注释、`&`、
+`exec` 程序、`source`（同进程、可嵌套 2 层）、`exit`、`run`、`echo`、`true/false`。
+
+砍掉：`if/while/else/fi/done/break` + `eval_cond` + `scan_block`、`$(...)`、
+管道、重定向、`incr`、`history`、`cd/pwd/rm/ps/prio/nice`、`sleep` 内建、长 help。
+这些正是 `sh.c` 里 text 8 KiB / rodata 4.3 KiB 的来源。
+
+### 四个坑（都踩过）
+
+1. **裸 ELF 不能 `exec`**：上传到板子上的文件不会经过 `mklfs`，没有 LZ4TOS 信封，
+   `exec` 直接报 "not found or not a loadable program"（§17 之后不再有 plain-ELF 路径）。
+   验证一个用户程序必须把它编进镜像。
+2. **pool 必须装得下 `etc/rc`**：rc 941 B，所以 1 KiB 的池只剩 81 B 余量，
+   `etc/demo.sh`（1 140 B）就进不去了。原型用 2 KiB。
+3. **全注释脚本的返回码是 0**：`run_script` 的 `code` 从 0 起，不能跟
+   `run_command` 的 -1（继续执行）混用 —— 第一版把 0 行的 rc 报成了 "cannot open"。
+4. **rp2040 只剩 384 B 余量**（7 808 / 8 192）：Thumb 代码 + `aeabi` 除法令牌比
+   rv32 大 1.8 KiB。真要在 Pico 上留余量，把 pool 降到 1 KiB（rc 够，demo.sh 不够）。
+
+### 待拍板
+
+`bin/msh` 目前只是**多一个程序**，`bin/sh` 没动，内核仍然 `process_start_shell("bin/sh")`。
+两条路：
+
+- **A. 换名**：`bin/sh` = 最小（init），完整版改名（如 `bin/shb`）留给带块语句的脚本。
+  省一个 grain，但 `source etc/demo.sh`、`run sh <file>` 这些既有用法和文档全要跟着改。
+- **B. 并存**：`bin/sh` 不动，小板上把 init 名字指到 `bin/msh`（要加一个板级常量），
+  FS 里两个 shell 都在，多约 2 KiB flash。
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
@@ -1057,3 +1111,5 @@ i386 上就是这样漂移出了幽灵进程）。
    内核 79 088 → 49 760 B、任务区 15 → 19 窗口、24/24 验收通过），
    所以 RP2040 上要验的只剩 ARM 侧的 8 KiB 内核栈。仍要先攒一台可烧的 Pico。
 7. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
+8. **最小 shell 进不进 init 位**（§21）：`bin/msh` 已实测一个 16 KiB 窗口够用
+   （rv32 6 016 B 镜像），但谁叫 `bin/sh` 会牵动脚本、文档和验收，先拍板。
