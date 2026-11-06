@@ -460,7 +460,13 @@ func (b *Builder) linkPIE(objs []string, script, out string) error {
 		"-o", out,
 	)
 	args = append(args, objs...)
-	return b.runTool(tool, args, "LD")
+	if err := b.runTool(tool, args, "LD"); err != nil {
+		return err
+	}
+	// The kernel loads these through the program header table only; see
+	// TrimELFSections for why the section table is safe (and worth) dropping.
+	_, err := TrimELFSections(out)
+	return err
 }
 
 func globFiles(dir, pattern string) ([]string, error) {

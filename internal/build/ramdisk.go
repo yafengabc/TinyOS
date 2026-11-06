@@ -2,12 +2,91 @@ package build
 
 import (
 	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// TrimELFSections drops the section header table - and the section name
+// string table that only exists to serve it - from a linked user program.
+//
+// kernel/elf.c finds PT_LOAD / PT_NOTE / PT_DYNAMIC through the program
+// header table and never reads e_shoff, so those bytes are ballast: across
+// the 36 programs actually staged into the image they average 336 B each
+// (12 088 B in total).  They also inflate the
+// LZ4TOS raw_size, which is exactly how much kernel heap exec() allocates
+// before it can load the image.  -s strips symbols but cannot remove the
+// section table itself.
+//
+// Only the safe shape is rewritten: little-endian ELF32, section table at
+// EOF, and nothing any program header points at living in the tail.  A
+// linker that lays its output out differently keeps its bytes - saving a
+// few hundred bytes is never worth a program that will not load.  All four
+// section header fields are zeroed so the result is a valid "no sections"
+// ELF rather than a truncated one.  Returns the number of bytes removed.
+func TrimELFSections(path string) (int, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	if len(data) < 52 || string(data[:4]) != "\x7fELF" ||
+		data[4] != 1 || data[5] != 1 { // ELFCLASS32, ELFDATA2LSB
+		return 0, nil
+	}
+
+	shoff := uint64(binary.LittleEndian.Uint32(data[32:]))
+	shentsize := uint64(binary.LittleEndian.Uint16(data[46:]))
+	shnum := uint64(binary.LittleEndian.Uint16(data[48:]))
+	if shoff == 0 || shnum == 0 || shentsize == 0 {
+		return 0, nil
+	}
+	if shoff+shentsize*shnum != uint64(len(data)) {
+		return 0, nil // section table is not the tail
+	}
+
+	phoff := uint64(binary.LittleEndian.Uint32(data[28:]))
+	phentsize := uint64(binary.LittleEndian.Uint16(data[42:]))
+	phnum := uint64(binary.LittleEndian.Uint16(data[44:]))
+	if phentsize < 32 || phnum == 0 ||
+		phoff+phentsize*phnum > uint64(len(data)) {
+		return 0, nil
+	}
+
+	// Everything the loader can reach ends here.  Trimming to that point
+	// also removes .shstrtab and any padding before the section table.
+	var keep uint64
+	for i := uint64(0); i < phnum; i++ {
+		o := phoff + i*phentsize
+		poff := uint64(binary.LittleEndian.Uint32(data[o+4:]))
+		filesz := uint64(binary.LittleEndian.Uint32(data[o+16:]))
+		if poff > uint64(len(data)) || poff+filesz > uint64(len(data)) {
+			return 0, nil
+		}
+		if poff+filesz > keep {
+			keep = poff + filesz
+		}
+	}
+	if keep == 0 || keep > shoff || keep < 52 {
+		return 0, nil
+	}
+
+	binary.LittleEndian.PutUint32(data[32:], 0) // e_shoff
+	binary.LittleEndian.PutUint16(data[46:], 0) // e_shentsize
+	binary.LittleEndian.PutUint16(data[48:], 0) // e_shnum
+	binary.LittleEndian.PutUint16(data[50:], 0) // e_shstrndx
+	trimmed := data[:keep]
+	if err := os.WriteFile(path, trimmed, st.Mode().Perm()); err != nil {
+		return 0, err
+	}
+	return len(data) - len(trimmed), nil
+}
 
 // RamFile is a single file inside the TinyOS filesystem image.
 type RamFile struct {
