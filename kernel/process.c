@@ -1497,7 +1497,6 @@ static void task_kill(proc_t *p, int code)
 regs_t *process_exit(regs_t *r, int code)
 {
     proc_t *p = current;
-    kprintf("\n[exit pid=%d code=%d cpu=%d]\n", p->pid, code, plat_cpu_id());
     if (!p)
         panic("no current process");
 

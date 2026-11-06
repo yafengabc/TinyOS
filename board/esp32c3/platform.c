@@ -847,7 +847,10 @@ static void plat_clock_init(void)
 #define TOS_XIP_FLASH_BASE 0u
 #endif
 
-#ifdef TOS_XIP_FLASH_BASE
+/* A plain #ifdef would always be true: the fallback above defines the macro
+ * to 0 for all-RAM builds.  In that build there is no MMU mapping to report
+ * and reading 0x42000000 (an unmapped flash window) is not harmless. */
+#if TOS_XIP_FLASH_BASE
 /* The boot stub (arch/rv32/start.S) owns the mapping: it writes the MMU table
  * at 0x600C5000 - one 4-byte entry per 64 KiB page, entry = physical address
  * / 64 KiB, 0x100 = unmapped - and invalidates the cache before the first
@@ -876,7 +879,7 @@ void plat_board_early(void)
 {
     plat_console_init();
 
-#ifdef TOS_XIP_FLASH_BASE
+#if TOS_XIP_FLASH_BASE
     /* The stub mapped the window; just say what it ended up serving. */
     xip_report();
 #endif
