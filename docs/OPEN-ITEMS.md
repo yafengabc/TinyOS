@@ -793,7 +793,7 @@ span / asked_stack / heap_ask / win 四项，不一致拒绝加载（`elf_load` 
 | 真机 A（板上原 HEAD 镜像） | `priotest` 1 hog：normal worst 2 ms，nice 0 **1000/1000** worst 1 ms，PASS；`free` peak 28 408 B |
 | 真机 B（整片重烧） | `priotest` 1/2/3 hogs **全 PASS**，1 hog nice 0 重复两次仍 1000/1000；`accept.py` **24/24**；`py demo.py` sum:13 / fib(10):55、pytest 54/0、pytest2 21/0、`^C [pid 15] killed`；`transtest` 3/3 CRC、`rawstorm` 511 B、`clocktest` b=995.7731、`tosput` 32 KiB CRC `735de6d1` |
 | 冷启动 | 3 次各 593 B、逐字节一致、无 panic；板上镜像 `de76bb4c…` / `48da9800…` 与构建产物一致 |
-| 旧格式兼容 | **只烧旧 16 B 头 FS、保留新内核**：shell 正常起、`hello`、`py demo.py` 全过，无 `hint disagrees` |
+| 旧格式兼容（**已作废**） | 当时只烧旧 16 B 头 FS、保留新内核：shell 正常起、`hello`、`py demo.py` 全过。§18 之后不再兼容旧信封，这条只留作历史 |
 
 **必须整片烧**：新 FS 是 28 B 头，旧内核的 `lz4_wrap_info()` 遇到 `flags != 0`
 会拒绝信封、把它当 plain ELF，所有程序都加载不了；反过来（新内核 + 旧 FS）兼容。
@@ -805,10 +805,154 @@ span / asked_stack / heap_ask / win 四项，不一致拒绝加载（`elf_load` 
   littlefs 现有块内空隙吸收了。
 - `free` peak 28 408 → **28 424 B**（+16 B，压缩件多 12 B 加块头对齐）。
 - **堆峰值没有下降**，这步只把窗口分配提前、把数据通道和复核机制建好；
-  解压缓冲仍在内核堆。真正把 56 KiB 堆压到几 KiB、让 C3 跑起 64 KiB 以上程序，
-  要等**输入侧分块解码 + 输出直写窗口**（下一步）。
+  解压缓冲仍在内核堆。真正把 56 KiB 堆压到几 KiB 由 **§18** 完成
+  （堆 56 → 16 KiB、峰值 28 424 → 768 B）。
 - 另外两个独立障碍：LZ4 输出必须连续（任务窗口正好满足）；`p_offset != p_vaddr`
   （`py` 448 / `sh` 384），线性 ELF 要一次 `memmove` 摆正并先备份 phdr、调整 rela_off。
+
+## 18. 流式解压直写任务窗口（2026-11-06 深夜，已落地；B 路线第二步）
+
+§17 铺好的窗口预分配到这里才真正兑现货：`exec` 不再把镜像搬进内核堆，
+解压输出直接落进任务窗口。**内核堆从此与程序大小无关。**
+
+### 落地内容
+
+| 文件 | 改动 |
+| --- | --- |
+| `kernel/lz4.c` | 新增 `lz4_stream_decompress()`：输入侧 256 B 环形缓冲 + 回调 refill，token、255 扩展长度、2 字节 match offset 都可跨块。**删除**整块解码器 `lz4_decompress_block()` |
+| `kernel/lz4.h` | `lz4_wrap_info_prefix()` 只读前 28 B + 文件总大小即可判型；信封为唯一格式，`flags` 必须恰为 bit0 |
+| `kernel/ramdisk.c` | **删除** `find_locked()` / `ramdisk_find()` / `ramdisk_release()`（整份 `kmalloc` + 循环读）。顺序读复用已有的 `ramdisk_open/read/seek/close`（8 句柄 × 512 B littlefs 缓存） |
+| `kernel/elf.c` | **删除**线性视图，只留窗口视图：`view_at()` 经 `PT_LOAD` 把「文件偏移」换算成「窗口地址」；程序头副本在滑动前拷出，再逐段 `memmove` 到 `p_vaddr - link_lo` |
+| `kernel/process.c` | `exec` 单一路径：读前缀 → `proc_alloc` → 用本板常量算 `win` → `win_alloc` → 流式解压直写 `win_base` → 逐段摆正 → `elf_load_windowed()` → 复核三量与 ELF 一致 |
+| `tools/mklfs.c` | 不再写 16 B 头：算不出 hint 的「ELF」直接报错打包失败，而不是产出一个内核加载不了的文件 |
+
+`win_need` 用 `max(span, raw_size) + stack + heap_ask + guard`：解压先要能装下
+**整份线性 ELF**，摆正之后才是 `span` 那份布局。现有 36 个程序都是 `span` 更大，
+但 64 KiB 级程序在小板上可能是 `raw_size` 更大，所以两个都算进去。
+
+### 验证（全部实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 宿主交叉验证 | `tmp/lz4stream/harness.c` 用 `tools/lz4.c` 压缩 36 个真实 ELF，chunk = 1/2/3/5/7/16/64/127/256/4096 各解一遍，加 short-cap 与截断用例，**432 例全过**，输出逐字节一致 |
+| 离线 | 9 目标 build 全 rc=0；`go test -count=1 ./...` / `go vet` / `go build` rc=0；QEMU x86/rv32/arm/rv32smp smoke 全 OK；`compat` `COMPAT OK` |
+| C3 真机功能 | `accept.py` **24/24**；`py demo.py` sum:13 / fib(10):55、pytest 54/0、pytest2 21/0；`source etc/demo.sh` 全标记；`^C [pid 15] killed`；管道、`dd pattern verified`；无 `hint disagrees` / `corrupt` / panic |
+| C3 真机压力 | `transtest` 3/3 CRC；`rawstorm` 511 B / lost 0；`clocktest` b=995.7731；`tosput` 32 KiB CRC 过 |
+| 冷启动 | 3 次各 593 B、逐字节一致 |
+
+### 堆峰值：这才是真正的收益
+
+| | 改前（§17 交付态） | 改后 |
+| --- | --- | --- |
+| `free` peak（只跑过 shell） | 28 424 B | **768 B** |
+| `free` peak（跑过 `py demo.py`） | 54 752 B | **1 024 B** |
+| C3 内核堆 | 56 KiB | **16 KiB** |
+| C3 内核 SRAM（`kernel RAM ends`） | 120 048 B | **79 088 B** |
+| C3 内核窗口余量 | 12 832 B | 52 KiB |
+
+峰值不再是「最大那个程序」，而就是 littlefs 的文件缓存。程序大小的天花板因此
+从**内核堆**换成了**任务窗口**（C3 240 KiB 用户区），64 KiB 以上的程序第一次有可能。
+
+### `priotest` 1 hog 的 A/B（重要方法学）
+
+新内核 1 hog 出现 FAIL，先按纪律扩样本，再做真机 A/B：
+
+| 镜像 | 1 hog 样本 | PASS |
+| --- | --- | --- |
+| HEAD（`de76bb4c…`） | 20 | **16** |
+| 流式加载 + 56 KiB 堆 | 9 | 6 |
+| 流式加载 + 16 KiB 堆 | 20 | **17** |
+
+**这个判据本身就有约 20% 的偶发 FAIL**，与堆大小、加载路径无关。结论：无相位回归。
+（这也修正了 §16 的过度归因——不是「改内核就翻相位」，而是这条判据接近临界值，
+任何布局变动都可能把它推过线。判断回归必须连跑 3 次以上、样本 ≥ 10。）
+
+### 代价
+
+- 内核 `.text` 因流式状态机与窗口视图变长（C3 上 ±数百字节量级），XIP 代码地址搬动。
+- **必须整片烧**：新内核拒绝 16 B 信封，旧 FS 上所有程序都加载不了
+  （用户明确表示不需要兼容旧格式）。
+- 窗口里要多留「线性 raw ELF」的空间，`win_need` 因此取 `max(span, raw_size)`。
+
+## 19. RP2040 的 RAM 到底被谁吃了（2026-11-06 实测盘点，未改动）
+
+Pico 只有 **264 KiB** SRAM，比 C3 的 400 KiB 还紧，值得单独盘一次。以下全部是
+`build/kernel-rp2040.elf` 与源码常量的实测/实算值，不是估计。
+
+### 现状：内核只用了一半自己占的地
+
+| 项 | 字节 | 说明 |
+| --- | --- | --- |
+| `.text` | 72,372 | **在 XIP flash（0x10000100），不占 SRAM** |
+| `.data` | 28 | |
+| `.bss` | 77,536 | 见下表 |
+| `__kernel_end` | **77,568** | `0x20012f00`，链接脚本 ASSERT 卡在 `0x20020000` |
+| 内核窗口（`0x20000000..0x20020000`） | 131,072 | 128 KiB |
+| **窗口内闲置** | **53,504** | 因为 `PLAT_KERNEL_MAX` 写死 128 KiB |
+| 用户区 | 136 KiB | `0x20020000..0x20042000`，grain 16 KiB → **8 个窗口** |
+
+### `.bss` 明细（77,536 B）
+
+| 项 | 字节 | 可调？ |
+| --- | --- | --- |
+| 内核堆 arena（默认 32 KiB） | 32,768 | ✅ `HeapBytes` |
+| 内核栈（`ARM_KSTACK_BYTES`） | 16,384 | ✅ 需与 `kernel/cpu.h` 同步 |
+| 任务表 `procs[16]`，`sizeof(proc_t)=728` | 11,648 | ✅ `MaxProcs` |
+| littlefs 整块 bounce（4 KiB 块） | 4,096 | ⚠️ 拆开可省 3.5 KiB，但每次整块操作要拆 8 次 |
+| tty：行缓冲 1024 + 历史 512 + 行 256 + 回滚 256 + raw 环 512 | 2,560 | 部分可关（`TOS_HIST_BYTES=0`） |
+| 目录快照 20×32 + 名字缓冲 | 736 | |
+| littlefs 3 个 512 B 缓存（read/prog/look） | 1,536 | 否 |
+| 文件句柄池 `openfiles[8]`，`sizeof(ofile_t)=172` | 1,376 | 可降到 4 |
+| 屏幕网格 20×48 | 960 | ✅ rp2040 没有 LCD，可条件编译掉 |
+| 引脚表 48×2×8 | 768 | 可降到 16 |
+| devfs 名字表 32×16 | 512 | 可降到 16 设备 |
+| 控制台回显队列 | 256 | |
+| `lfs_t` + `lfs_config` | 212 | |
+| 其余零散 + 对齐 | ≈3,700 | |
+
+`sizeof(proc_t)=728` / `sizeof(ofile_t)=172` 是 `clang -Xclang -fdump-record-layouts`
+对 armv6m 目标实测的，不是手算。`proc_t` 里最大的是 `cwd[64]`、`regs_t saved`
+（80 B）和 `file_t fds[8]`。
+
+### 实测：两个旋钮能省多少
+
+把 rp2040 临时改成 `HeapBytes: 8*1024, MaxProcs: 8` 重建（已还原，未提交）：
+
+```
+kernel ends at 0x20012f00   (77,568 B)   →   0x2000b840   (47,168 B)
+```
+
+**−30,396 B**，与「24,576（堆）+ 5,824（任务表）」逐字节吻合。也就是说这两个
+数字不是纸面推算。
+
+### 建议的动手顺序（收益大 → 风险高）
+
+1. **先把白占的 50 KiB 让出来**（零代码）：`PLAT_KERNEL_MAX` 从 `0x20020000` 下移到
+   `0x20014000`、同步改 `board/rp2040/kernel.ld` 的 ASSERT。用户区 136 → **184 KiB**
+   （8 → **11 个窗口**），内核仍有 4.3 KiB 余量。这一步不碰任何 C 代码。
+2. **堆 32 → 8 KiB**（`HeapBytes`）：−24 KiB。C3 上 16 KiB 已过全部 flash 压力测试，
+   8 KiB 是新的未知，必须重跑 `tosput` / `transtest` / 大目录 `ls`。
+3. **任务表 16 → 8**（`MaxProcs`）：−5.8 KiB。rp2040 无论如何最多只有 8 个窗口。
+4. **内核栈 16 → 8 KiB**：−8 KiB。`ARM_KSTACK_BYTES`（`arch/arm/start.S`）与
+   `KSTACK_BYTES`（`kernel/cpu.h`）必须同时改，并且用栈底哨兵在真板实测高水位。
+   风险最高的一项，放最后。
+5. 做完 2/3/4 后 `__kernel_end` ≈ 39 KiB，可把 `PLAT_KERNEL_MAX` 再下移到
+   `0x2000C000`：用户区 **216 KiB / 13 个窗口**（+80 KiB，+59%）。
+
+板级裁剪（屏幕 960 + 历史 512 + raw 环 256）是最后 1.7 KiB，优先级最低。
+
+### 不要做的
+
+- **拆 4 KiB bounce**：littlefs 可能一次要整块，省 3.5 KiB 换每块 8 次扇区循环，
+  在 SRAM 最紧的板上也许值，但要先量 littlefs 实际请求分布。
+- **只读 littlefs / 自研 FS**：早前已否决（掉电正确性验证成本过高，17.6 KiB 是必要成本）。
+- **压缩内核 .bss / swap**：没有 MMU、没有 swap 介质语义，做到最后是自研换页，
+  与本项目「宁可牺牲功能也不牺牲体积」的取舍冲突。
+
+### 为什么现在没动
+
+rp2040 手边没有可烧的 Pico，而项目纪律是**内核改动必须真板 A/B**（§16、§18）。
+上面第 1 步是纯布局、可离线验证；2/3/4 需要真板。等有板子再按顺序做。
 
 ## 建议的讨论顺序
 
@@ -818,7 +962,9 @@ span / asked_stack / heap_ask / win 四项，不一致拒绝加载（`elf_load` 
    `process.c` 就发版，先解决 `priotest` 的相位敏感性。注意 §16 的归因修正：
    地址搬动本身不必然翻相位，改完仍要做真机 A/B。
 4. ~~`script` 先合、`sched-prio` 后 rebase~~（2026-11-02 已按此顺序完成）。
-5. **B 路线第二步**：在 §17 已铺好的窗口预分配之上，把 LZ4 改成输入侧分块、
-   输出直接写任务窗口，内核堆 56 KiB → 十几 KiB，C3 可加载 64 KiB 以上程序。
-   前置要解决 `p_offset != p_vaddr` 的滑动与 phdr/rela 备份。
-6. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
+5. ~~B 路线第二步：输入侧分块 + 输出直写窗口~~（2026-11-06 深夜已做，§18；
+   C3 堆 56 → 16 KiB，堆峰值 28 424 → 768 B）。
+6. **RP2040 的 RAM 布局**（§19）：内核窗口写着 128 KiB、实际只用 77.6 KiB，
+   50 KiB 白白占着；把 `PLAT_KERNEL_MAX` 下移 + 缩堆/任务表/内核栈，能把用户区
+   从 136 KiB 抬到 190 KiB 以上。要在真板上验，先攒一台可烧的 Pico。
+7. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。

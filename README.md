@@ -45,9 +45,10 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - **位置无关程序（PIE）**：用户程序链接为 `ET_DYN`（基址 0），内核加载时整体搬到
   该任务的窗口基址并应用 `.rel.dyn`/`.rela.dyn` 重定位。这样**同一份二进制可以在
   不同 `APP_BASE` 的板子上运行**（QEMU 与真实 MCU 共用）
-- **LZ4 压缩的程序**：用户 ELF 在构建时压缩，内核内嵌约 420 字节的解压器在
-  `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）。
-  信封头还带着窗口三量（见「格式决策」），`exec` 据此在解压**之前**就把任务窗口分好
+- **LZ4 压缩的程序**：用户 ELF 在构建时压缩，内核内嵌的流式解压器在 `exec` 时
+  **直接把解压结果写进任务窗口**——镜像从不进内核堆，堆上只有 littlefs 那 512 B
+  文件缓存（`LZ4TOS` 信封，见「格式决策」）。信封头带着窗口三量，`exec` 因此能在
+  解压**之前**就把窗口分配好
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
   外加 `clock/getcpu/gpio/adc/pipe/dup2/ioctl`
@@ -161,13 +162,25 @@ include/             freestanding 的 stdint/stdbool/string/inttypes 头
 > 内核 `build/kernel-*.elf` 不受影响，反汇编照旧。实测 36 个程序原始减
 > 12 088 B、LZ4TOS 后减 7 149 B，同时把 `exec` 的解压缓冲（`raw_size`）也压小了。
 >
-> `LZ4TOS` 信封现在是 28 字节：`flags` bit0 表示后面跟三个 u32
+> `LZ4TOS` 信封是 28 字节：`flags` bit0 表示后面跟三个 u32
 > （`span` / `stack_ask` / `heap_ask`），由 `tools/mklfs.c` 在打包时按
-> `kernel/elf.c` 的同一套规则从 ELF 算出。`exec` 用**本板**的默认栈、守卫洞和窗口
-> 粒度现场算出窗口、在解压之前分配，解压后再用 `elf_probe()` / `elf_tos_note()`
-> 逐项复核，不一致就拒绝加载。三量不含任何板级常量，所以同一份镜像仍能跨板分发；
-> `flags=0` 的旧 16 字节信封照常可读（真机验证过）。这是为「解压直接写进任务窗口」
-> 铺路：**目前解压缓冲仍在内核堆，堆峰值尚未下降**。
+> `kernel/elf.c` 的同一套规则从 ELF 算出。三量不含任何板级常量，所以同一份镜像
+> 仍能跨板分发。
+>
+> 信封是**唯一格式**，没有旧版回退：`exec` 必须知道窗口大小才能先分配窗口、
+> 再往里解压，所以 `flags` 不对的信封一律拒绝（报 `not found or not a loadable
+> program`）。由此 `exec` 的加载链变成一条直线：读 28 字节前缀 → 用本板默认栈 /
+> 守卫洞 / 窗口粒度算出 win → `win_alloc()` → 流式解压直接写 `win_base` →
+> 逐段 `memmove` 摆正 → 应用重定位 → 复核三量与 ELF 一致。**内核堆不再持有镜像**，
+> 也不再需要「整份读 + 解压缓冲」两份拷贝。
+>
+> 复核是这条链的安全阀：构建期算错、镜像被改、或信封与 ELF 不符，`exec` 会在
+> 写任何用户内存之前拒绝加载，而不是按一个偏小的窗口继续跑。
+>
+> 代价与边界：解压输出必须是连续的（LZ4 的 match 可回溯 64 KiB，窗口正好连续），
+> 且 `p_offset != p_vaddr`（`py` 差 448 B、`sh` 差 384 B），所以窗口里先落一份线性
+> ELF、再逐段滑到 `p_vaddr - link_lo`——36 个程序实测都是「向前且目的区间不重叠」，
+> 程序头的副本在滑动前就拷出来了。
 
 ## 环境准备
 
@@ -753,9 +766,13 @@ token 数组、名字文本和字节码都是编译期一次成形、不再释�
 | C3 内核堆 | 48 KiB | 56 KiB | +8 KiB |
 
 **省的是 RAM，付的是 flash**。速度没赢：名称查找（动态作用域）是两版共同的
-大头，栈式 VM 的 switch 循环没有把它变便宜。内核堆涨 8 KiB 是因为 `exec` 会把
-解压后的整份镜像装进内核堆再拷进任务窗口，镜像从 27.6 → 31.5 KiB；那 8 KiB
-落在 `.bss` 末尾到第一个任务窗口之间本来就空着的 SRAM 里。
+大头，栈式 VM 的 switch 循环没有把它变便宜。上表最后一行是当时的代价：`exec` 要把
+解压后的整份镜像装进内核堆再拷进任务窗口，镜像从 27.6 → 31.5 KiB，C3 的堆因此
+从 48 涨到 56 KiB。
+
+**那一行现在已经作废**：改成流式解压直写窗口后，镜像不再进内核堆，C3 的堆从
+56 KiB 降到 **16 KiB**，`free` 的 peak 从 28 424 B（shell）/ 54 752 B（`py`）
+降到 **768 B / 1 024 B**——峰值不再是「最大那个程序」，而就是 littlefs 的文件缓存。
 
 `files/demo.py` 是功能演示，`files/pytest.py` 和 `files/pytest2.py` 是断言套件
 （`py pytest.py` 的输出每行一条，最后一行是 `checks: N failed: 0`）。
@@ -1128,8 +1145,10 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   防止坏镜像覆写内核或拿到可写可执行的区间。
 - 同一时刻最多 28 个嵌套任务窗口（x86：112 MiB / 4 MiB）、16 个（RV32：16 MiB / 1 MiB）
   或 14 个（ARM：3.5 MiB / 256 KiB），同时活着的任务超过这个数会报 `out of task windows`。
-- 内核堆是 **32 KiB** 静态 arena（`.bss`），first-fit **且合并相邻空闲块**；littlefs 的缓存和临时缓冲区都走它
-  （每次 `exec` 会临时分配一个文件大小的加载缓冲，随后立即释放）。
+- 内核堆是静态 arena（`.bss`），first-fit **且合并相邻空闲块**；大小由板子决定
+  （`-DTOS_HEAP_BYTES`：x86 / rv32 256 KiB、arm 128 KiB、rp2350 60 KiB、
+  esp32c3 16 KiB、其余默认 32 KiB）。`exec` 不再分配「文件大小」的加载缓冲，
+  堆峰值只剩 littlefs 的缓存与临时缓冲区。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。
 - 引导扇区固定读取 180 个扇区（`internal/build/build.go` 的 `KernelSectors`）。改内核大小时
   还要同步改 `boot/stage1.S` 的 `KERNEL_SECTORS` 和 `board/pc/layout.c` 的 `PLAT_LFS_LBA`——
