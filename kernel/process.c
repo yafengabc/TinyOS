@@ -1086,6 +1086,16 @@ static void set_name(proc_t *p, const char *path)
     p->name[i] = '\0';
 }
 
+/* A TOS_STACK() request (or the same value arriving in an envelope hint)
+   has to be one the protection unit can describe and the window grain can
+   hold.  Both paths use this so a hint cannot bypass the check the ELF note
+   has always had. */
+static int stack_request_ok(uint32_t v)
+{
+    return (v & (v - 1u)) == 0 && v >= PLAT_PAGE_SIZE &&
+           PLAT_APP_GRAIN % v == 0;
+}
+
 static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
                                  int claim)
 {
@@ -1097,33 +1107,79 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
         return NULL;
     }
 
-    /* Programs are stored LZ4-compressed.  Decompress into a fresh buffer,
-       then hand the plain ELF to the loader. */
+    /* Programs are stored LZ4-compressed.  The envelope may also carry the
+       three numbers the window is sized from, which lets us reserve it
+       before decompressing - a streaming loader will write straight into
+       that window.  hdr is the offset of the LZ4 block; 0 means a plain
+       (uncompressed) file. */
     uint32_t raw_size = 0;
-    if (lz4_wrap_info(data, size, &raw_size)) {
-        uint8_t *raw = kmalloc(raw_size ? raw_size : 1);
-        if (!raw) {
-            kprintf("exec: out of memory decompressing '%s'\n", path);
-            ramdisk_release(data);
-            return NULL;
-        }
-        int n = lz4_decompress_block(data + LZ4_WRAP_HEADER, size - LZ4_WRAP_HEADER,
-                                     raw, raw_size);
-        ramdisk_release(data);
-        if (n < 0 || (uint32_t)n != raw_size) {
-            kprintf("exec: '%s' is corrupt (bad LZ4 block)\n", path);
-            kfree(raw);
-            return NULL;
-        }
-        data = raw;
-        size = raw_size;
-    }
+    lz4_window_hint_t hint = {0, 0, 0};
+    int has_hint = 0;
+    uint32_t hdr = lz4_wrap_info(data, size, &raw_size, &hint, &has_hint);
 
+    /* Claim the table slot first: win_alloc() records the window in this
+       very entry, and proc_retire() gives both back on any failure below. */
     proc_t *p = proc_alloc();
     if (!p) {
         kprintf("exec: process table full\n");
         ramdisk_release(data);
         return NULL;
+    }
+
+    uint32_t win = 0, base = 0;
+    uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
+    if (has_hint) {
+        /* Everything the window needs is on the envelope.  No board value
+           is stored in it: the default stack, guard and grain are ours, so
+           the same image still loads on every target.  The ELF is checked
+           against these numbers once it has been decompressed. */
+        uint32_t hint_stk = hint.stack_ask ? hint.stack_ask : DEFAULT_STACK;
+        if (hint.stack_ask && !stack_request_ok(hint.stack_ask)) {
+            kprintf("exec: '%s' carries a bad stack hint (%u bytes)\n",
+                    path, hint.stack_ask);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+        uint32_t need = hint.span + hint_stk + hint.heap_ask + HEAP_GUARD;
+        if (need > app_total) {
+            kprintf("exec: '%s' needs %u KiB, the whole user area is %u KiB\n",
+                    path, need / 1024u, app_total / 1024u);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+        win = align_up(need, PLAT_APP_GRAIN);
+        if (win < PLAT_APP_GRAIN)
+            win = PLAT_APP_GRAIN;
+        if (win_alloc(p, win) != 0) {
+            kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
+                    path, win / 1024u, win_largest_free() / 1024u);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+        base = p->win_base;
+    }
+
+    if (hdr) {
+        uint8_t *raw = kmalloc(raw_size ? raw_size : 1);
+        if (!raw) {
+            kprintf("exec: out of memory decompressing '%s'\n", path);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+        int n = lz4_decompress_block(data + hdr, size - hdr, raw, raw_size);
+        ramdisk_release(data);
+        data = raw;                 /* owns the decompressed ELF from here */
+        size = raw_size;
+        if (n < 0 || (uint32_t)n != raw_size) {
+            kprintf("exec: '%s' is corrupt (bad LZ4 block)\n", path);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
     }
 
     /* How much of the window will the image itself occupy, and where does
@@ -1151,9 +1207,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     uint32_t asked_stack = 0, asked_heap = 0;
     if (elf_tos_note(data, size, &asked_stack, &asked_heap) == 0) {
         if (asked_stack != 0) {
-            if ((asked_stack & (asked_stack - 1u)) != 0 ||
-                asked_stack < PLAT_PAGE_SIZE ||
-                PLAT_APP_GRAIN % asked_stack != 0) {
+            if (!stack_request_ok(asked_stack)) {
                 kprintf("exec: '%s' asks for a %u-byte stack; this board "
                         "needs a power of two from %u to %u KiB\n",
                         path, asked_stack, PLAT_PAGE_SIZE / 1024u,
@@ -1168,7 +1222,6 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     }
 
     uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
-    uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
     /* The window has to hold the image, the stack, whatever heap the
        program declared as its floor, and the guard hole between heap and
        stack.  A declared heap is what makes a small image reserve a big
@@ -1189,18 +1242,35 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        image rounds up to, the stack, the declared heap, the guard hole.
        A small program stops reserving a big program's share; a program
        that declared a heap gets at least that much of one. */
-    uint32_t win = align_up(win_need, PLAT_APP_GRAIN);
-    if (win < PLAT_APP_GRAIN)
-        win = PLAT_APP_GRAIN;
+    uint32_t win_elf = align_up(win_need, PLAT_APP_GRAIN);
+    if (win_elf < PLAT_APP_GRAIN)
+        win_elf = PLAT_APP_GRAIN;
 
-    if (win_alloc(p, win) != 0) {
-        kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
-                path, win / 1024u, win_largest_free() / 1024u);
-        ramdisk_release(data);
-        proc_retire(p);
-        return NULL;
+    if (has_hint) {
+        /* The window was already reserved from the envelope.  Three numbers
+           decided its size, so all three have to match what the ELF says -
+           a stale or tampered hint must not turn into an undersized window
+           the loader then writes past. */
+        if (span != hint.span || asked_stack != hint.stack_ask ||
+            heap_ask != hint.heap_ask || win_elf != win) {
+            kprintf("exec: '%s' window hint disagrees with its ELF\n", path);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+    } else {
+        /* Old 16-byte envelope (or a plain ELF): nothing to go on until the
+           image is here, so size and reserve exactly as before. */
+        win = win_elf;
+        if (win_alloc(p, win) != 0) {
+            kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
+                    path, win / 1024u, win_largest_free() / 1024u);
+            ramdisk_release(data);
+            proc_retire(p);
+            return NULL;
+        }
+        base = p->win_base;     /* recorded by win_alloc, under the lock */
     }
-    uint32_t base = p->win_base;     /* recorded by win_alloc, under the lock */
 
     /* The loader relocates the position independent (ET_DYN) image to
        `base` and checks every write against the window. */

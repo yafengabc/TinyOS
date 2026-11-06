@@ -82,24 +82,48 @@ int lz4_decompress_block(const uint8_t *src, uint32_t src_len,
     return (int)op;
 }
 
-int lz4_wrap_info(const uint8_t *data, uint32_t size, uint32_t *out_size)
+static uint32_t wrap_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+uint32_t lz4_wrap_info(const uint8_t *data, uint32_t size,
+                       uint32_t *out_size,
+                       lz4_window_hint_t *hint, int *has_hint)
 {
     if (size < LZ4_WRAP_HEADER)
         return 0;
     if (memcmp(data, LZ4_WRAP_MAGIC, 6) != 0)
         return 0;
 
-    /* flags (2 bytes) are currently unused and must be zero */
-    if (data[6] != 0 || data[7] != 0)
+    /* An unknown flag bit may change where the block starts; refuse the
+       envelope rather than decode from a guessed offset. */
+    uint32_t flags = (uint32_t)data[6] | ((uint32_t)data[7] << 8);
+    uint32_t hdr = LZ4_WRAP_HEADER;
+    if (flags & LZ4_WRAP_HINT_BIT) {
+        if (flags != LZ4_WRAP_HINT_BIT)
+            return 0;
+        hdr = LZ4_WRAP_HEADER_V1;
+    } else if (flags != 0) {
+        return 0;
+    }
+    if (size < hdr)
         return 0;
 
-    uint32_t orig = (uint32_t)data[8] | ((uint32_t)data[9] << 8) |
-                    ((uint32_t)data[10] << 16) | ((uint32_t)data[11] << 24);
-    uint32_t comp = (uint32_t)data[12] | ((uint32_t)data[13] << 8) |
-                    ((uint32_t)data[14] << 16) | ((uint32_t)data[15] << 24);
-    if (comp != size - LZ4_WRAP_HEADER)
+    uint32_t orig = wrap_le32(data + 8);
+    uint32_t comp = wrap_le32(data + 12);
+    if (comp != size - hdr)
         return 0;
 
-    *out_size = orig;
-    return 1;
+    if (out_size)
+        *out_size = orig;
+    if (has_hint)
+        *has_hint = (flags == LZ4_WRAP_HINT_BIT);
+    if (hint && flags == LZ4_WRAP_HINT_BIT) {
+        hint->span      = wrap_le32(data + 16);
+        hint->stack_ask = wrap_le32(data + 20);
+        hint->heap_ask  = wrap_le32(data + 24);
+    }
+    return hdr;
 }
