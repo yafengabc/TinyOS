@@ -407,7 +407,10 @@ trap_entry / isr_common          sched_switch(r)
 发现的——`ps` 里 shell 自己就写着 prio 0）。放在 NORMAL 之后，0 级是空的，
 `nice 0 samp` 才真的意味着"每毫秒都要有我"：C3 上三个同级的 CPU 忙任务把
 NORMAL 的 1 ms 采样循环拖成 666/1000 准时、334 次 3 ms，同一个循环在 0 级
-986/1000 准时、最差 2 ms（`scripts/esp-c3/priotest.py`）。
+986/1000 准时、最差 2 ms（`scripts/esp-c3/priotest.py`，2026-11-04 基线）。
+2026-11-06 修掉回显队列的排空时机之后，0 级在 1/2/3 个忙任务下都是
+**1000/1000 准时、最差 1 ms**：此前积压的回显留到 tick 里排空，会拖走
+0 级任务 1 ms 唤醒的相位（见 `docs/OPEN-ITEMS.md` §15）。
 
 **唯一能往 0 级放东西的是 shell**（`current == init_proc` 才允许越过自己的级别）。
 它给出的是一条可收回的授权：0 级的任务一旦死循环，shell 拿不到 CPU，

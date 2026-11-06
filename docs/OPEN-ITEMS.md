@@ -586,6 +586,74 @@ boot2 的最后一步是 `ldr sp,[0x10000100]; ldr pc,[0x10000104]`，读到的 
 **这仍然不等于"能启动"**：boot2 内部有没有正确配置 QSPI（拿的到底是 W25Q080 的
 序列还是别的 flash 型号）、12 MHz 时钟假设成不成立、USB CDC 枚举——都只有真机能回答。
 
+## 15. C3 真机：回显队列排空时机（2026-11-06，已修）
+
+远端 `9dd076e`（XIP + tty 行编辑 + 双核板级）整片烧到 C3 之后，QEMU 与
+`go test` 全过，但真机暴露两个 QEMU/emutest 都抓不到的回归。两者**同一个根因**。
+
+### 回显落在提示符之后（整行粘贴才触发）
+
+`echo first` 回显 `echo` → 输出 `first` → `tos> ` 后才补 ` first`；`history`
+回显 `hist` → 列表 → `tos> ory`；`lfs` 甚至 `exec: 'bin/lfs' not found` 先于
+命令回显；200 字符长行结尾 `tos> XXXX`。字节不丢（长行 400 个 X = 200 回显
++ 200 输出），是顺序错。量化：整行突发输入 3/9 错乱，逐字符 5 ms 输入 0/6；
+人手打字不触发，粘贴和协议输入会。
+
+根因：`arch/rv32/platform.c` 的 UART RX 中断路径是 `tty_poll()` →
+`plat_irq_service()` → `process_console_kick()` → 直接抢占，**没有
+`console_echo_tick()`**；只有 tick（`process.c`）和 idle 排空 `echo_q`。
+C3 的 `plat_console_tx_room()` 一 tick 最多放行 100 字节，shell 被中断立刻
+唤醒并直接 `console_write` 提示符，队列里剩下的行尾要等下一个 1 ms tick。
+
+修法：`console.c` 把排空抽成 `echo_drain_locked(max)`，tick 传发送器空闲量
+（不阻塞），**每个同步输出入口**（`console_write` / `console_putc` /
+`kprintf`）在写自己第一个字节前传 `-1` 抽干；RX 中断路径也补一次
+`console_echo_tick()` 让回显尽早发。逐字节输出逻辑保持原样（不走 `out_char`，
+否则「任务输出 → 回显」的所有权切换会插入 `\r\n`，把输入挤到下一行）。
+顺手删掉从未被赋值的死变量 `in_echo`，并改正自相矛盾的顶部注释。
+实测：突发 3/9 → **0/9**，行编辑（backspace / ^U / Tab / 方向键 / history）
+逐字节正确。
+
+### `priotest` 1 hog 判据稳定 FAIL —— 同一个根因
+
+| 配置 | 基线 11-04 | 9dd076e | 修复后 |
+| --- | --- | --- | --- |
+| 1 hog NORMAL | 976 | 983~986 | 982~999 |
+| 1 hog nice 0 | 990 | **948~952** | **1000** |
+| 2/3 hogs nice 0 | 988 / 986 | 987~989 | **1000 / 1000** |
+
+`priotest.py` 修前 3/3 复跑稳定 FAIL（`rt_bad > normal_bad`），修后 3/3 PASS，
+且 0 级最差间隔从 2 ms 降到 1 ms。原因是积压的回显在 tick 里排空会占掉
+1 ms 唤醒的相位，不是调度器改坏了 —— 调度器一行没动。
+
+### 同时清掉的
+
+- `process_exit()` 的 `[exit pid=N code=C cpu=0]` 调试打印删除，并把
+  `if (!p) panic(...)` 移回解引用之前。
+- `board/esp32c3/platform.c` 的 `#ifdef TOS_XIP_FLASH_BASE` 改成
+  `#if TOS_XIP_FLASH_BASE`：兜底 `#define ... 0u` 让 `#ifdef` 恒真，
+  全 RAM 构建也会跑 `xip_report()` 去读未映射的 `0x42000000`。改后重新构建，
+  `esp32c3.bin` 与 ELF 的 SHA256 逐字节不变，XIP 路径行为未动。
+
+### 真机验证（COM4，整片烧录）
+
+5 次冷启动逐字节一致（593 B、无 panic）；`demo.sh` 全标记；
+`py demo.py` sum:13 / fib(10):55；`pytest.py` 54/0、`pytest2.py` 21/0；
+^C 三级目标全 `[pid N] killed`；crash/prot/deep/dd 写读校验/管道/重定向；
+`transtest.py` 1024/16384/65536 三档 CRC 全过；`tosput-cli` 32 KiB CRC 过；
+`rawstorm` 511 B / lost 0；`clocktest` b=996.65；9 目标 build、Go test/vet、
+QEMU 三目标 smoke 与 compat 全过。**XIP 下擦写 flash 会自毁的担心撤回**：
+`flash_irq_off()` 的 icache 热行 + 关 MIE + ROM 函数 + `.text.trap` 在 SRAM
+是自洽设计，64 KiB 持续编程实测通过。
+
+### 模拟器另开任务（不属本次改动）
+
+`9dd076e` 的 XIP 启动桩调 ROM `0x400004d8`，rv32emu-c 只建模 `0x400004d4`，
+`emutest` 因此挂掉。补 stub 后内核已能跑进 XIP 代码（`exceptions=0`），但仍
+卡在启动早期（`mstatus MIE=0`、`cpu interrupts=0`、UART 零输出、无 prompt），
+模拟器还缺一层建模；主仓 gitlink 也被该提交从 `6909215` 退回 `4e8cf59`。
+这两件事独立推进，本次不提交 gitlink、不推子模块。
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
