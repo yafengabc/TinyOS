@@ -46,7 +46,8 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   该任务的窗口基址并应用 `.rel.dyn`/`.rela.dyn` 重定位。这样**同一份二进制可以在
   不同 `APP_BASE` 的板子上运行**（QEMU 与真实 MCU 共用）
 - **LZ4 压缩的程序**：用户 ELF 在构建时压缩，内核内嵌约 420 字节的解压器在
-  `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）
+  `exec` 时先解压再交给 ELF 加载器（`LZ4TOS` 信封，非压缩文件原样加载）。
+  信封头还带着窗口三量（见「格式决策」），`exec` 据此在解压**之前**就把任务窗口分好
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
   外加 `clock/getcpu/gpio/adc/pipe/dup2/ioctl`
@@ -159,6 +160,14 @@ include/             freestanding 的 stdint/stdbool/string/inttypes 头
 > 代价是 `build/user/bin/*` 不再能直接 `readelf` / `objdump -d`（`-s` 早已去掉符号）；
 > 内核 `build/kernel-*.elf` 不受影响，反汇编照旧。实测 36 个程序原始减
 > 12 088 B、LZ4TOS 后减 7 149 B，同时把 `exec` 的解压缓冲（`raw_size`）也压小了。
+>
+> `LZ4TOS` 信封现在是 28 字节：`flags` bit0 表示后面跟三个 u32
+> （`span` / `stack_ask` / `heap_ask`），由 `tools/mklfs.c` 在打包时按
+> `kernel/elf.c` 的同一套规则从 ELF 算出。`exec` 用**本板**的默认栈、守卫洞和窗口
+> 粒度现场算出窗口、在解压之前分配，解压后再用 `elf_probe()` / `elf_tos_note()`
+> 逐项复核，不一致就拒绝加载。三量不含任何板级常量，所以同一份镜像仍能跨板分发；
+> `flags=0` 的旧 16 字节信封照常可读（真机验证过）。这是为「解压直接写进任务窗口」
+> 铺路：**目前解压缓冲仍在内核堆，堆峰值尚未下降**。
 
 ## 环境准备
 

@@ -685,6 +685,15 @@ call quietly costs a whole millisecond, about 1% of samples」。结论是
 或让 `samp` / `priotest` 的测量不再依赖启动相位，或用
 `#if PLAT_MAX_CPUS > 1` 让单核产物与 HEAD 逐字节相同。另开任务跟进。
 
+**2026-11-06 晚修正归因（§17 的反例）**：上面的 A/B 表是实测事实，但
+「**只要 XIP 内核代码地址一变，相位窗口就翻面**」这个因果说过头了。§17 的
+`process.c` 改动把内核代码从 `0x42010528` 搬到 `0x42010800`（**+728 B**，比表里
+任何一版 console 改动都大），`priotest` 1/2/3 hogs 仍全部 PASS，1 hog nice 0
+依旧 1000/1000。所以地址搬动本身不是充分条件；更合理的解释是 console 输出锁
+动到了 tick / 中断收尾的**热路径时序**，而 §17 只改了 `exec` 这条冷路径。
+结论仍然成立 —— 改内核后必须 HEAD vs 新镜像各整片烧做真机 A/B —— 但不能
+拿「代码变大」预判结果，也不能用它替一个真实回归开脱。
+
 ### 段头表：程序头能触达之外的字节全部不要
 
 `kernel/elf.c` 的一切都走程序头表：`header_ok()` 只校验 `e_phoff/e_phnum`，
@@ -733,11 +742,83 @@ crash / deep / `dd pattern verified` / 管道；回显突发 0/9、200 字符长
 `transtest` 3/3 CRC、`rawstorm` 511 B / lost 0、`clocktest` b=995.75
 （交付态实测，与 A/B 阶段的 996.59 / 基线 996.65 同一水平）、`tosput` 32 KiB CRC 过。
 
+## 17. LZ4TOS 信封预存窗口三量（2026-11-06 晚，已落地；B 路线第一步）
+
+### 为什么需要它
+
+「解压直接写进任务窗口」（§4 的 B 路线）要求窗口**先**分配、**再**解压，
+于是窗口大小必须在解压之前已知。信封里本来就有 `original_size`（`mklfs.c`
+的 `put_u32(hdr+8, flen)`，`kmalloc(raw_size)` 读的就是它），但它只是**文件字节数**，
+而 `kernel/process.c` 算的是：
+
+```
+win = align_up(span + stack + heap_ask + HEAP_GUARD, PLAT_APP_GRAIN)
+span = align_up(max(PT_LOAD.vaddr+memsz) - min(PT_LOAD.vaddr), PAGE)   /* 含 .bss */
+stack / heap_ask = .note.tos 的 TOS_STACK() / TOS_HEAP()
+```
+
+实测 C3/RV32 的 36 个进镜像程序，**36/36 都是 window > raw**：
+`py` 31 014 → 131 072 B（4.2×）、`mem` 1 318 → 81 920 B（**62.2×**）、
+`dd` 2 486 → 32 768 B；raw 合计 110 184 B，window 合计 950 272 B。
+拿 `original_size` 当窗口大小，`mem` 会被分到 1.3 KiB 而不是 80 KiB，加载时直接写越界。
+
+不预存就得两阶段，而两阶段有两个硬伤：LZ4 的 match 回溯要求**输出连续**，
+阶段 1「解出 ELF 头」也得有一块连续内存，可窗口还没分配 —— 又退回内核堆缓冲；
+而且 `.note.tos` 在 `user.ld` 里排在 `.rodata` 之后，`py` 的 note 落在文件
+**29 284 B** 处（31 014 B 的 94%），阶段 1 几乎解完整文件，再从头重解 ≈ 解两遍。
+（§4 / 上一轮对话里「先流式解出头部」的说法低估了这个成本，此处更正。）
+
+### 落地内容
+
+`flags` bit0 标记扩展头，16 → **28 B**：`span` / `stack_ask` / `heap_ask` 三个 u32。
+`tools/mklfs.c` 的 `elf_window_hint()` 按 `kernel/elf.c` 的同一套规则从 ELF 算出它们；
+`kernel/lz4.c` 的 `lz4_wrap_info()` 改为返回 LZ4 块的偏移（0 = 不是信封）并填 hint；
+`kernel/process.c` 把 `proc_alloc()` 提前，有 hint 时用本板常量现场算 `win` 并
+`win_alloc()` **在解压之前**分配，解压后再用 `elf_probe()` / `elf_tos_note()` 复核
+span / asked_stack / heap_ask / win 四项，不一致拒绝加载（`elf_load` 的窗口边界检查
+是第二道防线）。`flags=0` 的旧 16 B 信封走原路径。栈请求校验抽成
+`stack_request_ok()`，hint 与 note 共用同一套规则。
+
+**为什么不直接存 `win_size`**：grain（C3 16 KiB / x86 64 KiB）和默认栈（8 / 32 KiB）
+是目标相关的，存结果会把镜像绑死到一块板 —— 而选 ELF32 PIE 的初衷正是「同一份
+二进制跨板分发」。存三个 ELF 派生量、由内核补上自己的常量，两头都保住。
+`mklfs -v` 现在会打印 `hint=span/stack/heap`，便于只读诊断。
+
+### 验证（全部实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 离线 | 9 目标 build 全 rc=0；`go test -count=1 ./...` / `go vet` / `go build` rc=0；QEMU x86/rv32/arm/rv32smp smoke 全 `SMOKE TEST OK`；`compat` 自带 rebuild 后 `COMPAT OK` |
+| 新测试 | `lz4hint_test.go`：用 `debug/elf` 独立算参考值，经 `mklfs` 打包 + `-v` 读回，**36 个 hint 逐一一致**；不可解析的假 ELF 正确退回旧 16 B 头 |
+| 真机 A（板上原 HEAD 镜像） | `priotest` 1 hog：normal worst 2 ms，nice 0 **1000/1000** worst 1 ms，PASS；`free` peak 28 408 B |
+| 真机 B（整片重烧） | `priotest` 1/2/3 hogs **全 PASS**，1 hog nice 0 重复两次仍 1000/1000；`accept.py` **24/24**；`py demo.py` sum:13 / fib(10):55、pytest 54/0、pytest2 21/0、`^C [pid 15] killed`；`transtest` 3/3 CRC、`rawstorm` 511 B、`clocktest` b=995.7731、`tosput` 32 KiB CRC `735de6d1` |
+| 冷启动 | 3 次各 593 B、逐字节一致、无 panic；板上镜像 `de76bb4c…` / `48da9800…` 与构建产物一致 |
+| 旧格式兼容 | **只烧旧 16 B 头 FS、保留新内核**：shell 正常起、`hello`、`py demo.py` 全过，无 `hint disagrees` |
+
+**必须整片烧**：新 FS 是 28 B 头，旧内核的 `lz4_wrap_info()` 遇到 `flags != 0`
+会拒绝信封、把它当 plain ELF，所有程序都加载不了；反过来（新内核 + 旧 FS）兼容。
+
+### 收益与代价（诚实口径）
+
+- 内核代码 `0x42010528 → 0x42010800`（**+728 B**），`esp32c3.bin` 329 000 → 329 728 B。
+- 36 × 12 B 的头增长**没有多占 flash**：`df` Used 仍是 221 184 B，432 B 被
+  littlefs 现有块内空隙吸收了。
+- `free` peak 28 408 → **28 424 B**（+16 B，压缩件多 12 B 加块头对齐）。
+- **堆峰值没有下降**，这步只把窗口分配提前、把数据通道和复核机制建好；
+  解压缓冲仍在内核堆。真正把 56 KiB 堆压到几 KiB、让 C3 跑起 64 KiB 以上程序，
+  要等**输入侧分块解码 + 输出直写窗口**（下一步）。
+- 另外两个独立障碍：LZ4 输出必须连续（任务窗口正好满足）；`p_offset != p_vaddr`
+  （`py` 448 / `sh` 384），线性 ELF 要一次 `memmove` 摆正并先备份 phdr、调整 rela_off。
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
 2. ~~段头表裁剪~~（2026-11-06 已做，§16；+12 KiB littlefs 可用空间）。
 3. **控制台输出锁**（§16 上半）：需要布局稳定的实现，别直接改 `console.c` /
-   `process.c` 就发版，先解决 `priotest` 的相位敏感性。
+   `process.c` 就发版，先解决 `priotest` 的相位敏感性。注意 §16 的归因修正：
+   地址搬动本身不必然翻相位，改完仍要做真机 A/B。
 4. ~~`script` 先合、`sched-prio` 后 rebase~~（2026-11-02 已按此顺序完成）。
-5. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
+5. **B 路线第二步**：在 §17 已铺好的窗口预分配之上，把 LZ4 改成输入侧分块、
+   输出直接写任务窗口，内核堆 56 KiB → 十几 KiB，C3 可加载 64 KiB 以上程序。
+   前置要解决 `p_offset != p_vaddr` 的滑动与 phdr/rela 备份。
+6. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
