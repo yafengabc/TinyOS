@@ -63,9 +63,13 @@ regs_t *trap_handler(regs_t *f)
              * latches, and acking before the FIFO is empty lets it set
              * again.  Then hand the fresh bytes to whoever is blocked
              * reading them - waiting for the next tick would cap every
-             * console transfer at the tick rate. */
+             * console transfer at the tick rate.  Drain the echo queue here
+             * too: the RX interrupt bypasses the tick, and without this the
+             * freshly cooked keystrokes sit in the ring until the next 1 ms
+             * tick while the woken shell is already printing its prompt. */
             tty_poll();
             plat_irq_service(line);
+            console_echo_tick();
             process_console_kick();
 
             /* The kick can have made a more important task runnable, and

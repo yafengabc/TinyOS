@@ -19,13 +19,15 @@
  * no task is, and keystroke echo is its own owner so that it never
  * interrupts the task that is printing.
  *
- * Keystroke echo is not queued any more.  It used to wait for a "quiet
- * tick" because it could not tear a line; now that lines are closed at
- * ownership changes, waiting only delays typing: into a program that prints
- * continuously, a keystroke would arrive seconds after it was pressed. */
+ * Keystroke echo is queued, not written through.  tty_poll() runs inside an
+ * interrupt and cannot wait for the transmitter, so console_echo() only
+ * puts bytes in a ring and the tick drains what the device will take.
+ * Any synchronous output path has to drain the rest of that ring FIRST:
+ * those bytes belong to keystrokes that arrived before the output existed,
+ * and letting a task print first puts a pasted command's tail after the
+ * prompt instead of before it. */
 #define CONSOLE_ECHO_OWNER (-1)
 
-static int            in_echo;         /* printing echo, not a task's output */
 static int            out_owner;       /* pid whose line is still open      */
 static int            out_mid;         /* last character was not a newline  */
 
@@ -66,7 +68,7 @@ static void con_putc(char c)
 
 static void out_char(char c)
 {
-    int who = in_echo ? CONSOLE_ECHO_OWNER : process_current_pid();
+    int who = process_current_pid();
 
     if (who != out_owner && out_mid) {
         con_putc('\r');
@@ -108,23 +110,23 @@ void console_shutdown(void)
     plat_irq_disable();
 }
 
-/* Show a keystroke at once, on its own line if a program has one open.
+/* Show a keystroke, on its own line if a program has one open.
  *
- * Echo is queued, not written through.  tty_poll() runs inside the tick and
- * echoes every byte it cooked; writing those synchronously means waiting for
- * the transmitter, and at 115200 baud 180 characters take 15.6 ms - longer
- * than the 10 ms tick itself.  Nothing drains the receive FIFO during that
+ * Echo is queued, not written through.  tty_poll() runs inside an interrupt
+ * and echoes every byte it cooked; writing those synchronously means waiting
+ * for the transmitter, and at 115200 baud 180 characters take 15.6 ms -
+ * longer than the 1 ms tick.  Nothing drains the receive FIFO during that
  * wait, so an input burst longer than the FIFO depth (128 bytes on the C3)
  * is truncated in the middle: a 180-character pasted command reached the
  * shell as two fragments and failed with "sh: name too long", and the file
  * it was meant to write came out 63 characters long.  Hand typing never
  * shows it because a human produces a byte every ~100 ms.
  *
- * console_echo() queues, and console_echo_tick() - which process_tick already
- * calls right after tty_poll() - moves only what the device will take without
- * blocking.  A full queue drops the newest echo: the characters are already
- * in the line buffer, and losing sight of what you typed is recoverable in a
- * way that losing the input is not.
+ * console_echo() queues, console_echo_tick() moves only what the device will
+ * take without blocking, and every synchronous output path drains whatever
+ * is left before its own first byte.  A full queue drops the newest echo:
+ * the characters are already in the line buffer, and losing sight of what
+ * you typed is recoverable in a way that losing the input is not.
  */
 #define ECHO_Q 256
 
@@ -142,27 +144,39 @@ void console_echo(const char *s, size_t n)
     }
 }
 
-void console_echo_tick(void)
+/* Move queued echo bytes out, at most `max` of them (-1 = all of them).
+ * The lock is already held.  This is deliberately NOT out_char(): echo may
+ * start in the middle of a task's open line (the shell prompt), and closing
+ * that line here would put every typed character on a fresh line.  Echo
+ * simply takes ownership of the line, exactly as the tick path always did.
+ *
+ * The tick passes the transmitter's free space so it never blocks; the
+ * synchronous output paths pass -1, because they are about to wait for the
+ * transmitter anyway and must not let a keystroke land after their text. */
+static void echo_drain_locked(int max)
 {
-    int room = plat_console_tx_room();
-
     if (echo_head == echo_tail)
         return;
-
-    if (!spin_trylock(&out_lock))
-        return;                    /* the queue keeps its bytes; next tick */
-    while (room > 0 && echo_head != echo_tail) {
+    while (echo_head != echo_tail && (max < 0 || max-- > 0)) {
         char c = echo_q[echo_head];
         echo_head = (echo_head + 1) % ECHO_Q;
-        room--;
-        /* Echo owns the console line while it writes: a task printing at the
-           same time gets its line closed first (see out_char). */
         out_owner = CONSOLE_ECHO_OWNER;
         out_mid = (c != '\n');
         if (c == '\n')
             con_putc('\r');
         con_putc(c);
     }
+}
+
+void console_echo_tick(void)
+{
+    int room = plat_console_tx_room();
+
+    if (room <= 0 || echo_head == echo_tail)
+        return;
+    if (!spin_trylock(&out_lock))
+        return;                    /* the queue keeps its bytes; next tick */
+    echo_drain_locked(room);
     spin_unlock(&out_lock);
 }
 
@@ -301,6 +315,7 @@ void kprintf(const char *fmt, ...)
      * entry; spinning costs the board. */
     if (!spin_trylock(&out_lock))
         return;
+    echo_drain_locked(-1);
     adopt_line_locked();
     for (int i = 0; i < n; i++)
         out_char(buf[i]);
@@ -327,6 +342,7 @@ void console_putc(char c)
 {
     if (!spin_trylock(&out_lock))
         return;
+    echo_drain_locked(-1);
     out_char(c);
     spin_unlock(&out_lock);
 }
@@ -335,6 +351,7 @@ void console_write(const char *s, size_t n)
 {
     if (!spin_trylock(&out_lock))
         return;
+    echo_drain_locked(-1);
     for (size_t i = 0; i < n; i++)
         out_char(s[i]);
     spin_unlock(&out_lock);
