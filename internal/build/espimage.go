@@ -77,7 +77,28 @@ type ESPImage struct {
 	   boots anyway.  So append it - 32 bytes buys a quiet boot and a real
 	   integrity check. */
 	AppendSHA256 bool
+
+	/* XipBlob is code that runs straight out of flash instead of being
+	   copied into SRAM.  The ROM cannot load it (0x42000000 is a read-only
+	   alias of flash, not RAM), so it is appended past the checksum at
+	   XipOffset and the kernel's own cache/MMU bring-up maps that page.
+	   XipOffset must be 64 KiB aligned - one MMU page - and must be past
+	   the segments.  The checksum and digest only cover the segments, so
+	   these trailing bytes are invisible to the ROM's verifier. */
+	XipBlob   []byte
+	XipOffset uint32
 }
+
+/* One cache MMU page.  Cache_Ibus_MMU_Set() takes its page size in KiB and
+ * the C3 only accepts 64. */
+const espXipPageSize = 0x10000
+
+/* The window the C3 maps flash into, and the range inside it that code can
+ * be linked to.  Anything linked here is fetched, never loaded. */
+const (
+	espXipVaddrLow  = 0x42000000
+	espXipVaddrHigh = 0x42800000
+)
 
 // addrRange is a region the ROM is allowed to copy a segment into.  It exists
 // to catch the expensive mistake of packaging a kernel that was linked for
@@ -206,6 +227,23 @@ func BuildESPImage(img ESPImage) ([]byte, error) {
 		sum := sha256.Sum256(out)
 		out = append(out, sum[:]...)
 	}
+
+	if len(img.XipBlob) > 0 {
+		if img.XipOffset%espXipPageSize != 0 {
+			return nil, fmt.Errorf("esp image: XIP offset 0x%x is not 64 KiB aligned (%d pages)",
+				img.XipOffset, img.XipOffset/espXipPageSize)
+		}
+		if len(img.XipBlob)%4 != 0 {
+			return nil, fmt.Errorf("esp image: XIP blob is %d bytes, not a multiple of 4",
+				len(img.XipBlob))
+		}
+		if uint32(len(out)) > img.XipOffset {
+			return nil, fmt.Errorf("esp image: segments end at 0x%x, past the XIP blob offset 0x%x",
+				len(out), img.XipOffset)
+		}
+		out = append(out, make([]byte, int(img.XipOffset)-len(out))...)
+		out = append(out, img.XipBlob...)
+	}
 	return out, nil
 }
 
@@ -227,7 +265,15 @@ func espChecksum(segs []ESPSegment) byte {
 //
 // Only file-backed PT_LOAD segments go in: .bss is not part of the image,
 // exactly like the flat binary the PC target uses, and start.S zeroes it.
-func ESPImageFromELF(path string, withSHA256 bool) ([]byte, []ESPSegment, error) {
+//
+// A segment linked into the IROM window (0x42000000..) is *not* loaded by
+// the ROM - that window is a read-only alias of flash, and the ROM would be
+// writing into a mapping it has not even built yet.  Those bytes travel as
+// XipBlob at xipOffset instead, with the blob laid out so that
+// blob[vaddr - 0x42000000] is the byte the CPU will fetch from vaddr.  The
+// boot stub maps 0x42000000 -> xipOffset and hops in.  Pass xipOffset 0 to
+// refuse such a segment (the qemu targets have none).
+func ESPImageFromELF(path string, withSHA256 bool, xipOffset uint32) ([]byte, []ESPSegment, error) {
 	f, err := elf.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -239,12 +285,29 @@ func ESPImageFromELF(path string, withSHA256 bool) ([]byte, []ESPSegment, error)
 	}
 
 	var segs []ESPSegment
+	var xip []ESPSegment
 	for _, p := range f.Progs {
 		if p.Type != elf.PT_LOAD || p.Filesz == 0 {
 			continue
 		}
 		if p.Vaddr%4 != 0 {
 			return nil, nil, fmt.Errorf("%s: segment at 0x%x is not 4-byte aligned", path, p.Vaddr)
+		}
+		if p.Vaddr >= espXipVaddrLow && p.Vaddr < espXipVaddrHigh {
+			if xipOffset == 0 {
+				return nil, nil, fmt.Errorf("%s: segment at 0x%x is in the flash window but no XIP offset was given",
+					path, p.Vaddr)
+			}
+			if p.Filesz%4 != 0 {
+				return nil, nil, fmt.Errorf("%s: XIP segment at 0x%x is %d bytes, not a multiple of 4",
+					path, p.Vaddr, p.Filesz)
+			}
+			buf := make([]byte, p.Filesz)
+			if _, err := p.ReadAt(buf, 0); err != nil {
+				return nil, nil, fmt.Errorf("%s: reading XIP segment at 0x%x: %w", path, p.Vaddr, err)
+			}
+			xip = append(xip, ESPSegment{Addr: uint32(p.Vaddr), Data: buf})
+			continue
 		}
 		/* A foreign-board kernel (e.g. the qemu-virt one at 0x80000000)
 		   must be refused for its address space, not for some incidental
@@ -284,9 +347,30 @@ func ESPImageFromELF(path string, withSHA256 bool) ([]byte, []ESPSegment, error)
 		Segments:     segs,
 		FlashMode:    ESPFlashDIO,
 		AppendSHA256: withSHA256,
+		XipBlob:      xipBlob(xip),
+		XipOffset:    xipOffset,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return img, segs, nil
+}
+
+/* Lay the XIP segments out the way the CPU will address them: byte k of the
+ * blob is what the window returns for 0x42000000+k. */
+func xipBlob(xip []ESPSegment) []byte {
+	if len(xip) == 0 {
+		return nil
+	}
+	var end uint32
+	for _, s := range xip {
+		if e := s.Addr - espXipVaddrLow + uint32(len(s.Data)); e > end {
+			end = e
+		}
+	}
+	blob := make([]byte, end)
+	for _, s := range xip {
+		copy(blob[s.Addr-espXipVaddrLow:], s.Data)
+	}
+	return blob
 }

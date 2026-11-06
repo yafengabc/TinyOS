@@ -26,8 +26,7 @@ usage:
                  [-commandwait-ms 700] [-allow-reboot]
                    boot a build in QEMU over a TCP serial port and drive it
   tostest compat [-targets x86,rv32] [-port 5570] [-no-build] [-verbose]
-                   cross-target compatibility check (same commands, same output);
-                   add arm explicitly once its exec HardFault is fixed
+                   cross-target compatibility check (same commands, same output)
   tostest emu    build|test
                    build the rv32emu-c submodule into build/rv32emu-c.exe, or
                    boot the esp32c3 kernel on it and poke the shell

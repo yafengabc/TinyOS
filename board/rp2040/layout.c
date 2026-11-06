@@ -33,9 +33,13 @@ const uint32_t PLAT_APP_GRAIN  = 0x00004000u;   /* 16 KiB per step: 8 fit    */
 const uint32_t PLAT_STACK_BYTES = 8u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
-/* The littlefs image is flashed 1 MiB in (see emitRP2040UF2 in build.go). */
-const uint32_t PLAT_LFS_LBA = 0x100000u / 512u;
-const uint32_t PLAT_LFS_BLOCKS = 75;   /* 300 KiB, unchanged */
+/* littlefs starts at flash 0x80000 (512 KiB), the same offset as the
+ * ESP32-C3 and RP2350 (rpLfsOffset in internal/build/uf2.go).  A Pico has
+ * 2 MiB of QSPI flash, so the partition covers the remaining 1.5 MiB;
+ * the shipped image is still only 300 KiB and ramdisk_init() grows the
+ * mounted filesystem over the rest. */
+const uint32_t PLAT_LFS_LBA = 0x80000u / 512u;   /* 1024 */
+const uint32_t PLAT_LFS_BLOCKS = 384;            /* 1.5 MiB */
 
 /* One CPU: these boards have a single core.  The SMP build sets 2 and
  * start.S brings the second hart up (see kernel/cpu.c). */

@@ -72,6 +72,54 @@ _start:
     .option pop
     csrw    mtvec, t0
 
+#ifdef TOS_XIP_FLASH_BASE
+    /* Map the IROM window onto the code half of the image.
+     *
+     * 0x42000000 is pure translation on this chip: one 4-byte MMU entry per
+     * 64 KiB page at 0x600C5000, entry = physical address / 64 KiB, 0x100 =
+     * unmapped.  The ROM's own helpers (Cache_Ibus_MMU_Set,
+     * spi_flash_enable_cache) report success without changing anything here,
+     * so the table is written directly.  All of it checked on hardware,
+     * scripts/esp-c3/irom.S.
+     *
+     * This runs from RAM, before the window resolves, so it uses no literal
+     * pool, no data and no calls into flash. */
+
+    /* 1. cache owner/mode/enable.  The table alone is not enough: the
+     *    instruction path stays shut until this has run. */
+    li      t0, 0x400004c8          /* ROM_Boot_Cache_Init */
+    jalr    ra, t0, 0
+
+    /* 2. the two gate bits.  ICACHE_ENABLE resets to 0 and
+     *    ICACHE_SHUT_IBUS/DBUS reset to 1, which is why a mapping written
+     *    without them leaves the first fetch hanging forever. */
+    li      t0, 0x600C4000
+    lw      t1, 0(t0)
+    ori     t1, t1, 1
+    sw      t1, 0(t0)
+
+    li      t0, 0x600C4004
+    lw      t1, 0(t0)
+    andi    t1, t1, -4              /* clear SHUT_IBUS | SHUT_DBUS */
+    sw      t1, 0(t0)
+
+    /* 3. the table, then drop whatever the cache picked up under the ROM's
+     *    mapping. */
+    call    xip_map_window
+    li      t0, 0x400004d8          /* Cache_Invalidate_ICache_All */
+    jalr    ra, t0, 0
+
+    /* 4. hand the trap vector to the real table before anything can trap.
+     *    This chip runs mtvec in vectored mode, so a stale base sends an
+     *    interrupt to base + 4*code instead of the handler. */
+    .option push
+    .option norelax
+    la      t0, trap_vectors
+    .option pop
+    csrw    mtvec, t0
+#endif  /* TOS_XIP_FLASH_BASE */
+
+    /* Into the kernel.  Everything from here on executes out of flash. */
     call    kmain
 
 park:
@@ -332,3 +380,35 @@ __kernel_stack:
     .space 32768 * TOS_MAX_CPUS
     .globl __kernel_stack_top
 __kernel_stack_top:
+
+/* -------------------------------------------------------------------- */
+/* XIP bring-up diagnostics.                                            */
+/*                                                                      */
+/* Lives in .text.boot, which the XIP linker script keeps in SRAM:      */
+/* everything here has to work before the flash mapping exists, so it   */
+/* uses no literal pool, calls nothing, and loads nothing.              */
+
+#ifdef TOS_XIP_FLASH_BASE
+
+    .section .text.boot, "ax"
+    .align 4
+
+/* xip_map_window(): point the whole code window at the image.
+ *
+ * One entry per 64 KiB page; the entry holds the physical address divided by
+ * the page size, not the address itself - writing the byte address makes the
+ * window address a page number far past the end of the chip, and the first
+ * fetch through it never completes (measured). */
+xip_map_window:
+    li      t0, 0x600C5000
+    li      t1, (TOS_XIP_FLASH_BASE >> 16)
+    li      t2, 56                  /* 3.5 MiB of code from the XIP base */
+    li      t3, 1
+1:  sw      t1, 0(t0)
+    addi    t0, t0, 4
+    add     t1, t1, t3
+    addi    t2, t2, -1
+    bnez    t2, 1b
+    ret
+
+#endif  /* TOS_XIP_FLASH_BASE */

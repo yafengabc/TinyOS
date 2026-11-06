@@ -114,13 +114,30 @@ int periph_adc(int op, int chan)
 
 /* ---- device files: /dev/gpioN and /dev/adcN -------------------------- */
 
-/* One int per pin/channel, because struct dev carries a void* and handing it
- * a cast integer would be a pointer that is not an object.  The RP2040 has 30
- * pins and 5 channels; 48 leaves room for the RP2350 without a realloc path
- * that cannot exist (registration happens at boot only). */
+/* One dev_t per pin/channel, because struct dev carries a void* and handing it
+ * a cast integer would be a pointer that is not an object.
+ *
+ * These used to be 30-odd rows in the device table, one per pin, which is why
+ * the table needed 64 slots and a 48-pin part would have overflowed it.  Now
+ * each family registers one template ("dev/gpio") and this array supplies the
+ * per-instance dev_t the resolver hands back.  The table no longer grows with
+ * the pin count; this array does, but it is 16 bytes a pin and lives next to
+ * the driver that needs it.
+ *
+ * The RP2040 has 30 pins and 5 channels; 48 leaves room for the RP2350 without
+ * a realloc path that cannot exist (registration happens at boot only). */
 #define MAX_PIN_DEVS 48
-static int gpio_pins[MAX_PIN_DEVS];
-static int adc_chans[MAX_PIN_DEVS];
+
+struct pin_node {
+    dev_t dev;
+    int   index;                /* pin or channel number, the driver's priv */
+};
+
+static struct pin_node gpio_node[MAX_PIN_DEVS];
+static struct pin_node adc_node[MAX_PIN_DEVS];
+
+static const dev_t *gpio_resolve(int i) { return &gpio_node[i].dev; }
+static const dev_t *adc_resolve(int i)  { return &adc_node[i].dev; }
 
 /* The text form is a digit and a newline - short enough that `echo 1 >
  * /dev/gpio4` (which writes "1\n") and a program writing a bare "1" both
@@ -260,7 +277,6 @@ static const struct dev_ops adc_ops = {
 
 void periph_init_devs(void)
 {
-    char name[16];
     int ng = plat_gpio_count();
     int na = plat_adc_count();
 
@@ -270,13 +286,20 @@ void periph_init_devs(void)
         na = MAX_PIN_DEVS;
 
     for (int i = 0; i < ng; i++) {
-        gpio_pins[i] = i;
-        ksnprintf(name, sizeof(name), "dev/gpio%d", i);
-        devfs_register(name, &gpio_ops, &gpio_pins[i]);
+        gpio_node[i].index    = i;
+        gpio_node[i].dev.name = "dev/gpio";   /* the instance is `index` */
+        gpio_node[i].dev.ops  = &gpio_ops;
+        gpio_node[i].dev.priv = &gpio_node[i].index;
     }
+    if (ng > 0)
+        devfs_register_template("dev/gpio", ng, gpio_resolve);
+
     for (int i = 0; i < na; i++) {
-        adc_chans[i] = i;
-        ksnprintf(name, sizeof(name), "dev/adc%d", i);
-        devfs_register(name, &adc_ops, &adc_chans[i]);
+        adc_node[i].index    = i;
+        adc_node[i].dev.name = "dev/adc";
+        adc_node[i].dev.ops  = &adc_ops;
+        adc_node[i].dev.priv = &adc_node[i].index;
     }
+    if (na > 0)
+        devfs_register_template("dev/adc", na, adc_resolve);
 }

@@ -86,6 +86,29 @@ func ELFToFlat(path string) (data []byte, base uint64, err error) {
 
 // ELFEndAddress returns the highest virtual address occupied by the ELF,
 // including .bss (p_memsz), so the layout can be checked for collisions.
+// ELFEndBelow is ELFEndAddress with an upper bound: segments at or above limit
+// are ignored.  A kernel that executes its code in place has two regions - one
+// in RAM, bounded by PLAT_KERNEL_MAX, and one in the flash window - and the
+// headroom only means anything for the first.
+func ELFEndBelow(path string, limit uint64) (uint64, error) {
+	f, err := elf.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	var end uint64
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_LOAD || p.Vaddr >= limit {
+			continue
+		}
+		if v := p.Vaddr + p.Memsz; v > end {
+			end = v
+		}
+	}
+	return end, nil
+}
+
 func ELFEndAddress(path string) (uint64, error) {
 	f, err := elf.Open(path)
 	if err != nil {

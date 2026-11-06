@@ -125,8 +125,18 @@ func runSmoke(opts smokeOpts) (string, error) {
 	}
 
 	for _, c := range opts.commands {
-		_ = client.send(c)
-		client.drain(opts.cmdWait)
+		_ = client.sendSlow(c, 3*time.Millisecond)
+		// Wait for the shell to come back instead of draining a fixed
+		// window: the shell has no input queue, so a burst of commands
+		// used to interleave the echo of command N+1 into the output of
+		// command N (most visibly on the arm/mPS2 QEMU target, where the
+		// chardev delivers output in ragged chunks).  A command that never
+		// returns to the prompt simply times out here and keeps whatever
+		// output arrived; `exit` ends init on purpose and gets none.
+		if c != "exit" {
+			client.waitFor([]byte("tos> "), opts.cmdWait+2*time.Second)
+		}
+		client.drain(300 * time.Millisecond)
 		// A dead shell must not read as a pass: the prompt had appeared once,
 		// no panic was printed, and later commands went to a machine that was
 		// no longer listening.  `exit` is the one command whose job is to end

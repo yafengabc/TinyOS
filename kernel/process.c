@@ -12,7 +12,15 @@
 #include "cpu.h"
 #include "tos.h"
 
-#define MAX_PROCS   16
+/* Per-target: the table costs 792 bytes an entry, and a board can only run
+ * as many tasks as it has 16 KiB windows.  The ESP32-C3 has 12, so 16
+ * entries were mostly zeroed memory; it asks for 14 through TOS_MAX_PROCS
+ * (12 live tasks plus two slots for children that have exited but not been
+ * reaped yet).  Everything else keeps 16. */
+#ifndef TOS_MAX_PROCS
+#define TOS_MAX_PROCS 16
+#endif
+#define MAX_PROCS   TOS_MAX_PROCS
 #define MAX_ARGS    12
 #define MAX_FDS     12
 
@@ -337,6 +345,17 @@ static proc_t *sched_pick(void)
     return NULL;
 }
 
+/* READY tasks other than `skip`.  Called with the table lock held. */
+static int ready_others(const proc_t *skip)
+{
+    int n = 0;
+
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (&procs[i] != skip && procs[i].state == ST_READY)
+            n++;
+    return n;
+}
+
 static int proc_waiting(void)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -369,11 +388,34 @@ static int other_cpu_busy(void)
 }
 
 /* Nothing runnable: let the CPU rest until an interrupt.  The timer tick is
- * what makes progress here - it wakes sleepers and hands finished console
- * lines to whoever is blocked reading. */
+ * what normally makes progress here - it wakes sleepers and hands finished
+ * console lines to whoever is blocked reading.
+ *
+ * It cannot be the only source of that progress.  A core that reaches this
+ * loop from the MemManage handler that `run prot heap &` produces can go a
+ * long time without taking a tick; the console is then never drained, the
+ * shell blocked in read() is never woken, and the machine looks dead while
+ * every counter still advances.  Measured on the RP2350 with a K/M/P trace:
+ * on the rounds that wedged, not even "a line is ready" was ever reached -
+ * the input was simply never cooked.
+ *
+ * So the console owner drains here too.  The drain runs with interrupts
+ * masked, because tty_poll() is not reentrant: doing it with them on lets
+ * the tick land in the middle of tty_char() and cook the same FIFO twice,
+ * which came out as `ps` arriving as "sp" plus a stray "p" and ended in a
+ * "no runnable process" panic.  Handing the finished line over happens with
+ * interrupts back on - it takes only the process lock. */
 static void sched_idle(void)
 {
     plat_irq_enable();
+
+    if (cpu_id() == 0) {
+        plat_irq_disable();
+        tty_poll();
+        console_echo_tick();
+        plat_irq_enable();
+        process_console_kick();
+    }
     plat_cpu_idle();
 }
 
@@ -392,14 +434,10 @@ static void apply_protection(proc_t *p)
 static regs_t *sched_switch(regs_t *r)
 {
     proc_t *prev = current;
+    int first = 1;
 
-    if (prev && prev->state == ST_RUNNING) {
+    if (prev && prev->state == ST_RUNNING)
         prev->saved = *r;
-        spin_lock(&proc_lock);
-        prev->state = ST_READY;
-        prev->cpu = -1;
-        spin_unlock(&proc_lock);
-    }
     /* Somebody asked for this switch; whoever asked (a wake-up, a syscall)
        does not need to ask again once we are here. */
     need_resched = 0;
@@ -407,6 +445,9 @@ static regs_t *sched_switch(regs_t *r)
     for (;;) {
         proc_t *next;
         int waiting;
+
+        plat_irq_disable();
+        spin_lock(&proc_lock);
 
         /* Picking a task and asking "is anybody still blocked?" have to
          * observe the same instant.  sched_idle() below switches interrupts
@@ -423,8 +464,39 @@ static regs_t *sched_switch(regs_t *r)
          * On SMP the lock does the same job against the other CPU: both the
          * scan and the probe happen inside it, so a task cannot slip from
          * one state to the other between them. */
-        plat_irq_disable();
-        spin_lock(&proc_lock);
+
+        /* Hand the outgoing task back to the run queue inside the same
+         * critical section that picks its successor.  Marking it READY under
+         * one lock acquisition and picking under the next leaves a window in
+         * which it is READY but still running here - and the other core is
+         * scanning for exactly that.  Measured on the RP2350: the shell was
+         * run by both cores, each writing the other's saved frame, and died
+         * with a register holding an image offset instead of a pointer. */
+        if (first) {
+            first = 0;
+            if (prev && prev->state == ST_RUNNING) {
+                prev->state = ST_READY;
+                prev->cpu = -1;
+
+                /* Hand it to the other core if that core has nothing to do.
+                 * Without this an idle CPU never sees a READY task at all:
+                 * the moment this one publishes its own task it is back
+                 * inside the lock re-picking it, and the window is a few
+                 * instructions wide.  Measured on the RP2350 with two
+                 * workers: both stayed on cpu 0 while cpu 1 spun in its
+                 * idle loop, and the workers' throughput was 1:130.
+                 *
+                 * Only when another runnable task exists - otherwise a
+                 * single task would ping-pong between the cores every tick
+                 * for no gain. */
+                if (cpu_count > 1 && ready_others(prev) > 0) {
+                    spin_unlock(&proc_lock);
+                    plat_wake_cpu();
+                    spin_lock(&proc_lock);
+                }
+            }
+        }
+
         next = sched_pick();
         waiting = proc_waiting() || other_cpu_busy();
         if (next) {
@@ -433,6 +505,12 @@ static regs_t *sched_switch(regs_t *r)
             current = next;
             quantum = QUANTUM;
             spin_unlock(&proc_lock);
+            /* A task can move to another core, and on ARM the kernel stack
+             * pointer inside its frame points at the core that built it.
+             * Re-base it to this one before the frame is restored; a no-op
+             * on the ports where the kernel stack is per task (rv32) or
+             * lives behind a TSS (x86). */
+            plat_set_kernel_stack(KSTACK_TOP);
             apply_protection(next);
             /* Leave interrupts closed: the caller is trap exit and mret
                restores MIE from MPIE, which is the state we came in with. */
@@ -449,7 +527,7 @@ static regs_t *sched_switch(regs_t *r)
             }
             panic("no runnable process");
         }
-        sched_idle();       /* re-enables interrupts and sleeps until the next tick */
+        sched_idle();       /* interrupts on; poll until the next tick */
     }
 }
 
@@ -562,14 +640,14 @@ void process_tick(regs_t *r)
     /* Preempt only a task the timer interrupted in user mode: a tick that
        lands inside a kernel call must let that call finish, because the
        kernel stack below it is not resumable. */
-    if (!current || !plat_fault_is_user(r))
+    if (!current || !plat_fault_is_user(r)) {
         return;
+    }
     if (quantum > 0)
         quantum--;
     if (quantum == 0)
         need_resched = 1;
 }
-
 regs_t *process_resched(regs_t *r)
 {
     if (need_resched) {
@@ -611,6 +689,11 @@ proc_t *cpu_take_task(void)
 regs_t *process_saved_frame(struct proc *p)
 {
     return &((proc_t *)p)->saved;
+}
+
+regs_t *process_current_frame(void)
+{
+    return current ? &current->saved : 0;
 }
 
 /* Trap exit for the current task: park it if somebody stopped it while it
@@ -1003,7 +1086,8 @@ static void set_name(proc_t *p, const char *path)
     p->name[i] = '\0';
 }
 
-static proc_t *proc_create(const char *path, char *const argv[], int argc)
+static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
+                                 int claim)
 {
     uint8_t *data = NULL;
     uint32_t size = 0;
@@ -1247,11 +1331,29 @@ static proc_t *proc_create(const char *path, char *const argv[], int argc)
 
     /* Publish it.  The state store is the last write and it happens under
        the table lock, so a scheduler on another CPU either sees a free slot
-       or a finished task, never a half-built one. */
+       or a finished task, never a half-built one.
+       
+       `claim` is for the one caller that is also the task's first runner:
+       the initial shell.  It is published as already RUNNING instead of
+       READY, with `current` set, so a secondary CPU cannot take it in the
+       window between the publish and the caller's own bookkeeping.  That
+       window is not theoretical - with core 1 up, `starting /bin/sh` is
+       followed by a boot that dies in the shell roughly one time in three,
+       because both cores end up running it on different stacks. */
     spin_lock(&proc_lock);
-    p->state = ST_READY;
+    p->state = claim ? ST_RUNNING : ST_READY;
+    if (claim) {
+        p->cpu = cpu_id();
+        current = p;
+        quantum = QUANTUM;
+    }
     spin_unlock(&proc_lock);
     return p;
+}
+
+static proc_t *proc_create(const char *path, char *const argv[], int argc)
+{
+    return proc_create_claim(path, argv, argc, 0);
 }
 
 int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
@@ -1395,6 +1497,7 @@ static void task_kill(proc_t *p, int code)
 regs_t *process_exit(regs_t *r, int code)
 {
     proc_t *p = current;
+    kprintf("\n[exit pid=%d code=%d cpu=%d]\n", p->pid, code, plat_cpu_id());
     if (!p)
         panic("no current process");
 
@@ -1420,7 +1523,8 @@ regs_t *process_exit(regs_t *r, int code)
         plat_shutdown();
     }
 
-    return sched_switch(r);
+    regs_t *nr = sched_switch(r);
+    return nr;
 }
 
 regs_t *process_wait(regs_t *r, int pid)
@@ -2319,24 +2423,14 @@ int process_dup2(int oldfd, int newfd)
 
 void process_start_shell(const char *path)
 {
-    proc_t *p = proc_create(path, NULL, 0);
+    /* Published already claimed: see proc_create_claim().  On an SMP build
+     * the other core's idle loop is scanning for READY tasks from the moment
+     * cpu_init() returns, and the shell must not be one of them. */
+    proc_t *p = proc_create_claim(path, NULL, 0, 1);
     if (!p)
         panic("cannot load initial program '%s'", path);
 
     init_proc = p;
-
-    /* Claim it inside the table lock.  proc_create() published it as READY,
-     * and on an SMP build the other hart's idle loop is already scanning for
-     * exactly that: between the publish and this line it could take the
-     * shell, and then both CPUs would be running the same task on two
-     * different stacks.  Setting RUNNING here is the same "publish" as the
-     * one in sched_switch(), just from the boot CPU's own hand. */
-    spin_lock(&proc_lock);
-    p->state = ST_RUNNING;
-    p->cpu = cpu_id();
-    current = p;
-    quantum = QUANTUM;
-    spin_unlock(&proc_lock);
 
     plat_set_kernel_stack(KSTACK_TOP);
     apply_protection(p);

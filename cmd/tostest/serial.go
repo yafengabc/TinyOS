@@ -361,6 +361,25 @@ func (sc *socketConn) send(line string) error {
 	return err
 }
 
+// sendSlow writes a command one byte at a time with a per-byte pause.
+// The mps2 QEMU models the PL011 with a 16-byte receive FIFO and no flow
+// control: a whole 22-byte command line written in one TCP push overflows
+// it, the shell's echo loses characters and resumes mid-line, and the
+// transcript can never match.  Pacing the bytes keeps the guest's RX
+// interrupt service ahead of the wire - the same reason a human typing on
+// a real PL011 never sees this.
+func (sc *socketConn) sendSlow(line string, perByte time.Duration) error {
+	var err error
+	for _, b := range []byte(line + "\n") {
+		_, err = sc.conn.Write([]byte{b})
+		if err != nil {
+			return err
+		}
+		time.Sleep(perByte)
+	}
+	return err
+}
+
 func (sc *socketConn) close() {
 	_ = sc.conn.Close()
 }

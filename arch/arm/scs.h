@@ -17,15 +17,32 @@
  * Cortex-M3 implements the top three bits, so values step by 0x20 from
  * 0x00 (highest) to 0xE0 (lowest); writing a value that is not a multiple
  * of 0x20 simply loses the unimplemented low bits. */
+#define ARM_SHPR1        (ARM_SCS_BASE + 0xD18u)
 #define ARM_SHPR2        (ARM_SCS_BASE + 0xD1Cu)
 #define ARM_SHPR3        (ARM_SCS_BASE + 0xD20u)
 
 /* SysTick outranks SVCall: a task blocked inside its syscall idles with
  * SVCall active, and only a higher-priority exception can preempt it.
- * PendSV stays at the bottom for future deferred context switches. */
+ * PendSV stays at the bottom for future deferred context switches.
+ *
+ * ARMv6-M (Cortex-M0+) has no SHPR1: its only fault is HardFault, whose
+ * priority is fixed at -1, so the configurable fault priorities are M3
+ * and up.  SHPR1 packs UsageFault in [31:24], BusFault in [23:16] and
+ * MemManage in [15:8]. */
 #define ARM_PRIO_SYSTICK 0x00u
 #define ARM_PRIO_SVC     0x40u
 #define ARM_PRIO_PENDSV  0xE0u
+#define ARM_PRIO_FAULT   0x40u
+
+/* ---- NVIC ------------------------------------------------------------- */
+
+/* Nested Vectored Interrupt Controller.  ISER/ICER are the per-IRQ enable
+ * bits, one 32-bit word per group of 32 IRQs; IPR holds one priority byte
+ * per IRQ (at most 8 bits wide, so the low bits may read back as zero). */
+#define ARM_NVIC_ISER(n)  (ARM_SCS_BASE + 0x100u + 4u * (n))
+#define ARM_NVIC_ICER(n)  (ARM_SCS_BASE + 0x180u + 4u * (n))
+#define ARM_NVIC_ISPR(n)  (ARM_SCS_BASE + 0x200u + 4u * (n))
+#define ARM_NVIC_IPR(irq) (ARM_SCS_BASE + 0x400u + (uint32_t)(irq))
 
 /* ---- reset ------------------------------------------------------------ */
 
@@ -56,6 +73,21 @@
 /* CFSR validity bits: the address registers only mean something when set. */
 #define ARM_CFSR_MMARVALID (1u << 7)
 #define ARM_CFSR_BFARVALID (1u << 15)
+/* MemManage bits that say the *exception frame* could not be written, which
+ * is how a stack overrun announces itself: the push of r0-r3/lr/pc is the
+ * first access to fail, so the reported pc is meaningless and SP has already
+ * left the stack. */
+#define ARM_CFSR_MSTKERR   (1u << 4)
+#define ARM_CFSR_MUNSTKERR (1u << 3)
+
+/* ARMv8-M (Cortex-M33) TrustZone diagnostics.  A security violation is
+ * escalated to HardFault with HFSR.FORCED set and CFSR completely zero -
+ * without SFSR there is no way to tell it from an ordinary bus fault.
+ * These are Secure-world registers; in Non-secure state they read as zero. */
+#define ARM_SAU_CTRL     (ARM_SCS_BASE + 0xDD0u)
+#define ARM_SAU_TYPE     (ARM_SCS_BASE + 0xDD4u)
+#define ARM_SFSR         (ARM_SCS_BASE + 0xDE4u)
+#define ARM_SFAR         (ARM_SCS_BASE + 0xDE8u)
 
 /* ---- MPU -------------------------------------------------------------- */
 
@@ -68,7 +100,17 @@
 #define ARM_MPU_CTRL     (ARM_SCS_BASE + 0xD94u)
 #define ARM_MPU_RNR      (ARM_SCS_BASE + 0xD98u)
 #define ARM_MPU_RBAR     (ARM_SCS_BASE + 0xD9Cu)
-#define ARM_MPU_RASR     (ARM_SCS_BASE + 0xDA0u)
+#define ARM_MPU_RASR     (ARM_SCS_BASE + 0xDA0u)   /* ARMv7-M only */
+
+/* ARMv8-M PMSAv8 reuses the same two slots with a different meaning:
+ * RBAR holds base[31:5] | shareability | AP | XN, and the register at 0xDA0
+ * becomes RLAR - the *inclusive limit* plus the attribute index and the
+ * enable bit, instead of a size field.  Region numbering, priority (higher
+ * number wins on overlap) and the 32-byte minimum are unchanged, which is
+ * why only the writer differs between the two ports. */
+#define ARM_MPU_RLAR     (ARM_SCS_BASE + 0xDA0u)
+#define ARM_MPU_MAIR0    (ARM_SCS_BASE + 0xDC0u)
+#define ARM_MPU_MAIR1    (ARM_SCS_BASE + 0xDC4u)
 
 #define ARM_MPU_CTRL_ENABLE     (1u << 0)
 /* PRIVDEFENA: privileged code keeps the default map, so the kernel reads

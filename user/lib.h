@@ -45,6 +45,12 @@
  * buffering a file: these ask; a filter that reads a line at a time does
  * not need to.
  *
+ * **Without this note the heap is only the slack the window happens to
+ * leave after it rounds up to the grain - and for a small tool that slack is
+ * usually zero** (image 4 KiB + stack 8 + guard 4 is exactly one 16 KiB
+ * grain), so every malloc returns NULL with no other symptom.  A program
+ * that calls malloc must declare what it needs.
+ *
  * Unlike the stack, the heap has no alignment constraint of its own - the
  * break is a plain address and the PMP entry that covers it is TOR - so any
  * byte value is legal, and the only check is that the whole window still
@@ -111,6 +117,11 @@ int  getcwd(char *buf, int len);  /* copy cwd into buf, returns len or -1 */
  * restores cooked mode when the process dies, so a crash cannot leave the
  * shell unable to read a line. */
 int  ttyraw(int on);
+/* Command history kept by the line discipline: count, and entry N counted
+ * from the newest (1 = the last command run).  Returns the length or -1.
+ * buf must hold at least 256 bytes, the longest line the console keeps. */
+int  hist_count(void);
+int  hist_get(int newest_index, char *buf, int cap);
 int  getpid(void);
 int  sleep(int ms);
 int  uptime(void);
@@ -177,6 +188,11 @@ size_t strcspn(const char *s, const char *reject);
 char  *strstr(const char *hay, const char *needle);
 int    atoi(const char *s);
 int    printf(const char *fmt, ...);
+/* printf into a caller's buffer - the panel and file writers need the text
+ * as bytes, not on stdout.  %d %u %x %c %s %%, with an optional zero/space
+ * width, which is all the kernel formatter supports too. */
+int    tos_vsnprintf(char *buf, int cap, const char *fmt,
+                     __builtin_va_list ap);
 void   puts(const char *s);
 void   putchar(int c);
 int    putint(int v);

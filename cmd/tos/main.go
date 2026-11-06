@@ -14,11 +14,12 @@ func usage() {
 	fmt.Print(`TinyOS build tool
 
 usage:
-  tos build [-v] [-target x86|rv32|arm]
-                            build build/tinyos.img (x86),
-                            build/kernel-rv32.elf (rv32) or
-                            build/kernel-arm.elf (arm, QEMU mps2-an385)
-  tos run   [-headless] [-debug] [-no-build] [-target x86|rv32|arm]
+  tos build [-v] [-target <target>]
+                            build the kernel and filesystem for a target.
+                            Targets: x86, rv32, rv32smp, rv32nc, arm,
+                            rp2040, rp2350, esp32c3.  The flash-backed
+                            boards also emit build/<target>.uf2.
+  tos run   [-headless] [-debug] [-no-build] [-target <target>]
                             build (unless -no-build) and boot in QEMU
   tos espimg <elf> <out.bin>
                             package a linked ELF as an ESP32-C3 boot image,
@@ -59,7 +60,7 @@ func main() {
 		b.Verbose = *verbose
 		t, ok := build.Targets[*target]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown target %q (want x86, rv32 or arm)\n", *target)
+			fmt.Fprintf(os.Stderr, "unknown target %q (see 'tos help')\n", *target)
 			os.Exit(2)
 		}
 		b.Target = t
@@ -84,7 +85,7 @@ func main() {
 		b.Verbose = *verbose
 		t, ok := build.Targets[*target]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown target %q (want x86, rv32 or arm)\n", *target)
+			fmt.Fprintf(os.Stderr, "unknown target %q (see 'tos help')\n", *target)
 			os.Exit(2)
 		}
 		b.Target = t
@@ -104,12 +105,13 @@ func main() {
 	case "espimg":
 		fs := flag.NewFlagSet("espimg", flag.ExitOnError)
 		sha := fs.Bool("sha", true, "append the SHA-256 digest the ROM checks")
+		xip := fs.Uint("xip", 0, "flash offset for segments linked at 0x42000000 (0 refuses them)")
 		fs.Parse(os.Args[2:])
 		if fs.NArg() != 2 {
-			fmt.Fprintln(os.Stderr, "usage: tos espimg [-sha] <elf> <out.bin>")
+			fmt.Fprintln(os.Stderr, "usage: tos espimg [-sha] [-xip off] <elf> <out.bin>")
 			os.Exit(2)
 		}
-		img, segs, err := build.ESPImageFromELF(fs.Arg(0), *sha)
+		img, segs, err := build.ESPImageFromELF(fs.Arg(0), *sha, uint32(*xip))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "tos:", err)
 			os.Exit(1)
@@ -123,7 +125,7 @@ func main() {
 
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
-		for _, name := range []string{"x86", "rv32", "arm"} {
+		for _, name := range []string{"x86", "rv32", "arm", "rp2040", "rp2350", "esp32c3"} {
 			t := build.Targets[name]
 			tc, err := build.DetectToolchain(t)
 			if err != nil {

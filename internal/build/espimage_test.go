@@ -243,11 +243,84 @@ func TestESPImageFromELFRefusesForeignBoard(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skip("kernel-rv32.elf not built")
 	}
-	_, _, err := ESPImageFromELF(path, false)
+	_, _, err := ESPImageFromELF(path, false, 0)
 	if err == nil {
 		t.Fatalf("packaged a qemu-virt kernel without complaint")
 	}
 	if !strings.Contains(err.Error(), "ESP32-C3 memory") {
 		t.Errorf("error = %q, want it to mention the address space", err)
+	}
+}
+
+// A XIP blob is not a segment: the ROM must not copy it, so it rides past
+// the checksum at a 64 KiB aligned flash offset and the kernel maps it.
+func TestESPImageXipBlob(t *testing.T) {
+	img := twoSegments()
+	img.XipBlob = bytes.Repeat([]byte{0xA5}, 512)
+	img.XipOffset = 0x10000
+
+	out, err := BuildESPImage(img)
+	if err != nil {
+		t.Fatalf("BuildESPImage: %v", err)
+	}
+	if want := 0x10000 + 512; len(out) != want {
+		t.Fatalf("image length = %d, want %d", len(out), want)
+	}
+	if !bytes.Equal(out[0x10000:], img.XipBlob) {
+		t.Errorf("XIP blob is not at flash offset 0x10000")
+	}
+	// The segment area must be untouched: same header, same checksum.
+	plain, err := BuildESPImage(twoSegments())
+	if err != nil {
+		t.Fatalf("BuildESPImage(plain): %v", err)
+	}
+	if !bytes.Equal(out[:len(plain)-1], plain[:len(plain)-1]) {
+		t.Errorf("XIP blob changed the segment area")
+	}
+	if out[len(plain)-1] != plain[len(plain)-1] {
+		t.Errorf("checksum changed by the XIP blob")
+	}
+}
+
+func TestESPImageXipBlobRejects(t *testing.T) {
+	bad := twoSegments()
+	bad.XipBlob = []byte{1, 2, 3, 4}
+	bad.XipOffset = 0x8000 /* not a 64 KiB page */
+	if _, err := BuildESPImage(bad); err == nil {
+		t.Error("misaligned XIP offset was accepted")
+	}
+
+	overlap := twoSegments()
+	overlap.XipBlob = []byte{1, 2, 3, 4}
+	overlap.XipOffset = 0 /* the segments are already past zero */
+	if _, err := BuildESPImage(overlap); err == nil {
+		t.Error("XIP offset inside the segment area was accepted")
+	}
+}
+
+// xipBlob lays the flash-window segments out by address: the window's virtual
+// address minus its base indexes the blob, so a gap between two segments has
+// to stay a gap.  Packing them together would shift every byte after the hole.
+func TestXipBlobLayout(t *testing.T) {
+	blob := xipBlob([]ESPSegment{
+		{Addr: 0x42000000, Data: []byte{1, 2, 3, 4}},
+		{Addr: 0x42000010, Data: []byte{9, 9}},
+	})
+	if len(blob) != 0x12 {
+		t.Fatalf("blob length = %d, want 0x12", len(blob))
+	}
+	if !bytes.Equal(blob[:4], []byte{1, 2, 3, 4}) {
+		t.Errorf("first segment not at the window base: % x", blob[:4])
+	}
+	if !bytes.Equal(blob[0x10:], []byte{9, 9}) {
+		t.Errorf("second segment not at window+0x10: % x", blob[0x10:])
+	}
+	for i, b := range blob[4:0x10] {
+		if b != 0 {
+			t.Fatalf("gap byte %d is %#x, want 0", i+4, b)
+		}
+	}
+	if xipBlob(nil) != nil {
+		t.Errorf("empty input should give no blob")
 	}
 }

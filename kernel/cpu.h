@@ -21,16 +21,24 @@
 struct proc;
 
 /* Bytes of kernel stack per CPU.  The linker reserves
- * `KSTACK_BYTES * PLAT_MAX_CPUS` in .bss (start.S on rv32, entry.S on x86);
- * process.c uses the same number for the overflow guard.
+ * `KSTACK_BYTES * PLAT_MAX_CPUS` in .bss (start.S on rv32 and arm, entry.S on
+ * x86); process.c uses the same number for the overflow guard.
  *
  * These three used to be kept in step by hand, and they drifted: i386
  * reserved 16 KiB while this said 32 KiB, so the guard word was written 16 KiB
  * below the stack - into the process table - and `ps` listed a phantom task
  * whose `state` was 0x5354414B.  cpu_init() now compares the arena against
  * this constant and panics on a mismatch, which turns a corruption bug into a
- * one-line boot error. */
+ * one-line boot error.
+ *
+ * ARM takes 16 KiB: the RP2350 has 128 KiB for the entire kernel, and two
+ * 32 KiB stacks would leave no room for the 60 KiB exec arena.  The RV32 and
+ * x86 ports keep 32 KiB - their linker scripts and assembly hard-code it. */
+#if defined(__arm__) || defined(__thumb__)
+#define KSTACK_BYTES 16384u
+#else
 #define KSTACK_BYTES 32768u
+#endif
 
 /* Where CPU `id`'s kernel stack sits.  The linker lays the blocks out back
  * to back with hart 0's at the top, so this is arithmetic rather than a
@@ -94,10 +102,20 @@ typedef struct {
 void spin_lock(spin_t *s);
 void spin_unlock(spin_t *s);
 
+/* Take the lock only if it is free right now; returns 0 when somebody else
+ * holds it.  For output paths: a console that drops a line under contention
+ * can never wedge a core, while one that spins can (and did - the board hung
+ * solid with interrupts off inside a print). */
+int  spin_trylock(spin_t *s);
+
 /* The arch/board primitives behind the two calls above.  A port with more
  * than one CPU must provide real atomics here (RV32A amoswap, ARM LDREX/STREX,
  * or the RP2040's SIO spinlock block). */
 void plat_spin_acquire(volatile int *v);
 void plat_spin_release(volatile int *v);
+
+/* Wake a CPU that is parked in plat_cpu_idle().  Weak no-op by default; a
+ * port whose idle is wfi and whose wake-up is sev (ARM) overrides it. */
+void plat_wake_cpu(void);
 
 #endif

@@ -75,6 +75,17 @@ int ttyraw(int on)
     return tos_sys1(SYS_TTYRAW, on);
 }
 
+int hist_count(void)
+{
+    return tos_sys3(SYS_HIST, 0, 0, 0);
+}
+
+int hist_get(int newest_index, char *buf, int cap)
+{
+    (void)cap;          /* the kernel bounds the copy at TTY_LINE_MAX */
+    return tos_sys3(SYS_HIST, 1, newest_index, (int)buf);
+}
+
 int getpid(void)
 {
     return tos_sys0(SYS_GETPID);

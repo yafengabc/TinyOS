@@ -32,6 +32,52 @@ static int  q_cnt;                     /* lines queued                       */
 
 static char pending[TTY_LINE_MAX];     /* the line being typed             */
 static int  pending_len;
+static int  pending_cur;                /* insertion point, 0..pending_len */
+
+/* ESC sequence state for the arrow keys.  The cooked path used to drop
+ * everything below 32, so ESC [ A arrived as nothing at all; now the
+ * sequence is recognised without letting its bytes into the line. */
+#define ESC_NONE 0
+#define ESC_SEEN 1                      /* got ESC                        */
+#define ESC_BRKT 2                      /* got ESC [                      */
+#define ESC_NUM  3                      /* got ESC [ 3 (Delete)           */
+static int  esc_state;
+
+/* ---- command history --------------------------------------------------
+ * A pool of finished lines, each stored as one length byte plus its text:
+ * 512 bytes is ~43 typical commands, against 8 KiB for 32 fixed 256-byte
+ * slots.  The pool is linear and recycles from the front when full - the
+ * same shape q_pool uses for type-ahead.  It lives here rather than in the
+ * shell because the arrow keys are cooked here; the shell never sees them.
+ *
+ * One pool size everywhere: 512 bytes.  The C3 briefly ran a 192-byte pool
+ * because its kernel window was full to within 368 bytes; the .bss trims
+ * (process table, exec argv buffer, device table) bought back 5.4 KiB, so
+ * the small-pool special case is gone.  A board that cannot spare it can
+ * still define TOS_HIST_BYTES=0 and get the stub below.
+ *
+ * hist_pos is 0 while a fresh line is being edited, 1 for the newest
+ * entry, 2 for the one before it, and so on. */
+#ifndef TOS_HIST_BYTES
+#define TOS_HIST_BYTES 512
+#endif
+
+#if TOS_HIST_BYTES > 0
+#define HIST_BYTES TOS_HIST_BYTES
+/* The line stashed when history recall starts.  Small pools get a small
+ * stash: a board this tight is also not typing 200-character commands. */
+#if HIST_BYTES >= 512
+#define HIST_KEEP_MAX TTY_LINE_MAX
+#else
+#define HIST_KEEP_MAX 64
+#endif
+static char hist_pool[HIST_BYTES];
+static int  hist_used;                  /* bytes in use, oldest first      */
+static int  hist_cnt;                   /* entries                         */
+static int  hist_pos;
+static char hist_keep[HIST_KEEP_MAX];   /* line being edited before recall */
+static int  hist_keep_len;
+#endif
 
 /* Queue one finished line of n bytes (NUL included).  The pool is linear:
  * the read end only advances, so when the tail runs out of room the live
@@ -103,10 +149,15 @@ static int  raw_on;
 void tty_set_raw(int on)
 {
     cr_seen = 0;
+    esc_state = ESC_NONE;
+#if TOS_HIST_BYTES > 0
+    hist_pos = 0;
+#endif
     if (on) {
         /* Drop a half-typed command: it belongs to the shell, and the
          * editor's first keystroke must not complete it. */
         pending_len = 0;
+        pending_cur = 0;
     } else {
         raw_head = raw_tail = 0;
     }
@@ -137,6 +188,213 @@ int tty_take_raw(char *dst, int max)
  * newline.  Called from the tick, i.e. never from inside a syscall, so a
  * reader can block on "line ready" without racing us.  Echo goes through
  * console_echo(), which makes room for itself in the output. */
+
+/* ---- line editing helpers --------------------------------------------
+ * Everything here redraws with backspace and spaces only: ESC [ K would be
+ * shorter, but the LCD text screen implements '\b' by moving its cursor and
+ * has no escape parser, and the same bytes have to look right on both the
+ * panel and a serial terminal.  Moving right means re-printing the tail,
+ * which is exactly what a real terminal would do with a cursor-right it
+ * does not have. */
+static void echo_bs(int n)
+{
+    while (n-- > 0)
+        console_echo("\b", 1);
+}
+
+static void echo_tail(int from)
+{
+    if (from < pending_len)
+        console_echo(pending + from, (size_t)(pending_len - from));
+}
+
+/* Move the insertion point, redrawing only what has to change. */
+static void move_cur(int to)
+{
+    if (to < 0)
+        to = 0;
+    if (to > pending_len)
+        to = pending_len;
+    if (to < pending_cur) {
+        echo_bs(pending_cur - to);
+    } else if (to > pending_cur) {
+        echo_tail(pending_cur);
+        echo_bs(pending_len - to);
+    }
+    pending_cur = to;
+}
+
+/* Wipe the typed text from the screen and the buffer. */
+static void kill_line(void)
+{
+    echo_bs(pending_cur);
+    for (int i = 0; i < pending_len; i++)
+        console_echo(" ", 1);
+    echo_bs(pending_len);
+    pending_len = 0;
+    pending_cur = 0;
+}
+
+static void insert_char(char c)
+{
+    if (pending_len >= TTY_LINE_MAX - 2)
+        return;
+    memmove(pending + pending_cur + 1, pending + pending_cur,
+            (size_t)(pending_len - pending_cur));
+    pending[pending_cur] = c;
+    pending_len++;
+    if (pending_cur == pending_len - 1) {
+        console_echo(&c, 1);            /* appending: nothing to redraw */
+        pending_cur++;
+    } else {
+        echo_tail(pending_cur);         /* print the shifted tail ...   */
+        echo_bs(pending_len - pending_cur - 1);
+        pending_cur++;                  /* ... and step back over it    */
+    }
+}
+
+static void delete_char(void)
+{
+    if (pending_cur >= pending_len)
+        return;
+    memmove(pending + pending_cur, pending + pending_cur + 1,
+            (size_t)(pending_len - pending_cur - 1));
+    pending_len--;
+    echo_tail(pending_cur);
+    console_echo(" ", 1);               /* erase the vacated last cell  */
+    echo_bs(pending_len - pending_cur + 1);
+}
+
+/* Delete the word before the cursor (^W): skip trailing blanks, then the
+ * word itself.  Rewrites from the start of the typed text because the
+ * deleted run is in the middle, then walks the cursor back. */
+static void delete_word(void)
+{
+    int from = pending_cur, removed;
+
+    while (from > 0 && pending[from - 1] == ' ')
+        from--;
+    while (from > 0 && pending[from - 1] != ' ')
+        from--;
+    if (from == pending_cur)
+        return;
+    removed = pending_cur - from;
+    memmove(pending + from, pending + pending_cur,
+            (size_t)(pending_len - pending_cur));
+    pending_len -= removed;
+    pending_cur = from;
+    echo_bs(from + removed);            /* back to the first typed cell */
+    echo_tail(0);                       /* reprint the shortened line   */
+    for (int i = 0; i < removed; i++)
+        console_echo(" ", 1);           /* erase what moved left        */
+    echo_bs(pending_len - from + removed);
+}
+
+/* ---- history ---------------------------------------------------------- */
+#if TOS_HIST_BYTES > 0
+
+
+/* Offset of the payload of the k-th newest entry (1 = newest), -1 when
+ * there is no such entry.  The pool is oldest-first, so walking it is a
+ * loop over at most a few dozen length bytes. */
+static int hist_entry(int k, int *lenp)
+{
+    int want, off = 0;
+
+    if (k < 1 || k > hist_cnt)
+        return -1;
+    want = hist_cnt - k;
+    for (int i = 0; i < want; i++)
+        off += 1 + (unsigned char)hist_pool[off];
+    *lenp = (unsigned char)hist_pool[off];
+    return off + 1;
+}
+
+/* Keep a finished line, dropping the oldest entries when the pool is full.
+ * Consecutive duplicates are folded, which is what every interactive shell
+ * does and what keeps `ls`, Enter, Enter from eating the pool. */
+static void hist_push(const char *s, int n)
+{
+    int last, lastlen, off;
+
+    if (n <= 0)
+        return;
+    last = hist_entry(1, &lastlen);
+    if (last >= 0 && lastlen == n && memcmp(hist_pool + last, s, (size_t)n) == 0)
+        return;
+
+    while (hist_used + 1 + n > HIST_BYTES && hist_cnt > 0) {
+        int len = (unsigned char)hist_pool[0];
+        memmove(hist_pool, hist_pool + 1 + len, (size_t)(hist_used - 1 - len));
+        hist_used -= 1 + len;
+        hist_cnt--;
+    }
+    if (hist_used + 1 + n > HIST_BYTES)
+        return;                         /* a single line larger than the pool */
+
+    off = hist_used;
+    hist_pool[off] = (char)n;
+    memcpy(hist_pool + off + 1, s, (size_t)n);
+    hist_used += 1 + n;
+    hist_cnt++;
+}
+
+/* Replace the line being edited with history entry k (0 = the line that
+ * was being typed before recall started). */
+static void hist_show(int k)
+{
+    int len = 0, off = -1;
+
+    if (k > 0) {
+        off = hist_entry(k, &len);
+        if (off < 0)
+            return;             /* entry vanished (pool recycled); keep line */
+    }
+    kill_line();
+    if (k == 0) {
+        len = hist_keep_len;
+        if (len > TTY_LINE_MAX - 2)
+            len = TTY_LINE_MAX - 2;
+        memcpy(pending, hist_keep, (size_t)len);
+    } else {
+        if (len > TTY_LINE_MAX - 2)
+            len = TTY_LINE_MAX - 2;
+        memcpy(pending, hist_pool + off, (size_t)len);
+    }
+    pending_len = len;
+    pending_cur = len;
+    console_echo(pending, (size_t)pending_len);
+    hist_pos = k;
+}
+
+/* Up: older.  The first step stashes the current line so Down can bring it
+ * back, exactly like bash. */
+static void hist_up(void)
+{
+    if (hist_cnt == 0 || hist_pos >= hist_cnt)
+        return;
+    if (hist_pos == 0) {
+        hist_keep_len = pending_len;
+        memcpy(hist_keep, pending, (size_t)pending_len);
+    }
+    hist_show(hist_pos + 1);
+}
+
+static void hist_down(void)
+{
+    if (hist_pos == 0)
+        return;
+    hist_show(hist_pos - 1);
+}
+
+#else  /* TOS_HIST_BYTES == 0: no pool, no recall, a few stubs */
+static void hist_push(const char *s, int n) { (void)s; (void)n; }
+static void hist_up(void) { }
+static void hist_down(void) { }
+int tty_hist_count(void) { return 0; }
+int tty_hist_get(int i, char *dst, int max) { (void)i; (void)dst; (void)max; return -1; }
+#endif
+
 static void tty_char(char c)
 {
     if (c == 3 || c == 26 || c == 28) {
@@ -150,7 +408,9 @@ static void tty_char(char c)
         if (c == 28)
             ctrl_bs = 1;
         pending_len = 0;
+        pending_cur = 0;
         cr_seen = 0;
+        esc_state = ESC_NONE;
         console_echo("^C\n", 3);
         return;
     }
@@ -166,6 +426,39 @@ static void tty_char(char c)
             raw_q[raw_tail] = c;
             raw_tail = next;
         }
+        return;
+    }
+
+    /* ---- escape sequences from the arrow keys ------------------------ */
+    if (esc_state != ESC_NONE || c == 27) {
+        if (c == 27) {
+            esc_state = ESC_SEEN;
+            return;
+        }
+        if (esc_state == ESC_SEEN && c == '[') {
+            esc_state = ESC_BRKT;
+            return;
+        }
+        if (esc_state == ESC_BRKT) {
+            esc_state = ESC_NONE;
+            switch (c) {
+            case 'A': hist_up();   return;   /* up    */
+            case 'B': hist_down(); return;   /* down  */
+            case 'C': move_cur(pending_cur + 1); return;
+            case 'D': move_cur(pending_cur - 1); return;
+            case 'H': move_cur(0);            return;
+            case 'F': move_cur(pending_len);  return;
+            case '3': esc_state = ESC_NUM;    return;
+            default:                          return;
+            }
+        }
+        if (esc_state == ESC_NUM) {
+            esc_state = ESC_NONE;
+            if (c == '~')
+                delete_char();
+            return;
+        }
+        esc_state = ESC_NONE;
         return;
     }
 
@@ -190,22 +483,53 @@ static void tty_char(char c)
         console_echo("\n", 1);
         pending[n] = '\0';
         q_push(pending, n + 1);
+        hist_push(pending, n);
         pending_len = 0;
+        pending_cur = 0;
+#if TOS_HIST_BYTES > 0
+        hist_pos = 0;
+#endif
+        esc_state = ESC_NONE;
         return;
     }
 
     if (c == 8 || c == 127) {
-        if (pending_len > 0) {
-            pending_len--;
-            console_echo("\b \b", 3);
+        if (pending_cur > 0) {
+            /* Step the screen cursor back one cell, then delete at it. */
+            echo_bs(1);
+            pending_cur--;
+            delete_char();
         }
         return;
     }
 
-    if (c >= 32 && c < 127 && pending_len < TTY_LINE_MAX - 2) {
-        pending[pending_len++] = c;
-        console_echo(&c, 1);
+    /* Line editing, in the same spirit as a terminal in canonical mode. */
+    switch (c) {
+    case 1:  move_cur(0);            return;   /* ^A home        */
+    case 5:  move_cur(pending_len);  return;   /* ^E end         */
+    case 11: {                                 /* ^K kill to end */
+        int n = pending_len - pending_cur;
+        for (int i = 0; i < n; i++)
+            console_echo(" ", 1);
+        echo_bs(n);
+        pending_len = pending_cur;
+        return;
     }
+    case 21:                                   /* ^U kill line   */
+        kill_line();
+        return;
+    case 23:                                   /* ^W kill word   */
+        delete_word();
+        return;
+    case 9:                                    /* TAB: a space   */
+        insert_char(' ');
+        return;
+    default:
+        break;
+    }
+
+    if (c >= 32 && c < 127)
+        insert_char(c);
 }
 
 void tty_poll(void)
@@ -227,6 +551,27 @@ int tty_line_ready(void)
 {
     return q_cnt > 0;
 }
+
+#if TOS_HIST_BYTES > 0
+int tty_hist_count(void)
+{
+    return hist_cnt;
+}
+
+int tty_hist_get(int newest_index, char *dst, int max)
+{
+    int len, off;
+
+    off = hist_entry(newest_index, &len);
+    if (off < 0)
+        return -1;
+    if (len > max - 1)
+        len = max - 1;
+    memcpy(dst, hist_pool + off, (size_t)len);
+    dst[len] = '\0';
+    return len;
+}
+#endif
 
 int tty_take_line(char *dst, int max)
 {

@@ -42,6 +42,13 @@ regs_t  *process_resched(regs_t *r);
 struct proc;
 regs_t  *process_saved_frame(struct proc *p);
 
+/* The frame of the task this CPU is running.  Used by ports that have to
+ * rewrite part of a frame when a task moves to another core - on ARM the
+ * kernel stack pointer stored in the frame belongs to whichever core built
+ * it, so it has to be re-based at every switch.  NULL before the first task
+ * exists. */
+regs_t  *process_current_frame(void);
+
 /* Syscalls that may give up the CPU. */
 regs_t  *process_wait(regs_t *r, int pid);
 regs_t  *process_sleep(regs_t *r, uint32_t ms);

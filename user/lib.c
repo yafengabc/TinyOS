@@ -172,7 +172,10 @@ int atoi(const char *s)
 
 static char outbuf[512];
 
-static int fmt(char *buf, int cap, const char *fmt, __builtin_va_list ap)
+/* The formatter behind printf().  Exported because a program that has to
+ * put text in a buffer - to draw it on a panel, to send it as a file - has
+ * no other way to do it: the lib deliberately carries no stdio. */
+int tos_vsnprintf(char *buf, int cap, const char *fmt, __builtin_va_list ap)
 {
     int n = 0;
 #define PUT(ch)                     \
@@ -252,7 +255,7 @@ int printf(const char *fmtstr, ...)
 {
     __builtin_va_list ap;
     __builtin_va_start(ap, fmtstr);
-    int n = fmt(outbuf, sizeof(outbuf), fmtstr, ap);
+    int n = tos_vsnprintf(outbuf, sizeof(outbuf), fmtstr, ap);
     __builtin_va_end(ap);
     if (n > (int)sizeof(outbuf) - 1)
         n = sizeof(outbuf) - 1;

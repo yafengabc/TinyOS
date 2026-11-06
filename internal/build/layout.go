@@ -46,10 +46,22 @@ func (b *Builder) checkLayout() error {
 			relName(b.Root, stage1), n, n*512/1024, KernelSectors)
 	}
 
-	// Only the ATA image packs boot + kernel + filesystem back to back, so it
-	// is the only layout where the filesystem LBA follows from the sector
-	// counts.  Flash-backed boards place the filesystem at a fixed offset of
-	// their own (1 MiB on the C3 and on the RP2040) and embedded ones at zero.
+	// Flash-backed boards all put the filesystem at rpLfsOffset (the RP UF2
+	// packers and the C3 esptool command).  The ATA image is the only one
+	// where the LBA instead follows from the sector counts; embedded images
+	// start at zero.
+	if b.Target.FSBacking == "flash" {
+		layout := filepath.Join(b.Root, "board", b.Target.Board, "layout.c")
+		lba, err := constFromSource(b.Root, layout, rePlatLFSLBA, "PLAT_LFS_LBA")
+		if err != nil {
+			return err
+		}
+		if lba != rpLfsOffset/512 {
+			return fmt.Errorf("%s sets PLAT_LFS_LBA = %d but the flash image builder puts littlefs at 0x%x (LBA %d)",
+				relName(b.Root, layout), lba, rpLfsOffset, rpLfsOffset/512)
+		}
+		return nil
+	}
 	if b.Target.FSBacking != "disk" {
 		return nil
 	}

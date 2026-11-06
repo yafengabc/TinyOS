@@ -43,6 +43,22 @@ board/rp2040/    RP2040：boot2、UF2、XIP、UART0
 - `arch/*` 只能通过 `platform.h` 暴露能力。
 - `board/*` 只提供地址、初始化顺序和驱动实例。
 
+### 各端口的验证程度（2026-11-06 更新）
+
+**"能构建"和"跑起来过"是两件事，这张表就是分界线。**
+
+| 目标 | 载体 | 验证到哪一步 |
+|---|---|---|
+| x86 | QEMU | smoke / compat 全绿。无保护单位，`prot` 四条 `survived` |
+| rv32 | QEMU virt | smoke / compat 全绿；PMP 四条全拦 |
+| arm | QEMU mps2（Cortex-M3） | smoke / compat 全绿；MPU 受 7 块预算限制会退化，见 §5.2 |
+| esp32c3 | **真机**（COM13） | 上板验收 24 项：内核 XIP、flash 读写 800 KiB 校验、ADC、WS2812、`reboot` 断言 `RTC_SW_SYS_RST` |
+| rp2350 | **真机**（ATK-DNRP2350AM） | 上板：USB CDC + UART0 双控制台、PMSAv8 四条保护、ST7789 DMA、`/dev/fb0`、ADC、littlefs 3.5 MiB、`reboot`、`dd` 128 KiB 校验 |
+| **rp2040** | **没有任何硬件** | **只有"编译通过"**：从未烧进过一块 Pico。boot2 的 256 B stage-2、UF2 family、XIP 映射、12 MHz 时钟、手写 USB CDC、ARMv6-M 的无除法/非对齐限制——全都没在硅片上验过一行。唯一能离线验的镜像首部已经查过并修了一个致命 bug：向量表曾经被 ELF 头挤到 `0x10000200`（详见 `OPEN-ITEMS.md` §13），现在 `0x10000000` 是 boot2、`0x10000100` 是 MSP/reset |
+
+所以文档里 rp2040 的所有数字（窗口大小、镜像预算、`prot` 预期结果）都是
+**按 ARMv6-M 推算的**，不是实测。第一次上板前不要引用成结论。
+
 ## 3. 平台接口（platform.h）
 
 ```c
@@ -172,12 +188,13 @@ RISC-V 对每次 U 模式访问都查 PMP，M 模式在没置 lock 位时不受�
 ### 5.2 ARM 的 MPU 区域
 
 Cortex-M3 的 MPU 只有 8 个区域，而且每个区域是“自然对齐的 2 的幂”块，没有 TOR
-那种任意上界。`plat_task_protect()` 用全部 8 个区域拼出一个任务：
+那种任意上界。`plat_task_protect()` 用全部 8 个区域拼出一个任务（下面这套是
+ARMv7-M 的形状；Cortex-M33 是 PMSAv8，形状不同，见 5.2.1）：
 
 | 区域 | 权限 | 范围 | 用途 |
 |---|---|---|---|
-| 0 | RW，**XN** | `[win_base, win_base + 256 KiB)` | 整个窗口：数据、堆、栈 |
-| 1–6 | RO，可执行 | `[win_base, wx)`，从 32 B 起的 2 的幂块 | 代码 + 只读数据 |
+| 0 … k | RO，可执行 | `[win_base, wx)`，从 32 B 起的 2 的幂块 | 代码 + 只读数据 |
+| k+1 … 6 | RW，**XN** | `[wx, win_end)`，同样的 2 的幂块 | 数据、堆、栈 |
 | 7 | 特权 RW，用户不可访问 | `[stack_low - 16 KiB, stack_low)` | 栈溢出护栏 |
 
 - **`PRIVDEFENA`**：`MPU_CTRL = ENABLE|PRIVDEFENA`。内核在 Handler 模式（以及
@@ -194,18 +211,138 @@ Cortex-M3 的 MPU 只有 8 个区域，而且每个区域是“自然对齐的 2
   的空洞（`sbrk` 上限 = `stack_low - PLAT_HEAP_GUARD`），所以正常的堆写永远碰
   不到护栏。
 
-与 rv32 PMP 的**已知差距**（都是“没有 TOR”造成的，如实记录）：
+与 rv32 PMP 的**已知差距**（都是“没有 TOR”造成的，如实记录。这一节讲的是
+**ARMv7-M** 的 MPU，也就是 `qemu-mps2` 的 Cortex-M3；RP2350 的 Cortex-M33 用的是
+PMSAv8，没有这些差距，见 5.2.1）：
 
-| 规则 | rv32 PMP | ARM MPU |
+| 规则 | rv32 PMP | ARMv7-M MPU |
 |---|---|---|
-| 代码只读 | 精确到字节 | 32 B 粒度（`user.ld` 已对齐，实际精确） |
-| 堆上界 | 精确到 `brk` | 只能到区域边界：`brk` 后写一字节不 fault，直到 `sbrk()` 覆盖它（`prot heap` 在 ARM 上会 “survived”） |
+| 代码只读 | 精确到字节 | 32 B 粒度（`user.ld` 已对齐，实际精确）——**但要够用**，见下面的预算 |
+| 堆上界 | 精确到 `brk` | 只能到区域边界：`brk` 后写一字节不 fault，直到 `sbrk()` 覆盖它（`prot heap` 在 M3 上会 “survived”） |
 | 栈下空洞 | `[brk, stack_low)` 全部拒绝 | 只有栈下 16 KiB 护栏，再往下仍属于区域 0 |
 | 栈溢出深度 | 任意深度都当场拦下 | ≤ 16 KiB 拦下，更深会踩进窗口 |
-| 区域数量 | 16 个 PMP 条目 | 8 个（1 个窗口 + 6 个 RO 块 + 1 个护栏） |
+| 区域数量 | 16 个 PMP 条目 | 8 个（7 个拼窗口 + 1 个护栏） |
 
-实测（`run prot ...`）：`null`、`rodata`、`stack` 在 rv32 和 arm 上都当场
-MemManage / access fault；`heap` 只有 rv32 能拦下。
+**区域预算（2026-11-06 实测，这是个真坑）**：一块面积如果起点不在自然对齐的
+2 的幂边界上，切块数量 ≈ 起点与终点各自的二进制“零散位”数。窗口起点 `win_base`
+总是对齐的，所以代价全在 `wx`（可写段的起点）：`sh` 在 arm 上 `wx-win_base =
+0x5420`，**代码区要 4 块、数据区要 9 块，共 13 块**，而预算只有 7。旧代码把
+“装不下”当成“装得下”：`mpu_area()` 到 `n >= 7` 就停，于是窗口上半（栈）没有
+任何区域覆盖，任务在**入口地址 `win_base+1` 就 IACCVIOL**——现象是 `smoke
+-target arm` 在 `[mpu] ... regions=7` 之后立刻 `init process exited with code
+139`，看上去像 ELF/入口问题，和 MPU 毫无关系。
+
+现在的处理：先 `mpu_blocks(base,end)` 数块，装得下才用精确形状；装不下就退化成
+**整个窗口一个 RWX 面积**（仍然限死在窗口内、仍然保留护栏），并打印一次
+
+```
+[mpu] window needs 4+9 blocks (budget 7): code is writable and executable for this task
+```
+
+退化的代价是 M3 上 `prot rodata` 会 “survived”（`stack`/`null` 照样被拦下），
+但机器能跑、且不会静默。要恢复 M3 的 w^X 只有一条路：让 `wx` 落在 2 的幂偏移上
+（`user.ld` 在 `.data` 前加 `. = ALIGN(2^k)`，`k` 由构建器探针链接一次后回填），
+代价是每个程序最多浪费一倍代码体积的窗口与镜像——M33 上不需要（PMSAv8 没有这个
+限制），所以暂时不做。
+
+实测（`run prot ...`，2026-11-06）：`null`、`stack` 在 rv32 / arm / rp2350 上都当场
+MemManage / access fault；`rodata` 在 rv32 和 rp2350 上被拦下，在 M3 上因窗口退化
+而存活；`heap` 在 rv32 和 rp2350 上被拦下（M33 见 5.2.1），M3 上存活。
+
+### 5.2.1 PMSAv8：Cortex-M33 用的是另一套 MPU（2026-11-06 上板）
+
+RP2350 的 M33 是 ARMv8-M，MPU 是 **PMSAv8**：`RBAR`/`RLAR` 放的是**基址和上限**
+（各 32 B 粒度），权限和 XN 挤在基址寄存器低 4 位，内存类型不再直接编码在区域里、
+而是 `MAIR` 的一个字节。区域编号、32 B 最小尺寸、`PRIVDEFENA` 这些概念没变，所以
+`plat_task_protect` 的任务模型原样复用，只有 writer 和三个属性字不同
+（`TOS_ARM_MPU_V8` 分支）。
+
+于是上表的头两行对 PMSAv8 不成立：区域可以不是 2 的幂，**一个区域就能精确描述
+`[win_base, wx)`**，不需要切块。既然边界可以落在任意 32 B 上，`brk` 也就不必再
+让步——堆和栈各自成区，中间的空洞没有任何区域覆盖：
+
+```
+region 0   [win_base, wx)        RO，可执行          镜像
+region 1   [wx, brk)             RW，XN              数据 + sbrk 已经发出去的堆
+region 2   [stack_low, win_end)  RW，XN              栈
+region 7   [stack_low-GUARD, stack_low)  仅特权 RW、XN（栈下护栏，GUARD 板级：rp2350 是 4 KiB）
+```
+
+`brk` 是动态的（`sbrk()` 每动一次内核就重编一次），所以堆上界**跟着 break 走**：
+越过 break 写一个字节，在 32 B 粒度以外就是当场 MemManage——与 rv32 PMP 同一条
+规则。唯一残留的不精确是最后那不足 32 B 的一格：堆区按 `brk` **向上**取整到 32 B
+（向下取整会让跨界的合法分块 fault），所以贴着 break 的 32 B 内仍可写。这是硬件
+粒度，不是实现偷懒；`user/prot.c` 探针因此往 `brk+64` 写。
+
+`MPU_TYPE` 报 8 个可用区域，这套形状只用 4 个。切在 `brk` 之后有一个行为变化要
+记住：**M33 上栈没有"生长"，洞是硬墙**。`process_stack_grow()` 只有 rv32 的 PMP 端口
+实现，ARM 端口没有，所以以前栈越过声明值时会**静默**走进洞里（直到撞上 16 KiB
+护栏才 fault），现在在 `stack_low` 就被拦下。`deep 6` 这类不声明栈的程序因此在
+M33 上不会长到 16 KiB，而是当场死；dump 里的 pc 是 0、`cfsr` 带 `MSTKERR`，因为
+**异常压栈本身就是第一个失败的写**——内核现在会明说：
+
+```
+  (stacking error: sp 0x20031ea8 left the stack - stack overrun, not a wild pointer)
+```
+
+窗口取整剩下的空档仍然归堆（`heap_end = stack_low - guard`），要更多栈就
+`TOS_STACK()` 显式声明。
+
+四个踩出来的坑，都是真机实测：
+
+1. **AP 编码和 ARMv7-M 不同**。v7 里 `0b110` 是「两态只读」，v8 只有两位：
+   `00` 特权 RW、`01` 两态 RW、`10` 仅特权只读、`11` 两态只读。第一版照 v7 的直觉
+   写成 `10`，结果用户态第一次取指就 `cfsr=0x1`（IACCVIOL）。
+2. **不要靠重叠 + 优先级**。第一版让「整个窗口 RW/XN」和「代码区 RO/可执行」重叠，
+   指望高编号覆盖低编号，实测取指照样被 XN 挡住。改成按 `wx` 精确切分、零重叠后
+   就没有这个问题了——区域数量反而更少。
+3. **MPU 不能在 `plat_init` 里开**。那时没有任何区域，理论上全靠 `PRIVDEFENA` 的默认
+   映射，但实测一开板子就卡死在 `[ramdisk]` 之后、串口全静默。现在由**第一次
+   `plat_task_protect`** 打开：启动全程 MPU 关着，任何区域配置错误都表现为
+   "第一个任务 fault 并打印 dump"，而不是整机静默。
+4. **`MAIR` 只在开 MPU 的那一刻写**。在 `plat_init` 里写（那时 `MPU_CTRL=0`，理论上
+   无害）同样会让板子卡死——`MPU_TYPE`/`MPU_CTRL` 的读回显示 ROM 没留 MPU，所以
+   这一条目前只能记成"经验"：不要提前碰 MAIR。
+5. **`CFSR` 是写 1 清零，不清就会串味**。连着跑四条 `prot`，四条都打印
+   `mmfar=0x2002c167`——那是第一条（`rodata`）碰过的地址，因为 `MMARVALID` 一直没
+   被清掉，后面的 fault 复用同一份状态。现在 fault dump 先**读一份快照再清零、
+   然后打印快照**，四条各自报自己的地址（`0x2002c167` / `0x20025ed7` /
+   `0x2002d040` / 0）。
+
+开机一行自检（RP2350 实测，`regions` 是代码/堆/栈三块真正用掉的区域数，护栏固定占 7 号）：
+
+```
+[mpu] type=800 win=20020000..2002c000 wx=20025420 brk=20027000 stk=20029000..2002a000 regions=3
+```
+
+`stk=` 那两段是护栏 `[stack_low-GUARD, stack_low)`，`brk=` 是打印那一刻的堆上界
+（`sh` 起来时已经 sbrk 了约 7 KiB）。这一行以前固定打印 `regions=7`：它读的是
+禁用循环之后的索引，不是用掉的区域数——现在改成在循环前记一份。
+
+实测（RP2350，`prot`/`ls`/`cat`/`dd` 128 KiB 读回校验/`bench`/`mem` 全通）：
+`prot rodata|heap|stack|null` 四条**全部当场 MemManage**（`cfsr=0x82`，即
+DACCVIOL|MMARVALID），进程被杀、shell 存活，四条各报自己的地址：
+
+| 用例 | 报出的地址 | 说明 |
+|---|---|---|
+| `prot rodata` | `0x2002c167` | 字符串常量在 `[win_base, wx)` 里，只读 |
+| `prot stack` | `0x20025ed7` | 栈顶下方 40 KiB，落在 `stack_low` 以下 |
+| `prot heap` | `0x2002d040` | `brk + 64`，堆区之外 |
+| `prot null` | 无（`mmfar=0`） | 访问 0 号地址，本来就没有区域覆盖 |
+
+`prot heap` 那一条改之前打印 “survived”，现在是：
+
+```
+tos> run prot heap
+writing past the end of the heap
+[pid 4] MemManage at 0x2002c0a0 (address 0x2002d040)
+  cfsr=0x00000082 hfsr=0x00000000 mmfar=0x2002d040 bfar=0x2002d040
+tos> ps
+```
+
+顺带一个现象：dump 比 CDC 环形缓冲长的时候，**尾部会被丢掉**（`aircr=` 之后那几行
+经常看不见，`usb_cdc_putc()` 满了就丢而不是阻塞）。所以关键信息都排在前面，
+`deep` 的栈溢出提示也挪到了 `cfsr` 行之后。
 
 ## 6. 任务模型
 
@@ -1123,6 +1260,14 @@ stack_top - 栈 - 守卫`，和没有声明时是同一条公式，只是窗口�
 `TOS_HEAP(24 * 1024)` 直接把 8 KiB 映像的它抬进 48 KiB 窗口，不用再让布局
 猜。
 
+**没声明就等于没有堆。** 这一点值得单独写下来，因为它的症状是"malloc 一律返回
+NULL"，看上去像内核坏了：窗口按 `span + 栈 + 0 + 守卫` 算，而一个小工具的
+`4 + 8 + 4` 正好是 16 KiB 的一整格，取整后一点空档都不剩，`heap_base` 于是
+等于 `heap_end`。真机上 `bench` 就是这么"坏"的——它 malloc 两块 4 KiB 却没声明，
+而同一块板子上声明了 12 KiB 的 `wheap` 一切正常（2026-11-06 查明并修好：
+`bench` 补 `TOS_HEAP(8 * 1024)`，`mem` 从 200000 字节改成 64 KiB 并声明，
+`lib.h` 的 `TOS_HEAP` 注释里写明了这条后果）。
+
 ##### 8.9.2 栈和堆共用一个区：爆栈就借，PMP 只改尺寸（2026-11-03 晚）
 
 上一节的 8 KiB 还是拍的：程序要么猜，要么声明。这一节把"猜"换成"量"——**栈是软
@@ -1202,6 +1347,13 @@ ROM bootloader -> boot2（256 B，配置 XIP）-> 内核 @0x10000000（XIP）
 
 RP2040 需要一段 256 字节的 `boot2`（通常来自 pico-sdk），负责配置 QSPI XIP。
 产物可用 UF2 格式，通过 ROM 的 USB 大容量设备拖拽烧录。
+
+**链接脚本里的 0x100 是个陷阱**：`FLASH ORIGIN = 0x10000100` 时 lld 会把
+「ELF 头 + 程序头表」映射成一个 PT_LOAD，并且对齐到页边界 `0x10000000`——正好
+压在 boot2 上，向量表被顶到 `0x10000200`，而 boot2 跳的是 `0x10000100`。
+`emitRP2040UF2()` 因此丢掉这个纯元数据段、并按段的最小 paddr 摆放（见
+`OPEN-ITEMS.md` §13 的离线校验表）。RP2350 不受影响：它的 ORIGIN 就是
+`0x10000000`，第一个 LOAD 直接以向量表开头。
 
 ### 电源：关机与复位（跨板）
 
@@ -1299,6 +1451,52 @@ USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定
 协议是必须的，不是保守——窗口化连发只能再挤 ~19%（115200 + base64 的上限
 是 8.6 KiB/s，现在 7.0）。
 
+### 8.11 ESP32-C3 内核 XIP（真机实测，2026-11-06）
+
+C3 的内核原本整份装在 SRAM 里（`0x40380000`，175.6 KiB），`PLAT_KERNEL_MAX` 只剩
+368 B 余量。现在 `.text` + `.rodata` 链到 `0x42000000`（IROM 窗口）、在 flash 上就地
+执行，SRAM 只留启动桩、trap 机件、`.data` 和 `.bss`：
+
+```
+0x40380000  .boot   _start + MMU 建表 + trap 向量与 trap_entry   (RAM)
+            .data / .bss
+0x42000000  .text / .rodata                                     (flash 0x40000 起)
+```
+
+`internal/build` 用 `XipFlashBase` 开关选 `board/esp32c3/kernel-xip.ld`（板级目录里
+同时留着 `kernel.ld` 的全 RAM 布局，关掉 XIP 只是把这个字段清 0）。打包器看到
+`0x42000000` 的段就不把它们放进 ROM 可加载段，而是按 `vaddr - 0x42000000` 摆成
+`XipBlob` 追加到镜像的 `XipOffset`（64 KiB 对齐）——**ROM 不能把段加载到
+`0x42000000`，那是 flash 的只读别名**。
+
+启动桩（`arch/rv32/start.S`，只在 `TOS_XIP_FLASH_BASE` 定义时汇编）做四件事，全部在
+RAM 里、不用字面量池、不碰数据：
+
+1. `ROM_Boot_Cache_Init`（`0x400004c8`）—— cache 的 owner/mode/enable 一步到位；
+2. `EXTMEM_ICACHE_CTRL`(0x600C4000) bit0 置 1、`EXTMEM_ICACHE_CTRL1`(0x600C4004)
+   bit0/1 清零 —— 这三位的复位值都是「关」，只写表不置位则第一个取指永久挂死；
+3. 写 MMU 表：`0x600C5000`，4 字节一项，64 KiB 一页，
+   **项值 = 物理地址 / 64 KiB**，`0x100` = 未映射；随后
+   `Cache_Invalidate_ICache_All`（`0x400004d8`）；
+4. `mtvec` 交还给 `trap_vectors`。
+
+四个都是踩出来的：ROM 的 `Cache_Ibus_MMU_Set` / `spi_flash_enable_cache` /
+`Cache_MMU_Init` 组合**全部返回 0 却改不动映射**（读到的一直是陈旧 cache 行）；
+项值写成字节地址会让窗口指向页号 `0x40000`、取指永不返回；`mtvec` 留着调试处理器
+时第一个 tick 会跳到 `base + 4*cause` 的指令中间。
+
+flash 擦写期间不能取指，所以 `plat_block_write/erase` 入口用 `flash_irq_off()` 保存
+`mstatus.MIE` 并关中断，出口精确恢复（开机早期 MIE 本来是 0，恢复时不会误开）。
+真机：800 KiB 写入 + 读回 `pattern verified` 通过。
+
+实测：`free` 里内核 175.6 → **109 KiB**；开机自检
+`[xip] mmu[0]=4 want 4, window: 41 11 6 c6`。
+
+腾出的空间随即还给了任务区：`PLAT_KERNEL_MAX` 从 `0x403AC000`（176 KiB）缩到
+**`0x403A0000`（128 KiB）**，内核 RAM 止于 `0x4039b4e0`，仍余 ~19 KiB 给以后的
+增长；任务区从 192 KiB（12 个 16 KiB 窗口）变成 **240 KiB（15 个）**。
+`free`：kernel 109 KiB / tasks 240 KiB / unused 略增。
+
 ## 9. 行为一致性契约
 
 | 项 | 约定 |
@@ -1314,7 +1512,7 @@ USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定
 | 时钟 | `clock_ns()` 来自自由运行计数器，单调；`cpus` 字段是编译期 CPU 数 |
 | 描述符 | 0/1/2 是控制台，其余从 3 起分配；`FD_NONE/FD_CONSOLE/FD_FILE/FD_PIPE_R/FD_PIPE_W` 五种 |
 | 管道 | 空且仍有写者 → 阻塞；写者全关 → `read` 返回 0（EOF）；读者全关 → `write` 返回 -1（EPIPE）；缓冲 2 KiB |
-| 内存保护 | x86 无（平坦）；rv32 PMP：code RX / data+heap RW / stack RW / 其余拒绝；arm MPU：窗口 RW+XN / code RO+可执行 / 栈下 16 KiB 护栏；内核读用户内存不受影响 |
+| 内存保护 | x86 无（平坦）；rv32 PMP：code RX / data+heap RW / stack RW / 其余拒绝；arm MPU：code RO+可执行 / 数据+堆到 `brk` RW / 栈 RW / 两者之间的空洞拒绝（M33 的 PMSAv8 四个区域精确表达；Cortex-M3 受 7 块预算限制，`wx` 不对齐时退化为整窗 RWX + 栈下护栏，见 §5.2）；内核读用户内存不受影响 |
 | 异常隔离 | 只杀当前任务，其余继续跑 |
 
 **`crash` 测试已经改写（P0 完成）。** 原先它靠写 `0xdeadb000` 触发缺页；关闭分页后没有缺页，
@@ -1323,6 +1521,11 @@ USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定
 
 验证方式：`tostest compat` 对每个目标启动对应 QEMU，喂相同命令序列，
 比较归一化输出（去掉时间戳和 pid）。
+
+**唯一允许的差异表**（`cmd/tostest/compat.go` 的 `allowedDiffs`，别处不一致就是 bug）：
+`prot` 四条在各平台上按保护能力分化——x86/rp2040 无保护单位，四条都 `survived`；
+rv32 PMP 四条全杀；Cortex-M3 杀 `null`/`stack`，但 `rodata`/`heap` 因窗口退化
+（§5.2 的区域预算）而 `survived`；Cortex-M33（rp2350，不在 compat 里跑）四条全杀。
 
 ## 10. 迁移阶段
 
@@ -1335,8 +1538,8 @@ USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定
 | **P2.6** ✅ | RV32 PMP 分段 + 窗口重排（栈顶对齐、堆栈之间留洞）+ ELF w^X/入口校验 | `prot rodata/heap/stack/null` 四条都被拦下且只杀任务——已完成 |
 | **P3** ✅ | `arch/arm` + `board/qemu-mps2`：异常、PSP、SysTick、用户态 ELF + littlefs | smoke 全绿（`hello`/`sh`/后台 `spin`/`crash` 只杀任务）——已完成 |
 | **P3.1** ✅ | ARM MPU + `nPRIV=1`：每任务 8 个区域、RO 代码、栈护栏、`PLAT_HEAP_GUARD` | `prot null/rodata/stack` 当场 MemManage，smoke 全绿——已完成 |
-| P4 | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello` |
-| P5 | RP2040：boot2 + UF2 + SRAM 运行 | 真机 `hello` |
+| **P4** ✅ | ESP32-C3：ESP 镜像 + SPI flash | 真机 `hello`（验收脚本 24 项全过）——已完成 |
+| P5 ⛔ | RP2040：boot2 + UF2 + XIP/SRAM 运行 | 目标里唯一**从未在真机上跑过**的板子，只有编译产物；见 §2 的验证程度表与 `OPEN-ITEMS.md` 的上板清单 |
 | P6 | 可选：PIE/重定位加固、优先级、每子任务退出码队列 | — |
 
 P0 是最容易被低估的一步：**它会让 x86 失去现有的进程隔离**，
@@ -1347,7 +1550,7 @@ P0 是最容易被低估的一步：**它会让 x86 失去现有的进程隔离*
 | 风险 | 影响 | 缓解 |
 |---|---|---|
 | x86 无内存保护 | 用户程序可破坏内核 | 文档明确；`process_user_ok` 只做窗口范围检查；rv32 PMP / arm MPU 均已补上 |
-| ARM MPU 无 TOR（只能 2 的幂对齐块） | 堆上界不精确、栈下空洞只有 16 KiB | 见 5.2 的差距表；`prot heap` 在 ARM 上预期不 fault |
+| ARMv7-M MPU 无 TOR（只能 2 的幂对齐块） | 堆上界不精确、栈下空洞只有 16 KiB；`wx` 不对齐时切块数会超过 7 块预算（`sh` 要 13 块），任务退化成 RWX 窗口 | 只影响 Cortex-M3；RP2350 的 PMSAv8 是基址+上限形式，四个区域就把 `brk` 和空洞都切准了（见 5.2.1），`prot heap` 在 M33 上被拦下。块预算的实测与退化策略见 5.2 |
 | 用户二进制跨板分发 | 依赖加载器重定位正确性 | ELF32 ET_DYN + `.rel/.rela`，elf.c 校验目标窗口与 w^X |
 | x86 关闭分页后 APP_BASE 需在 RAM 内 | 现有 `0x08048000` 超界 | 改链接地址，QEMU 内存覆盖 |
 | C3 启动镜像格式 | 无法启动 | 先用 QEMU virt；或 ESP-IDF 二级引导 |
@@ -1596,13 +1799,21 @@ struct dev_ops {
 };
 ```
 
-`devfs_register()` 只在 `kmain` 里调用，表项 64 个、名字放在静态池里（`gpio4`
+`devfs_register()` 只在 `kmain` 里调用，表项 32 个、名字放在静态池里（`gpio4`
 这种名字要靠 `ksnprintf` 现拼，不能指向栈）。运行期没有任何写入，所以 SMP 上
 `open()` 走这张表**不需要锁**——这是把"注册是启动行为"当契约用，省掉一把锁。
 
+**模板节点**：引脚这类东西"数量随芯片变"，按每脚一格注册会让表被 GPIO 吃光
+（RP2350 的 30 脚 + 5 个 ADC 就是 35 格，48 脚的 RP2350B 更是 53 格）。
+`devfs_register_template("dev/gpio", count, resolve)` 只占**一格**，打开时按
+`dev/gpio17` 的数字后缀回源：`resolve(17)` 返回 `periph.c` 里
+`struct pin_node gpio_node[48]` 的第 17 项。族名本身（`/dev/gpio`）等于实例 0，
+这样 `ls /dev` 看得见它，`cat /dev/gpio` 也有确定含义。于是 `ls /dev` 是七项
+（`led0 key0 lcd0 screen fb0 gpio adc`），而不是四十项。
+
 没写驱动的板子注册 0 个设备：`/dev/gpio0` 打不开，和 `gpio_count() == 0` 是同一
-个事实的两种问法。`procfs` 注册三个伪文件，`periph` 按 `plat_gpio_count()` /
-`plat_adc_count()` 循环注册。
+个事实的两种问法。`procfs` 注册 `/proc/{uptime,ps,mem,lfs,stack,dev}`，
+`periph` 只注册两张模板。
 
 ### 14.3 数据面走文本，配置面走 ioctl
 

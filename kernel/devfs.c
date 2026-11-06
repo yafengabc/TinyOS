@@ -8,24 +8,48 @@
  *
  * Names are copied into a static pool because drivers want to build them in a
  * loop ("gpio" + itoa(i)) and the table must not point at a local buffer. */
-#define MAX_DEVS     64
+/* 32 slots is plenty now that pin families are templates: the RP2350 uses 13
+ * (7 in /dev - led0, key0, lcd0, screen, fb0, gpio, adc - and 6 in /proc).
+ * Before templates it needed 46, thirty of them just for /dev/gpio0..29, and
+ * a 48-pin part would have overflowed the old 64. */
+#define MAX_DEVS     32
 #define DEV_NAME_MAX 16
 
 static dev_t devs[MAX_DEVS];
 static char  names[MAX_DEVS][DEV_NAME_MAX];
 static int   ndevs;
+static int   dropped;   /* refused because the table was full, see below */
+
+/* Numeric families ("dev/gpio" + index).  Kept beside the table rather than
+ * in it: a template needs a resolver, which a dev_t has no room for. */
+#define MAX_TMPL 4
+static struct {
+    const char        *prefix;
+    int                count;
+    devfs_tmpl_resolve resolve;
+} tmpl[MAX_TMPL];
+static int   ntmpl;
 
 void devfs_init(void)
 {
     ndevs = 0;
+    ntmpl = 0;
+    dropped = 0;
 }
 
 int devfs_register(const char *name, const struct dev_ops *ops, void *priv)
 {
     uint32_t n;
 
-    if (!name || !ops || ndevs >= MAX_DEVS)
+    if (!name || !ops)
         return -1;
+    if (ndevs >= MAX_DEVS) {
+        /* Count it instead of failing quietly: the first symptom of a full
+         * table is a missing /dev/fb0 much later, and that is a long walk
+         * back to this line.  hwdev_init() prints the count at boot. */
+        dropped++;
+        return -1;
+    }
     n = (uint32_t)strlen(name);
     if (n == 0 || n >= DEV_NAME_MAX)
         return -1;
@@ -43,6 +67,38 @@ int devfs_register(const char *name, const struct dev_ops *ops, void *priv)
     return ndevs++;
 }
 
+/* How many registrations the table refused.  Non-zero means MAX_DEVS is too
+ * small for this board; hwdev_init() reports it at boot. */
+int devfs_dropped(void)
+{
+    return dropped;
+}
+
+int devfs_register_template(const char *prefix, int count,
+                            devfs_tmpl_resolve resolve)
+{
+    if (!prefix || !*prefix || !resolve || count <= 0)
+        return -1;
+    if (ntmpl >= MAX_TMPL || strlen(prefix) >= DEV_NAME_MAX)
+        return -1;
+
+    tmpl[ntmpl].prefix  = prefix;
+    tmpl[ntmpl].count   = count;
+    tmpl[ntmpl].resolve = resolve;
+    return ntmpl++;
+}
+
+/* Does the template hang directly below `dir`?  "dev/gpio" is a child of
+ * "dev", not of "dev/gpio0". */
+static int tmpl_child(const char *prefix, const char *dir)
+{
+    size_t n = strlen(dir);
+
+    if (strncmp(prefix, dir, n) != 0 || prefix[n] != '/')
+        return 0;
+    return strchr(prefix + n + 1, '/') == NULL;
+}
+
 const dev_t *devfs_lookup(const char *path)
 {
     if (!path)
@@ -56,6 +112,31 @@ const dev_t *devfs_lookup(const char *path)
     for (int i = 0; i < ndevs; i++)
         if (!strcmp(devs[i].name, path))
             return &devs[i];
+
+    /* Numeric families: "dev/gpio17" resolves through the "dev/gpio"
+     * template.  The exact table is searched first so a board can still
+     * single out one instance if it ever needs to. */
+    for (int i = 0; i < ntmpl; i++) {
+        size_t n = strlen(tmpl[i].prefix);
+        const char *s;
+        int v = 0;
+
+        if (strncmp(path, tmpl[i].prefix, n) != 0)
+            continue;
+        s = path + n;
+        /* The family name on its own means instance 0: it is what `ls dev`
+         * lists and what `cat /dev/gpio` opens, and pin 0 is as good a
+         * default as any other. */
+        if (*s == '\0')
+            return tmpl[i].resolve(0);
+        if (*s < '0' || *s > '9')
+            continue;
+        while (*s >= '0' && *s <= '9' && v < tmpl[i].count)
+            v = v * 10 + (*s++ - '0');
+        if (*s || v >= tmpl[i].count)   /* trailing junk, or out of range */
+            continue;
+        return tmpl[i].resolve(v);
+    }
     return NULL;
 }
 
@@ -131,6 +212,9 @@ static int dir_has_entries(const char *dir)
     for (int i = 0; i < ndevs; i++)
         if (child_of(devs[i].name, dir))
             return 1;
+    for (int i = 0; i < ntmpl; i++)
+        if (tmpl_child(tmpl[i].prefix, dir))
+            return 1;
     return 0;
 }
 
@@ -173,6 +257,11 @@ int devfs_dir_count(const char *path)
     for (int i = 0; i < ndevs; i++)
         if (child_of(devs[i].name, dir))
             n++;
+    /* A template is one row in the listing ("gpio"), not one per instance:
+     * the family is what exists, the numbers on it are not separate nodes. */
+    for (int i = 0; i < ntmpl; i++)
+        if (tmpl_child(tmpl[i].prefix, dir))
+            n++;
     return n;
 }
 
@@ -213,6 +302,15 @@ int devfs_dir_name(const char *path, uint32_t index, char *buf, int cap)
 
         if (!rest)
             continue;
+        if (index-- == 0)
+            return put_name(buf, cap, rest, strlen(rest));
+    }
+    for (int i = 0; i < ntmpl; i++) {
+        const char *rest;
+
+        if (!tmpl_child(tmpl[i].prefix, dir))
+            continue;
+        rest = tmpl[i].prefix + strlen(dir) + 1;
         if (index-- == 0)
             return put_name(buf, cap, rest, strlen(rest));
     }

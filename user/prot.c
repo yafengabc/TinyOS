@@ -21,9 +21,13 @@ static void heap(void)
 {
     volatile char *p = sbrk(0);
 
-    puts("writing one byte past the heap end\n");
-    /* Ours only once sbrk() says so; until then it belongs to nobody. */
-    p[0] = 1;
+    puts("writing past the end of the heap\n");
+    /* Ours only once sbrk() says so; until then it belongs to nobody.
+       64 bytes clear of the break so the answer does not depend on how
+       coarse the machine's regions are: MPU regions are 32-byte granular
+       and the heap is described up to the break rounded up, PMP entries are
+       4-byte granular. */
+    p[64] = 1;
 }
 
 static void stack(void)

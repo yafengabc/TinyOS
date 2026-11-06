@@ -39,6 +39,12 @@ int  tty_is_raw(void);
 int  tty_raw_ready(void);
 int  tty_take_raw(char *dst, int max);
 
+/* Command history, for the shell's `history` builtin.  Entries are
+ * numbered from the newest (1); returns the entry's length, copies into
+ * dst, or -1 when there is no such entry. */
+int  tty_hist_count(void);
+int  tty_hist_get(int newest_index, char *dst, int max);
+
 /* ^C / ^Z / ^\ kill, stop and continue the foreground task (the one blocked
  * reading the console).  Called once per tick after tty_poll(); a no-op when
  * no control character arrived.  The tty layer only knows "the reader", the

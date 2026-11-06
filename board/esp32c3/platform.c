@@ -516,6 +516,30 @@ static int spi1_erase_sector_at(uint32_t flash_addr)
     return 0;
 }
 
+/* Program and erase must not be interrupted.
+ *
+ * The erase path busy-waits on the SPI controller from code the icache already
+ * holds - a fetch through a cold line while the flash is erasing stalls until
+ * the operation ends, which is only slow - but a handler that runs between two
+ * ROM flash calls races the controller the ROM is driving directly.  Masking
+ * for the tens of milliseconds an erase takes is much cheaper than that race.
+ * The state is put back exactly: this also runs during boot, before interrupts
+ * are enabled at all. */
+static uint32_t flash_irq_off(void)
+{
+    uint32_t m;
+
+    __asm__ volatile("csrr %0, mstatus" : "=r"(m));
+    plat_irq_disable();
+    return m & 8u;                      /* mstatus.MIE */
+}
+
+static void flash_irq_restore(uint32_t mie)
+{
+    if (mie)
+        plat_irq_enable();
+}
+
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
     uint8_t *dst = buf;
@@ -546,6 +570,8 @@ int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 {
     const uint8_t *src = buf;
     uint32_t addr = lba * 512u;
+    uint32_t mie = flash_irq_off();
+    int rc = 0;
 
     /* Write straight through.  This used to read each sector back first and
      * program only the words that differed ("minimal-change prog"), which is
@@ -558,29 +584,40 @@ int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
      * back. */
     for (; count > 0; count--, addr += 512u, src += 512u) {
         if (((uint32_t)src & 3u) == 0) {
-            if (rom_flash_write(addr, (const uint32_t *)src, 512) != 0)
-                return -1;
+            if (rom_flash_write(addr, (const uint32_t *)src, 512) != 0) {
+                rc = -1;
+                break;
+            }
         } else {
             /* The ROM wants word-aligned source data. */
             static uint32_t stage[512 / 4];
             uint32_t i;
             for (i = 0; i < 512 / 4; i++)
                 stage[i] = ((const uint32_t *)src)[i];
-            if (rom_flash_write(addr, stage, 512) != 0)
-                return -1;
+            if (rom_flash_write(addr, stage, 512) != 0) {
+                rc = -1;
+                break;
+            }
         }
     }
-    return 0;
+    flash_irq_restore(mie);
+    return rc;
 }
 
 int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t first = (lba * 512u) / NOR_SECTOR;
     uint32_t last = (lba * 512u + count * 512u - 1) / NOR_SECTOR;
+    uint32_t mie = flash_irq_off();
+    int rc = 0;
+
     for (; first <= last; first++)
-        if (spi1_erase_sector_at(first * NOR_SECTOR) != 0)
-            return -1;
-    return 0;
+        if (spi1_erase_sector_at(first * NOR_SECTOR) != 0) {
+            rc = -1;
+            break;
+        }
+    flash_irq_restore(mie);
+    return rc;
 }
 
 uint32_t plat_block_size(void)
@@ -775,11 +812,74 @@ static void plat_clock_init(void)
     kprintf("[clk] CPU 160 MHz, APB 80 MHz (PLL up from the ROM's XTAL/2)\n");
 }
 
+/* ---- flash XIP ------------------------------------------------------- */
+
+/* The flash windows (IROM 0x42000000, DROM 0x3C000000) are pure MMU:
+ * everything the CPU sees there comes from the table at 0x600C5000, one
+ * 4-byte entry per 64 KiB page, entry value = physical address, 0x100 means
+ * "not mapped".
+ *
+ * The ROM's own helpers cannot be used to change it on this chip: measured
+ * on hardware, Cache_Ibus_MMU_Set / Cache_Dbus_MMU_Set / spi_flash_enable_cache
+ * all return 0 and the window keeps serving whatever the ROM mapped (the app
+ * partition at flash 0x10000), because those reads are satisfied by cache
+ * lines that were filled before the call.  Writing the table directly and
+ * then invalidating the cache does work - verified by reading the image
+ * header back through 0x42000000.
+ *
+ * What the entry holds is the physical address divided by the page size, not
+ * the address itself: writing the byte address makes the window resolve to a
+ * page number far past the end of the chip and the first fetch never
+ * completes.  The boot stub (arch/rv32/start.S) writes page
+ * TOS_XIP_FLASH_BASE / 64 KiB into entry 0 and so on, so the code half of the
+ * image - linked at 0x42000000 and flashed at TOS_XIP_FLASH_BASE - is what
+ * the window serves. */
+#define MMU_TABLE      0x600C5000u
+#define MMU_PAGE       0x10000u
+#define MMU_PAGES      64u             /* 4 MiB part */
+#define CACHE_INV_ALL  0x400004d8u     /* Cache_Invalidate_ICache_All */
+
+/* Where the code half of the kernel lives in flash.  The boot stub in
+ * arch/rv32/start.S maps the window to exactly this offset before the first
+ * fetch; getting the base wrong here would remap the running kernel out from
+ * under itself (measured: fetching flash 0 instead of the code, trap, hang). */
+#ifndef TOS_XIP_FLASH_BASE
+#define TOS_XIP_FLASH_BASE 0u
+#endif
+
+#ifdef TOS_XIP_FLASH_BASE
+/* The boot stub (arch/rv32/start.S) owns the mapping: it writes the MMU table
+ * at 0x600C5000 - one 4-byte entry per 64 KiB page, entry = physical address
+ * / 64 KiB, 0x100 = unmapped - and invalidates the cache before the first
+ * fetch through the window.
+ *
+ * Nothing here may write that table again.  The kernel is already running out
+ * of the window by the time this code executes, so rewriting an entry remaps
+ * the floor out from under the CPU; the first measured symptom was an illegal
+ * instruction inside the writer itself.  This only reports. */
+static void xip_report(void)
+{
+    const volatile uint32_t *tbl = (const volatile uint32_t *)MMU_TABLE;
+    const volatile uint8_t  *p   = (const volatile uint8_t *)0x42000000u;
+    uint32_t want = (uint32_t)(TOS_XIP_FLASH_BASE / MMU_PAGE);
+
+    kprintf("[xip] mmu[0]=%u want %u, window: %x %x %x %x\n",
+            (unsigned)tbl[0], (unsigned)want,
+            (unsigned)p[0], (unsigned)p[1],
+            (unsigned)p[2], (unsigned)p[3]);
+}
+#endif  /* TOS_XIP_FLASH_BASE */
+
 /* ---- boot ------------------------------------------------------------ */
 
 void plat_board_early(void)
 {
     plat_console_init();
+
+#ifdef TOS_XIP_FLASH_BASE
+    /* The stub mapped the window; just say what it ended up serving. */
+    xip_report();
+#endif
 }
 
 void plat_board_init(void)

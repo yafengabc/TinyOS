@@ -50,11 +50,29 @@ typedef struct dev {
     void            *priv;   /* driver data handed to every op (pin number) */
 } dev_t;
 
+/* A template node covers a numeric family with one table slot: registering
+ * "dev/gpio" with count 30 answers for /dev/gpio0 .. /dev/gpio29 without
+ * spending 30 entries of the device table.  That matters because the table is
+ * fixed-size .bss and a 48-pin part would otherwise own half of it.
+ *
+ * resolve(index) must return a dev_t that lives forever: open() keeps the
+ * pointer in the descriptor and dup() re-opens through it. */
+typedef const dev_t *(*devfs_tmpl_resolve)(int index);
+
 /* Registration happens at boot, before any task runs; the table is read-only
  * afterwards, which is why open() needs no lock on an SMP build. */
 void        devfs_init(void);
 int         devfs_register(const char *name, const struct dev_ops *ops,
                            void *priv);
+/* Register one slot that answers for prefix + digits 0..count-1.  Exact
+ * entries still win, so a board can single out one pin if it ever needs to. */
+int         devfs_register_template(const char *prefix, int count,
+                                    devfs_tmpl_resolve resolve);
+/* Registrations refused because MAX_DEVS was reached.  Non-zero means the
+ * table is too small for this board; hwdev_init() prints it at boot so the
+ * failure is not discovered later as a missing /dev node. */
+int         devfs_dropped(void);
+
 /* "/dev/gpio4", "dev/gpio4" and "/proc/ps" all resolve.  NULL when the path
  * is not a device - that is the caller's cue to try the filesystem. */
 const dev_t *devfs_lookup(const char *path);

@@ -33,3 +33,18 @@ __pycache__/
 
 # Host-side debugging harness for the interpreter (not a board program).
 /tmp/
+
+# Go build cache when a non-interactive bash run points GOCACHE here
+/.gocache/
+
+# Vendor board material: a 124 MB copy of the ATK board's SDK examples and
+# datasheets, kept only for reference.  The distilled notes live in
+# docs/BOARD-ATK-DNRP2350AM.md, which IS committed.
+/docs/RP2350A/
+
+# Third-party archives and diagrams kept out of the tree (8 MB / 700 KB)
+/TMOD.7z
+/docs/ATK-DNRP2350AM_V1.0.PDF
+
+# Generated app bundle from the desktop agent
+/.wbapp_*.genie

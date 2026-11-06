@@ -3,7 +3,12 @@
  * The kernel is loaded into SRAM by the ROM from the ESP image at flash
  * offset 0.  Addresses use the instruction-bus window (0x4038...): the
  * real chip cannot fetch from the data alias, see docs/PLATFORM-DESIGN.md
- * §8.1.  The layout mirrors arch/rv32/kernel.ld; only the base differs. */
+ * §8.1.  The layout mirrors arch/rv32/kernel.ld; only the base differs.
+ *
+ * This is the all-SRAM layout.  board/esp32c3/kernel-xip.ld is the variant
+ * that runs the code half in place out of flash, and is selected when the
+ * target sets XipFlashBase (internal/build/build.go).
+ */
 
 ENTRY(_start)
 SECTIONS
@@ -49,12 +54,12 @@ SECTIONS
     __kernel_end = .;
 
     /* The first task window starts at PLAT_APP_BASE (board/esp32c3/layout.c,
-     * 0x403AC000), and nothing else separates the two: an overflow links
+     * 0x403A0000), and nothing else separates the two: an overflow links
      * quietly and then shows up as pid 1's image being overwritten by kernel
      * globals, which reads as a random user-program crash.  Same assertion
      * as board/rp2040/kernel.ld, same reason. */
-    ASSERT(__kernel_end <= 0x403AC000,
-           "kernel image overflows PLAT_KERNEL_MAX (0x403AC000), the first task window")
+    ASSERT(__kernel_end <= 0x403A0000,
+           "kernel image overflows PLAT_KERNEL_MAX (0x403A0000), the first task window")
 
     /DISCARD/ : {
         *(.comment)

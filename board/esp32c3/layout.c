@@ -23,17 +23,21 @@ const uint32_t PLAT_KERNEL_BASE = 0x40380000;
 const uint32_t PLAT_RAM_BASE   = 0x40380000;   /* SRAM, instruction alias */
 const uint32_t PLAT_RAM_TOP    = 0x403DC710;
 
-/* Image + .bss must stay below this.  176 KiB is generous for the ~144 KiB
- * the kernel currently occupies and keeps the window area page tidy. */
-const uint32_t PLAT_KERNEL_MAX  = 0x403AC000;
+/* Image + .bss must stay below this: 128 KiB.  It was 176 KiB while the code
+ * half of the kernel also lived in SRAM; with XIP (kernel-xip.ld, .text and
+ * .rodata in flash) the kernel occupies ~109 KiB, so the window comes back
+ * down and the 48 KiB difference goes to the task area.  The build asserts
+ * the fit in kernel-xip.ld; the current image ends at 0x4039b4e0, leaving
+ * ~19 KiB of headroom for growth. */
+const uint32_t PLAT_KERNEL_MAX  = 0x403A0000;
 
-/* Task windows are carved out of the remaining 192 KiB and sized to their
- * image, in 16 KiB steps: a shell takes 32 KiB, the editor 32, a 1 KiB tool
- * 16, and the rest of the area stays usable by whatever comes next.  Stack
- * at the top of every window, image below it, guard hole between image and
- * stack; see kernel/platform.h for the constraints this grain has to
- * satisfy. */
-const uint32_t PLAT_APP_BASE   = 0x403AC000;
+/* Task windows are carved out of the remaining 240 KiB (15 x 16 KiB) and
+ * sized to their image, in 16 KiB steps: a shell takes 32 KiB, the editor
+ * 32, a 1 KiB tool 16, and the rest of the area stays usable by whatever
+ * comes next.  Stack at the top of every window, image below it, guard hole
+ * between image and stack; see kernel/platform.h for the constraints this
+ * grain has to satisfy. */
+const uint32_t PLAT_APP_BASE   = 0x403A0000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
 const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See

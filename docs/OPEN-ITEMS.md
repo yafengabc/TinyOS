@@ -11,7 +11,7 @@
 | 1 | `reboot` 真复位 | 做，五端口全实现 | 未单独计量 | 已合并 `fc08eb2`（C3 20/20） |
 | 2 | QEMU memcpy 慢 / RV32EMU 复现 | 不是 bug，是 TCG 每迭代重译 | 无（只影响写法） | 已记录 `b31e854` + §8 |
 | 3 | 调度器加优先级 | 值得做，三级 + 可抢占 | x86 `-O2` `.text` +512、rv32 `-Oz` `.text` ±0 | **已合并** `97b07c4` |
-| 4 | 大程序 XIP | **能做，但现在不该做** | 见下（四条硬约束） | 只评估 |
+| 4 | 大程序 XIP | 用户程序 **不该做**；**内核已做并上板** | 内核省 66.8 KiB RAM | **已完成** 2026-11-06 |
 | 5 | 极简 shell 脚本 | 值得做，`source` + 启动脚本 | rv32 sh +576 B 原始 / +703 B 压缩 | **已合并** `7d949a3` |
 | 6 | 单文件多入口 vs 共享库 | 多入口 **−55%**，SO **+18%** | 内核 +~50 B | 只评估，已写进 §7.1（`d681089`） |
 | 7 | 每程序栈（默认 8 KiB + `TOS_STACK`） | 做，ELF note 通道，PMP 规则数不变 | 内核 +~60 行；小工具窗口 32→16 KiB | **已合并**（`PLATFORM-DESIGN.md` §8.9.1） |
@@ -69,7 +69,7 @@ rv32 `-Oz` 下 `.text` 恰好持平（28,936 B，代码不同但总量相抵—�
 量完 x86 再量 rv32 前必须重新构建，否则你是在拿 x86 的中间产物给 rv32 报数
 （本次就撞上了：REL vs RELA 重定位直接暴露了架构不对）。
 
-## 4. 大程序 XIP（结论：不该做）
+## 4. 大程序 XIP（用户程序：不该做；内核：已做，见本节末）
 
 想解决的问题：程序一旦大于窗口放不下，就不能跑。XIP 让代码留在 flash 上执行。
 四条硬约束，每条都和现有模型冲突：
@@ -87,8 +87,49 @@ rv32 `-Oz` 下 `.text` 恰好持平（28,936 B，代码不同但总量相抵—�
 **便宜的中间态**：只把大常量表（字库/查找表）放 flash，代码仍在 RAM——表链接到绝对地址
 符号、程序只经内核给的地址访问，不改 PIE 不改窗口模型。同样卡在「cache 能不能拉起」。
 
-**待定**：要不要花半天写 `irom.S` 探针，先钉死「cache 到底能不能从 kmain 拉起」？
-这是唯一能让这条线继续往下走的实验，成本低、结论二元。
+**内核 XIP 是另一个命题，已经做完并上板（2026-11-06）。** 上面四条里前两条只对
+*用户程序* 成立：内核是固定地址、非 PIE，镜像本来就在 flash offset 0，连续性问题
+不存在。剩下的两条都解决了，过程如下，都是真机实测。
+
+### 怎么拉起来的（`board/esp32c3/kernel-xip.ld` + `arch/rv32/start.S` 的启动桩）
+
+1. **cache/MMU 得自己拉，但 ROM 的 helper 全是假的。**
+   `Cache_Ibus_MMU_Set`、`Cache_Dbus_MMU_Set`、`spi_flash_enable_cache`、
+   `Cache_MMU_Init` + `Cache_Owner_Init` + `Cache_Set_IDROM_MMU_Size` 全部返回 0，
+   窗口内容一个字节不变——之前读到的「app 分区数据」其实是 ROM 留下的陈旧 cache 行。
+   **正解是直接写 MMU 表**：基址 `0x600C5000`，4 字节一项，64 KiB 一页，
+   **项值 = 物理地址 / 64 KiB**（不是字节地址！写成 `0x40000` 会让窗口指向页号
+   0x40000，取指永远不完成），`0x100` = 未映射。写完 `Cache_Invalidate_ICache_All`
+   (0x400004d8)。
+2. **两个门控位复位值都是「关」**：`EXTMEM_ICACHE_CTRL`(0x600C4000) bit0 使能、
+   复位 0；`EXTMEM_ICACHE_CTRL1`(0x600C4004) bit0/1 = SHUT_IBUS/DBUS、复位 1。
+   只写表不置这两位，第一个取指就挂死（数据读却能过，所以探针看起来是「成功」的）。
+3. **`mtvec` 必须在任何可能 trap 之前交还给真表**：C3 硬性 vectored 模式，
+   base + 4*cause，桩里若还留着调试处理器，第一个 tick 就跳到指令中间。
+4. **`0x42000000` 的段不能当 ROM 加载段**（那是 flash 的只读别名）。代码作为裸字节
+   `XipBlob` 追加在镜像 `XipOffset`（64 KiB 对齐）处，由启动桩映射。
+   `internal/build/espimage.go` 的 `XipBlob`/`XipOffset` + `xipBlob()` 负责按
+   `vaddr - 0x42000000` 排布，含单测（`TestESPImageXipBlob*`、`TestXipBlobLayout`）。
+5. **擦写期间不能取指**：程序/擦除路径现在在 `plat_block_write/erase` 入口关中断
+   （`flash_irq_off()` 保存 mstatus.MIE 并精确恢复）。erase 的忙等循环体在 icache 里
+   已经热了，所以能跑完；真正的风险是 ROM 驱动 SPI 控制器时被打断。
+   实测 800 KiB 写入 + 读回 `pattern verified` 通过。
+
+### 实测数字（ATK 板之外的这块 C3 核心板，COM18）
+
+| | 之前（全 RAM） | 现在（XIP） |
+|---|---|---|
+| 内核 RAM 结束地址 | `0x403aae60` | `0x4039b4e0` |
+| 176 KiB 窗口余量 | 4,512 B | **66.8 KiB** |
+| 内核占用（`free`） | 175.6 KiB | **109 KiB** |
+| 代码位置 | SRAM | flash `0x40000` 起，止于 `0x42010248` |
+
+开机第一行自检：`[xip] mmu[0]=4 want 4, window: 41 11 6 c6`（4 = 0x40000/64 KiB，
+后四个字节是 `.text` 的头 4 字节）。`df` / `ls` / `cat` / 写文件 / `dd` 800 KiB
+读回校验 / `uptime` 全部正常。
+
+**收益兑现**：省下的 63.7 KiB 正是当初想给脚本引擎的地方；窗口暂时仍留在 176 KiB，
+余量先记在账上，需要时再缩到 128 KiB。
 
 ## 5. 极简 shell 脚本（已合并 `7d949a3`）
 
@@ -208,11 +249,33 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
   `stat` 新增 `TOS_FTYPE_CHR`，`cd /dev` 也通了。见 `PLATFORM-DESIGN.md` §14.7。
   剩下的小缺口：`ls /dev` 在没注册任何设备的板子（qemu-virt、pc）上是空目录，
   这是对的；但设备节点没有 size 概念，`ls` 显示 `<dev>` 而不是字节数——够用。
-- **arm(qemu-mps2) 首次 exec 就 HardFault**：`bx lr` 处崩、帧没写回。怀疑 `arm_resume`
-  的 FR_HW 分支，或 MPU 区域 0 覆盖整窗且 XN。老 bug，没修——ARM 上的功能验证因此
-  只能靠「脚本抓 `init process exited`」兜着，别信绿。
-  （2026-11-02 复核：在 `effaa9c` 上原样复现，与 SMP/时钟/外设/管道这一轮无关。
-  `ls` 和 `cat` 都会崩，所以是「任何碰 littlefs 的用户态程序」都中招，不只是 ls。）
+- **~~arm(qemu-mps2) 首次 exec 就 HardFault~~**（2026-11-05 已修/不再复现）：
+  `tostest compat -targets x86,rv32,arm` 全绿，含 `hello`/`hello_printf`（exec 用户
+  ELF）、`cat readme.txt`（littlefs）、`run prot *` 全组；`smoke -target arm` 默认
+  14 条命令序列也过。当时的两个症状都不在了。
+  附带修复了 mps2 的串口交错假象：mps2 QEMU 的 PL011 只有 16 字节 RX FIFO 且无
+  流控，整行命令一次写入会溢出、回显丢字符——`runSmoke` 现在逐字节节流发送
+  （3 ms/字节）并在每条命令后等下一个 `tos> `，`compat` 对残余的顺序抖动用
+  「字符多重集相同则记 ok*」的可见回退兜底。
+- **~~arm(qemu-mps2) 又回到“首次 exec 就 fault”~~**（2026-11-06 修）：这次不是 ELF，
+  是 **MPU 区域预算**。ARMv7-M 的区域必须是自然对齐的 2 的幂，`wx` 不对齐时切块数
+  ≈ 起点/终点各自的零散位数；`sh` 涨到 21 KiB 之后要 **4+9=13 块**，而预算只有 7，
+  旧代码在 `mpu_area()` 里静默截断，窗口上半（栈）没区域覆盖 → 任务在入口
+  `win_base+1` IACCVIOL。现在先数块（`mpu_blocks()`），装不下就退化成整窗 RWX 并
+  打印 `[mpu] window needs 4+9 blocks (budget 7)`；`smoke -target arm` 恢复全绿。
+  根因与取舍见 `PLATFORM-DESIGN.md` §5.2。要恢复 M3 的 w^X 得让 `wx` 落在 2 的幂
+  偏移上（`user.ld` 的 `.data` 前加 `. = ALIGN(2^k)`，构建器探针链接后回填），
+  代价是镜像最多翻倍——M33 的 PMSAv8 没有这个限制，所以暂时不做。
+- **~~RP2350 上 `reboot` 之后板子挂住~~**（2026-11-06 修）：`AIRCR.SYSRESETREQ`
+  只复位内核和部分外设，USB 控制器/时钟树保持原样，结果主机能枚举 CDC 但打不开
+  （`PermissionError 13`）、UART0 全静默。改成走 ROM 的 `reboot`
+  （flags `0x100` = NORMAL|NO_RETURN_ON_SUCCESS），现在整条启动日志都在、CDC
+  重开即 `tos>`。见 `BOARD-ATK-DNRP2350AM.md` §4。
+- **~~一条 fault dump 里第二条任务报第一个任务的地址~~**（2026-11-06 修）：CFSR/
+  HFSR/SFSR 是写 1 清零，内核从来不清，`MMARVALID` 一直挂着，于是连着跑四条
+  `prot` 都打印第一条的 `mmfar`。现在 fault dump 先快照、再清零、再打印。
+  另外 dump 尾部会被 CDC 环形缓冲丢掉（`usb_cdc_putc()` 满了就丢），所以关键
+  信息都排在前面。
 - **RP2040 / RP2350 的 core1 还没起**：`board/rp2040` 仍是 `PLAT_MAX_CPUS = 1`，
   内核里 SMP 那一整套（per-CPU 栈、第二张向量表、自旋锁）已经就位，缺的是
   板级三件事：SIO 自旋锁（`SIO_SPINLOCK0` 替掉 `plat_spin_acquire`）、
@@ -459,6 +522,69 @@ B 档还要补 10 个 hosted libc shim 头、约 20 个软浮点辅助（`__adds
 三份脚本（`demo.py` / `pytest.py` 54 条 / `pytest2.py` 21 条）输出与改造前的
 黄金基线**逐字节一致**；`tostest emutest` 在 esp32c3 上 `EMU TEST OK`；
 7 个目标全部 `build ok`。
+
+## 14. RP2040：这个目标从未在真机上跑过（2026-11-06 记录）
+
+`go run ./cmd/tos build -target rp2040` 能出 `build/kernel-rp2040.elf`、
+`build/ramdisk-rp2040.bin`、`build/rp2040.uf2`（1.66 MB），但**这些产物一次都没
+烧进过 Pico**。板子那边是空的（"Pico 没接控制台"），所以从 ROM 校验 boot2 到
+最后一行 shell 提示符，整条链路都是纸面推演。文档里所有 rp2040 的数字
+（窗口/镜像预算、`prot` 四条全 `survived`、`reboot` 走 AIRCR）都按 ARMv6-M
+推算，不是实测。
+
+第一次上板要按这个顺序验，前面的不过就别往下走：
+
+1. **boot2**（`board/rp2040/boot2.bin`，256 B）：ROM 会对前 252 字节算
+   CRC-32/MPEG-2 并要求等于末 4 字节，不符就**静默不启动**（USB 不枚举、UART 无
+   输出，看起来像"板子坏了"）。先单独验这一段：在 boot2 之后立刻打印一个字符，
+   确认 `0x10000100` 被跳到。
+2. **UF2 family**：`0xe48bff56`。拖拽后盘符消失 ≠ 启动成功（RP2350 那次就吃过
+   这个亏：盘符消失了但固件没跑）。
+3. **时钟**：现在是"XOSC 12 MHz，UART 分频和 SysTick 都按这个算"，没有像
+   RP2350 那样用 FC0 实测。第一件事就是把实测值打出来——不然波特率错了会表现为
+   **乱码而不是无输出**，很容易误判成驱动问题。
+4. **控制台**：`board/rp2040/usb_cdc.c` 是手写 CDC（RP2350 后来换成 TinyUSB 了），
+   这段代码从没跑过。先用 UART0（GPIO0/1 + USB-TTL，115200）接通，再接 USB。
+5. **XIP vs SRAM**：`kernel.ld` 把内核链在 `0x10000100` 就地执行，`.data/.bss`
+   在 SRAM；文档 §RP2040 里"或拷到 SRAM 运行"那句只是选项，**没有实现**。
+6. **ARMv6-M 的三条硬限制**：无 MPU（`prot` 四条都会 `survived`，与 x86 同）、
+   无硬件除法（`-Os` + 软件除法）、非对齐访问直接 fault（结构体解析要按字节读）。
+7. 跑通之后再回收这张清单，把 `PLATFORM-DESIGN.md` §2 验证程度表里那一行从
+   "只有编译通过"改成实测结果。
+
+### 已修（离线查出来的，不需要硬件）
+
+**镜像首部曾经是 ELF 头——boot2 跳过去必死。** `board/rp2040/kernel.ld` 把
+`FLASH ORIGIN` 设在 `0x10000100`，而 lld 会为「ELF 头 + 程序头表」另起一个
+PT_LOAD，并且把它对齐到 64 KiB 页边界的 `0x10000000`。于是：
+
+```
+flash 0x10000000  boot2 (256 B)            ← 正确，ROM 校验通过
+flash 0x10000100  7f 45 4c 46 ...          ← 不是向量表，是 "\x7fELF"
+flash 0x10000200  MSP=0x20016a78 reset=0x100001c1   ← 向量表被推到这儿
+```
+
+boot2 的最后一步是 `ldr sp,[0x10000100]; ldr pc,[0x10000104]`，读到的 MSP 是
+0x464c457f，第一条指令就落在未定义地址——**板子连一个字节都不会输出**，看起来
+和"UF2 没烧进去""boot2 CRC 不对"完全一样。
+
+`internal/build/uf2.go` 的 `elfToFlashRaw()` 现在做两件事：丢掉「偏移 0 且长度
+不超过头部表」的纯元数据段，并把返回值的落点从"flash 基址"改成"段的最小 paddr"，
+`emitRP2040UF2()` 按这个偏移摆放（`boot2` 仍然占 0..0x100）。
+
+修完的离线校验（不需要板子，`build/rp2040.uf2` 直接解析）：
+
+| 检查 | 结果 |
+|---|---|
+| UF2 每个块的三段 magic / family | 全对，`0xe48bff56`，3248 块 |
+| `0x10000000..0x100000FF` = boot2，CRC-32/MPEG-2 自校验 | 通过（`d58f0b07`） |
+| `0x10000100` 字 0 = 初始 MSP | `0x20016a78`（在 264 KiB SRAM 内） |
+| 字 1 = reset（Thumb 位） | `0x100001c1`，落在 `.text` 里，指令是 `movs r0,#0 / msr …` |
+| `.data` 的 LMA 在 flash 里、内容非零 | 在 `0x100116a4` |
+| littlefs 分区 @ `0x10080000` | 有超级块 |
+
+**这仍然不等于"能启动"**：boot2 内部有没有正确配置 QSPI（拿的到底是 W25Q080 的
+序列还是别的 flash 型号）、12 MHz 时钟假设成不成立、USB CDC 枚举——都只有真机能回答。
 
 ## 建议的讨论顺序
 

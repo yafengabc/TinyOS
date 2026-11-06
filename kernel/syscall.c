@@ -12,6 +12,23 @@
 
 #define MAX_EXEC_ARGS 12
 
+#ifdef TOS_SYSCALL_TRACE
+/* Bring-up aid for a new ARM port: a 16-entry ring of trap events, printed
+ * by the fault handler when a task dies.  A syscall logs its number; the ARM
+ * port logs 0x54 for a tick taken from user mode, 0x48 for a tick nested
+ * inside SVCall, and 0x4600|vec for a fault.  The ordering is what separates
+ * "this syscall faulted" from "a nested tick switched tasks while SVCall was
+ * still active" - a distinction the register dump alone cannot make. */
+uint32_t g_sys_trace[16];
+uint32_t g_sys_trace_i;
+
+void sys_trace_note(uint32_t v)
+{
+    g_sys_trace[g_sys_trace_i & 15u] = v;
+    g_sys_trace_i++;
+}
+#endif
+
 /* One argv string.  A single argument cannot be longer than the console line
  * it was typed on, so TTY_LINE_MAX is the only honest bound: at 64 a long
  * "wfile notes.txt <text...>" lost everything past the 63rd character, and
@@ -137,8 +154,8 @@ static int path_stat(const char *path, uint32_t *size, uint8_t *type)
 static regs_t *do_exec(regs_t *r, const syscall_t *sc)
 {
     static char path[EXEC_ARG_MAX];
-    static char argbuf[MAX_EXEC_ARGS][EXEC_ARG_MAX];
     char *argv[MAX_EXEC_ARGS];
+    char *argbuf = NULL;            /* argv strings, from the kernel heap */
     int argc = (int)sc->a2;
 
     if (argc < 0)
@@ -152,21 +169,38 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
     }
 
     if (argc > 0) {
+        /* These strings used to sit in a static 12 x 256-byte array: 3 KiB
+         * of .bss held for the whole uptime to serve a window that lasts
+         * one exec().  Allocate only the slots actually asked for, from the
+         * same arena the loader is about to use. */
+        argbuf = kmalloc((size_t)argc * EXEC_ARG_MAX);
+        if (!argbuf) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         if (!process_user_ok(sc->a1, (uint32_t)argc * 4)) {
+            kfree(argbuf);
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
         const uint32_t *uargv = (const uint32_t *)sc->a1;
         for (int i = 0; i < argc; i++) {
-            argv[i] = argbuf[i];
-            if (!copy_user_string(argbuf[i], uargv[i], EXEC_ARG_MAX)) {
+            argv[i] = argbuf + (size_t)i * EXEC_ARG_MAX;
+            if (!copy_user_string(argv[i], uargv[i], EXEC_ARG_MAX)) {
+                kfree(argbuf);
                 plat_frame_set_ret(r, (uint32_t)-1);
                 return r;
             }
         }
     }
 
-    plat_frame_set_ret(r, (uint32_t)process_exec(r, path, argv, argc));
+    int rc = process_exec(r, path, argv, argc);
+    /* process_exec() lays the strings out in the new image's initial stack
+     * before it returns, so the buffer is dead as soon as it does - on the
+     * success path too, where the frame now describes the new program. */
+    if (argbuf)
+        kfree(argbuf);
+    plat_frame_set_ret(r, (uint32_t)rc);
     return r;
 }
 
@@ -187,6 +221,10 @@ static regs_t *dispatch(regs_t *r)
 {
     syscall_t sc;
     plat_frame_get_syscall(r, &sc);
+
+#ifdef TOS_SYSCALL_TRACE
+    sys_trace_note(sc.nr);
+#endif
 
     switch (sc.nr) {
     case SYS_EXIT:
@@ -510,6 +548,31 @@ static regs_t *dispatch(regs_t *r)
         int prev = tty_is_raw();
         tty_set_raw(sc.a0 != 0);
         plat_frame_set_ret(r, (uint32_t)prev);
+        return r;
+    }
+
+    case SYS_HIST: {
+        /* op 0: count.  op 1: copy entry sc.a1 (1 = newest) into sc.a2,
+         * NUL terminated, up to the line limit.  The buffer is validated
+         * for exactly the bytes we will write, not for a guessed size. */
+        char tmp[TTY_LINE_MAX];
+        int n;
+
+        if (sc.a0 == 0) {
+            plat_frame_set_ret(r, (uint32_t)tty_hist_count());
+            return r;
+        }
+        n = tty_hist_get((int)sc.a1, tmp, (int)sizeof(tmp));
+        if (n < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        if (!process_user_ok(sc.a2, (uint32_t)n + 1)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        memcpy((void *)sc.a2, tmp, (size_t)n + 1);
+        plat_frame_set_ret(r, (uint32_t)n);
         return r;
     }
 

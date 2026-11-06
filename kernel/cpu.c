@@ -35,6 +35,30 @@ __attribute__((weak)) void plat_timer_start_cpu(void)
 {
 }
 
+/* How a secondary CPU is brought out of reset.  Two models exist here:
+ *
+ *   - the secondaries are already running and wait for `cpu_release`
+ *     (qemu-virt: every hart starts at the reset vector and start.S parks
+ *     the ones that are not hart 0).  Those boards do not override this.
+ *   - the secondary sits in a boot-ROM wait loop and has to be kicked, with
+ *     a stack and an entry point (RP2350: the SIO FIFO launch).  Those
+ *     boards implement it and return 1 on success.
+ *
+ * Returning 0 is not an error - it means "this board starts its own". */
+__attribute__((weak)) int plat_start_cpu(int id)
+{
+    (void)id;
+    return 0;
+}
+
+/* Poke a CPU that may be sitting in its idle wait.  On ARM that is `sev`
+ * (the counterpart of the `wfi` in plat_cpu_idle); a port whose idle is a
+ * real instruction with its own wake-up (rv32's wfi, woken by the timer)
+ * needs nothing here, and the weak default keeps every board building. */
+__attribute__((weak)) void plat_wake_cpu(void)
+{
+}
+
 void cpu_init(void)
 {
     int n = (int)PLAT_MAX_CPUS;
@@ -67,8 +91,16 @@ void cpu_init(void)
     if (n > 1) {
         /* Everything the secondaries need exists from here on: the process
          * table (process_init ran), the timer (plat_timer_init ran) and the
-         * console.  Release them and give them a moment to appear. */
+         * console.  Release them and give them a moment to appear.
+         *
+         * The magic is for the ports whose secondaries are already spinning
+         * on it (rv32/qemu-virt).  A board whose cores have to be launched
+         * gets the kick loop below as well; plat_start_cpu() is a no-op
+         * there and returns 0. */
         cpu_release = CPU_RELEASE_MAGIC;
+
+        for (int i = 1; i < n; i++)
+            (void)plat_start_cpu(i);
 
         for (uint32_t spins = 0; spins < 20000000u; spins++) {
             if (cpu_count == n)
@@ -149,4 +181,17 @@ void spin_unlock(spin_t *s)
 {
     if (cpu_count > 1)
         plat_spin_release(&s->v);
+}
+
+__attribute__((weak)) int plat_spin_try_acquire(volatile int *v)
+{
+    (void)v;
+    return 1;              /* one CPU: the lock is never contended */
+}
+
+int spin_trylock(spin_t *s)
+{
+    if (cpu_count <= 1)
+        return 1;
+    return plat_spin_try_acquire(&s->v);
 }

@@ -8,6 +8,7 @@
 #include "devfs.h"
 #include "periph.h"
 #include "procfs.h"
+#include "hwdev.h"
 
 /* Architecture-independent entry point.  Everything platform specific goes
  * through platform.h; this file must build unchanged on i386, RV32 and ARM. */
@@ -17,6 +18,30 @@ static void banner(void)
     kprintf("\nTinyOS - a tiny multi-platform operating system\n");
     kprintf("user-mode ELF loader | littlefs | PIE\n");
     kprintf("kernel heap: %u KiB arena\n\n", heap_arena_bytes() / 1024u);
+}
+
+/* The panel, if the board has one, gets a title card of its own.  It is
+ * written before the console mirror starts producing output, so the screen
+ * opens with something that identifies the machine instead of a screenful
+ * of boot text scrolling past. */
+static void screen_banner(void)
+{
+    char line[48];
+
+    if (screen_cols() <= 0)
+        return;
+
+    screen_puts("TinyOS  ");
+    screen_puts(plat_board_name());
+    screen_puts("\n");
+
+    ksnprintf(line, sizeof(line), "tick %u Hz   heap %u KiB\n",
+              (unsigned)plat_tick_hz(), heap_arena_bytes() / 1024u);
+    screen_puts(line);
+    screen_puts("uart0 115200   usb0 cdc\n");
+    screen_puts("devices: cat /proc/dev\n");
+    screen_puts("screen : /dev/lcd0\n");
+    screen_puts("----------------------------------------\n");
 }
 
 void kmain(void)
@@ -42,9 +67,17 @@ void kmain(void)
     periph_init_devs();
     procfs_init();
 
+    /* Board devices: the table becomes /dev nodes here, and display 0
+     * becomes a text screen the console can mirror onto.  A board with no
+     * panel reports no display, both calls return -1, and every screen_*
+     * call below is a no-op. */
+    hwdev_init();
+    screen_init();
+
     process_init();
 
     banner();
+    screen_banner();
 
     /* Everything a secondary CPU touches exists from here on: the process
      * table, the console and the board's timer.  On a uniprocessor this

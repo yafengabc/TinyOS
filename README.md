@@ -2,7 +2,7 @@
 
 一个用 **C + 汇编** 写的极简 32 位操作系统，目前有 **x86（PC/QEMU i386）**、
 **RV32（QEMU virt）** 和 **ARM（QEMU mps2-an385，Cortex-M3）** 三个可运行目标，
-配套的构建/运行工具用 **Go** 写。
+另有 **ESP32-C3 / RP2040 / RP2350** 三个真机板级目标，配套的构建/运行工具用 **Go** 写。
 它的核心能力是：从 **littlefs** 镜像里**动态加载 ELF 可执行文件**，在用户态
 （x86 ring 3 / RV32 U-mode / ARM Thread+PSP 非特权 + MPU）里运行，
 程序可以 `exec` 另一个程序、读写文件、申请堆内存；程序崩溃只会杀掉自己，不会拖垮内核。
@@ -490,6 +490,87 @@ Handler 模式靠 `PRIVDEFENA` 访问整片 RAM/MMIO，非特权访问默认映�
 - 栈溢出 ≤ 16 KiB 被护栏拦下，更深则会踩进窗口里。
 
 细节和踩坑记录见 `docs/PLATFORM-DESIGN.md` §5.2、§8.0。
+
+## RP2350 真机目标（Pico 2 / Cortex-M33）
+
+`-target rp2350` 构建同一套内核、用户程序和 littlefs，但换成 RP2350 的板级实现：
+
+```bash
+go run ./cmd/tos build -target rp2350
+# -> build/kernel-rp2350.elf, build/ramdisk-rp2350.bin, build/rp2350.uf2
+```
+
+和 RP2040 的差别不是"换个 CPU 型号"那么简单，几乎每个外设地址都变了：
+
+| 主题 | RP2040 | RP2350 |
+| --- | --- | --- |
+| 核 | Cortex-M0+（ARMv6-M） | Cortex-M33（ARMv8-M，**Secure 态**） |
+| 启动 | ROM 搬 256 B stage-2、校验 CRC32/MPEG-2，跳 `0x10000100` | ROM 自己配好 XIP，扫前 4 KiB 找 **PICOBIN IMAGE_DEF**，从 flash 偏移 0 的向量表取 MSP/PC |
+| 前 256 B | `boot2.bin` | 就是向量表；`image_def.S` 的 20 B 元数据紧跟其后 |
+| UF2 family | `0xe48bff56` | `0xe48bff59`（ARM Secure） |
+| 控制台 | 手写 USB CDC | **两路同时输出**：手写 USB CDC（`2e8a:000a`，板子自己的 USB 口就是控制台）+ UART0（GPIO0/1）115200 8N1 给 USB-TTL；两路都能输入 |
+| 时钟 | stage-2 留下的 12 MHz XOSC | 不改 ROM 的 PLL：把 `clk_ref` 钉在 XOSC、用 CLOCKS 的 FC0 测出 `clk_sys`，UART 波特率和 SysTick 都用实测值 |
+| flash 写 | ROM `('R','E')/('R','P')` 两参数查表 | ROM 同样是这两个 code，但查表 ABI 变成 `(code, RT_FLAG_FUNC_ARM_SEC)`，且要先 `connect_internal_flash` / `exit_xip`、事后 `flush_cache` / `enter_cmd_xip` |
+| 基址 | UART0 `0x40034000`、IO `0x40014000`、PADS `0x4001c000`、RESETS `0x4000c000` | UART0 `0x40070000`、IO `0x40028000`、PADS `0x40038000`、RESETS `0x40020000`（位号也全变了） |
+| SIO | `GPIO_OUT_SET=+0x14`，步距 4 B | 64 位 GPIO 字，`GPIO_OUT_SET=+0x18`，步距 8 B |
+| SRAM | 264 KiB，8 个 16 KiB 任务窗口 | 520 KiB，头部 128 KiB 给内核，其后 384 KiB = **24 个窗口** |
+| MPU | 无（Cortex-M0+ 不带 MPU）——注意 RP2040 这个目标**至今没在真机上跑过**，只有编译产物 | 有，PMSAv8：区域是「基址+上限」、属性在 `MAIR`。已启用，每任务四个区域（代码 RO+X / 数据+堆到 `brk` RW / 栈 RW / 栈下护栏），`prot` 四条全部当场拦下 |
+
+`plat_block_erase/write` 放在 `.data.ramfunc`（`_start` 启动时拷进 SRAM）：ROM 执行
+flash 操作期间 XIP 会进入串行命令模式，调用者不能留在 flash 里取指。
+
+### 板载外设：一张表 + 一组类钩子
+
+`-target rp2350` 现在针对**正点原子 ATK-DNRP2350AM**（板载 1.14 寸 ST7789 屏、
+TF 卡座、CH343P 串口、按键、LED）。板子用一张 `board_dev_t` 表描述自己
+（`board/rp2350/board_devs.c`），`kernel/hwdev.c` 把 LED / 按键 / 屏变成
+`/dev/led0`、`/dev/key0`、`/dev/lcd0`，其余设备至少出现在 `/proc/dev` 里：
+
+```sh
+cat /proc/dev                  # 整张设备表（型号、类、引脚、接线）
+echo 1 > /dev/led0             # LED（板级负责低电平取反）
+cat /dev/key0                  # 按键：1 = 按下
+screen                         # 在 1.14" 屏上画状态卡
+echo hello > /dev/lcd0         # 屏就是终端：换行、滚动、40x16 字符
+```
+
+屏幕是内核控制台的**镜像**（默认开启，`screen mirror off` 关闭），所以插着屏
+就能看到启动日志和 shell 提示符而不需要串口。实现细节、引脚表和踩过的坑见
+`docs/BOARD-ATK-DNRP2350AM.md`。
+
+### 烧写与看日志
+
+RP2350 的 mask ROM 就是 bootloader，**BOOTSEL 盘**是烧写入口；它没有 UART 烧写协议。
+一根 USB 数据线同时负责供电、烧写和控制台：烧写时 ROM 挂出 `2e8a:000f` 的 UF2 盘，
+跑起来之后 TinyOS 自己枚举成 `2e8a:000a` 的 CDC 串口。UART0（GPIO0/1）作为可选的
+第二路控制台并列输出，接 FTDI 也能看同样的日志。
+
+```bash
+# 1. 按住 BOOTSEL 插上 USB 数据线（或按住 BOOTSEL 再按 RESET），出现 "RP2350" 盘
+# 2. 一条命令完成拷包 + 等重启 + 按 VID/PID 找 CDC 口 + 抓启动日志 + smoke
+python scripts/rp2350/flash.py --smoke
+# 当前固件是 pico-sdk 风格（2e8a:0009，带 "Reset" 接口）时，可免按按钮：
+# 1200 波特率触碰让固件自己重启进 BOOTSEL（PICO_USB_RESET_MAGIC_BAUD_RATE）
+python scripts/rp2350/flash.py --boot-1200 COM15 --smoke
+# 只是看串口（不烧写），或用 UART 适配器时显式指定端口：
+python scripts/rp2350/flash.py --no-flash --smoke
+python scripts/rp2350/flash.py -p COM14 --no-flash --smoke
+# 如果板子当前跑的是 MicroPython，可以让 REPL 直接进 bootloader：
+python scripts/rp2350/flash.py --boot-via COM9 --smoke
+# 列出现有串口 / CDC 口 / 可移动盘：
+python scripts/rp2350/flash.py --list
+```
+
+`--port auto`（默认）靠 VID/PID 找 CDC 口，不写死 COM 号——每次烧写 Windows 都可能
+换号。`--smoke` 在看到 `tos> ` 之后依次跑 `echo / ls / free / uptime /
+cat /proc/uptime / gpio / reboot`；若打开串口时启动提示已打印完，会补一个空行让
+shell 重发提示符。启动两行分别打印 ROM 留下的 `clk=` 值（UART 与 USB 各一行），
+用来核对 115200 的分频。littlefs 镜像放在 flash 偏移 `0x100000`（1 MiB），内核在它之前。
+
+板级文件：`board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,gpio.c,usb_cdc.c,usb_cdc.h}`；
+打包器 `internal/build/uf2.go` 的 `emitRP2350UF2()` 会在写出 UF2 前校验初始 MSP、
+复位向量的 Thumb 位，以及前 4 KiB 里是否真的有 IMAGE_DEF 魔数——BOOTSEL 对"镜像
+不合法"唯一的反馈是"什么都没发生"，所以这个校验放在构建期。
 
 ## 加一个自己的程序
 

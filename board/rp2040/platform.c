@@ -25,8 +25,8 @@
  * the XIP mapping.  Writes and erases go through the boot ROM's flash API
  * (resolved from the boot ROM function table), which drives the QSPI serial
  * command state and must be followed by rom_flash_flush_cache() so XIP sees the
- * new data.  The littlefs image is concatenated at flash offset 0x100000 by the
- * UF2 packer, which matches PLAT_LFS_LBA * 512 == 0x100000. */
+ * new data.  The littlefs image is concatenated at flash offset 0x80000 by the
+ * UF2 packer, which matches PLAT_LFS_LBA * 512 == 0x80000. */
 
 /* ---- boot ROM flash API ----------------------------------------------- */
 
@@ -172,7 +172,7 @@ void plat_timer_tick(void)
 /* ---- block device: NOR flash via boot ROM ------------------------------ */
 
 /* The build tool concatenates the littlefs image into the flash at offset
- * 0x100000 (see emitRP2040UF2 in internal/build/uf2.go), which is exactly
+ * 0x80000 (see emitRP2040UF2 in internal/build/uf2.go), which is exactly
  * PLAT_LFS_LBA * 512.  lba passed by ramdisk.c is already global
  * (PLAT_LFS_LBA + sector), so the flash byte address is simply lba * 512.
  * Erase operates on 4 KiB sectors (8 littlefs sectors); the ROM function
@@ -242,9 +242,10 @@ uint32_t plat_block_size(void)
 
 uint32_t plat_block_count(void)
 {
-    /* 600 sectors == 300 KiB, matching PLAT_LFS_BLOCKS (75) in layout.c.  The
-     * partition starts at flash 0x100000, well inside a 2 MiB (or 4 MiB) part. */
-    return 600;
+    /* The whole 1.5 MiB littlefs partition is addressable, even though the
+     * flashed image only occupies its first 300 KiB; ramdisk_init() grows
+     * the filesystem over the rest (see PLAT_LFS_BLOCKS in layout.c). */
+    return PLAT_LFS_BLOCKS * 8u;   /* 3072 sectors = 1.5 MiB */
 }
 
 /* ---- boot -------------------------------------------------------------- */

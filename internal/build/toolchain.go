@@ -162,17 +162,21 @@ func DetectToolchain(target Target) (Toolchain, error) {
 		}
 	}
 
-	if strings.HasPrefix(triple, "thumbv7m") || strings.HasPrefix(triple, "armv6m") {
+	if strings.HasPrefix(triple, "thumbv7m") || strings.HasPrefix(triple, "armv6m") ||
+		strings.HasPrefix(triple, "thumbv8m") {
 		// Cortex-M: Thumb only, and the ELF machine is EM_ARM, which lld
 		// selects from the target triple.  Driving lld directly avoids the
 		// compiler_rt a driver would pull in (thumb's libgcc helpers are
 		// not needed: the kernel supplies __aeabi_* below).
 		// -mcpu comes from the target's Machine field via ccFlags as well;
 		// stating it here keeps the standalone --target triple honest
-		// (armv6m-none-eabi alone does not imply the M0+ feature set).
+		// (armv6m-none-eabi alone does not imply the M0+ feature set, and
+		// thumbv8m.main alone does not imply the M33 FPU/DSP options).
 		mcpu := "cortex-m3"
 		if strings.HasPrefix(triple, "armv6m") {
 			mcpu = "cortex-m0plus"
+		} else if strings.HasPrefix(triple, "thumbv8m") {
+			mcpu = "cortex-m33"
 		}
 		clang := findTool("clang", "clang-19", "clang-18", "clang-17", "clang-16")
 		lld := findTool("ld.lld", "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16")

@@ -78,6 +78,13 @@ uint32_t plat_tick_hz(void);
  * interrupt-enable CSR are per hart - hart 1 inherits nothing from hart 0. */
 void plat_timer_start_cpu(void);
 
+/* Bring CPU `id` out of reset.  Boards whose secondaries are already
+ * spinning on cpu_release (qemu-virt) leave the weak default in place and
+ * return 0; boards where the second core sits in a boot-ROM wait loop
+ * (RP2350's SIO FIFO) implement it.  Called once per CPU from cpu_init(),
+ * after the process table, the timer and the console exist. */
+int  plat_start_cpu(int id);
+
 void plat_irq_enable(void);
 void plat_irq_disable(void);
 void plat_cpu_idle(void);             /* hlt / wfi, interrupts enabled */
@@ -282,8 +289,8 @@ extern const uint32_t PLAT_HEAP_GUARD;
  *   - PLAT_APP_BASE is aligned to it.
  *
  * The last two are what make a single NAPOT PMP entry describe the stack
- * exactly.  The C3's windows start at 0x403AC000 - 16 KiB aligned, because
- * the kernel ends there - so a 32 KiB stack would encode as the 32 KiB
+ * exactly.  The C3's windows start at 0x403A0000 - 16 KiB aligned, because
+ * PLAT_KERNEL_MAX is - so a 32 KiB stack would encode as the 32 KiB
  * region *containing* the stack instead: the guard page below it becomes
  * writable and the upper half of the real stack does not (found on the real
  * chip by leaving one PMP rule out of a test program).  The same test is why
@@ -335,6 +342,16 @@ int plat_fault_is_user(void *frame);
 
 /* Stop the machine. */
 void plat_panic_halt(void) __attribute__((noreturn));
+
+/* Board hook polled inside plat_panic_halt().  Left NULL by boards that
+ * have no way to be recovered remotely; the rp2350 port installs a Ctrl-D
+ * poll so a crashed kernel still drops back into the ROM bootloader. */
+extern void (*g_panic_poll)(void);
+
+/* Board hook for the shared USBCTRL (IRQ 14) vector.  NULL on boards that
+ * have no such controller; the rp2350 port installs its CDC driver's event
+ * pump so a SET_ADDRESS status stage is answered within microseconds. */
+extern void (*g_usb_irq_handler)(void);
 
 /* Reset the machine and boot again (SYS_REBOOT, the shell's `reboot`).
  * Noreturn by contract: a port that cannot reset halts instead, so the

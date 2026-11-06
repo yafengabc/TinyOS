@@ -8,7 +8,14 @@
  * caller's and gives the bytes back on return, so a `source` inside a loop
  * does not grow anything - the reason for not using malloc(), whose bump
  * allocator has no free().  Only MAX_SOURCE layers are ever alive at once. */
-#define POOL_MAX   4096
+/* 3 KiB, and the number is not free: it sets the shell's window.  The window
+ * is image + stack + guard rounded up to the 16 KiB grain, so sh lands in
+ * 32 KiB only while its image stays within 20 KiB (20 + 8 + 4 = 32, and 21 KiB
+ * of image would push it to 48).  Dropping the pool from 4 KiB to 3 was the
+ * cheapest way to cross that line: cutting the stack instead (TOS_STACK(4K))
+ * buys the same 32 KiB but leaves no room for the stack to grow into, and a
+ * nested `source` promptly faulted at 4 KiB (measured 2026-11-06). */
+#define POOL_MAX   3072
 #define MAX_LINES  64
 #define MAX_BLOCKS 8
 #define MAX_VARS   8
@@ -185,6 +192,9 @@ static void cannot_open(const char *path)
 static void cmd_help(void)
 {
     puts("TinyOS shell commands:\n");
+    puts("  Line editing: ^A/^E home/end, ^U kill line, ^K kill to end,\n");
+    puts("  ^W kill word, arrows move/history, Backspace, Delete, Tab=space.\n");
+    puts("  history            list recent commands (up/down recalls them)\n");
     puts("  ls [dir|file]      list a directory, or show a file\n");
     puts("  cd [dir]           change directory (default /)\n");
     puts("  pwd                print the working directory\n");
@@ -197,6 +207,12 @@ static void cmd_help(void)
     puts("  uptime             real time since boot (hardware clock)\n");
     puts("  sleep <ms>         wait without using the CPU (builtin in scripts)\n");
     puts("  gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)\n");
+    puts("  screen             draw a status card on the board's panel\n");
+    puts("  screen dev         the device table, on the panel\n");
+    puts("  screen text <s>    write text; screen mirror on|off\n");
+    puts("  splash             ASCII title card; 'splash off' restores it\n");
+    puts("  lcdconsole on|off  toggle the panel's copy of console output\n");
+    puts("  fb [demo|bars|info|clear|rect]  draw RGB565 pixels on /dev/fb0\n");
     puts("  adc [chan] [n]     sample the analog inputs\n");
     puts("  smp                run one worker per CPU, in parallel\n");
     puts("  reboot             reset the machine and boot again\n");
@@ -775,6 +791,19 @@ static int run_command(char *s)
             exit(0);
         }
         return ac > 1 ? atoi(args[1]) & 255 : 0;
+    } else if (!strcmp(args[0], "history")) {
+        /* The list lives in the line discipline, not here: it is filled
+         * whether or not the shell is the one reading. */
+        char h[256];
+        int n = hist_count();
+
+        for (int i = n; i >= 1; i--) {
+            if (hist_get(i, h, (int)sizeof(h)) < 0)
+                continue;
+            printf("%4d  %s\n", n - i + 1, h);
+        }
+        last_status = 0;
+        return 0;
     } else if (!strcmp(args[0], "reboot")) {
         puts("rebooting...\n");
         reboot();           /* does not return */

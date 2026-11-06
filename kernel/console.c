@@ -1,4 +1,5 @@
 #include "console.h"
+#include "hwdev.h"
 #include "platform.h"
 #include "process.h"
 #include "cpu.h"
@@ -46,19 +47,36 @@ static int            out_mid;         /* last character was not a newline  */
  * ever runs under it. */
 static spin_t         out_lock = SPIN_INIT;
 
+/* The one place a character leaves the kernel.
+ *
+ * The panel, when there is one, is a second screen rather than a second
+ * driver: it gets the same byte stream the UART gets, including the echo,
+ * so the LCD shows what the serial terminal shows.  Doing it here - below
+ * out_char(), adopt_line() and the echo queue - is what keeps those three
+ * from each needing to know a screen exists.
+ *
+ * screen_mirror_putc() returns immediately when mirroring is off or when
+ * the board has no panel, so this costs one call per character on boards
+ * that do not. */
+static void con_putc(char c)
+{
+    plat_console_putc(c);
+    screen_mirror_putc(c);
+}
+
 static void out_char(char c)
 {
     int who = in_echo ? CONSOLE_ECHO_OWNER : process_current_pid();
 
     if (who != out_owner && out_mid) {
-        plat_console_putc('\r');
-        plat_console_putc('\n');
+        con_putc('\r');
+        con_putc('\n');
     }
     out_owner = who;
     out_mid = (c != '\n');
     if (c == '\n')
-        plat_console_putc('\r');
-    plat_console_putc(c);
+        con_putc('\r');
+    con_putc(c);
 }
 
 /* Lock already held. */
@@ -68,13 +86,14 @@ static void adopt_line_locked(void)
         return;
     out_owner = process_current_pid();
     out_mid = 0;
-    plat_console_putc('\r');
-    plat_console_putc('\n');
+    con_putc('\r');
+    con_putc('\n');
 }
 
 void console_adopt_line(void)
 {
-    spin_lock(&out_lock);
+    if (!spin_trylock(&out_lock))
+        return;
     adopt_line_locked();
     spin_unlock(&out_lock);
 }
@@ -130,7 +149,8 @@ void console_echo_tick(void)
     if (echo_head == echo_tail)
         return;
 
-    spin_lock(&out_lock);
+    if (!spin_trylock(&out_lock))
+        return;                    /* the queue keeps its bytes; next tick */
     while (room > 0 && echo_head != echo_tail) {
         char c = echo_q[echo_head];
         echo_head = (echo_head + 1) % ECHO_Q;
@@ -140,8 +160,8 @@ void console_echo_tick(void)
         out_owner = CONSOLE_ECHO_OWNER;
         out_mid = (c != '\n');
         if (c == '\n')
-            plat_console_putc('\r');
-        plat_console_putc(c);
+            con_putc('\r');
+        con_putc(c);
     }
     spin_unlock(&out_lock);
 }
@@ -272,8 +292,15 @@ void kprintf(const char *fmt, ...)
 
     if (n > (int)sizeof(buf) - 1)
         n = sizeof(buf) - 1;
-    /* A kernel line stands on its own: close any task line it interrupts. */
-    spin_lock(&out_lock);
+    /* A kernel line stands on its own: close any task line it interrupts.
+     *
+     * Try-lock, not spin: printing is best effort, and a core parked in
+     * plat_spin_acquire() with interrupts off cannot be preempted - if the
+     * holder is waiting for something that needs *this* core, spinning here
+     * hangs the machine.  Dropping a line under contention costs a log
+     * entry; spinning costs the board. */
+    if (!spin_trylock(&out_lock))
+        return;
     adopt_line_locked();
     for (int i = 0; i < n; i++)
         out_char(buf[i]);
@@ -298,14 +325,16 @@ void console_set_color(uint8_t fg, uint8_t bg)
 
 void console_putc(char c)
 {
-    spin_lock(&out_lock);
+    if (!spin_trylock(&out_lock))
+        return;
     out_char(c);
     spin_unlock(&out_lock);
 }
 
 void console_write(const char *s, size_t n)
 {
-    spin_lock(&out_lock);
+    if (!spin_trylock(&out_lock))
+        return;
     for (size_t i = 0; i < n; i++)
         out_char(s[i]);
     spin_unlock(&out_lock);

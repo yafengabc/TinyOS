@@ -15,8 +15,8 @@ const (
 	// KernelSectors / RamdiskSectors must match boot/stage1.S and the
 	// kernel layout.  The kernel image on disk only holds .text/.rodata/
 	// .data; .bss is zeroed by kernel/entry.S.
-	KernelSectors  = 180 // 90 KiB, loaded at 0x10000
-	BootSectors    = 1
+	KernelSectors = 180 // 90 KiB, loaded at 0x10000
+	BootSectors   = 1
 
 	// The littlefs partition starts right after the kernel image.  This
 	// LBA is what the kernel's ATA driver mounts; keep it in sync with
@@ -63,6 +63,19 @@ type Target struct {
 	// one, and its 32 KiB of headroom is worth more than an idle arena.
 	HeapBytes int
 
+	// XipFlashBase is where the kernel's code lives in flash when the board
+	// executes it in place instead of copying it into RAM.  0 means "copy
+	// everything to RAM", which is what every board but the ESP32-C3 does.
+	// The linker puts .text/.rodata at the IROM window base and the packer
+	// writes those bytes at this offset; the boot stub maps the window to it.
+	XipFlashBase uint32
+
+	// MaxProcs is the size of the process table (kernel/process.c), passed
+	// in as TOS_MAX_PROCS.  0 means "use the default of 16".  It exists
+	// because a proc_t is 792 bytes: a board with 12 task windows gains
+	// 1.6 KiB by not sizing the table for tasks it can never run.
+	MaxProcs int
+
 	// CPUs is how many harts this target is built for.  0 and 1 mean the
 	// same thing - a uniprocessor, with no TOS_MAX_CPUS define at all, so
 	// none of the SMP code (second trap vector, second kernel stack, per-CPU
@@ -78,8 +91,8 @@ var Targets = map[string]Target{
 	// copies it into the task window.  The default 32 KiB is enough for
 	// the small tools, but not for the Python interpreter, whose image is
 	// tens of kilobytes.  A board that can spare the room says so here.
-	"x86":     {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk", RamdiskSectors: 600, HeapBytes: 256 * 1024},
-	"rv32":    {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 256 * 1024},
+	"x86":  {Name: "x86", Arch: "x86", Board: "pc", Triple: "x86-freestanding", FSBacking: "disk", RamdiskSectors: 600, HeapBytes: 256 * 1024},
+	"rv32": {Name: "rv32", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 256 * 1024},
 	// The shipped littlefs image is small (600 sectors = 300 KiB, same as
 	// every other target): the kernel mounts it with block_count=0 (take
 	// the size from the image superblock) and calls lfs_fs_grow to stretch
@@ -87,13 +100,42 @@ var Targets = map[string]Target{
 	// That is what keeps the flashed artifact at 300 KiB while the
 	// filesystem still gets the whole 4 MiB part.
 	// The heap has to hold one decompressed program image while it is
-	// being copied into the task window, so it has to be bigger than
-	// the biggest program: the Python interpreter is 31 KiB raw.  The
-	// 56 KiB sits in the SRAM that was unused between the end of .bss
-	// and the first task window, so it costs the board nothing.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 56 * 1024},
+	// being copied into the task window, so it has to be bigger than the
+	// biggest program: the Python interpreter is 31 KiB raw.  With XIP the
+	// kernel window is down to 128 KiB and the task area is up to 15
+	// windows, so the 56 KiB is affordable; checkLayout() fails the build
+	// if it ever stops fitting.
+	//
+	// 14 process slots: the board's task area gives 12 x 16 KiB windows, so
+	// a 16-entry table (792 bytes each) carried two slots that could never
+	// run.  Twelve live tasks plus two slots for children that exited and
+	// are waiting to be reaped is the real ceiling.  XipFlashBase is what
+	// selects board/esp32c3/kernel-xip.ld; set it to 0 for the all-RAM
+	// layout.
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 56 * 1024, MaxProcs: 14, XipFlashBase: 0x40000},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
+// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
+// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
+// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
+// The M33 user programs are bigger than the RV32 ones: bin/sh is a
+// 19,884-byte ELF that compresses to 15,632 bytes.  exec() holds the
+// compressed buffer (ramdisk_find) AND the decompression buffer at the
+// same time, so the 32 KiB default arena fails right at the first shell;
+// the biggest program (py) needs ~49 KiB.  60 KiB (was 64) still leaves
+// that with an 11 KiB margin and keeps .bss below PLAT_KERNEL_MAX
+// (0x20020000) - the panel's DMA row buffer (3.8 KiB in lcd_st7789.c)
+// had to come out of the same 128 KiB budget.
+	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024},
+
+	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
+	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
+	// the board launches it from cpu_init() - that is what makes this a
+	// separate target rather than a runtime switch.  The per-core kernel
+	// stack drops to 16 KiB (KSTACK_BYTES in kernel/cpu.h is per arch), so
+	// two cores still reserve the 32 KiB the single-core image did and the
+	// 60 KiB exec arena is untouched.
+	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024},
 
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what
@@ -194,8 +236,20 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// RP2040 is a Cortex-M0+ (ARMv6-M): no MPU, no BASEPRI, no
 		// ldrex/strex, no CFSR/MMFAR/BFAR.  arch/arm isolates the M0+
 		// specific bits behind this macro so the M3 build is unaffected.
-		if b.Target.Name == "rp2040" {
+		if b.Target.Board == "rp2040" {
 			archFlags = append(archFlags, "-DTOS_ARM_M0P")
+		}
+		// Cortex-M33 has an MPU, but it is ARMv8-M PMSAv8 (PRBAR/PRLAR plus
+		// MAIR), not the ARMv7-M one: same region model on top, different
+		// registers underneath, so arch/arm/platform.c compiles its other
+		// writer.  Fault reporting (CFSR/MMFAR/BFAR) stays on either way -
+		// only TOS_ARM_M0P suppresses that.
+		if b.Target.Board == "rp2350" {
+			archFlags = append(archFlags, "-DTOS_ARM_MPU_V8")
+			// Bring-up aid: a 16-entry ring of the last syscall numbers,
+			// dumped by arm_handle_fault().  Only the new M33 port pays for
+			// it; remove once the shell is stable on real hardware.
+			archFlags = append(archFlags, "-DTOS_SYSCALL_TRACE=1")
 		}
 	} else {
 		archFlags = []string{
@@ -212,6 +266,19 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	if b.Target.HeapBytes > 0 {
 		archFlags = append(archFlags,
 			fmt.Sprintf("-DTOS_HEAP_BYTES=%d", b.Target.HeapBytes))
+	}
+
+	// XIP: the boot stub needs the flash offset to map the IROM window to.
+	if b.Target.XipFlashBase != 0 {
+		archFlags = append(archFlags,
+			fmt.Sprintf("-DTOS_XIP_FLASH_BASE=0x%x", b.Target.XipFlashBase))
+	}
+
+	// Process table size (kernel/process.c).  Left undefined on boards that
+	// can run 16 or more tasks, so they keep tty-independent defaults.
+	if b.Target.MaxProcs > 0 {
+		archFlags = append(archFlags,
+			fmt.Sprintf("-DTOS_MAX_PROCS=%d", b.Target.MaxProcs))
 	}
 
 	// How many harts.  Left undefined for a uniprocessor so that every
@@ -558,6 +625,21 @@ func (b *Builder) buildKernel() error {
 		filepath.Join(b.Root, "arch", b.Target.Arch),
 	}
 
+	// The RP2350 console is a TinyUSB CDC-ACM device (board/rp2350/usb_cdc.c).
+	// third_party/tinyusb holds a trimmed upstream tree - device stack, CDC
+	// class, RP2040 controller port - and port_rp2/ is the pico-sdk facade
+	// that lets those upstream files compile unchanged.  The board directory
+	// joins the include path so tusb_config.h is found by name.
+	tusbDir := filepath.Join(b.Root, "third_party", "tinyusb")
+	useTinyUSB := b.Target.Board == "rp2350"
+	if useTinyUSB {
+		incs = append(incs,
+			filepath.Join(b.Root, "board", b.Target.Board),
+			filepath.Join(tusbDir, "src"),
+			filepath.Join(tusbDir, "port_rp2", "include"),
+		)
+	}
+
 	// Sources come from three places: the arch-independent core, the
 	// architecture port, and the board support package.  Which arch and
 	// board directory is used depends on the build target.
@@ -578,6 +660,23 @@ func (b *Builder) buildKernel() error {
 		}
 		srcs = append(srcs, ss...)
 		srcs = append(srcs, cs...)
+	}
+
+	// Vendored TinyUSB, RP2350 only: the seven translation units that make up
+	// a CDC-ACM device.  Everything else in upstream's tree (host stack, the
+	// other device classes, other chips' ports) is not checked in.
+	if useTinyUSB {
+		for _, rel := range []string{
+			"src/tusb.c",
+			"src/common/tusb_fifo.c",
+			"src/device/usbd.c",
+			"src/device/usbd_control.c",
+			"src/class/cdc/cdc_device.c",
+			"src/portable/raspberrypi/rp2040/dcd_rp2040.c",
+			"src/portable/raspberrypi/rp2040/rp2040_usb.c",
+		} {
+			srcs = append(srcs, filepath.Join(tusbDir, filepath.FromSlash(rel)))
+		}
 	}
 
 	var objs []string
@@ -649,18 +748,39 @@ func (b *Builder) buildKernel() error {
 		if _, err := os.Stat(boardScript); err == nil {
 			script = boardScript
 		}
+		// A board that executes code in place needs a different layout: the
+		// code half links at the icache window instead of at the RAM base.
+		// Keeping it in a separate script means turning XIP off is one
+		// target field, not an edit to the board's normal layout.
+		if b.Target.XipFlashBase != 0 {
+			xip := filepath.Join(b.Root, "board", b.Target.Board, "kernel-xip.ld")
+			if _, err := os.Stat(xip); err != nil {
+				return fmt.Errorf("target %s sets XipFlashBase but %s is missing",
+					b.Target.Name, xip)
+			}
+			script = xip
+		}
 		if err := b.link(objs, script, elfPath); err != nil {
 			return err
 		}
 		if end, err := ELFEndAddress(elfPath); err == nil {
-			b.logf("      kernel ends at 0x%x\n", end)
+			// With XIP the highest segment is the code half in the flash
+			// window; the number that matters for headroom is the RAM one.
+			if b.Target.XipFlashBase != 0 {
+				if ram, err2 := ELFEndBelow(elfPath, espXipVaddrLow); err2 == nil {
+					b.logf("      kernel RAM ends at 0x%x, code at 0x%x (flash 0x%x)\n",
+						ram, end, b.Target.XipFlashBase)
+				}
+			} else {
+				b.logf("      kernel ends at 0x%x\n", end)
+			}
 		}
 
 		// Flash-backed targets need a board-specific image format.
 		if b.Target.FSBacking == "flash" {
-			switch b.Target.Name {
+			switch b.Target.Board {
 			case "esp32c3":
-				img, segs, err := ESPImageFromELF(elfPath, true)
+				img, segs, err := ESPImageFromELF(elfPath, true, b.Target.XipFlashBase)
 				if err != nil {
 					return err
 				}
@@ -669,10 +789,14 @@ func (b *Builder) buildKernel() error {
 					return err
 				}
 				b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
-			b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x80000 %s\n",
-				relName(b.Root, out), relName(b.Root, b.fsImage()))
+				b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x80000 %s\n",
+					relName(b.Root, out), relName(b.Root, b.fsImage()))
 			case "rp2040":
 				if err := b.emitRP2040UF2(elfPath); err != nil {
+					return err
+				}
+			case "rp2350":
+				if err := b.emitRP2350UF2(elfPath); err != nil {
 					return err
 				}
 			}

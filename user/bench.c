@@ -26,6 +26,14 @@
 #define BYTES 4096              /* per buffer, 2 buffers = 8 KiB of heap */
 #define REPS  64                /* 256 KiB copied per phase */
 
+/* Both buffers live on the heap, and the heap is not free space the image
+ * happens to leave over: a window is sized to image + stack + guard, which on
+ * a 16 KiB grain lands exactly on the grain boundary for a small tool - so
+ * without this note the window has no heap at all and every malloc returns
+ * NULL (measured: this program printed "out of memory" while `wheap`, which
+ * declares, worked). */
+TOS_HEAP(8 * 1024);
+
 static int bytes = BYTES;       /* runtime size, so a machine that is */
 static int reps = REPS;         /* absurdly slow can be measured small */
 
