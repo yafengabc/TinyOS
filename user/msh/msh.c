@@ -2,10 +2,10 @@
  *
  * A window is image + stack + guard, and the last two have a floor of one
  * page each on every board with a protection unit, so the image budget is
- * 8 KiB: 16 - 4 - 4.  Measured, on C3: 6 272 B of image (2 952 text, 331
- * rodata, 2 656 bss) and `ps` reports wink 16 / stk 1.6-of-4 after a
- * nested `source`.  The full shell needs 20 464 + 12 288 = 32 752, i.e. a
- * 32 KiB window with 16 bytes to spare.
+ * 8 KiB: 16 - 4 - 4.  Measured, on C3 at -Oz: 5 792 B of image (2 494
+ * text, 348 rodata, 2 656 bss) and `ps` reports wink 16 / stk 1.6-of-4
+ * after a nested `source`.  The full shell needs 20 464 + 12 288 = 32 752,
+ * i.e. a 32 KiB window with 16 bytes to spare.
  *
  * What it keeps: read a line, split it, name=value, $name, ${name}, $?,
  * comments, `&`, exec a program, source a file in-process (nests two
@@ -22,9 +22,14 @@
  * and the 256-byte buffer it needs sits on the stack, never in .bss.
  *
  * POOL_MAX is 2 KiB because etc/rc is 941 bytes and etc/demo.sh is 1 140:
- * with 1 KiB the boot script still fits, a demo script does not.  On
- * rp2040 the image grows to 7 968 B (Thumb plus the aeabi division
- * helpers), so only 224 bytes of the budget are left there.
+ * with 1 KiB the boot script still fits, a demo script does not.
+ *
+ * The "opt" file next to this source says -Oz, and that is what buys the
+ * headroom: rp2040 (Thumb plus the aeabi division helpers) lands at
+ * 6 656 B of the 8 192 budget instead of 7 968, where 224 bytes were all
+ * that stood between msh and a 32 KiB window.  x86 goes 7 792 -> 6 640 and
+ * rv32 6 272 -> 5 792.  A shell copies characters and forks programs; it
+ * has no loop anyone can measure, so the size win costs nothing felt.
  *
  * Not wired into init: the kernel still starts bin/sh, and this is a
  * second program in the image.  See docs/OPEN-ITEMS.md section 21.
