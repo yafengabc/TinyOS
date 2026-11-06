@@ -1058,8 +1058,12 @@ i386 上就是这样漂移出了幽灵进程）。
 |---|---|---|---|---|---|
 | `bin/sh`（-O2） | 10 766 | 4 623 | 5 008 | 20 464 | 32 KiB |
 | `bin/sh`（-Oz） | 7 924 | 4 537 | 5 008 | 17 552 | 32 KiB |
-| `bin/msh`（-O2, rv32） | 2 696 | 331 | 2 656 | **6 016** | **16 KiB** |
-| `bin/msh`（-O2, rp2040） | — | — | — | **7 808** | **16 KiB** |
+| `bin/msh`（-O2, rv32，无 history） | 2 696 | 331 | 2 656 | **6 016** | **16 KiB** |
+| `bin/msh`（-O2, rv32，有 history） | 2 952 | 331 | 2 656 | **6 272** | **16 KiB** |
+| `bin/msh`（-O2, rp2040） | — | — | — | **7 968** | **16 KiB** |
+
+`history` 内建精确地花掉 **256 B text、0 B bss**（rv32 6 016 → 6 272），
+余量从 2 176 降到 1 920。
 
 真机（C3，`ps`）：`4  1  1  wait  -  ...  16  1.6/4  msh` —— 窗口 16 KiB、
 栈高水位 1.6 KiB / 申请 4 KiB，跑的是嵌套 `source` 这条最深路径。
@@ -1067,11 +1071,37 @@ i386 上就是这样漂移出了幽灵进程）。
 ### 保留 / 砍掉
 
 保留：读行、分词、`name=value`、`$name`/`${name}`/`$?`、`#` 注释、`&`、
-`exec` 程序、`source`（同进程、可嵌套 2 层）、`exit`、`run`、`echo`、`true/false`。
+`exec` 程序、`source`（同进程、可嵌套 2 层）、`exit`、`run`、`echo`、`true/false`、
+`history`（列出）+ ↑/↓ 召回。
 
 砍掉：`if/while/else/fi/done/break` + `eval_cond` + `scan_block`、`$(...)`、
-管道、重定向、`incr`、`history`、`cd/pwd/rm/ps/prio/nice`、`sleep` 内建、长 help。
+管道、重定向、`incr`、`cd/pwd/rm/ps/prio/nice`、`sleep` 内建、长 help。
 这些正是 `sh.c` 里 text 8 KiB / rodata 4.3 KiB 的来源。
+
+### history 不用在这 8 KiB 里出钱
+
+历史池不在 shell 里，在行规程（`kernel/tty.c`，512 B 内核 `.bss`，全平台同一个
+尺寸），这也是 ↑/↓ 能用的原因 —— 它连 shell 是哪个都不知道，只认 `read()`
+的字节流。于是：
+
+- **召回（↑/↓、^W、退格、Delete）本来就是免费的**：msh 用 lib 的 `getline`
+  走 cooked 路径，箭头在 tty 就被吃掉了，`read()` 返回的是重写过的整行。
+  实测把手里的 msh（改动前那一版）启动，敲 `echo marker-abc`、按 ↑、回车，
+  再次输出 `marker-abc`。
+- **`history` 内建只是那个池的读者**：`hist_count()` / `hist_get()` 两个
+  syscall（`SYS_HIST`），256 B 的复制缓冲放在栈上 —— 窗口已经为 4 KiB 栈付过钱，
+  嵌套 `source` 的高水位才 1.6 KiB，这 256 B 不动 `.bss`。
+- 所以"给 history 留 256 B"这个预算，花在了**代码**上（右对齐 + 循环），
+  存储一个字都没花。
+
+真机（C3）：`history` 打出 6 行右对齐列表（含 `run msh` 这条由完整 sh 敲进去的
+命令 —— 池与 shell 无关，谁敲的都记），↑ 两次退格重绘回 `ls bin` 后回车正常执行。
+
+**唯一的代价在 rp2040**：7 968 / 8 192，只剩 224 B。真要给 Pico 留余量，两条：
+pool 2 KiB → 1 KiB（`etc/rc` 941 B 够，`etc/demo.sh` 1 140 B 装不下了），
+或者按架构给 pool 定尺寸。也可以反过来把内核 `TOS_HIST_BYTES` 从 512 降到 256，
+省 256 B 内核 `.bss` —— 但代价是 `HIST_KEEP_MAX`（召回时暂存正在编辑的那一行）
+从 256 掉到 64，且池只能留住约五六条短命令。C3 上不必要。
 
 ### 四个坑（都踩过）
 
@@ -1082,8 +1112,9 @@ i386 上就是这样漂移出了幽灵进程）。
    `etc/demo.sh`（1 140 B）就进不去了。原型用 2 KiB。
 3. **全注释脚本的返回码是 0**：`run_script` 的 `code` 从 0 起，不能跟
    `run_command` 的 -1（继续执行）混用 —— 第一版把 0 行的 rc 报成了 "cannot open"。
-4. **rp2040 只剩 384 B 余量**（7 808 / 8 192）：Thumb 代码 + `aeabi` 除法令牌比
-   rv32 大 1.8 KiB。真要在 Pico 上留余量，把 pool 降到 1 KiB（rc 够，demo.sh 不够）。
+4. **rp2040 只剩 224 B 余量**（7 968 / 8 192）：Thumb 代码 + `aeabi` 除法令牌比
+   rv32 大 1.8 KiB。真要在 Pico 上留余量，把 pool 降到 1 KiB（rc 够，demo.sh 不够），
+   或按架构定 pool 尺寸。
 
 ### 待拍板
 

@@ -2,23 +2,29 @@
  *
  * A window is image + stack + guard, and the last two have a floor of one
  * page each on every board with a protection unit, so the image budget is
- * 8 KiB: 16 - 4 - 4.  Measured, on C3: 6 016 B of image (2 696 text, 331
+ * 8 KiB: 16 - 4 - 4.  Measured, on C3: 6 272 B of image (2 952 text, 331
  * rodata, 2 656 bss) and `ps` reports wink 16 / stk 1.6-of-4 after a
  * nested `source`.  The full shell needs 20 464 + 12 288 = 32 752, i.e. a
  * 32 KiB window with 16 bytes to spare.
  *
  * What it keeps: read a line, split it, name=value, $name, ${name}, $?,
  * comments, `&`, exec a program, source a file in-process (nests two
- * deep), exit, run, echo, true/false.
+ * deep), exit, run, echo, true/false, history.
  * What it drops: if/while/else/fi/done/break, $(...), pipes, redirection,
- * incr, history, cd/pwd/rm/ps/prio/nice, the sleep builtin, the long help.
+ * incr, cd/pwd/rm/ps/prio/nice, the sleep builtin, the long help.
  * Those are the 8 KiB of text the full shell's script engine and builtins
  * account for.
  *
+ * history costs no storage here: the pool lives in the line discipline
+ * (kernel/tty.c, 512 B of kernel .bss), which is also what makes the arrow
+ * keys work, so a shell that just calls read() gets recall for free.  The
+ * `history` builtin is a reader of that pool - hist_count()/hist_get() -
+ * and the 256-byte buffer it needs sits on the stack, never in .bss.
+ *
  * POOL_MAX is 2 KiB because etc/rc is 941 bytes and etc/demo.sh is 1 140:
  * with 1 KiB the boot script still fits, a demo script does not.  On
- * rp2040 the image grows to 7 808 B (Thumb plus the aeabi division
- * helpers), so only 384 bytes of the budget are left there.
+ * rp2040 the image grows to 7 968 B (Thumb plus the aeabi division
+ * helpers), so only 224 bytes of the budget are left there.
  *
  * Not wired into init: the kernel still starts bin/sh, and this is a
  * second program in the image.  See docs/OPEN-ITEMS.md section 21.
@@ -267,6 +273,32 @@ static int run_command(char *s)
         last_status = 0;
         return -1;
     }
+    if (!strcmp(args[0], "history")) {
+        /* The list is the kernel's, the same pool the arrow keys walk:
+         * hist_count()/hist_get() are two syscalls against tty.c's 512
+         * bytes, so this builtin adds no static storage at all.  The copy
+         * buffer lives on the stack - the window already paid for 4 KiB of
+         * it and a nested source only got 1.6 KiB deep. */
+        char h[256];
+        int n = hist_count();
+
+        for (int i = n; i >= 1; i--) {
+            if (hist_get(i, h, (int)sizeof(h)) < 0)
+                continue;
+            /* "printf(\"%4d  %s\n\")" without printf: the full shell's
+             * version drags in the formatter, which is most of a kilobyte
+             * of text this window does not have. */
+            int k = n - i + 1;
+            for (int w = k < 10 ? 3 : k < 100 ? 2 : 1; w > 0; w--)
+                putchar(' ');
+            putint(k);
+            puts("  ");
+            puts(h);
+            putchar('\n');
+        }
+        last_status = 0;
+        return -1;
+    }
     if (!strcmp(args[0], "true")) {
         last_status = 0;
         return -1;
@@ -398,7 +430,7 @@ int main(int argc, char *argv[])
 
     puts("\nTinyOS shell (pid ");
     putint(getpid());
-    puts("). Type 'help' for commands.\n");
+    puts("). Arrows recall, 'history' lists.\n");
 
     if (getpid() == 1)
         run_script("etc/rc");
