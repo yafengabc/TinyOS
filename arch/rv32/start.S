@@ -19,9 +19,17 @@
 #define TOS_MAX_CPUS 1
 #endif
 
-/* Bytes of kernel stack per CPU.  Must match KSTACK_BYTES in
- * kernel/process.c - the guard check there indexes the same array. */
-#define KSTACK_SHIFT 15                 /* 32 KiB */
+/* Bytes of kernel stack per CPU.  Must match KSTACK_BYTES in kernel/cpu.h -
+ * cpu_init() compares the reserved pool against the constant and panics on a
+ * mismatch, because a mismatch does not fail to link: it moves the overflow
+ * guard word into whatever happens to sit below the stack.
+ *
+ * 16 KiB, not 32: the ARM port has run on 16 KiB since it existed (RP2350 has
+ * 128 KiB for the whole kernel), and the deepest kernel path here is a trap
+ * frame plus a syscall, not a user recursion - `py` recurses on its own stack
+ * in user mode.  A whole 16 KiB of .bss buys a task window on boards this
+ * small. */
+#define KSTACK_SHIFT 14                 /* 16 KiB */
 
     .section .text.entry, "ax"
     .globl _start
@@ -376,8 +384,10 @@ rv32_enter_user:
     .globl __kernel_stack
 __kernel_stack:
     /* One stack per CPU, allocated statically: hart N gets
-     * [__kernel_stack_top - (N+1)*32K, __kernel_stack_top - N*32K). */
-    .space 32768 * TOS_MAX_CPUS
+     * [__kernel_stack_top - (N+1)*KSTACK_SHIFT, __kernel_stack_top - N*KSTACK_SHIFT).
+     * Sized from the same macro the trap entry uses, so the two cannot
+     * drift apart the way they once did on i386. */
+    .space (1 << KSTACK_SHIFT) * TOS_MAX_CPUS
     .globl __kernel_stack_top
 __kernel_stack_top:
 

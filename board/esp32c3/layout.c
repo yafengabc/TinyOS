@@ -23,21 +23,29 @@ const uint32_t PLAT_KERNEL_BASE = 0x40380000;
 const uint32_t PLAT_RAM_BASE   = 0x40380000;   /* SRAM, instruction alias */
 const uint32_t PLAT_RAM_TOP    = 0x403DC710;
 
-/* Image + .bss must stay below this: 128 KiB.  It was 176 KiB while the code
- * half of the kernel also lived in SRAM; with XIP (kernel-xip.ld, .text and
- * .rodata in flash) the kernel occupies ~109 KiB, so the window comes back
- * down and the 48 KiB difference goes to the task area.  The build asserts
- * the fit in kernel-xip.ld; the current image ends at 0x4039b4e0, leaving
- * ~19 KiB of headroom for growth. */
-const uint32_t PLAT_KERNEL_MAX  = 0x403A0000;
+/* Image + .bss must stay below this: 64 KiB.  It was 176 KiB while the code
+ * half of the kernel also lived in SRAM, then 128 KiB once XIP moved .text
+ * and .rodata to flash - and 128 KiB turned out to be an arbitrary number
+ * that left 50.8 KiB of dead space between __kernel_end and the first task
+ * window, which neither the kernel nor a window could ever use.
+ *
+ * 64 KiB is 4 grains, i.e. a boundary the task area can start on.  The
+ * kernel's .bss is 48.6 KiB after streaming exec (16 KiB kernel stack,
+ * 8 KiB arena, 8 process slots), which leaves ~15.4 KiB of headroom.  The
+ * build asserts the fit in kernel-xip.ld, so growth past it is a link error
+ * rather than pid 1's image being overwritten.
+ *
+ * Every number here is a lever on the task area: each 16 KiB the kernel
+ * gives back is one more window, and a window is a whole program. */
+const uint32_t PLAT_KERNEL_MAX  = 0x40390000;
 
-/* Task windows are carved out of the remaining 240 KiB (15 x 16 KiB) and
+/* Task windows are carved out of the remaining 304 KiB (19 x 16 KiB) and
  * sized to their image, in 16 KiB steps: a shell takes 32 KiB, the editor
  * 32, a 1 KiB tool 16, and the rest of the area stays usable by whatever
  * comes next.  Stack at the top of every window, image below it, guard hole
  * between image and stack; see kernel/platform.h for the constraints this
  * grain has to satisfy. */
-const uint32_t PLAT_APP_BASE   = 0x403A0000;
+const uint32_t PLAT_APP_BASE   = 0x40390000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
 const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See

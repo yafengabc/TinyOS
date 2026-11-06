@@ -53,14 +53,18 @@ type Target struct {
 	RamdiskSectors int
 
 	// HeapBytes is the size of the kernel heap arena (kernel/heap.c), passed
-	// in as TOS_HEAP_BYTES.  0 keeps heap.c's default of 32 KiB, which is
-	// what every target now uses: the C3 briefly asked for 64 KiB to soak up
-	// the ~50 KiB that was free between the end of .bss and the first task
-	// window, but that put the kernel at 175.8 KiB of its 176 KiB budget -
-	// 240 bytes of headroom - while the measured peak never went past
-	// 11.6 KiB (writing 3 MiB, littlefs working set included).  The option
-	// stays for a board that genuinely needs a bigger arena; the C3 is not
-	// one, and its 32 KiB of headroom is worth more than an idle arena.
+	// in as TOS_HEAP_BYTES.  0 keeps heap.c's default of 32 KiB.  Since
+	// exec() streams images straight into the task window the arena only
+	// carries littlefs's working set, so the target list is a spread rather
+	// than one number: 256 KiB where RAM is free (x86, rv32 - it costs
+	// nothing and keeps a big write from fragmenting), 8 KiB on the C3,
+	// where every 16 KiB of .bss is another task window.
+	//
+	// History worth keeping: the C3 once asked for 64 KiB to soak up the
+	// ~50 KiB between the end of .bss and the first task window, which put
+	// the kernel at 240 bytes of headroom while the measured peak never
+	// passed 11.6 KiB.  That is the pattern to avoid - a buffer sized to
+	// fill space rather than to hold data.
 	HeapBytes int
 
 	// XipFlashBase is where the kernel's code lives in flash when the board
@@ -102,19 +106,22 @@ var Targets = map[string]Target{
 	// The heap does not hold program images any more: exec() streams the LZ4
 	// block straight into the task window, so the peak is littlefs's working
 	// set - measured on C3 at 768 B after boot and 1 024 B after a `py run`,
-	// where the same numbers used to be 28 424 and 54 752 B.  16 KiB is
-	// generous for that and leaves most of the 128 KiB kernel window idle.
-	// (It used to be 56 KiB, sized to hold the largest raw image - the Python
-	// interpreter at 31 KiB - while it was being decompressed in the heap.)
-	// checkLayout() fails the build if the kernel stops fitting.
+	// where the same numbers used to be 28 424 and 54 752 B.
+	// 8 KiB is 8x the measured peak and still leaves the rest of the kernel
+	// window to the task area: on a 370 KiB part the .bss it frees is worth
+	// more than an arena that never fills.  (It used to be 56 KiB, sized to
+	// hold the largest raw image - the Python interpreter at 31 KiB - while
+	// it was being decompressed in the heap.)  checkLayout() fails the build
+	// if the kernel stops fitting.
 	//
-	// 14 process slots: the board's task area gives 12 x 16 KiB windows, so
-	// a 16-entry table (792 bytes each) carried two slots that could never
-	// run.  Twelve live tasks plus two slots for children that exited and
-	// are waiting to be reaped is the real ceiling.  XipFlashBase is what
+	// 8 process slots: a proc_t is 792 bytes, and this board only ever runs a
+	// shell plus a foreground child plus a couple of background jobs.  The
+	// 8 slots leave four spare above that - enough for a parent, a child that
+	// exited and is waiting to be reaped, and the odd `&` job - while the
+	// four slots it drops return 3 KiB to .bss.  XipFlashBase is what
 	// selects board/esp32c3/kernel-xip.ld; set it to 0 for the all-RAM
 	// layout.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 16 * 1024, MaxProcs: 14, XipFlashBase: 0x40000},
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 8 * 1024, MaxProcs: 8, XipFlashBase: 0x40000},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
 	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is

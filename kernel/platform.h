@@ -289,7 +289,7 @@ extern const uint32_t PLAT_HEAP_GUARD;
  *   - PLAT_APP_BASE is aligned to it.
  *
  * The last two are what make a single NAPOT PMP entry describe the stack
- * exactly.  The C3's windows start at 0x403A0000 - 16 KiB aligned, because
+ * exactly.  The C3's windows start at 0x40390000 - 16 KiB aligned, because
  * PLAT_KERNEL_MAX is - so a 32 KiB stack would encode as the 32 KiB
  * region *containing* the stack instead: the guard page below it becomes
  * writable and the upper half of the real stack does not (found on the real

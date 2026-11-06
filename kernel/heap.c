@@ -16,10 +16,11 @@
 
 /* The arena is .bss, so its size is a board decision: the build passes
    -DTOS_HEAP_BYTES for boards that say something other than the 32 KiB
-   default (the C3 dropped to 16 KiB once exec() stopped loading images
+   default (the C3 dropped to 8 KiB once exec() stopped loading images
    through the heap).  Peak use is littlefs's working set plus the small
    per-open-file caches - exec() decompresses straight into the task window
-   and never allocates a buffer proportional to the program size. */
+   and never allocates a buffer proportional to the program size.  Measured
+   on the C3: 768 B after boot, 1 024 B after `py pytest.py`. */
 #ifndef TOS_HEAP_BYTES
 #define TOS_HEAP_BYTES 32768     /* 32 KiB for boards that say nothing */
 #endif

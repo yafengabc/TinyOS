@@ -31,10 +31,14 @@ struct proc;
  * this constant and panics on a mismatch, which turns a corruption bug into a
  * one-line boot error.
  *
- * ARM takes 16 KiB: the RP2350 has 128 KiB for the entire kernel, and two
- * 32 KiB stacks would leave no room for the 60 KiB exec arena.  The RV32 and
- * x86 ports keep 32 KiB - their linker scripts and assembly hard-code it. */
-#if defined(__arm__) || defined(__thumb__)
+ * ARM and RISC-V take 16 KiB.  ARM needed it first: the RP2350 has 128 KiB
+ * for the entire kernel, so two 32 KiB stacks would crowd out everything
+ * else.  RISC-V then turned out to want the same number for a different
+ * reason - the deepest kernel path is a trap frame plus a syscall, and a
+ * recursive user program like `py` recurses on its own stack, so half of a
+ * 32 KiB reservation was never touched.  i386 keeps 32 KiB because
+ * arch/x86/entry.S reserves exactly that. */
+#if defined(__arm__) || defined(__thumb__) || defined(__riscv)
 #define KSTACK_BYTES 16384u
 #else
 #define KSTACK_BYTES 32768u
