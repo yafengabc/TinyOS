@@ -1147,8 +1147,9 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   或 14 个（ARM：3.5 MiB / 256 KiB），同时活着的任务超过这个数会报 `out of task windows`。
 - 内核堆是静态 arena（`.bss`），first-fit **且合并相邻空闲块**；大小由板子决定
   （`-DTOS_HEAP_BYTES`：x86 / rv32 256 KiB、arm 128 KiB、rp2350 60 KiB、
-  esp32c3 16 KiB、其余默认 32 KiB）。`exec` 不再分配「文件大小」的加载缓冲，
-  堆峰值只剩 littlefs 的缓存与临时缓冲区。
+  esp32c3 8 KiB、其余默认 32 KiB）。`exec` 不再分配「文件大小」的加载缓冲，
+  堆峰值只剩 littlefs 的缓存与临时缓冲区（C3 实测 768 B，跑完 `py` 1 024 B）。
+- 内核栈每 CPU 16 KiB（x86 32 KiB），栈底哨兵见「内核栈守卫」。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。
 - 引导扇区固定读取 180 个扇区（`internal/build/build.go` 的 `KernelSectors`）。改内核大小时
   还要同步改 `boot/stage1.S` 的 `KERNEL_SECTORS` 和 `board/pc/layout.c` 的 `PLAT_LFS_LBA`——

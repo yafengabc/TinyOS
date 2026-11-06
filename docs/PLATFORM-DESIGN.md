@@ -1496,9 +1496,16 @@ flash 擦写期间不能取指，所以 `plat_block_write/erase` 入口用 `flas
 `[xip] mmu[0]=4 want 4, window: 41 11 6 c6`。
 
 腾出的空间随即还给了任务区：`PLAT_KERNEL_MAX` 从 `0x403AC000`（176 KiB）缩到
-**`0x403A0000`（128 KiB）**，内核 RAM 止于 `0x4039b4e0`，仍余 ~19 KiB 给以后的
-增长；任务区从 192 KiB（12 个 16 KiB 窗口）变成 **240 KiB（15 个）**。
-`free`：kernel 109 KiB / tasks 240 KiB / unused 略增。
+`0x403A0000`（128 KiB），内核 RAM 止于 `0x4039b4e0`；任务区从 192 KiB
+（12 个 16 KiB 窗口）变成 240 KiB（15 个）。
+
+128 KiB 当时是个随手取的数，它让 `__kernel_end` 与第一个窗口之间留了 50.8 KiB
+死区——内核长不到那么高，窗口又拿不到。流式加载把内核 RAM 压到 49 760 B
+（16 KiB 内核栈 + 8 KiB 堆 + 8 个进程槽）之后，窗口收到了 **64 KiB
+（`0x40390000`）**，内核 RAM 止于 **`0x4038c260`**，余 15 776 B 给增长
+（超出是链接期 ASSERT，不静默）；任务区 **304 KiB（19 个窗口）**。
+`free`：kernel 49 760 B / tasks 311 296 B / unused 17 584 B
+（含尾部 1 808 B ROM 保留）。详见 `OPEN-ITEMS.md §20`。
 
 ## 9. 行为一致性契约
 
