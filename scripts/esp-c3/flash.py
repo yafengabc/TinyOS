@@ -54,7 +54,11 @@ def main():
     args = ap.parse_args()
 
     if args.build:
-        subprocess.run([str(ROOT / "tos.exe"), "build", "-target", "esp32c3"],
+        # `go run`, not ./tos.exe: the .exe is a gitignored leftover that is
+        # only as fresh as the last time somebody rebuilt it, and a stale one
+        # fails in confusing ways (it once built a kernel that overflowed
+        # PLAT_KERNEL_MAX while `go run` built the same tree fine).
+        subprocess.run(["go", "run", "./cmd/tos", "build", "-target", "esp32c3"],
                        cwd=ROOT, check=True)
 
     for p in (KERNEL,) + (() if args.keep_fs else (FS,)):
