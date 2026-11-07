@@ -53,11 +53,15 @@ typedef char arm_regs_frame_size_check[(sizeof(regs_t) == 80) ? 1 : -1];
 #define ARM_VEC_SVCALL      11
 #define ARM_VEC_SYSTICK     15
 
-/* EXC_RETURN values.  Bit 2 (S) is 1 when returning to Thread mode, which
- * is where user programs run. */
-#define ARM_EXC_RET_THREAD     0xFFFFFFFDu
-#define ARM_EXC_RET_HANDLER    0xFFFFFFF9u
-#define ARM_EXC_RET_S_BIT      0x00000004u
+/* EXC_RETURN values (v7-M): bit 3 = mode (1 = Thread), bit 2 = SPSEL
+ * (1 = PSP).  So 0xFFFFFFF1 = Handler+MSP, 0xFFFFFFF9 = Thread+MSP (the
+ * kernel's own launch path: kmain / cpu_take_task / arm_enter_user),
+ * 0xFFFFFFFD = Thread+PSP (user tasks).  frame_is_user() tests bit 2
+ * only: Thread+MSP frames are kernel frames even though mode is Thread. */
+#define ARM_EXC_RET_THREAD     0xFFFFFFFDu  /* Thread + PSP (user task)  */
+#define ARM_EXC_RET_THREAD_MSP 0xFFFFFFF9u  /* Thread + MSP (kernel path)*/
+#define ARM_EXC_RET_HANDLER    0xFFFFFFF1u  /* Handler + MSP             */
+#define ARM_EXC_RET_S_BIT      0x00000004u  /* bit 2: SPSEL (PSP in use) */
 
 /* Initial xPSR for a fresh user task: only the Thumb bit (24) is set. */
 #define ARM_XPSR_THUMB         0x01000000u

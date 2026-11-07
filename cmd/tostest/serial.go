@@ -277,6 +277,16 @@ type socketConn struct {
 	conn net.Conn
 	pump *pump
 	buf  []byte
+	// Where the output of the command just sent begins.  waitFor() searches
+	// from here rather than from the top of the buffer: the boot prompt
+	// ("tos> ") stays in buf forever, so a whole-buffer search matches it
+	// again for every command and returns instantly.  That silently disabled
+	// -commandwait-ms - each command got only the 300 ms drain() that
+	// follows - which read as "the guest hangs" for any command needing more
+	// time on the wire.  Measured with rv32smp: `piperace 1 16` finished
+	// inside 300 ms and looked fine, `piperace 1 32` did not and looked hung,
+	// and the same two commands both pass when driven by hand.
+	mark int
 	mu   sync.Mutex
 	eof  bool
 }
@@ -314,6 +324,9 @@ func (sc *socketConn) read(timeout time.Duration) ([]byte, bool) {
 func (sc *socketConn) waitFor(needle []byte, timeout time.Duration) (bool, time.Duration) {
 	start := time.Now()
 	deadline := start.Add(timeout)
+	sc.mu.Lock()
+	from := sc.mark
+	sc.mu.Unlock()
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -327,7 +340,10 @@ func (sc *socketConn) waitFor(needle []byte, timeout time.Duration) (bool, time.
 			break
 		}
 		sc.mu.Lock()
-		hit := bytes.Contains(sc.buf, needle)
+		if from > len(sc.buf) {
+			from = len(sc.buf)
+		}
+		hit := bytes.Contains(sc.buf[from:], needle)
 		sc.mu.Unlock()
 		if hit {
 			return true, time.Since(start)
@@ -356,7 +372,17 @@ func (sc *socketConn) text() string {
 	return string(sc.buf)
 }
 
+// markSent records where the response to the command about to be written
+// will start.  Called before the write, never after: the pump may append the
+// first bytes of the answer before the write returns.
+func (sc *socketConn) markSent() {
+	sc.mu.Lock()
+	sc.mark = len(sc.buf)
+	sc.mu.Unlock()
+}
+
 func (sc *socketConn) send(line string) error {
+	sc.markSent()
 	_, err := sc.conn.Write([]byte(line + "\n"))
 	return err
 }
@@ -370,6 +396,8 @@ func (sc *socketConn) send(line string) error {
 // a real PL011 never sees this.
 func (sc *socketConn) sendSlow(line string, perByte time.Duration) error {
 	var err error
+
+	sc.markSent()
 	for _, b := range []byte(line + "\n") {
 		_, err = sc.conn.Write([]byte{b})
 		if err != nil {

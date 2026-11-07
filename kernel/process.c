@@ -456,8 +456,6 @@ static regs_t *sched_switch(regs_t *r)
     proc_t *prev = current;
     int first = 1;
 
-    if (prev && prev->state == ST_RUNNING)
-        prev->saved = *r;
     /* Somebody asked for this switch; whoever asked (a wake-up, a syscall)
        does not need to ask again once we are here. */
     need_resched = 0;
@@ -494,7 +492,21 @@ static regs_t *sched_switch(regs_t *r)
          * with a register holding an image offset instead of a pointer. */
         if (first) {
             first = 0;
-            if (prev && prev->state == ST_RUNNING) {
+            /* Ownership is `cpu`, not `state`.  A task that blocked in a
+             * syscall does its bookkeeping, drops the lock and only then
+             * calls us (see block_on_pipe_locked); in that gap the other
+             * core may wake it, pick it and set it RUNNING again.  Testing
+             * the state alone then says "still mine", and this CPU writes
+             * its own trap frame - r0 is still the syscall number - over
+             * the result the other core just delivered, and marks the task
+             * READY while the other core is executing it.  `cpu` is set to
+             * -1 by whoever releases the task and to the new owner by
+             * whoever picks it, so comparing it with this CPU answers "do
+             * I still own it".  Measured on the RP2350 as a lost syscall
+             * return value and as duplicated/missing 128-byte blocks in
+             * `piperace 4 64`. */
+            if (prev && prev->state == ST_RUNNING && prev->cpu == cpu_id()) {
+                prev->saved = *r;
                 prev->state = ST_READY;
                 prev->cpu = -1;
 
@@ -688,7 +700,16 @@ void process_tick(regs_t *r)
 }
 regs_t *process_resched(regs_t *r)
 {
-    if (need_resched) {
+    /* Only a frame that interrupted USER code may consume the request.  A
+     * tick (or a console kick's preempt_if_higher) can arm need_resched
+     * while the task is in the middle of a kernel call; the IRQ that
+     * happens to exit first may then be one that interrupted the KERNEL,
+     * and switching here would save that kernel frame over the task's
+     * state - the task resumes in user mode from a frame whose r0 is still
+     * the syscall number, and whatever the interrupted call had half done
+     * is abandoned.  The request simply waits for the next trap that
+     * really did interrupt user code. */
+    if (need_resched && plat_fault_is_user(r)) {
         need_resched = 0;
         return sched_switch(r);
     }
@@ -754,6 +775,11 @@ regs_t *process_suspend(regs_t *r)
         current->stop_pending = 0;
         kprintf("\n[pid %d] stopped\n", current->pid);
         current->state = ST_STOPPED;
+        /* Leaving the CPU: `cpu` is what the scheduler uses to decide
+         * ownership now, so it has to be cleared here as well.  A stopped
+         * task that still names this CPU makes sched_switch() believe it
+         * owns it and write this trap frame over its saved one. */
+        current->cpu = -1;
         return sched_switch(r);
     }
     return r;
@@ -1052,6 +1078,13 @@ static void proc_retire_locked(proc_t *p)
 
 static void proc_retire(proc_t *p)
 {
+    /* An exec that fails after the descriptor inheritance still holds the
+     * references fd_clone() took.  Retiring the slot without closing them
+     * leaks pipe readers/writers: measured on mps2 as a writer count stuck
+     * at 1 with no task holding the end, and a reader parked forever on a
+     * pipe nobody will ever close. */
+    for (int i = 0; i < MAX_FDS; i++)
+        fd_close_in(p, i);
     spin_lock(&proc_lock);
     proc_retire_locked(p);
     spin_unlock(&proc_lock);

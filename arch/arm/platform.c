@@ -37,6 +37,13 @@ void sys_trace_note(uint32_t v);
 
 static int frame_is_user(const regs_t *f)
 {
+    /* v7-M EXC_RETURN: 0xFFFFFFF1 = Handler+MSP, 0xFFFFFFF9 = Thread+MSP,
+     * 0xFFFFFFFD = Thread+PSP.  Bit 2 is SPSEL, so this is true exactly for
+     * frames that interrupted a user task - the kernel's own Thread-mode
+     * launch path (cpu_take_task -> arm_enter_user) runs on MSP and reads
+     * as kernel, which is what keeps a tick landing there from consuming
+     * need_resched (OPEN-ITEMS §22/§24.4).  (regs.h used to call bit 2
+     * "Thread mode"; it is the stack select.) */
     return (f->exc_return & ARM_EXC_RET_S_BIT) != 0;
 }
 
@@ -262,6 +269,25 @@ regs_t *arm_handle_tick(regs_t *f)
        the next trap that really did interrupt user code. */
     if (!from_user)
         return f;
+
+    /* An SVC is *pended*, not taken, when a higher-priority exception is
+     * pending at the same instruction boundary - and SysTick (0x00)
+     * outranks SVCall (0x40) here.  The stacked frame is Thread+PSP, so
+     * the test above reads as "user", but the instruction that has not run
+     * yet is an SVC: switching tasks now leaves it pending, the pending
+     * SVC is tail-chained against whichever task we switch to, and the
+     * saved user frame still holds the pre-svc registers (r0 = syscall
+     * number).  Measured on mps2 as the lost syscall result, duplicated
+     * 128-byte blocks and the `piperace` EPIPE storm (OPEN-ITEMS §24.4).
+     * Let the tick return; the SVC runs at once on the original frame. */
+    {
+        uint32_t icsr = mmio_read32(ARM_ICSR);
+
+        if ((icsr & ARM_ICSR_PENDSVSET) ||
+            ((icsr & ARM_ICSR_VECTPENDING) == (ARM_VEC_SVCALL << 12)))
+            return f;
+    }
+
     return process_resched(f);
 }
 
@@ -441,6 +467,8 @@ void plat_wake_cpu(void)
  * in kernel/cpu.c are what it links against. */
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1 && !defined(TOS_ARM_M0P)
 
+#if !defined(TOS_ARM_SIO_SPIN)
+
 static inline uint32_t arm_ldrex(volatile int *p)
 {
     uint32_t v;
@@ -457,6 +485,8 @@ static inline uint32_t arm_strex(uint32_t val, volatile int *p)
                      : "=&r"(res) : "r"(val), "r"(p) : "memory");
     return res;
 }
+
+#endif /* !TOS_ARM_SIO_SPIN */
 
 /* Raw console line, used when the normal path may itself be stuck.  The
  * board's putc takes no lock (it writes the UART and the USB ring directly),
@@ -490,35 +520,124 @@ static void raw_putdec(uint32_t v)
 }
 
 /* How long a lock may stay taken before we call it stuck.  At 150 MHz a
- * pass through the LDREX/STREX pair is a handful of cycles, so this is
+ * pass through the acquire loop is a handful of cycles, so this is
  * seconds: long enough that no legitimate holder (a flash erase is 20 ms,
  * the longest thing the kernel does under a lock) trips it. */
 #define SPIN_LIMIT 40000000u
+
+/* The Cortex-M33 cores of the RP2350 share no global exclusive monitor:
+ * LDREX/STREX only excludes against the local core, so two cores could both
+ * "acquire" the same word - measured on real hardware as proc_lock held by
+ * both sides at once, with two cores running one task (OPEN-ITEMS §24.4).
+ * This is why the SIO block carries 32 real hardware spinlocks: reading
+ * SPINLOCK[n] claims it atomically (bit 31 set means we own it now) and
+ * writing it releases, with no cache or exclusive-monitor involvement.
+ *
+ * The gate protects only the flag's test-and-set - never a whole critical
+ * section - so the nested-lock shape of the kernel (proc_lock inside
+ * heap_lock, a pipe lock inside proc_lock, ...) cannot self-deadlock on
+ * one hardware lock.  The gate window is three instructions and is IRQ
+ * masked, so a tick landing inside it cannot try to pass it again. */
+#if defined(TOS_ARM_SIO_SPIN)
+
+#define SIO_BASE       0xD0000000u
+#define SIO_SPINLOCK0  (SIO_BASE + 0x100u)
+/* Kernel has no other SIO-spinlock user; pick one far from boot ROM's. */
+#define TOS_SIO_GATE   31u
+
+static inline int sio_gate_claim(void)
+{
+    return (int)(mmio_read32(SIO_SPINLOCK0 + 4u * TOS_SIO_GATE) >> 31);
+}
+
+static inline void sio_gate_free(void)
+{
+    mmio_write32(SIO_SPINLOCK0 + 4u * TOS_SIO_GATE, 0);
+}
+
+static inline uint32_t sio_gate_irq_save(void)
+{
+    uint32_t pm;
+
+    __asm__ volatile("mrs %0, primask\n"
+                     "cpsid i" : "=r"(pm) :: "memory");
+    return pm;
+}
+
+static inline void sio_gate_irq_restore(uint32_t pm)
+{
+    __asm__ volatile("msr primask, %0" :: "r"(pm) : "memory");
+}
+
+#endif /* TOS_ARM_SIO_SPIN */
 
 void plat_spin_acquire(volatile int *v)
 {
     uint32_t spins = 0;
 
-    while (arm_ldrex(v) != 0 || arm_strex(1, v) != 0) {
-        if (++spins == SPIN_LIMIT) {
-            /* The holder is not coming back.  A hung board that says which
-             * lock and which core is worth a hundred blind reboots; a panic
-             * here cannot make things worse. */
-            raw_puts("\r\n[spin] cpu ");
-            raw_putdec((uint32_t)plat_cpu_id());
-            raw_puts(" stuck on lock ");
-            raw_puthex((uint32_t)(uintptr_t)v);
-            raw_puts(" ticks=");
-            raw_putdec((uint32_t)plat_ticks());
-            raw_puts("\r\n");
-            plat_panic_halt();
+    for (;;) {
+        while (*v != 0) {
+            if (++spins == SPIN_LIMIT) {
+                /* The holder is not coming back.  A hung board that says which
+                 * lock and which core is worth a hundred blind reboots; a panic
+                 * here cannot make things worse. */
+                raw_puts("\r\n[spin] cpu ");
+                raw_putdec((uint32_t)plat_cpu_id());
+                raw_puts(" stuck on lock ");
+                raw_puthex((uint32_t)(uintptr_t)v);
+                raw_puts(" ticks=");
+                raw_putdec((uint32_t)plat_ticks());
+                raw_puts("\r\n");
+                plat_panic_halt();
+            }
         }
+#if defined(TOS_ARM_SIO_SPIN)
+        {
+            uint32_t pm = sio_gate_irq_save();
+
+            while (!sio_gate_claim()) { }
+            __asm__ volatile("dmb" ::: "memory");   /* order the gate vs *v */
+            if (*v == 0) {
+                *v = 1;
+                __asm__ volatile("dmb" ::: "memory");
+                sio_gate_free();
+                sio_gate_irq_restore(pm);
+                __asm__ volatile("dmb" ::: "memory");
+                return;
+            }
+            sio_gate_free();
+            sio_gate_irq_restore(pm);
+            /* Lost the race: go back and watch the flag. */
+        }
+#else
+        if (arm_ldrex(v) == 0 && arm_strex(1, v) == 0) {
+            __asm__ volatile("dmb" ::: "memory");   /* acquire: later reads see the holder's writes */
+            return;
+        }
+        /* Do not leave the exclusive tag set across the retry spin. */
+        __asm__ volatile("clrex" ::: "memory");
+#endif
     }
-    __asm__ volatile("dmb" ::: "memory");   /* acquire: later reads see the holder's writes */
 }
 
 int plat_spin_try_acquire(volatile int *v)
 {
+#if defined(TOS_ARM_SIO_SPIN)
+    uint32_t pm = sio_gate_irq_save();
+
+    while (!sio_gate_claim()) { }
+    __asm__ volatile("dmb" ::: "memory");
+    if (*v == 0) {
+        *v = 1;
+        __asm__ volatile("dmb" ::: "memory");
+        sio_gate_free();
+        sio_gate_irq_restore(pm);
+        return 1;
+    }
+    sio_gate_free();
+    sio_gate_irq_restore(pm);
+    return 0;
+#else
     if (arm_ldrex(v) != 0) {
         /* Do not leave the exclusive tag set: a later LDREX on this core
          * would otherwise be the one that clears it, and in between a STREX
@@ -530,6 +649,7 @@ int plat_spin_try_acquire(volatile int *v)
         return 0;
     __asm__ volatile("dmb" ::: "memory");
     return 1;
+#endif
 }
 
 void plat_spin_release(volatile int *v)

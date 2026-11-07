@@ -261,6 +261,12 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 			// dumped by arm_handle_fault().  Only the new M33 port pays for
 			// it; remove once the shell is stable on real hardware.
 			archFlags = append(archFlags, "-DTOS_SYSCALL_TRACE=1")
+			// The two M33 cores share no global exclusive monitor, so
+			// LDREX/STREX cannot give cross-core mutual exclusion (measured
+			// as proc_lock double-held, OPEN-ITEMS §24.4).  The SIO block's
+			// hardware spinlocks are the sanctioned fix - tell platform.c
+			// to use one as the gate behind the software lock flag.
+			archFlags = append(archFlags, "-DTOS_ARM_SIO_SPIN")
 		}
 	} else {
 		archFlags = []string{

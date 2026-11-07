@@ -17,6 +17,15 @@
  * Cortex-M3 implements the top three bits, so values step by 0x20 from
  * 0x00 (highest) to 0xE0 (lowest); writing a value that is not a multiple
  * of 0x20 simply loses the unimplemented low bits. */
+#define ARM_ICSR         (ARM_SCS_BASE + 0xD04u)
+/* Set when an SVC was pended instead of taken (a higher-priority exception
+ * was pending at the same instruction boundary).  QEMU/mps2 does not set
+ * this bit for a priority-pended SVC; it shows up in VECTPENDING instead
+ * (measured: ICSR=0x0000B80F while SysTick 15 is active and SVC 11 is
+ * pending), so both are tested. */
+#define ARM_ICSR_PENDSVSET     (1u << 28)
+#define ARM_ICSR_VECTPENDING   (0x1FFu << 12)
+
 #define ARM_SHPR1        (ARM_SCS_BASE + 0xD18u)
 #define ARM_SHPR2        (ARM_SCS_BASE + 0xD1Cu)
 #define ARM_SHPR3        (ARM_SCS_BASE + 0xD20u)

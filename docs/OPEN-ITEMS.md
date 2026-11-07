@@ -1624,7 +1624,10 @@ gitignore 掉的 `tos.exe`（2026-11-02 的陈货），它会用一个旧构建�
 加 `write_all()`（`user/lib.c`）让 `puts`/`printf`/`putint`/`cat`/`sh` 都走它之后，
 同一命令固定 2788，`cat pytest.py | wc` 固定 3447，正好是文件大小。
 
-### 24.4 仍未结案：>50 KiB 之后字节错位（HEAD 也有）
+### 24.4 ~~仍未结案~~：>50 KiB 之后字节错位（HEAD 也有）
+
+> **已结案（2026-11-08）**：第一因是“tick 抢在 SVC 前面、SVC 被 pended 时内核仍
+> 切换任务”。修复与验证见 §24.4.5 末尾。
 
 `piperace 2 64`（两对，各 64 KiB）在本树上 **5 次里 4 次失败**，HEAD 上同样失败
 （1 次损坏 + 3 次直接卡死）。证据：
@@ -1638,11 +1641,227 @@ piperace: bad byte at 61824: got 11 want 139
 属于 `0 mod 2048` 那一类，而位置 61824 属于 `384 mod 2048` —— 即流**错位了 384
 字节（3 个 128 字节块）**。错位发生在 40~60 KiB 之后，1 对 64 KiB 不出现。
 
-已经排除的：环形缓冲的读/写都在 `proc_lock` 里（本轮改的）、引用计数有锁、
-`fd_close` 与 `kfree` 分开。**没有排除的**：一个块被投递两次（`pipe_deliver_locked`
-把数据直接写进等待者的 `wbuf`，而等待者恢复时 `r0` 的来源是 §22 那条链）。
+#### 24.4.1 第一个根因已修：M33 双核 LDREX/STREX 不互斥（2026-11-08）
 
-这是 §22 之外的一条独立线索，也是目前 `piperace` 唯一还红着的东西。
+rp2350smp 上 `proc_lock` 的自旋实现是 LDREX/STREX。Cortex-M33 **没有全局排他
+监视器**——排他监视器是每核一份的，核 0 的 LDREX 在核 1 眼里不存在，STREX 永远
+成功。两个核于是能**同时持锁**：`[L race]` 探针（持锁者互相发现对方也持锁）从
+持续增长到修后归零，环记账 `[A hit]` 同步归零。这是本条错位形态的主根因。
+
+修法：SIO 硬件 spinlock（`arch/arm/platform.c`，`TOS_ARM_SIO_SPIN` 由 build.go
+对 rp2350 板定义）。不能全程持有（内核多锁嵌套会自锁），所以 SIO 锁（#31）只作
+3 条指令的短门闩 + PRIMASK 屏蔽，保护 flag 的 test-and-set：外层 `while (*v != 0)`
+带 SPIN_LIMIT 卡死报告，门内 claim → dmb → `if (*v == 0) { *v = 1; }`。
+SIO 寄存器属 SoC 外设区（0xD0000000），不走 L1 cache，无需维护一致性。
+
+顺带修的：`cpu_secondary_main` 的 CPU 归属判据、`process_resched` 的用户帧门
+（tick 落在内核 Thread+MSP 帧上不再消费 `need_resched`，§22 链路的守护）。
+
+**踩过的坑（EXC_RETURN 编码）**：v7-M 的 bit3 = mode（1=Thread）、bit2 = SPSEL
+（1=PSP）。`0xFFFFFFF1`=Handler+MSP、`0xFFFFFFF9`=**Thread+MSP**（内核启动路径
+kmain/cpu_take_task/arm_enter_user）、`0xFFFFFFFD`=Thread+PSP（用户任务）。
+一度把 frame_is_user 改成测 bit3，结果 Thread+MSP 的启动帧被判成 user，tick 在
+shell 启动路径上直接 sched_switch，从启动帧恢复任务 → HardFault，QEMU mps2 三个
+镜像全挂。QEMU 三步二分定位后回滚：**测 bit2 本来就对**（regs.h 注释已修正）。
+
+#### 24.4.2 SIO 修复后仍有残留（根因未定位）
+
+`piperace 4 64` / `2 64` 偶发 FAIL，单 pair `1 64` 3 连过 → 并发相关。形态：
+
+- 写端 mid-stream 返回 -1（failcode kind4, a=1；PIPE_EAGAIN=-1 与 EPIPE 经
+  `pipe_deliver_locked` 的映射不可区分，但 `[E ep]` 持有者对账探针命中过
+  `rhold 0`——reader 的 fd 确实没了 = reader 自己先退，writer 引用没丢
+  （`[E wdrop]` 修正假阳性后零命中））。
+- reader 提前 EOF（kind5：读到 26/35/41/49 KiB 就 0）。
+- 流移位：off≈31488 处期望 `pat(off)=11` 得 107（坏字节，非错位 2048 周期）。
+- p3 一次 off=0 双失败（`w=80001004`/`r=80000405`）：两个孩子开局即 EBADF/EOF
+  形状，指向"child fd 全关"或"任务被重启"一类机制。
+- `w r0=1 echo=00000000`：任务从入口帧直接恢复（`plat_frame_set_ret` 未应用）。
+- 一次退出码 `0x80`：不属于 137/139/exit(a0) 任一已知来源。
+
+已排除：writer/reader 引用计数丢失、fd→pipe 对象错配、argv 解析（0x7E 探针未
+触发）、SIO 锁竞态本身（`[L race]`/`[A hit]` 归零）。
+
+候选方向：`sched_switch` resume 路径的帧来源、`block_on_pipe_locked` 预置 -1
+被错误唤醒消费、启动槽协议。撤探针前应先给预置返回值加标记位区分"预置未覆盖"
+与"deliver 覆盖"。
+
+#### 24.4.3 QEMU mps2 复现与排除清单收窄（2026-11-08 晚）
+
+QEMU mps2（单核）上 `piperace 4 64` 稳定复现 0/4 → 加 marker 后 2/4，QEMU 也
+丢行（推翻"QEMU 不丢行"）。本轮新证据与排除：
+
+- **探针自污染定案**：arm_resume 尾部 C 探针的局部变量必然覆盖活帧低 32 B，
+  幽灵帧证据全部作废；改纯 asm ring 捕获（label 7，64×16 字）。
+- **窗口期彻底排除**：ring 检查 `*hw+0 == frame.r0` 且 `*hw+16 == frame.r12`
+  （r12 槽盲区已补），全部自洽——cpsie i → bx lr 之间无人写坏帧。
+- **-1 预置唤醒分类**（`w1=` 按 src 计数）：命中全部 src=4（合法 EPIPE 投递
+  给 writer），src=2/3/5（丢失唤醒形状）= 0 —— 丢失唤醒假说被否。
+- **`[B big]` 是误报**：er 环的巨大 r0（0x8c819405 等）= 任务的 exit code
+  （failcode/offcode），set_ret 合法写入，echo 自洽。
+- **`[N hw2]` 窗口观察者是误报**：任意嵌套 tick 读 PSP = 用户栈顶活动数据
+  （r12=KEY^1 是 shell echo 变量残留），已撤。
+- **`[P prev]` 0 命中**：sched_switch 抢占复制无 procs[0] 交叉写入。
+- **argc/argv 损坏实锤（偶发）**：子进程报告 `0x7E000001`（argc<4 而
+  argv[1] 完好）+ `w=00000001`（is_child 误判为 false → 走 parent 路径
+  return bad=1）。piperace 加 "C" 标记参数 + argc/argv[1]/argv[2] 校验后
+  通过率 0/4 → 2/4。**`[E argc]` 写后读回验证未命中** → 损坏发生在布局
+  之后、crt0 之前（或 crt0 的 sp 错位）。
+- **exit code 0 形状**：`w=00000000`/`r=00000000` 与"子进程走 parent 路径
+  return bad=0"吻合；`w=8xx01004`（EPIPE@0-9 KB）与 reader 提前死级联。
+- **proc_retire 泄漏 fd 引用已修**（exec 晚期失败路径，永久候选）。
+- **HardFault 转储**（fault 任务 r12=0xa5a5a5a5 = -1 预置 echo、r9=0x1999999a
+  = printf ÷10 魔数、故障在 `strh [r0,#12]`）：echo 失配 printf 路径崩溃，
+  fault 任务被 exit(139) 处理；转储已加 `[F pid=...]` 尾行（console 丢行
+  只吃行首，关键信息放最后）。
+
+**当前第一嫌疑**：exec 初始栈（argc/argv/strings，build_initial_stack →
+plat_prepare_user_frame → arm_enter_user 启动链）在窗口复用/连续 exec 下的
+偶发损坏或 sp 错位；其次是假 EPIPE（readers 计数错误清零，`[E ep]` 场景已
+入 dbg 行 `ep:` 字段，待命中）。
+
+#### 24.4.4 二分推进（2026-11-08 深夜）
+
+- **假 EPIPE 被否**：`epd=` 场景（pid/gen/r/w/cnt/rh/rpid/rfd 并入 dbg 行）
+  显示 readers=0 且持有者扫描 rh=0 —— **计数与持有者一致，reader 真的先退
+  了**，writer 的 EPIPE 是对的。第一因回到"reader 为什么提前死"。
+- **argc 槽损坏确认 + 部分二分**：piperace 子进程报 `0x7E0000A3`（新魔数，
+  低 4 位 = argc=3；布局写的是 5）。**[E argc] 写后读回（prepare_user_frame
+  之后）从未命中** → 损坏在布局之后；**start-svc 消费点读回探针**（asm，
+  [hw+32]）曾见 0 —— 但 `sac=0/bad=1` 恒定来自 **shell 的启动**
+  （shell 以 argc=0 布局属正常，探针假设 5 系误报源，已修为只记 !=5 并存
+  hw）。piperace 子的"消费点 argc 值"被 shell 的记录覆盖，**需要环形记录**
+  才能对上"哪次 start 读到几"。
+- **wait 卡死型**：一轮出现每轮 hang——writer（pid 3）已退出（fd 表无它）
+  而父进程 fd4 未关（close(fds[1]) 未执行到），reader 停在空管道；父进程
+  疑卡在 wait(wpid[0]) —— **writer 的 exit code 未送达（lag 路径待查）**。
+- **hw/PSP 一致性检查**（ring 新增条件 psp!=hw）零命中 —— 写回目标无误。
+- **探针污染教训再+1**：sac 探针假设 argc=5 把 shell 的正常启动记成坏。
+- **临时工具**：scripts/tmp-arm.py 每轮后发 `ps` 抓 dbg:/er: 行；dbg 行含
+  pair/race/ufb/wdrop/eof/ep/br/fr/exe/wake/big/w1/epd/sac/tak。
+
+**下一步**：① start-svc 消费点改环形记录（值+hw+pc，8 项）以对上"哪次
+start 读到几"；② lag_push/lag_take 的 exit-code 送达路径加对账；③ 查
+`p->parent` 在 writer exit 时的正确性。
+
+#### 24.4.5 决定性 A/B：触发条件是 tick 抢占，不是管道（2026-11-08 更晚）
+
+**A/B 结果**：`QUANTUM` 从 1 改成 1000000（tick 不再主动抢占，只保留阻塞时的
+自愿切换）后，`piperace 4 64` **2/2 全 ok，echo mismatch 归零**；改回 1 立刻
+0/2~0/4。第一因锁定在**运行中的任务被 tick 抢占、之后再恢复**这条路径，与管道
+环形缓冲、引用计数、阻塞唤醒、lag 送达都无关。
+
+新增的 per-task 探针（都在 `proc_t` 里，随 `ps` 的 dbg 行输出）：
+
+- `dbg_l*`：本任务最后一次 **syscall 向量（vec=11）** 的恢复帧；
+- `dbg_a*`：本任务最后一次**任意**恢复帧（含 tick，vec=15）；
+- `dbg_nr_disp/res`、`dbg_rd_disp`：dispatch / syscall 恢复 / read dispatch 计数；
+- `svc in/disp/start`：`arm_svc` 进入、进入 dispatch、被 pending-start 吃掉的次数；
+- tick-save 捕获：tick 抢占保存的帧若 r0 仍是 syscall 号而本任务上次 syscall 结果是
+  另一个值，记下两边（`ts:` 行）。
+
+**现场（每次失败形状一致）**：
+
+```
+ts: pid=8 tick pc=20100864 r0=00000002 r12=0000007f
+    last r0=00000080 r12=5a5a5ada pc=20100864 v11
+```
+
+- 本任务最后一次 syscall 恢复：`pc=win+0x864`（`read_echo` 里 `svc` 之后的第一条
+  指令），`r0=0x80`、`r12=0x80^KEY` —— 内核认为结果已经交付。
+- 紧接着 tick 抢占保存的帧：**pc 相同**，但 `r0=2`（`SYS_READ`）、`r12=0x7f`
+  —— 用户寄存器还是 **svc 之前**的值。即 eret 装上了 pc，却没装上 r0/r12。
+- `arm_resume` 尾部新加的持久检查（frame 的 r0/r12、`*hw`、`*hw16`、`PSP` 四者
+  全等）**0 命中**：eret 前一刻的写回目标、硬件帧内容和 PSP 都自洽。
+- `arm_svc` 计数 `in = disp + start`，所有 svc 都进了 dispatch；但本任务的 read
+  dispatch 计数**恒比用户 read 调用数少 1**，与"pc 已过 svc、r0 还是 syscall 号"
+  完全一致：有一次 read 的结果从未被用户看到。
+
+**已排除**（本轮）：窗口复用（win_alloc 与 hang dump 自洽）、跨窗口栈
+（`fr=0/ufb=0`）、引用计数/假 EPIPE/提前 EOF（无 tick 抢占时全通过）、
+`-1` 预置唤醒（`w1` 全 src=4）、写回丢失（上面的四者全等检查 0 命中）。
+另外把 echo 指针从 `lr` 换到 `r4`（`lr` 是内核唯一需要从栈帧恢复的用户寄存器），
+并在 asm 内直接存 raw r0/r12，排除了"测量被 epilogue 影响"这一层。
+
+**当前唯一嫌疑**：tick 抢占的保存/恢复与 SVC 返回之间的交接。已在 `arm_resume`
+尾部把实际写入的 `(pc,r0,r12,psp,hw,*hw,*hw16,exc)` 存成 `dbg_wr_f`，与下一次
+tick save 对账：
+
+```
+ts: tick pc=200f0888 r0=00000001 r12=00000025
+    wr   r0=00000080 r12=5a5a5ada pc=200f0888 psp=hw=200ffd68 h0=80 h12=...
+    dwr=1  thw=200ffd68
+```
+
+- `dwr=1`：tick 是这次 syscall `arm_resume` 之后**第一个**异常；
+- `thw == wr hw`：tick 的 PSP 就是刚写回的帧地址，没有 PSP 漂移；
+- 但 tick 保存下来的 `r0/r12` 是 **svc 之前的 1/0x25**，而 `[hw]` 在 eret 前
+  一刻确实是 `0x80/0x80^KEY`。
+
+即：**写回目标、PSP、硬件帧内容三者都对，eret 却像只装了 pc/sp、没装 r0/r12**。
+这与“tick 落在 `arm_resume` 内部”的形状一致。已试过在 `arm_resume` 入口
+`cpsid i`、只在 `bx lr` 前按 exc bit2 重新 `cpsie i`：**启动即 HardFault
+(exc=0xfffffff9, pc=0xee38)**，说明不能简单地对所有返回路径无条件改 PRIMASK，
+该实验已回退。
+
+**更晚的两组实验（2026-11-08 末）**：
+
+- **marker 实验**：在 `arm_resume` 最后把 `0xDEADBEEF` 写进 user 帧的 r1 槽，
+  下一次 tick 的 raw 压栈帧里看得到就说明 eret 真的 unstack 了。结果：
+  - 正常恢复：`f1=0xDEADBEEF`（unstack 正常）；
+  - 失败的那次：`f1=00000003`（**svc 前的 fd 参数**），marker 不在——
+    **eret 没有 unstack 这个写好的帧**。
+- **raw SysTick 入口**（在 `arm_trap_enter` 之前记录）：失败 tick 的
+  `lr=0xFFFFFFFD, msp=0x20076c10, psp=hw, primask=0`，并且 `psp[0]=2`、
+  `psp[4]=3`、`psp[24]=post-svc pc`。即它确实按 Thread+PSP 压栈，且压栈内容就是
+  svc 前的寄存器；不是“压栈在 MSP、只是 LR 看起来像 FD”的普通 tail-chain。
+- **原子化 A/B**：入口 `mrs primask` 保存、`cpsid i` 包住写回、末尾对 kernel 帧
+  `msr primask` 恢复、user 帧 `cpsie i`——启动不再 HardFault，但**仍然 0/3**。
+- **PENDSTSET 清除 A/B**：在 user 返回前若 ICSR.PENDSTSET 置位就 PENDSTCLR，
+  **仍然 0/3**。所以不是“eret 处正好有一个 pending SysTick”。
+
+**根因（QEMU `-d int` trace 确认，2026-11-08）**：
+
+```
+Taking exception 2 [SVC] on CPU 0
+...taking pending nonsecure exception 15      <- SysTick 先被取走
+...loaded new PC 0xefc1
+Exception return: magic PC fffffffd previous exception 15
+...tailchaining to pending exception 11        <- 被 pended 的 SVC 之后才执行
+```
+
+SysTick 优先级 0x00 高于 SVCall 0x40，所以 `svc` 执行的同一个指令边界上如果有
+pending tick，**tick 先进入，SVC 被 pended**（ICSR 现场：`0x0000B80F`
+= VECTACTIVE 15 + VECTPENDING 11；注意 QEMU/mps2 **不置 PENDSVSET**）。
+这个 tick 的 EXC_RETURN 是 0xFFFFFFFD（Thread+PSP），内核按普通用户 tick 处理，
+`process_resched()` 切走任务，并把 **svc 之前**的用户寄存器存进 `saved`
+（r0 = syscall 号）。随后被 pended 的 SVC 才 tail-chain 执行，等原任务以后从
+这份 saved 恢复时，pc 已经在 svc 之后、r0 仍是 syscall 号——一次 syscall 的结果
+就这样丢了。短写/重复块/移位流/EPIPE/argc 与 fd 级联全部由此而来。
+
+**修复**（`arch/arm/platform.c: arm_handle_tick`）：tick 处理完以后，如果
+`ICSR.PENDSVSET` 置位，或 `ICSR.VECTPENDING == ARM_VEC_SVCALL`，**不要
+reschedule**，直接返回本 tick 的帧。tick 返回后 pended SVC 立即 tail-chain，
+在原来的帧上正常 dispatch。判定两个位都查，是因为真机（M33）会置
+PENDSVSET，而 QEMU/mps2 只体现在 VECTPENDING。
+
+**验证（QEMU mps2 单核，探针全部撤除后的干净镜像，原 `user/piperace.c`）**：
+
+| 命令 | 结果 |
+|---|---|
+| `piperace 4 64` | 10/10 + 10/10 + 3/3 |
+| `piperace 3 64` | 5/5 + 6/6 |
+| `piperace 2 64` | 6/6 + 6/6 |
+| `piperace 1 64` | 5/5 |
+
+全部 `piperace: ok`。之前带探针的版本还跑过 `4 32` 5/5。修复前同一镜像每轮都有
+错位或 EPIPE。
+
+同时 `x86`、`rv32` 目标都恢复可编译（探针撤掉后 x86 内核重新回到 boot loader
+的 92 160 字节限制以内）。`user/piperace.c` 保持原样——旧版用 `dup2` 的测试在
+修复后的内核上同样通过（10/10、6/6、5/5）。
+
+探针已撤除，工作树准备提交。
 
 ### 24.5 块数吞吐指标在真板上不可用
 
