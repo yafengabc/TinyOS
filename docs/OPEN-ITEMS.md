@@ -1670,6 +1670,24 @@ shell 启动路径上直接 sched_switch，从启动帧恢复任务 → HardFaul
 > 主形状已由 §24.4.5 的 pended-SVC 修复解决（单核 RP2350 `piperace 4 64` 10/10）。
 > 本条剩下的偶发坏字节/短流仍在 `rp2350smp` 上以约 1/7 的频率出现，是另一条
 > SMP 残留，尚未定位。
+>
+> **已抓到的 SMP 残留现场**（`piperace 4 128`，修复后的双核镜像）：
+>
+> - 某对写端退出码 **139**（`arm_handle_fault` 的 fault 退出码），读端先报
+>   `bad byte at 22144: got 11 want 139`——`got` 正好是 `off-128` 处的字节，
+>   即**一个 128 字节块被重复写入**；随后读端 EOF，写端 EPIPE。
+> - 但 r0/r12 echo 探针（`plat_frame_set_ret` 写 r12）在这些失败里**没有报**
+>   mismatch。说明用户拿到的返回值与 echo 一致，问题不是“结果没写进帧”，而更像
+>   **同一次 write syscall 被回放**（pc 回到 svc 之前）或帧的 pc 被另一条路径
+>   覆盖。
+> - 事件探针显示健康 pair 的 EOF/最后 close 会覆盖失败 pair 的场景；需要按
+>   pipe 指针/pid 做环形记录才能对上。
+> - 探针加上后 15 轮不触发（时序敏感），源码补丁留在 `build/smp-probes.patch`。
+>
+> **下一步（SMP）**：给每个任务记一个 write/read dispatch 计数并在帧里带序号，
+> 检测“同一 svc 被执行两次”；同时检查 `block_on_pipe_locked` 保存的
+> `saved.pc` 与投递后恢复的 pc 是否始终在 svc 之后，以及 pended-SVC 修复里
+> “不 reschedule 但保留 need_resched”在双核下的后续行为。
 
 `piperace 4 64` / `2 64` 偶发 FAIL，单 pair `1 64` 3 连过 → 并发相关。形态：
 
@@ -1920,7 +1938,8 @@ HEAD 自己同一条命令的两个 worker 就差 3.3 倍（2953 vs 9764），�
   `2 64` 的根因已修（§24.4.5）。修复前固件上复现：`piperace 2 64` →
   `p0: w=95201004 r=00000020`、`[E ep: pid 74 gen 33 r=0 w=1 cnt=1920]`。
   烧修复镜像后：**单核 `rp2350` `piperace 4 64` 10/10**；`rp2350smp` `2 64` 3/3、
-  `4 64` 19/22（残留为 §24.4.2 的偶发坏字节，EPIPE 风暴已消失）。
+  `4 64` 19/22，`4 128` 偶发（坏字节/写端 fault 139）。残留是 §24.4.2 的
+  SMP 问题（128 字节块重复），EPIPE/丢结果风暴已消失；细节与探针补丁见该节。
 - C3 真机 `accept.py` **24/24**。
 - QEMU：x86 全套冒烟 ok；rv32smp（`cpus=2`）`piperace 1 16` ok、`cat demo.py | wc`
   2788 精确。
