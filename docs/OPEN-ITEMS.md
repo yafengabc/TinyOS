@@ -1899,10 +1899,18 @@ HEAD 自己同一条命令的两个 worker 就差 3.3 倍（2953 vs 9764），�
 
 ### 24.8 验收
 
-- 真板 `rp2350smp`：功能 7/7；`piperace 1 64` / `2 32` / `3 32` 全 ok；`2 64` 见 24.4。
+- 真板 `rp2350smp`：历史结果 功能 7/7；`piperace 1 64` / `2 32` / `3 32` 全 ok。
+  `2 64` 的根因已修（§24.4.5），**待烧录修复后的镜像复跑**（`piperace 2 64` / `4 64`）。
+  2026-11-08 在板上现有（修复前）固件上复现：`piperace 2 64` →
+  `p0: w=95201004 r=00000020`、`[E ep: pid 74 gen 33 r=0 w=1 cnt=1920]`，
+  `p1` 通过——与 §24.4.5 的形状一致。
 - C3 真机 `accept.py` **24/24**。
 - QEMU：x86 全套冒烟 ok；rv32smp（`cpus=2`）`piperace 1 16` ok、`cat demo.py | wc`
   2788 精确。
+- QEMU mps2 单核（探针撤除后的干净镜像）：`piperace 4 64` 23/23、
+  `3 64` 11/11、`2 64` 12/12、`1 64` 5/5、`4 32` 5/5；`tostest smoke -target arm`
+  （hello + `piperace 2 64`）OK。
+- `tostest compat -targets x86,rv32` OK；x86 / rv32 / rp2350 / rp2350smp 均可构建。
 - 镜像 `e90e21a5…`（与实测镜像 md5 相同）。
 
 
