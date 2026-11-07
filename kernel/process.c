@@ -531,8 +531,13 @@ static regs_t *sched_switch(regs_t *r)
     }
 }
 
-/* Give up the CPU until somebody completes our request. */
-static regs_t *block(regs_t *r, int st)
+/* Put the caller to sleep with its frame already saved.  Called with
+ * proc_lock held and interrupts off; the caller has already checked the
+ * condition it is waiting for under that same lock, so a waker on the other
+ * CPU either sees ST_* and hands over the result, or it ran first and the
+ * check would have failed.  Splitting these three (check, frame, state) is
+ * what made `wait` hang: see docs/OPEN-ITEMS.md §23.2. */
+static regs_t *block_locked(regs_t *r, int st, uint32_t irq)
 {
     proc_t *p = current;
 
@@ -540,12 +545,25 @@ static regs_t *block(regs_t *r, int st)
     /* Woken by something unexpected?  Better a failed syscall than the
        syscall number handed back as a result. */
     plat_frame_set_ret(&p->saved, (uint32_t)-1);
-    spin_lock(&proc_lock);
     p->state = st;
     p->cpu = -1;
     spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
 
     return sched_switch(r);
+}
+
+/* Give up the CPU until somebody completes our request.  For conditions
+ * whose waker cannot be raced: the tick, or a driver callback that reruns
+ * every millisecond.  A one-shot waker (a dying child, a pipe writer) has to
+ * call block_locked() inside the critical section that checks the condition,
+ * or the wake-up can be spent before this task is sleepable. */
+static regs_t *block(regs_t *r, int st)
+{
+    uint32_t irq = plat_irq_save();
+
+    spin_lock(&proc_lock);
+    return block_locked(r, st, irq);
 }
 
 static regs_t *done(regs_t *r, int32_t val)
@@ -1002,15 +1020,20 @@ static proc_t *proc_alloc(void)
  * Clearing win_size is what frees the memory: the live windows *are* the
  * table (see win_alloc), so a task that stops being a task stops holding
  * address space, and its gap merges with its neighbours on the next scan. */
-static void proc_retire(proc_t *p)
+static void proc_retire_locked(proc_t *p)
 {
-    spin_lock(&proc_lock);
     p->state = ST_FREE;
     p->pid = 0;
     p->parent = NULL;
     p->cpu = -1;
     p->win_base = 0;
     p->win_size = 0;
+}
+
+static void proc_retire(proc_t *p)
+{
+    spin_lock(&proc_lock);
+    proc_retire_locked(p);
     spin_unlock(&proc_lock);
 }
 
@@ -1527,15 +1550,27 @@ static void task_release(proc_t *p)
 
 /* Hand a dead task's exit code to whoever waits for it: an actual waiter
  * gets it in its saved frame, otherwise it is remembered for the next
- * wait().  Children of the dead task go to its parent, or to init. */
-static void reap_into_parent(proc_t *p, int code)
+ * wait().  Children of the dead task go to its parent, or to init.
+ *
+ * Called with proc_lock held.  Returns the parent if it was made runnable;
+ * the caller has to unlock before preempt_if_higher(), which touches
+ * per-CPU state.  This runs in the same critical section as the retire (see
+ * retire_and_reap) so that a parent scanning for a live child can never see
+ * it in the gap between "the code is recorded" and "the slot is free". */
+static proc_t *reap_into_parent_locked(proc_t *p, int code)
 {
     proc_t *parent = p->parent;
+    proc_t *woke = NULL;
 
     if (parent) {
         if (parent->state == ST_WAIT_CHILD &&
             (parent->wait_pid == p->pid || parent->wait_pid < 0)) {
-            make_ready(parent, code);
+            /* Same as make_ready(), but the lock is already held and this
+             * must not release it: the frame write and the state store stay
+             * in the sender's critical section. */
+            plat_frame_set_ret(&parent->saved, (uint32_t)code);
+            parent->state = ST_READY;
+            woke = parent;
         } else {
             parent->exit_code = code;
             parent->laggards++;
@@ -1546,6 +1581,26 @@ static void reap_into_parent(proc_t *p, int code)
         if (procs[i].state != ST_FREE && procs[i].parent == p)
             procs[i].parent = parent ? parent : init_proc;
     }
+    return woke;
+}
+
+/* The last act of a task: record its code and give the slot back as one
+ * step.  Two separate steps left a window in which the slot was neither
+ * waiting-for-us nor free, and a parent that scanned there would block
+ * forever on a result that had already been recorded. */
+static void retire_and_reap(proc_t *p, int code)
+{
+    uint32_t irq = plat_irq_save();
+    proc_t *woke;
+
+    spin_lock(&proc_lock);
+    woke = reap_into_parent_locked(p, code);
+    proc_retire_locked(p);
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
+
+    if (woke)
+        preempt_if_higher(woke);
 }
 
 /* Retire a task that is not the caller: the caller keeps the CPU, the
@@ -1554,8 +1609,7 @@ static void reap_into_parent(proc_t *p, int code)
 static void task_kill(proc_t *p, int code)
 {
     task_release(p);
-    reap_into_parent(p, code);
-    proc_retire(p);
+    retire_and_reap(p, code);
 }
 
 regs_t *process_exit(regs_t *r, int code)
@@ -1565,20 +1619,30 @@ regs_t *process_exit(regs_t *r, int code)
         panic("no current process");
 
     task_release(p);
-    reap_into_parent(p, code);
 
     int is_init = (p == init_proc);
     if (is_init) {
         /* Raise the flag *before* the slot goes back to the table: a CPU
          * that sees an empty run queue must be able to see it, and the only
          * way to guarantee that without a shared clock is to make the flag
-         * visible first. */
+         * visible first.  Folding the reap in lets it share the lock, and
+         * keeps the flag ahead of the slot as before. */
+        uint32_t irq = plat_irq_save();
+        proc_t *woke;
+
         spin_lock(&proc_lock);
         sys_down = 1;
+        woke = reap_into_parent_locked(p, code);
+        proc_retire_locked(p);
         spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+
+        if (woke)
+            preempt_if_higher(woke);
+    } else {
+        retire_and_reap(p, code);
     }
 
-    proc_retire(p);
     current = NULL;
 
     if (is_init) {
@@ -1593,7 +1657,20 @@ regs_t *process_exit(regs_t *r, int code)
 regs_t *process_wait(regs_t *r, int pid)
 {
     proc_t *p = current;
+    uint32_t irq = plat_irq_save();
 
+    /* The scan and the sleep are one critical section.  A child exiting on
+     * the other CPU does reap + retire under this same lock, so there are
+     * only two orders and both are correct:
+     *
+     *   it exits first  -> the slot is already ST_FREE, the loop skips it,
+     *                      and the code it recorded is taken below;
+     *   we scan first   -> it finds parent->state == ST_WAIT_CHILD and
+     *                      hands the code straight into our saved frame.
+     *
+     * The old code scanned outside the lock and slept afterwards, which left
+     * a third order: recorded, then we sleep, then nobody ever wakes us. */
+    spin_lock(&proc_lock);
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *c = &procs[i];
         if (c->state == ST_FREE || c->parent != p)
@@ -1601,15 +1678,20 @@ regs_t *process_wait(regs_t *r, int pid)
         if (pid >= 0 && c->pid != pid)
             continue;
         p->wait_pid = pid;
-        return block(r, ST_WAIT_CHILD);
+        return block_locked(r, ST_WAIT_CHILD, irq);
     }
 
     /* No such child: either it already exited (we remember its code, but
        not which of several children it was) or it never existed. */
     if (p->laggards > 0) {
+        int code = p->exit_code;
         p->laggards--;
-        return done(r, p->exit_code);
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        return done(r, code);
     }
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
     return done(r, -1);
 }
 

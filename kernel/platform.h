@@ -89,6 +89,17 @@ void plat_irq_enable(void);
 void plat_irq_disable(void);
 void plat_cpu_idle(void);             /* hlt / wfi, interrupts enabled */
 
+/* Save the interrupt-enable state and disable interrupts.  plat_irq_restore()
+ * puts back exactly what was there.
+ *
+ * A critical section that can be entered both from a system call (interrupts
+ * on) and from the tick handler (interrupts already off) must not re-enable
+ * on the way out, so disable()/enable() are the wrong pair; and on ARM
+ * plat_irq_enable() has a side effect - it unmasks the board's tick source
+ * the first time it runs on a core.  See docs/OPEN-ITEMS.md §23.3. */
+uint32_t plat_irq_save(void);
+void     plat_irq_restore(uint32_t state);
+
 /* The arch dispatcher reports an external interrupt as a CPU line number.
  * Exactly one of them is the clock; the rest belong to the board (the C3
  * routes console input to its own line so a byte is drained the moment it

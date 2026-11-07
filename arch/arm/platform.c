@@ -371,6 +371,32 @@ void plat_irq_disable(void)
     __asm__ volatile("cpsid i" ::: "memory");
 }
 
+/* PRIMASK is 1 when interrupts are masked, so returning it verbatim is the
+ * whole state.  Restored with MSR rather than CPSIE: plat_irq_enable()
+ * unmasks the board's tick source on first use per core and this must not. */
+uint32_t plat_irq_save(void)
+{
+    uint32_t pm;
+
+    __asm__ volatile("mrs %0, primask\n\t"
+                     "cpsid i"
+                     : "=r"(pm)
+                     :
+                     : "memory");
+    return pm;
+}
+
+void plat_irq_restore(uint32_t state)
+{
+    /* MSR PRIMASK needs a context synchronisation event before the next
+     * instruction may rely on the new value. */
+    __asm__ volatile("msr primask, %0\n\t"
+                     "isb"
+                     :
+                     : "r"(state)
+                     : "memory");
+}
+
 void plat_cpu_idle(void)
 {
     /* Idle as a poll, not a WFI.

@@ -140,6 +140,21 @@ uint32_t plat_tick_hz(void)           { return timer_hz(); }
 
 void plat_irq_enable(void)  { sti(); }
 void plat_irq_disable(void) { cli(); }
+
+/* EFLAGS.IF, captured and cleared in one sequence. */
+uint32_t plat_irq_save(void)
+{
+    uint32_t flags;
+
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    return flags & 0x200u;
+}
+
+void plat_irq_restore(uint32_t state)
+{
+    if (state)
+        __asm__ volatile("sti" ::: "memory");
+}
 void plat_cpu_idle(void)    { hlt(); }
 
 uint32_t plat_uptime_ms(void)      { return timer_uptime_ms(); }

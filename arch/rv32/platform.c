@@ -214,6 +214,22 @@ void plat_irq_disable(void)
     __asm__ volatile("csrci mstatus, 8");
 }
 
+/* csrrci reads the old mstatus and clears MIE in one instruction, so the
+ * saved value cannot be torn by an interrupt in between. */
+uint32_t plat_irq_save(void)
+{
+    uint32_t old;
+
+    __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(old) : : "memory");
+    return old & 8u;
+}
+
+void plat_irq_restore(uint32_t state)
+{
+    if (state)
+        __asm__ volatile("csrsi mstatus, 8" ::: "memory");
+}
+
 void plat_cpu_idle(void)
 {
     __asm__ volatile("csrsi mstatus, 8; wfi");
