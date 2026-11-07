@@ -24,6 +24,11 @@
 #define MAX_ARGS    12
 #define MAX_FDS     12
 
+/* Unwaited exit codes a parent remembers (see proc_t.lag_pid).  Costs
+ * LAG_MAX * 8 bytes per table slot; eight is what a test bench that spawns
+ * one child per CPU times two needs, and the shell needs two. */
+#define LAG_MAX     8
+
 /* The board's default stack size, from layout.c.  It is what a task gets
  * when its image does not ask for anything else; a program can ask with
  * TOS_STACK() (see elf_tos_note) and the answer lives in proc_t.stack_size,
@@ -139,8 +144,17 @@ typedef struct proc {
     int      prio;          /* PRIO_*, 0 = highest */
     int      pid;
     int      wait_pid;      /* ST_WAIT_CHILD: which child, -1 for any */
-    int      exit_code;
-    int      laggards;      /* children that exited without a waiter */
+
+    /* Children that exited before anybody waited for them, as (pid, code)
+     * pairs.  A single slot plus a counter is not enough: `piperace 2 64`
+     * spawns four children and they all finish before the parent's first
+     * wait(), so every code but the last was overwritten and the parent was
+     * told -1 for the rest (OPEN-ITEMS §24).  Beyond LAG_MAX unwaited exits
+     * the oldest is lost and wait() reports -1 for it - a program that
+     * leaves eight dead children behind has a bug of its own. */
+    int      lag_pid[LAG_MAX];
+    int      lag_code[LAG_MAX];
+    uint8_t  lag_n;
     uint32_t in_buf;        /* ST_WAIT_INPUT: where the line goes */
     uint32_t in_len;
     uint64_t wake_tick;     /* ST_WAIT_SLEEP */
@@ -324,10 +338,16 @@ static void preempt_if_higher(proc_t *p)
  * READY must not be handed a result afterwards and lose it). */
 static void make_ready(proc_t *p, int32_t val)
 {
+    /* Interrupts off, not just the lock: a waker in system-call context has
+     * them on, and a tick landing between the acquire and the release calls
+     * this again on the same CPU, spinning on a lock it already holds. */
+    uint32_t irq = plat_irq_save();
+
     plat_frame_set_ret(&p->saved, (uint32_t)val);
     spin_lock(&proc_lock);
     p->state = ST_READY;
     spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
     preempt_if_higher(p);
 }
 
@@ -1548,6 +1568,33 @@ static void task_release(proc_t *p)
     /* The window goes back with the table entry, in proc_retire(). */
 }
 
+/* Remember a child's exit code for a wait() that has not happened yet.
+ * Called with the table lock held. */
+static void lag_push(proc_t *p, int pid, int code)
+{
+    if (p->lag_n >= LAG_MAX)
+        return;                 /* the oldest is lost; see proc_t.lag_pid */
+    p->lag_pid[p->lag_n] = pid;
+    p->lag_code[p->lag_n] = code;
+    p->lag_n++;
+}
+
+/* Take the code of child `pid` (any child when pid < 0).  Returns 0 when
+ * that child is not in the list.  Called with the table lock held. */
+static int lag_take(proc_t *p, int pid, int *code)
+{
+    for (int i = 0; i < p->lag_n; i++) {
+        if (pid >= 0 && p->lag_pid[i] != pid)
+            continue;
+        *code = p->lag_code[i];
+        p->lag_n--;             /* order does not matter, so fill the hole */
+        p->lag_pid[i] = p->lag_pid[p->lag_n];
+        p->lag_code[i] = p->lag_code[p->lag_n];
+        return 1;
+    }
+    return 0;
+}
+
 /* Hand a dead task's exit code to whoever waits for it: an actual waiter
  * gets it in its saved frame, otherwise it is remembered for the next
  * wait().  Children of the dead task go to its parent, or to init.
@@ -1572,8 +1619,7 @@ static proc_t *reap_into_parent_locked(proc_t *p, int code)
             parent->state = ST_READY;
             woke = parent;
         } else {
-            parent->exit_code = code;
-            parent->laggards++;
+            lag_push(parent, p->pid, code);
         }
     }
 
@@ -1658,6 +1704,7 @@ regs_t *process_wait(regs_t *r, int pid)
 {
     proc_t *p = current;
     uint32_t irq = plat_irq_save();
+    int code;
 
     /* The scan and the sleep are one critical section.  A child exiting on
      * the other CPU does reap + retire under this same lock, so there are
@@ -1671,6 +1718,15 @@ regs_t *process_wait(regs_t *r, int pid)
      * The old code scanned outside the lock and slept afterwards, which left
      * a third order: recorded, then we sleep, then nobody ever wakes us. */
     spin_lock(&proc_lock);
+    /* A child that has already gone is in the lag list, and taking it first
+     * is what keeps the codes straight: several children can exit between
+     * two wait() calls, and the one asked about is not necessarily the last
+     * to go. */
+    if (lag_take(p, pid, &code)) {
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        return done(r, code);
+    }
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *c = &procs[i];
         if (c->state == ST_FREE || c->parent != p)
@@ -1681,15 +1737,8 @@ regs_t *process_wait(regs_t *r, int pid)
         return block_locked(r, ST_WAIT_CHILD, irq);
     }
 
-    /* No such child: either it already exited (we remember its code, but
-       not which of several children it was) or it never existed. */
-    if (p->laggards > 0) {
-        int code = p->exit_code;
-        p->laggards--;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
-        return done(r, code);
-    }
+    /* No live child by that pid, and no remembered code either: it never
+       existed (or it is one of the exits that did not fit in lag_pid). */
     spin_unlock(&proc_lock);
     plat_irq_restore(irq);
     return done(r, -1);
@@ -1741,7 +1790,7 @@ int process_signal(int pid, int sig)
 
         kprintf("\n[pid %d] killed\n", pid);
         /* The caller keeps the CPU; the victim simply never runs again.
-           Its exit code reaches a waiting parent through laggards. */
+           Its exit code reaches a waiting parent through lag_pid. */
         task_kill(victim, 137);
         /* The CPU was only parked next to it, not inside it: stop pointing
            at a slot that is now free, the way process_exit() does. */
@@ -2233,11 +2282,19 @@ int process_fd_create(const char *path)
     return fd;
 }
 
-/* Hand a pipe to a sleeping task: whoever moved data completes the transfer
+/* Hand a pipe to one sleeping task: whoever moved data completes the transfer
  * on the waiter's behalf, so nothing has to be replayed when it resumes (the
- * same trick the console line hand-over uses).  One delivery per event is
- * enough - the next operation wakes the next waiter. */
-static void pipe_wake(struct pipe *p, int dir)
+ * same trick the console line hand-over uses).
+ *
+ * Called with proc_lock held and interrupts off, by the reader or writer that
+ * just moved data and is still inside its own critical section - so the task
+ * it hands over to cannot have parked itself in between (see the FD_PIPE_R
+ * and FD_PIPE_W cases).  Returns the task made runnable, or NULL.
+ *
+ * One transfer per call, and the caller loops: one event can satisfy more
+ * than one waiter (two readers parked on a pipe that then hits EOF both have
+ * to see the 0, or the second one waits for a wake-up nobody will send). */
+static proc_t *pipe_deliver_locked(struct pipe *p, int dir)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *w = &procs[i];
@@ -2249,27 +2306,39 @@ static void pipe_wake(struct pipe *p, int dir)
         if (dir == 0) {
             n = pipe_read(p, (void *)w->wbuf, w->wlen);
             if (n == PIPE_EAGAIN)
-                return;             /* still empty, keep waiting */
+                return NULL;        /* still empty, keep waiting */
         } else {
             n = pipe_write(p, (const void *)w->wbuf, w->wlen);
             if (n == PIPE_EAGAIN)
-                return;             /* still full, keep waiting */
-            if (n == PIPE_EPIPE) {
-                /* Every reader closed while we waited: fail the write
-                 * instead of parking it forever. */
-                w->wpipe = NULL;
-                make_ready(w, (uint32_t)-1);
-                continue;
-            }
+                return NULL;        /* still full, keep waiting */
+            /* Every reader closed while we waited: fail the write instead
+             * of parking it forever. */
+            if (n == PIPE_EPIPE)
+                n = -1;
         }
         w->wpipe = NULL;
-        make_ready(w, n);           /* n == 0 is EOF and is delivered too */
-        return;
+        plat_frame_set_ret(&w->saved, (uint32_t)n);
+        w->state = ST_READY;
+        return w;                   /* n == 0 is EOF and is delivered too */
     }
+    return NULL;
 }
 
-static regs_t *block_on_pipe(regs_t *r, struct pipe *p, int dir,
-                             uint32_t buf, uint32_t len)
+/* Every waiter that can be satisfied right now.  Returns the one with the
+ * best priority, for the caller's post-unlock preempt_if_higher(). */
+static proc_t *pipe_wake_locked(struct pipe *p, int dir)
+{
+    proc_t *best = NULL;
+    proc_t *w;
+
+    while ((w = pipe_deliver_locked(p, dir)) != NULL)
+        if (!best || w->prio < best->prio)
+            best = w;
+    return best;
+}
+
+static regs_t *block_on_pipe_locked(regs_t *r, struct pipe *p, int dir,
+                                    uint32_t buf, uint32_t len, uint32_t irq)
 {
     proc_t *me = current;
 
@@ -2280,6 +2349,10 @@ static regs_t *block_on_pipe(regs_t *r, struct pipe *p, int dir,
     me->wbuf  = buf;
     me->wlen  = len;
     me->state = ST_WAIT_PIPE;
+    me->cpu   = -1;
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
+
     return sched_switch(r);
 }
 
@@ -2356,12 +2429,28 @@ regs_t *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
     }
 
     case FD_PIPE_R: {
-        int n = pipe_read(f->pipe, (void *)ubuf, len);
+        /* The ring is guarded by the table lock, not by one of its own: it
+         * is a leaf object whose whole lifetime (including the free in
+         * fd_close_in) is decided by tasks, and a second lock here would
+         * only add an order to get wrong.  Taking it also closes the gap
+         * between "the pipe is empty" and "I am asleep": a writer on the
+         * other CPU runs pipe_write and pipe_wake_locked inside this same
+         * lock, so it either sees ST_WAIT_PIPE and delivers, or it ran
+         * first and the read above would have returned the data. */
+        uint32_t irq = plat_irq_save();
+        proc_t *woke;
+        int n;
+
+        spin_lock(&proc_lock);
+        n = pipe_read(f->pipe, (void *)ubuf, len);
         if (n == PIPE_EAGAIN)
-            return block_on_pipe(r, f->pipe, 0, ubuf, len);
-        /* Room appeared: a writer may be parked waiting for it. */
-        if (n > 0)
-            pipe_wake(f->pipe, 1);
+            return block_on_pipe_locked(r, f->pipe, 0, ubuf, len, irq);
+        /* Room appeared: writers may be parked waiting for it. */
+        woke = n > 0 ? pipe_wake_locked(f->pipe, 1) : NULL;
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        if (woke)
+            preempt_if_higher(woke);
         return done(r, (uint32_t)n);
     }
 
@@ -2408,13 +2497,22 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
     }
 
     case FD_PIPE_W: {
-        int n = pipe_write(f->pipe, (const void *)ubuf, len);
+        uint32_t irq = plat_irq_save();
+        proc_t *woke;
+        int n;
+
+        spin_lock(&proc_lock);
+        n = pipe_write(f->pipe, (const void *)ubuf, len);
         if (n == PIPE_EAGAIN)
-            return block_on_pipe(r, f->pipe, 1, ubuf, len);
-        if (n == PIPE_EPIPE)
-            return done(r, (uint32_t)-1);
-        pipe_wake(f->pipe, 0);      /* data for a sleeping reader */
-        return done(r, (uint32_t)n);
+            return block_on_pipe_locked(r, f->pipe, 1, ubuf, len, irq);
+        /* Data for a sleeping reader - delivered before the lock goes, so
+         * nobody can drain it in between and leave the reader parked. */
+        woke = n > 0 ? pipe_wake_locked(f->pipe, 0) : NULL;
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        if (woke)
+            preempt_if_higher(woke);
+        return done(r, (uint32_t)(n == PIPE_EPIPE ? -1 : n));
     }
 
     default:
@@ -2445,23 +2543,46 @@ static void fd_close_in(proc_t *p, int fd)
 
     case FD_PIPE_R: {
         struct pipe *pp = f->pipe;
-        if (pipe_drop_reader(pp)) {
+        uint32_t irq = plat_irq_save();
+        proc_t *woke = NULL;
+        int last;
+
+        /* Drop the reference and look at what is left in one step: the last
+         * reader going away is what turns "empty but writers exist" into
+         * "no data will ever arrive", and a writer that checks in between
+         * would miss it.  The free is safe because a pipe with no
+         * references has no descriptor and therefore no task inside it. */
+        spin_lock(&proc_lock);
+        last = pipe_drop_reader(pp);
+        if (!last && pipe_readers(pp) == 0)
+            woke = pipe_wake_locked(pp, 1);     /* writers have nobody to write to */
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+
+        if (last)
             kfree(pp);              /* no references left at all */
-        } else if (pipe_readers(pp) == 0) {
-            /* Writers waiting for space have nobody to write to now. */
-            pipe_wake(pp, 1);
-        }
+        if (woke)
+            preempt_if_higher(woke);
         break;
     }
 
     case FD_PIPE_W: {
         struct pipe *pp = f->pipe;
-        if (pipe_drop_writer(pp)) {
+        uint32_t irq = plat_irq_save();
+        proc_t *woke = NULL;
+        int last;
+
+        spin_lock(&proc_lock);
+        last = pipe_drop_writer(pp);
+        if (!last && pipe_writers(pp) == 0)
+            woke = pipe_wake_locked(pp, 0);     /* readers must see EOF */
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+
+        if (last)
             kfree(pp);
-        } else if (pipe_writers(pp) == 0) {
-            /* Readers blocked on an empty pipe must see EOF, not hang. */
-            pipe_wake(pp, 0);
-        }
+        if (woke)
+            preempt_if_higher(woke);
         break;
     }
 

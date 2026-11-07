@@ -17,9 +17,18 @@
  * waiting for the buffer to drain, and a writer must see EPIPE the moment
  * the last reader goes away.
  *
- * Concurrency: every entry point takes the pipe's own lock when the kernel
- * is built for more than one CPU (spin_t collapses to nothing otherwise), so
- * a reader on one core and a writer on the other cannot corrupt the ring. */
+ * Concurrency: the ring (head/tail/count/buf) is covered by proc_lock, and
+ * every call below that moves bytes is made with it held and interrupts off,
+ * from process.c (process_read/process_write's FD_PIPE_* cases,
+ * pipe_deliver_locked and fd_close_in).  One lock rather than two because
+ * the ring and the tasks parked on it are decided by the same call: "the
+ * pipe is empty" and "I am asleep" have to be one step, and the free has to
+ * see no waiter left.
+ *
+ * The two reference counters are different: fd_clone() takes one while
+ * exec() builds the child's table, outside proc_lock, so they have their
+ * own leaf lock inside struct pipe.  Lock order is proc_lock then that one,
+ * never the other way round. */
 
 #define PIPE_SIZE 2048          /* bytes per pipe (heap allocated) */
 #define PIPE_EPIPE (-2)         /* no readers left                  */
@@ -40,12 +49,14 @@ uint32_t     pipe_readers(struct pipe *p);
 uint32_t     pipe_writers(struct pipe *p);
 
 /* Read up to len bytes: >0 bytes, 0 for EOF (empty and no writers),
- * PIPE_EAGAIN when empty but writers still exist.  Never blocks. */
+ * PIPE_EAGAIN when empty but writers still exist.  Never blocks.  Called
+ * with proc_lock held and interrupts off - see Concurrency above. */
 int          pipe_read(struct pipe *p, void *buf, uint32_t len);
 
 /* Write up to len bytes: >0 bytes accepted, PIPE_EAGAIN when full,
  * PIPE_EPIPE when nobody is left to read.  Never blocks, and a short write
- * is normal - a pipe has no message boundaries. */
+ * is normal - a pipe has no message boundaries.  Same lock rule as
+ * pipe_read(). */
 int          pipe_write(struct pipe *p, const void *buf, uint32_t len);
 
 int          pipe_readable(struct pipe *p);

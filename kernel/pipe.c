@@ -1,10 +1,13 @@
 #include "pipe.h"
+#include "cpu.h"
 #include "heap.h"
+#include "platform.h"
 #include "string.h"
 
 /* Ring buffer with one reader end and one writer end (multiple tasks may
  * hold each end; the buffer itself does not care).  See pipe.h for the
- * division of labour with process.c. */
+ * division of labour with process.c and for the locking rule: the ring is
+ * covered by proc_lock, the reference counters have a lock of their own. */
 
 struct pipe {
     uint32_t head;          /* next byte to read  */
@@ -13,8 +16,15 @@ struct pipe {
     uint32_t size;
     uint32_t readers;       /* open read ends  */
     uint32_t writers;       /* open write ends */
-    /* The lock is a no-op on a uniprocessor and a real spin lock when the
-     * kernel is built for SMP; see kernel/cpu.h. */
+    /* Only readers/writers are covered by this.  They are the one part of a
+     * pipe that is touched from outside proc_lock: fd_clone() takes a
+     * reference while exec() is building the child's table, on whichever
+     * CPU called exec, and a plain ++ there loses an increment against the
+     * other core's -- when a child exits.  A lost writer reference is what
+     * makes readers see EOF while the writer is still running: measured on
+     * the RP2350, `piperace 4 32` stopped both ends of one pair at the same
+     * 17 KiB on one run in four (OPEN-ITEMS §24). */
+    spin_t   lock;
     uint8_t  buf[PIPE_SIZE];
 };
 
@@ -29,41 +39,83 @@ struct pipe *pipe_create(void)
     return p;
 }
 
+/* The reference counters are the one part of a pipe touched from outside
+ * proc_lock: fd_clone() takes a reference while exec() builds the child's
+ * table, on whichever CPU called exec.  Interrupts off as well as the lock,
+ * because the other side of this lock is fd_close_in(), which holds
+ * proc_lock: with them on, a tick landing here would ask for proc_lock
+ * while the CPU holding it waits for p->lock - both cores stuck (the same
+ * ABBA shape as OPEN-ITEMS §23.3). */
 void pipe_ref_reader(struct pipe *p)
 {
+    uint32_t irq = plat_irq_save();
+
+    spin_lock(&p->lock);
     p->readers++;
+    spin_unlock(&p->lock);
+    plat_irq_restore(irq);
 }
 
 void pipe_ref_writer(struct pipe *p)
 {
+    uint32_t irq = plat_irq_save();
+
+    spin_lock(&p->lock);
     p->writers++;
+    spin_unlock(&p->lock);
+    plat_irq_restore(irq);
 }
 
 int pipe_drop_reader(struct pipe *p)
 {
-    uint32_t r;
+    uint32_t irq = plat_irq_save();
+    int last;
 
+    spin_lock(&p->lock);
     /* count never underflows: a caller can only drop a reference it took. */
-    r = p->readers ? --p->readers : 0;
-    return r == 0 && p->writers == 0;
+    p->readers = p->readers ? p->readers - 1 : 0;
+    last = p->readers == 0 && p->writers == 0;
+    spin_unlock(&p->lock);
+    plat_irq_restore(irq);
+    return last;
 }
 
 int pipe_drop_writer(struct pipe *p)
 {
-    uint32_t w;
+    uint32_t irq = plat_irq_save();
+    int last;
 
-    w = p->writers ? --p->writers : 0;
-    return w == 0 && p->readers == 0;
+    spin_lock(&p->lock);
+    p->writers = p->writers ? p->writers - 1 : 0;
+    last = p->writers == 0 && p->readers == 0;
+    spin_unlock(&p->lock);
+    plat_irq_restore(irq);
+    return last;
 }
 
+/* Same rule: never take p->lock with interrupts on. */
 uint32_t pipe_readers(struct pipe *p)
 {
-    return p->readers;
+    uint32_t irq = plat_irq_save();
+    uint32_t n;
+
+    spin_lock(&p->lock);
+    n = p->readers;
+    spin_unlock(&p->lock);
+    plat_irq_restore(irq);
+    return n;
 }
 
 uint32_t pipe_writers(struct pipe *p)
 {
-    return p->writers;
+    uint32_t irq = plat_irq_save();
+    uint32_t n;
+
+    spin_lock(&p->lock);
+    n = p->writers;
+    spin_unlock(&p->lock);
+    plat_irq_restore(irq);
+    return n;
 }
 
 int pipe_read(struct pipe *p, void *buf, uint32_t len)
