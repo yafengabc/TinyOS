@@ -1158,6 +1158,432 @@ x86 的 400 B 也一并解决了。换优化级别的代价是一个 shell 逐�
 - **B. 并存**：`bin/sh` 不动，小板上把 init 名字指到 `bin/msh`（要加一个板级常量），
   FS 里两个 shell 都在，多约 2 KiB flash。
 
+## 22. RP2350 双核实测：`getcpu()` 偶尔返回系统调用号（2026-11-08，未定性）
+
+目标：用户明确要求「RP2350 也插着，做一下测试，貌似 SMP 还有一定问题」。
+测试台：`-target rp2350smp`（2 核）、tick 1000 Hz、UART0 @ COM6 115200、
+`user/smp.c` 的 `-s <n> <ms>` 单行汇总模式。Ctrl-D（0x04）写到 COM6 让固件自己
+跳 ROM BOOTSEL，全程无需按键。
+
+### 稳定复现的三件事
+
+1. **`smp -s 4 500` 的退出码偶尔是栈指针**，且值固定落在某个任务初始栈附近：
+   `537116152` = `0x2003BDF8`、`537181688` = `0x2004BE78`、
+   `537214456` = `0x20053DF8`、`537148920` = `0x20043DF8`。
+2. **`getcpu()` 偶尔返回 25** —— 而 `SYS_GETCPU` 的编号正好是 25
+   （`include/tos.h`）。给 worker 加自检后拿到直接证据：
+   `worker 1: BAD c=25 x2 (nr would be 25)`（500 ms 内约 2000 次调用中 1~2 次）。
+   **返回的是系统调用号本身，说明这次 SVC 的 `r0` 回写没有落到用户帧上。**
+3. **4 个可运行任务在 2 核上严重不公平**：同为 500 ms，块数
+   `27 / 62 / 248 / 323` 对 `2500 ~ 5000`，差 9~100 倍；`smp -s 2` 反而正常
+   （`5915 / 6123`）。同一 summary 里还会出现 `w1=-1`（`wait()` 找不到孩子）。
+
+### 已排除（都带判据）
+
+| 假设 | 判据 | 结果 |
+|---|---|---|
+| `make_ready()` 重复唤醒 READY/RUNNING 的任务 | 内核计数器 `wbad` | 0 |
+| `block()` 被非 RUNNING 的任务调用（已在双核上跑） | `bbad` | 0 |
+| 子进程退出时父进程还在 RUNNING（丢唤醒） | `rrun` | 0（个别 1） |
+| 恢复的帧属于别的任务 | `bpc`：`saved.pc` 不在自己窗口内 | 0 |
+| 恢复的 r0~r3 指向别的任务窗口 | `breg` | 0 |
+| `plat_cpu_id()` 返回 25 | `SIO_CPUID` = `0xd0000000 + 0x000`，每核常量 | 不可能 |
+| MSP 落到另一个核的内核栈 | `arm_svc` 的 pending 启动路径**故意不复制** `FR_TSP`，所以新任务的 MSP 天然是当前核的 | 否 |
+| MPU 区域过宽导致串窗 | PMSAv8 base/limit 形式，32 B 粒度、精确 | 否 |
+
+第二轮（用户指定「挖 r0 不回写」）又排掉三条，都是内核计数器，不靠打印：
+
+| 假设 | 判据 | 结果 |
+|---|---|---|
+| `arm_resume` 走到「没有硬件帧地址就跳过写回」的分支 | 在 `arm_resume` 里给该分支加计数器 `arm_nohw_count` | **0**，一次都没走。写回总是发生 |
+| 某次 SVC 被 `arm_svc` 的 pending-start 分支劫持（残留 pending 字） | `arm_pending_hits` 对比 `plat_enter_user_calls` | **2 == 2**，一次启动一次命中，没有残留 |
+| `SYS_GETCPU` 的 case 没跑到（`sc.nr` 被读错） | 内核数 `probe_getcpu_calls`，与用户侧 `calls` 对账 | 某一轮增量 **7952 == 7952**，完全相等 |
+| `plat_cpu_id()` 真的返回了 25 | 让 case 把 `id == 25` 换成 `99` 再返回 | 用户始终看到 25，**从没看到 99** |
+
+把 `SYS_GETCPU` 的返回改写成哨兵这一条最能说明问题：如果内核返回的是 25，用户会看到
+99；用户看到的仍是 25，说明那个值根本不是内核写进去的。而用户侧代码生成也查过了
+（`clang --target=thumbv8m.main-none-eabi -Oz -S`）：`movs r0,#25 / svc #0 / mov r1,r0`
+紧挨着，编译器没有把读取提到 svc 之前。
+
+### 现在的证据链（互相矛盾，所以还没结案）
+
+1. 用户每次 `getcpu()` 都对应一次内核 `SYS_GETCPU`（计数完全对得上）；
+2. 该 case 每次都执行了 `plat_frame_set_ret(r, id)`；
+3. `arm_resume` 每次都把 `frame->r0` 写进硬件帧（`nohw == 0`）；
+4. 用户代码是把 `svc` 之后的 `r0` 直接搬走（汇编已确认）；
+5. 可用户仍有约 1/2000 的概率读到 **25 = `SYS_GETCPU` 本身**，即「svc 之前的 r0」；
+6. 出问题的下一次调用立刻正确（`next=0/1`），说明机制本身没坏；
+7. 频率约每核每 1000 个 tick 一次 —— 与「一个 tick 落在 syscall 在飞的窗口里」这个
+   概率同量级。
+
+7 指向「tick 与 SVC 撞车」，但 1~4 又把所有已知的撞车路径堵死了。下一步最值得做的是
+**让 `SYS_GETCPU` 同时写 r0 和一个 r4~r11 里的寄存器**（例如 `r->r9 = 0xAB00|id`），
+用户侧用一小段内联汇编读回：如果 r9 是标记而 r0 是 25，说明帧确实被恢复了、只有 r0
+是旧的（那问题在写回与读出之间的某个拷贝）；如果 r9 也不是标记，说明恢复的不是这一帧，
+要回去查 `syscall_dispatch()` 返回值到 `arm_resume` 之间那两步。
+
+### 顺带挖出的两个真 bug（与上面的谜团无关）
+
+- **`exec()` 先发布后挂父**：`process_exec()` 里
+  `proc_t *p = proc_create(...)` 已经把子任务写成 `ST_READY`（另核可立刻取走并运行），
+  之后才 `p->parent = current`。子任务在那一瞬退出，`reap_into_parent()` 看到
+  `parent == NULL` 直接丢退出码；更糟的是槽位已被回收复用，这一行会写到**别人的**
+  `parent` 上。修法：把 `p->parent = current` 挪进 `proc_create_claim()` 的发布临界区
+  （那里已经在用 `current` 拿 cwd/fds/prio）。
+- **`wait(pid)` 的 `laggards`/`exit_code` 是单槽**：几个孩子先于父进程 `wait()` 退出时，
+  退出码全部塌成最后一个，`wait(pid)` 拿到的码与 pid 对不上。实测
+  `w1=w2=w3=27`、`w1=w2=w3=2188`、`w2=w3=2756`。**`smp -s` 的汇总在这一条修好之前
+  不能当判据** —— 第一轮把 `27 blocks` 读成「worker 被饿死」是对的，但把
+  `w1=w2=w3` 读成三个都饿死就错了。
+
+### 方法论教训
+
+第一轮我用 kprintf 做探针，得出「`make_ready()`/`block()` 都干净」的结论 —— **不可信**。
+控制台在竞争下会丢整行（§16 的 `#78`），丢行与「没发生」无法区分：同一轮里
+pid 18/19/20 的 `[E]` 行全部丢失，我因此误判「worker 1 从没退出」。
+改成**内核计数器 + 空闲看门狗一次性输出**（`[Z dbl=.. wbad=.. wsram=.. bbad=.. rrun=.. bpc=.. breg=..]`）
+之后结论才稳定。代价是 `dbl`（`current` 在 A 核、`cpu` 字段写 B 核）本身就是误报：
+`sched_switch()` 走 idle 分支时**故意不清 `current`**，任务随后被另一核取走就满足该条件，
+所以 `dbl` 只能当噪声看，不能当双跑的判据。
+
+### 下一步（未做）
+
+1. 定性 `r0` 不回写：把 `SYS_GETCPU` 的返回值同时写进 r0 和一个 r4~r11 寄存器
+   （如 `r->r9 = 0xAB00 | id`），用户侧用内联汇编读回核对（理由见上）。
+2. 4 任务 2 核的不公平要单独查（`sched_pick()` 的 `rr` 是每核的，round-robin 本身看着没问题，
+   怀疑点更可能在 `sched_switch()` 里 `spin_unlock / plat_wake_cpu / spin_lock` 那段的
+   交接时延）。
+3. 修上面两个真 bug（`exec` 挂父时机、`laggards` 单槽）。
+
+### 复现用的测试台（`user/smp.c`，未提交）
+
+- `smp -s <n> <ms>`：n 个 worker，全部等完，**一行**汇总。汇总行必须一行，因为多 worker
+  同时 `printf` 会被控制台丢行。
+- worker 每轮检查 `getcpu()` 是否落在 `{0,1}`；落外面就打
+  `worker N: BAD c=%d next=%d x%d (nr is %d), calls=%u` —— `next` 是紧跟的复测值，
+  用来区分「机制坏了」和「只丢了这一个值」。
+- worker 正常行带 `calls`，可以和内核计数器对账。
+- 注意：`smp -s 4` 的 `result:` 行目前**不可信**（`laggards` 单槽，见下），
+  要看单 worker 的 `worker N:` 行。
+
+## 23. RP2350 双核 SMP 竞态审计（2026-11-08；check-then-sleep 已修，§22 帧 bug 未修）
+
+§22 追的是一个具体现象（`getcpu()` 偶尔返回系统调用号）。这一节换成审计视角：
+把跨核共享状态、原子性、屏障、唤醒时序全部过一遍，给出判据、结论和补丁。
+代码基线 `a1d8c69`（HEAD），板子 RP2350 双 Cortex-M33，UART0/COM6。
+
+### 23.1 数据竞争与屏障：先给结论
+
+| 检查项 | 结论 | 判据 |
+|---|---|---|
+| `spin_lock` / `spin_unlock` 缺 DMB | **不缺** | `arch/arm/platform.c:491/505/511` 三处 `dmb`：acquire 成功 STREX 之后、trylock 之后、release 之前 |
+| LDREX/STREX 序列本身 | 正确 | 失败即重试；`trylock` 失败路径补 `clrex`，避免留下独占标记 |
+| 释放用普通 store（不是 STREX） | 可接受 | 独占持有期间唯一写者，`dmb` 已保证前序写可见 |
+| 缓存一致性 | **不是问题** | RP2350 的 M33 核无数据 cache，SRAM 访问到总线即一致；`XIP` 的指令 cache 只影响自修改代码，内核不做 |
+| 编译器重排 | 已处理 | 锁原语带 `"memory"` clobber；共享字段无 `volatile` 是靠锁边界的 DMB 而不是靠 volatile |
+| ISB 缺失 | 不适用 | 只有改 CONTROL/MPU/VTOR 之后需要，`platform.c:807/board/rp2350:861` 已有 |
+
+**所以"加打印就消失"不是屏障问题。** 这个 Heisenbug 的形状是「时序窗口被打印的
+串口时间放大了」，不是「缺 dmb 导致读到自己写的旧值」——后者是确定性的，不会随机。
+
+### 23.2 真正的竞争：check-then-sleep 不原子（不是"帧写在锁外"）
+
+**先纠正一个容易被当成根因、其实次要的点。** `make_ready()` / `block()` 确实是
+"帧在锁外写、状态在锁内写"，但 `plat_spin_unlock` 的 release `dmb` 把这个帧写和
+unlock 绑在了一起，所以任何**通过锁**读 `saved` 的观察者都是安全的（帧写 → dmb →
+unlock store；对方 acquire store → dmb → 读帧，传递性成立）。
+
+唯一不取锁的读者是 `sched_pick()`（`process.c:339` 直接读 `procs[idx].state`）。
+它依赖"同一核的两个 store，别的核按程序序看到"——ARMv8-M 对 Normal memory
+**不保证**这一点，但这台板子的总线是顺序的，所以这属于"架构上不保证、实测看不出"
+的一类。**它不是 Heisenbug 的来源，不要在这上面耗时间。**
+
+真正能造成无限期卡死的是另一件事：**「查谓词」和「置 state」不在同一个临界区**，
+而且 waker 用状态反查自己该不该动手。三处，全是同一形状：
+
+| 位置 | 检查（锁外） | 睡眠 | waker 怎么找它 | 丢了会怎样 |
+|---|---|---|---|---|
+| `process_wait()` `:1597` | 扫 `procs[]` 找活着的子进程 | `block(ST_WAIT_CHILD)` | `reap_into_parent()` `:1536` 读 `state == ST_WAIT_CHILD` | **永久睡**（无兜底） |
+| `process_read()` FD_PIPE_R `:2277` | `pipe_read()` 返回 `EAGAIN` | `block_on_pipe()` | `pipe_wake()` `:2164` 扫 `state == ST_WAIT_PIPE` | **睡到下一次写才醒** |
+| `console_read()` `:2214` | `tty_line_ready()` 假 | `block(ST_WAIT_INPUT)` | `process_console_kick()` `:576` 扫 `state == ST_WAIT_INPUT` | 1 ms 后自愈 |
+
+时间线（以 `wait` 为例，`-s 4` 时最容易撞上）：
+
+```
+CPU A: process_wait() 扫到子进程 c 还活着，正准备 block()
+CPU B: c 退出 → reap_into_parent() 读 parent->state，还是 ST_RUNNING
+       → 走 else 分支，code 进环/槽，没人唤醒
+CPU A: block() 置 ST_WAIT_CHILD → sched_switch → 永远没人来叫它
+```
+
+**这解释了"为什么只有 `wait`/`pipe` 卡死、控制台从来不卡"**：控制台的 kick 在
+`process_tick()` `:624` 里每 1 ms 重跑一遍（`cpu_id()==0` 时），丢一次 1 ms 后补上；
+`wait` 的 `reap_into_parent` 只在子进程退出那一刻跑一次，`pipe_wake` 只在写那一刻
+跑一次，**都没有周期性兜底**。
+
+正确的结构是：谓词检查和 `state` 赋值在**同一个临界区**里，并且 `block()` 必须在
+锁内**重查**一次——"结果可能已经躺在环里了，那就别睡，直接返回"。
+
+```c
+uint32_t irq = plat_irq_save();
+spin_lock(&proc_lock);
+if (已有人替我落了结果) {          /* 重查，这一步是关键 */
+    spin_unlock(&proc_lock); plat_irq_restore(irq);
+    return done(r, 结果);
+}
+p->saved = *r;                      /* 帧和状态现在同属一个临界区 */
+plat_frame_set_ret(&p->saved, (uint32_t)-1);
+p->state = ST_WAIT_CHILD;
+p->cpu = -1;
+spin_unlock(&proc_lock);
+plat_irq_restore(irq);
+return sched_switch(r);
+```
+
+`stash@{0}` 那个补丁**只把帧写挪进了 `block()` 的锁，没有做重查**，所以它只把窗口
+从"几十条指令"缩到"几条指令"，**没有关掉**（见 23.6）。按上面这个形状重写的版本
+已经落地并通过真板 A/B，见 23.10。
+
+### 23.3 拿锁必须连带关中断，否则是自死锁
+
+这一条不依赖任何吞吐数字，从代码里就能看出来——**给 `block()`/`make_ready()` 加
+`proc_lock` 之后，那个临界区必须关中断**：
+
+```
+本核持有 proc_lock（中断开着）
+        → SysTick 打断
+        → process_tick() → 唤醒睡眠任务 → make_ready()
+        → spin_lock(&proc_lock)   ← 这把锁是自己持有的
+        → 自旋到 SPIN_LIMIT（4 000 万）
+        → raw_puts("[spin] cpu N stuck on lock ...") + plat_panic_halt()
+```
+
+`block()` 在系统调用上下文里中断是开着的，所以这个窗口一直存在；`plat_spin_acquire`
+撞到 `SPIN_LIMIT` 不是"放弃"，是**打印并停机**（`arch/arm/platform.c:477-489`），
+所以它是硬故障而不是性能问题。
+
+> 记录上要分清：这条是**代码推出来的必然性**。当时 `-s 2` 量到 1 411 的那一版确实
+> 只加了 `spin_lock`，但那一轮没有留下 `[spin]` 行的记录，所以**不能把这个数字
+> 归因给自死锁**（见 23.6 的污染问题）。结论不变，证据分级要说清楚。
+
+正确写法是**save/restore 而不是无条件 disable**——因为 `make_ready()` 也会被 tick
+调用，那里中断本来就是关的，无条件 `plat_irq_enable()` 会把 tick 处理器的中断提前打开。
+
+```c
+uint32_t irq = plat_irq_save();     /* ARM: mrs r,%0,primask; cpsid i */
+spin_lock(&proc_lock);
+...帧 + 状态...
+spin_unlock(&proc_lock);
+plat_irq_restore(irq);              /* 原来关着的，走的时候还关着 */
+```
+
+`plat_irq_save/restore` 是新加的原语（`kernel/platform.h`，ARM 实现读 PRIMASK，
+其余端口 weak 默认退回 disable/enable）。
+
+### 23.4 原子指令、锁正确性、优先级反转
+
+| 项 | 结论 |
+|---|---|
+| 原子 RMW | ARM 侧只有 LDREX/STREX，没有 `ldadd`。**任何 `x++` 形式的跨核计数都不是原子的**——本轮的诊断计数器（`arm_r_calls` 等）在双核下实测会少记（`writes` 比 `calls` 少 10 是丢增量，不是逻辑错） |
+| `cpu_count++` | 非原子，但只有每个核启动时各加一次，且第二次核启动时第一次已完成，实际无害；**将来加核需要改成锁内** |
+| 锁的公平性 | 无排队，`plat_spin_acquire` 是抢；持锁时间都在几十条指令内，实测无饿死 |
+| 优先级反转 | **存在但不可达**：自旋锁持有期间不阻塞、不调度（临界区内没有 `sched_switch`），所以低优先级任务不会被高优先级任务在锁上挡路 |
+| 中断优先级反转 | SysTick 与 SVCall 同为可配置优先级；tick 里要拿 `proc_lock`，所以**必须**用 23.3 的 irqsave 形式，否则就是自死锁而不是反转 |
+
+### 23.5 IPI、tick 同步、WFI 唤醒时序
+
+| 项 | 实际实现 | 风险 |
+|---|---|---|
+| 核间唤醒 | `plat_wake_cpu()` = `sev`（`arch/arm/platform.c:398`） | **等于没有 IPI**。`sev` 只置位事件寄存器，能唤醒 `wfe`；本端口根本不用 `wfe`/`wfi`，idle 是忙轮询，所以 `sev` 无效果。跨核派发的延迟上限 = 一个 tick（1 ms） |
+| tick 同步 | 每核独立 SysTick（`plat_timer_start_cpu()` 写 `CTRL=7`），各自 1 kHz，**不锁相** | 两核的 `plat_ticks()` 不同步；所有超时都是相对量（`now - wake_tick`），所以不影响正确性，但同一任务的 `cpu_ms` 统计在两核间不完全可加 |
+| 双核 WFI | **不用 WFI**，`plat_cpu_idle()` 只有 `cpsie i` | 文档写明这是刻意的：WFI 在 MemManage 之后丢唤醒且无法解释。代价是一个核永远在跑 |
+| `need_resched` | 每核一份（`cpus[i].need_resched`） | 跨核 `make_ready` 只会置**发起核**的标志，目标核要等自己的 tick。不是 bug，但派发延迟同上 |
+| 抢占边界 | `arm_handle_tick()`：`if (!from_user) return f;` | 正确，且是必需的——内核态帧不具备可恢复性（见 23.7） |
+
+### 23.6 修复补丁：改了什么、为什么没合并
+
+补丁在 `git stash@{0}`（`smp-audit-wip`），也导出到 `/tmp/smp-patch.diff`（609 行）。
+六个 hunk：
+
+1. **`reap_into_parent()` 加锁 + 用环形槽记 (pid, code)**。原实现是
+   `int exit_code; int laggards;` 一个槽，多孩子先退出时互相覆盖 —— §22 记的
+   `w1=w2=w3=27` 就是它。改成 `LAGGARD_MAX=4` 的环形队列，溢出记 `lag_drop`
+   而不是静默丢弃。
+2. **`wait()` 从环里按 pid 取**，取走时移位收口，全程在锁内。
+3. **`process_exec()` 把挂父挪进 `proc_create_claim()` 的发布临界区**（新增
+   `parent` 参数）。原来先发布 `ST_READY`、再 `p->parent = current`，中间另一核
+   可以把子进程跑完并退出，退出码丢失，槽位复用后这一行还会写到别人的 `parent` 上。
+4. **`block()` / `block_on_pipe()` / `make_ready()` 的帧写进锁**（23.2）。
+5. **`plat_irq_save/restore` 新原语**（23.3）。
+6. `proc_create` 的调用点跟着改签名。
+
+**补丁缺一块，所以不能合**：它把帧写挪进了锁，但 `process_wait()` /
+`process_read()` / `console_read()` 里那三个"查谓词 → 睡"的序列仍然在锁外串着走，
+`block()` 也没有在锁内重查一次。也就是说 §23.2 的表里那三行**一行都没被关掉**，
+只是窗口变窄。补丁 3（`exec` 挂父）和补丁 1/2（环形槽）本身是对的、无争议，
+可以单独立项先合。
+
+**另外它把诊断探针一起打进去了**（`arm_resume` 里的四个计数器），所以下面的
+"补丁后"一列量到的是"修复 + 探针"，不是修复本身。
+
+**效果（真板实测）：**
+
+| 指标 | HEAD | 补丁后 |
+|---|---|---|
+| `smp -s 2` 退出码与块数一致 | ✅ | ✅ |
+| `smp -s 4` `w0` = 栈地址（537116144） | **复现** | 不再出现（本轮样本） |
+| `smp -s 2` 吞吐 | 5 957 ~ 6 522 | **1 411（4 倍退化）** |
+| `smp -s 4` 吞吐 | 53 / 3 698 / 5 563 | 90 ~ 1 523 |
+
+**但这个 1 411 是脏数据，不能当作"修复的代价"。** 参与 A/B 的"补丁"里同时包含了
+§22 的诊断探针——`arm_r_calls` / `arm_r_writes` / `arm_r_hret` / `arm_svc_nr25`
+四个计数器的自增**全部加在 `arm_resume` 里**，而 `arm_resume` 是整台机器上最热的
+代码（每一次异常返回都过，即每个 syscall + 每个 tick）：
+
+```asm
+    ldr     r2, =arm_r_calls        @ 4 个计数器 ×（ldr + ldr + adds + str）
+    ldr     r3, [r2]
+    adds    r3, #1
+    str     r3, [r2]
+    ...
+    ldr     r2, [r0, #FR_VEC]       @ 外加两条判据分支
+```
+
+三个计数器还是**两个核同时 RMW 的同一批字**。所以 4 倍退化里有多少是锁、有多少是
+探针，**这一轮根本没分开**。
+
+结论要改成：**这个数字不作数。** 要判定修复的真实代价，必须把探针剥掉重测（探针
+只留一个"输出后自锁"的版本，见 23.7 的判据纪律）。在剥离前，说"修复慢 4 倍"是
+不成立的；同样，说"修复不慢"也不成立。
+
+### 23.7 最小复现方案
+
+内核不用改，只要打两个补丁点（都在 `user/smp.c`，已提交）：
+
+1. **判定"写回是否发生"的回声**。寄存器残留会伪装成"写回成功"，所以不能只看
+   标记值。让内核在 `SYS_GETCPU` 里把调用方自己的 `r2` 回写到 `r12`
+   （`0xAB000000 | seq`），用户侧一次 `svc` 读回 `r0/r3/r12/r2` 四个寄存器：
+
+   ```c
+   register int r0 __asm__("r0") = SYS_GETCPU;
+   register uint32_t *p __asm__("r1") = o;
+   register uint32_t r2 __asm__("r2") = seq;
+   __asm__ volatile("svc #0\n\t"
+                    "str r0, [r1, #0]\n\t"
+                    "str r3, [r1, #4]\n\t"
+                    "str r12, [r1, #8]\n\t"
+                    "str r2, [r1, #12]"
+                    : "+r"(r0), "+r"(r2) : "r"(p) : "r3", "r12", "memory");
+   ```
+
+   判据：`r12` 的序号等于**本次** `seq` → 写回发生了；等于 `seq-1` → **整帧都没写回**，
+   用户拿到的是 `svc` 入口寄存器（这正是实测结果）。
+
+2. **`smp -s <n> <ms>`**：n 个 worker 各自跑 `<ms>` 毫秒，父进程等全部结束后
+   **一行**汇总。汇总必须一行，因为多 worker 同时 `printf` 会被控制台丢行（#78）。
+
+```
+smp -s 1 500     → 干净（4 次）
+smp -s 2 500     → 干净（4 次，约 50 000 次调用）
+smp -s 4 500     → 每次都能复现至少一条 BAD 或一个栈地址退出码
+```
+
+**触发条件是"任务数 > 核数"**，这是最有价值的线索：它说明缺的是一次
+"有任务在等、但没被派发到另一个核"的窗口，而不是单任务路径的 bug。
+
+**两种故障要分开记，别混成一个**：
+
+| 现象 | 属于 | 判据 |
+|---|---|---|
+| `worker N: BAD r0=...` / 退出码是栈地址 | §22，帧被恢复的地址不对 | `-s 4` 每次都能出（HEAD 基线） |
+| `smp -s 4` 跑完不回提示符、或 `smp -s result:` 永远不出现 | **§23.2 丢唤醒** | 父进程停在 `ST_WAIT_CHILD`；`ps` 能看到 `wait` 状态的任务挂着 |
+
+### 23.8 已排除清单（都带判据，别再重复挖）
+
+| 假设 | 判据 | 结果 |
+|---|---|---|
+| `arm_resume` 走了"没有硬件帧就跳过写回"的分支 | 计数器 `arm_r_skips` | 0 |
+| SVC 被 pending 启动分支劫持 | `arm_pend_hits` | 整轮只 1→2，与异常无关 |
+| 内核把 `r0` 还是 25 的 svc 帧交出去 | `arm_svc_nr25` | 0 |
+| tick 叠进 SVC 处理器造成丢写回 | 在 `SYS_GETCPU` 里 `plat_irq_disable()` 后再写 | **无效**，BAD 照出 |
+| `plat_cpu_id()` 返回 25 | `SIO_CPUID` 是每核常量；让 case 把 25 改成 99，用户从没见到 99 | 否 |
+| 用户侧代码生成把 `r0` 读早了 | `clang -Oz -S` 实测 `movs r0,#25 / svc #0 / str r0,[r1]` 紧挨 | 否 |
+| 同一个任务被两个核同时选中 | `sched_pick()` 返回 `cpu != -1` 的任务：`probe.pick_busy` | 9 万次选取 0 次 |
+| 锁缺屏障 | 见 23.1 | 不缺 |
+| `sev` 唤不醒核 | idle 不是 WFI，`sev` 本就多余 | 不适用 |
+
+### 23.9 结论
+
+- **确认的缺陷（按优先级）**：
+  1. **check-then-sleep 不原子**，三处（`wait` / pipe 读 / 控制台读），前两处
+     没有周期性兜底 → 永久睡。这是"随机卡死"最可能的根因，也是"任务数 > 核数
+     才触发"的最佳解释。
+  2. `reap_into_parent()` 完全无锁 + 单槽 `exit_code/laggards`（多孩子退出码互相
+     覆盖，§22 的 `w1=w2=w3=27`）。
+  3. `process_exec()` 先发布 `ST_READY` 再写 `p->parent`。
+  4. `block_on_pipe()` 的 `state` 写在任何锁之外。
+  5. `sev` 是假 IPI（idle 不是 WFI），跨核派发延迟上限 = 1 tick。
+- **确认不是缺陷**：锁屏障（`dmb` 齐全）、缓存一致性（M33 无数据 cache）、
+  `plat_cpu_id()`、pending 路径、双跑（9 万次选取 0 次）、tick 锁相。
+- **判据上不成立、不要当根因**：`sched_pick()` 裸读 `state` 与帧写之间的
+  store-store 次序——架构上不保证，总线上是顺序的，实测不出。
+- **不作数的数据**："修复慢 4 倍"。参与 A/B 的补丁里带着 `arm_resume` 的四个
+  计数器，热路径被污染，**必须剥离探针重测**——剥离后实测没有退化，见 23.10。
+- **仍未定性**：`getcpu()` 偶发拿回入口帧（`r0`=系统调用号、`r12`=上一次回声）。
+  所有"内核写错值"的可能都被计数器排除了，剩下的唯一方向是**帧被恢复的地址
+  与写入的地址不一致**——下一步不是再猜，而是把 `hw`（硬件帧地址）本身用回声
+  打出来，比对"写回的帧"和"恢复的帧"是不是同一个。
+
+### 23.10 修复落地与真板 A/B（2026-11-08）
+
+按 23.2 的形状重写，**不带任何探针**，只动内核：
+
+| 改动 | 位置 |
+|---|---|
+| `plat_irq_save/restore` | `kernel/platform.h` + `arch/{arm,rv32,x86}/platform.c` |
+| `block_locked()`：帧 + 状态在调用方已持有的锁里 | `kernel/process.c` |
+| `process_wait()`：扫子进程与入睡同一个临界区 | 同上 |
+| `retire_and_reap()`：reap 与 retire 一步（父进程再也看不到"既没在等、槽也没空"） | 同上 |
+
+`plat_irq_save` 三端口各自实现，没有走 weak 默认：默认的
+`disable(); return 0;` 在 tick 上下文里会把"本来关着的中断"在 restore 时打开，
+正是 23.3 要避免的那件事。
+
+**A/B 条件**：`-target rp2350smp`，只差内核（同一个 `user/smp.c` 测试台）；
+`scripts/rp2350/smptest.py` 每轮 11 条命令。
+
+| 项目 | HEAD 基线 | 修复后 |
+|---|---|---|
+| `smp -s 2 500` 块数（3 轮） | 6095/6469 · 6077/6444 · 6096/6464 | 6501/6985 · 6978/7011 · 6500/6937 |
+| `-s 4` 出 `BAD r0=00000019` | 3/5 | 4/10 |
+| `-s 4` 退出码是栈地址（537181680） | 出现 | 出现（2/10） |
+| `-s 4` 挂死（无 prompt） | 0/5 | 0/10 |
+| 功能 7 项（echo/ls/free/ps/管道/py/sleep） | — | 7/7 |
+
+三条结论要分开说，别合成一句：
+
+1. **§22 的帧寻址 bug 一点没动**：`r0=00000019`（=25，`SYS_GETCPU`）、
+   `r12=00000035`（上一轮回声的序号）与基线完全一致。它才是 `-s 4` 上唯一
+   可见的故障，也是"退出码变成栈地址"的来源。
+2. **没有 4 倍退化**：`-s 2` 从 6 077~6 469 到 6 500~7 011，同量级（修复后这一侧
+   甚至略高，但只有 3 轮样本，不当结论）。上一轮的 1 411 全是探针的账——四个
+   计数器都加在 `arm_resume` 这条每次异常返回都走的路径上，而且两核同时 RMW
+   同一批字。
+3. **"随机卡死"在这块板子上没有复现**：21 次 `-s 4` 一次没挂。丢唤醒的时序是
+   真的、修复按构造是正确的，但它不是这台机器上可见故障的来源。同一形状**还没修**
+   的两处是主要嫌疑：管道读（`pipe_wake`）和 console 读（`process_console_kick`）。
+   前者一次写入才 wake 一次，丢了就是永久睡；后者靠 `process_tick` 每 1 ms 重踢
+   兜底，所以从没表现出来。
+
+其余回归：x86 / rv32 / rv32smp 的 QEMU 冒烟全过（rv32smp 报 `cpus=2`、`prot`/
+`crash` 的 fault 隔离都在）；C3 真机 `accept.py` **24/24**。
+
+顺带修掉一个坑：`scripts/esp-c3/flash.py --build` 调的是仓库根目录里那个
+gitignore 掉的 `tos.exe`（2026-11-02 的陈货），它会用一个旧构建工具链编出
+"kernel overflows PLAT_KERNEL_MAX" 的假失败，而同一棵树用 `go run ./cmd/tos`
+编得过。已改成 `go run`。
+
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
