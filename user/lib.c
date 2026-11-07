@@ -1,5 +1,28 @@
 #include "lib.h"
 
+/* Write everything or report why not.
+ *
+ * write() on a pipe returns a short count as soon as the ring is full - it
+ * is a stream, not a message queue - and a program that ignores the return
+ * value silently loses the tail of whatever it printed.  `cat demo.py | wc`
+ * undercounted by a different amount on every run because of this: 2788
+ * bytes one time, 2660 the next, 2532 the time after (OPEN-ITEMS §24).
+ * Everything here that writes more than one byte goes through this. */
+int write_all(int fd, const void *buf, int len)
+{
+    const char *p = buf;
+    int done = 0;
+
+    while (done < len) {
+        int n = write(fd, p + done, len - done);
+
+        if (n <= 0)
+            return n < 0 ? n : done;    /* error, or the reader hung up */
+        done += n;
+    }
+    return done;
+}
+
 size_t strlen(const char *s)
 {
     size_t n = 0;
@@ -259,13 +282,13 @@ int printf(const char *fmtstr, ...)
     __builtin_va_end(ap);
     if (n > (int)sizeof(outbuf) - 1)
         n = sizeof(outbuf) - 1;
-    write(1, outbuf, n);
+    write_all(1, outbuf, n);
     return n;
 }
 
 void puts(const char *s)
 {
-    write(1, s, (int)strlen(s));
+    write_all(1, s, (int)strlen(s));
 }
 
 void putchar(int c)
@@ -298,7 +321,7 @@ int putint(int v)
         t[i] = t[j];
         t[j] = c;
     }
-    write(1, t, k);
+    write_all(1, t, k);
     return k;
 }
 

@@ -778,7 +778,7 @@ static int run_command(char *s)
             char buf[128];
             int n;
             while ((n = read(fd, buf, sizeof(buf))) > 0)
-                write(1, buf, n);
+                write_all(1, buf, n);
             close(fd);
         }
         last_status = 0;

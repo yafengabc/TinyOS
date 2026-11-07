@@ -67,6 +67,11 @@
 
 /* system calls */
 int  write(int fd, const void *buf, int len);
+
+/* write() until it is all gone.  A pipe accepts a short write when its ring
+ * fills up, so anything printing more than a byte at a time has to loop or
+ * it loses the rest; returns the bytes written or a negative error. */
+int  write_all(int fd, const void *buf, int len);
 int  read(int fd, void *buf, int len);
 int  exec(const char *path, char *const argv[], int argc);
 int  open(const char *path);

@@ -17,8 +17,14 @@ int main(int argc, char *argv[])
 
     char buf[256];
     int n;
+    /* write_all, not write: on the far end of a pipe a write comes back
+       short as soon as the ring is full, and the old loop threw the rest of
+       the block away (OPEN-ITEMS §24). */
     while ((n = read(fd, buf, sizeof(buf))) > 0)
-        write(1, buf, n);
+        if (write_all(1, buf, n) != n) {
+            close(fd);
+            return 1;
+        }
     close(fd);
     return 0;
 }
