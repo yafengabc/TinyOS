@@ -1684,10 +1684,27 @@ shell 启动路径上直接 sched_switch，从启动帧恢复任务 → HardFaul
 >   pipe 指针/pid 做环形记录才能对上。
 > - 探针加上后 15 轮不触发（时序敏感），源码补丁留在 `build/smp-probes.patch`。
 >
-> **下一步（SMP）**：给每个任务记一个 write/read dispatch 计数并在帧里带序号，
-> 检测“同一 svc 被执行两次”；同时检查 `block_on_pipe_locked` 保存的
-> `saved.pc` 与投递后恢复的 pc 是否始终在 svc 之后，以及 pended-SVC 修复里
-> “不 reschedule 但保留 need_resched”在双核下的后续行为。
+> **2026-11-08 晚再次尝试（还是没定位，但证据更具体）**：
+>
+> - `run spin &` 加负载后，`piperace 4 128` 约 1/10 触发；失败是
+>   **写端 103 KiB / 读端 101 KiB 提前 EOF**（没有坏字节），即 writers 提前归零。
+>   另一形态（坏字节）里 `got` 是 `off-128`，仍是 128 字节块重复。
+> - 低开销检测器（连续两个满 128 字节块的首 4 字节相同）在能跑完的轮次里
+>   **一次都没命中**；在失败轮次 `ps` 里也没有 `dup` 行。加探针后连续 12～15 轮
+>   不触发 —— 这是典型的时序 heisenbug。
+> - `r0/r12` echo 在坏字节失败里不报 mismatch，说明不是“结果没写进帧”。
+> - **A/B：QEMU rv32smp（两 hart）`piperace 4 64` 连跑 10 轮全过**，说明这条
+>   残留是 ARM/M33 侧（SIO/抢占/帧布局）或 QEMU 时序差异，不是通用的引用计数
+>   逻辑错误。
+> - 探针补丁留档：`build/smp-probes.patch`（echo/事件）、
+>   `build/smp-probes2.patch`（dup/badeof/badep 检测器）。
+>
+> **下一步（SMP）**：① 给每个任务记 write/read dispatch 序号并随帧保存，
+> 检测“同一 svc 被执行两次”；② 用**不加每写开销**的检测（例如只在上电后
+> 固定采样 N 次）避免 heisenbug；③ 在 rp2350 上把 `run spin &` 作为固定
+> 负载跑长循环，抓一次带 fault dump 的完整失败；④ 检查 M33 的
+> `block_on_pipe_locked` 保存/恢复 `saved.pc` 与 pended-SVC 的
+> `need_resched` 保留在双核下的行为。
 
 `piperace 4 64` / `2 64` 偶发 FAIL，单 pair `1 64` 3 连过 → 并发相关。形态：
 
@@ -1938,8 +1955,11 @@ HEAD 自己同一条命令的两个 worker 就差 3.3 倍（2953 vs 9764），�
   `2 64` 的根因已修（§24.4.5）。修复前固件上复现：`piperace 2 64` →
   `p0: w=95201004 r=00000020`、`[E ep: pid 74 gen 33 r=0 w=1 cnt=1920]`。
   烧修复镜像后：**单核 `rp2350` `piperace 4 64` 10/10**；`rp2350smp` `2 64` 3/3、
-  `4 64` 19/22，`4 128` 偶发（坏字节/写端 fault 139）。残留是 §24.4.2 的
-  SMP 问题（128 字节块重复），EPIPE/丢结果风暴已消失；细节与探针补丁见该节。
+  `4 64` 19/22；加 `run spin &` 负载后 `4 128` 约 1/10 出现提前 EOF
+  （写端 103 / 读端 101 KiB），另有坏字节/写端 fault 139 形态。残留是 §24.4.2
+  的 SMP 问题，EPIPE/丢结果风暴已消失；细节与探针补丁见该节。
+- QEMU rv32smp（2 hart）`piperace 4 64` 连跑 10 轮全过，残留只在 ARM/M33
+  侧或 QEMU 时序差异下出现。
 - C3 真机 `accept.py` **24/24**。
 - QEMU：x86 全套冒烟 ok；rv32smp（`cpus=2`）`piperace 1 16` ok、`cat demo.py | wc`
   2788 精确。
