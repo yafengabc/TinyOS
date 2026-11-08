@@ -1968,6 +1968,13 @@ HEAD 自己同一条命令的两个 worker 就差 3.3 倍（2953 vs 9764），�
   残留已按 §24.4.2 的宽判据修掉。
 - QEMU：mps2 单核最终版 `4 64` 5/5；rv32smp（2 hart）`4 64` 10/10；
   x86/rv32/arm/rp2350/rp2350smp 均可构建。
+- `rp2350smp` 最终镜像的**长浸泡**：`run spin &` + `piperace 4 128` 40 轮
+  40/40；每 10 轮插 `cat demo.py | wc`，四次都是 **2788** 字节；浸泡后
+  func 检查 7/7。
+- **官方电池等价**（`scripts/rp2350/smptest.py` 的判据，本机无 pyserial，
+  用同命令手工复刻）：5×`smp -s 4 500` + 3×`-s 2 500` + 2×`-s 1 500` +
+  `smp` 拓扑，**0 失败**；`--func` 7 项（echo/ls/free/ps/cat|wc/py/sleep）
+  7/7。
 - C3 真机 `accept.py` **24/24**。
 - QEMU：x86 全套冒烟 ok；rv32smp（`cpus=2`）`piperace 1 16` ok、`cat demo.py | wc`
   2788 精确。
