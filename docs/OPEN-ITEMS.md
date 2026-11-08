@@ -2089,6 +2089,50 @@ RP2040 目标当前因 `user/smp.c` 的 Thumb-2 内联汇编无法在 M0+ 编译
 与本次移植无关。
 
 
+## 26. CoreMark 1.0
+
+`user/coremark/` 是 EEMBC CoreMark 1.0（Apache-2.0，`LICENSE.md`）的 TinyOS
+port。上游的 5 个 core 文件算法未改，只加了：
+
+- `core_portme.[ch]`：2K performance run（`MEM_STATIC`、`SEED_VOLATILE`）、
+  用 `clock_ms()` 计时，`CORE_TICKS` 是毫秒；`HAS_FLOAT 0`，因为 RV32 用户
+  程序不链 soft-float。
+- `ee_printf.c`：只改 `uart_send_char()` 为 `putchar()`，并把 `coremark.h`
+  改成相对 include。
+- `core_main.c`：只加一行 `[tos] CoreMark 1.0`，用毫秒 ticks 算分；官方的
+  整数秒路径在 10–20 s 的跑分里只有 1 s 分辨率。算法、CRC 和验证逻辑未动。
+
+运行：
+
+```
+coremark              # 自动校准到 ~10 s
+coremark 6000         # 固定 6000 次，便于比较
+```
+
+QEMU rv32 用 `coremark 100` 验证过 CRC（seedcrc 0xe9f5、crclist 0xe714、
+crcmatrix 0x1fd7、crcstate 0x8e3a）；`crcfinal` 随迭代数变化，不是固定值。
+
+真板、150 MHz、默认 `-O2`/PIE、TinyOS 抢占 tick 下：
+
+| 镜像 | iterations | ticks (ms) | iter/s | CoreMark/MHz |
+|---|---|---|---|---|
+| `rp2350`（M33，单 hart） | 11000 | 20875 | **526.9** | **3.51** |
+| `rp2350rv`（Hazard3，单 hart） | 6000 | 14628 | **410.2** | **2.73** |
+| `rp2350smp`（M33，1 worker） | 6000 | 11825 | 507.4 | 3.38 |
+| `rp2350rvsmp`（Hazard3，1 worker） | 6000 | 13604 | 441.1 | 2.94 |
+
+单 hart 口径 M33 领先 **1.28×**；SMP 镜像里任务落点和共享 tick 不同，只有
+1.15×，不作为核性能结论。
+
+绝对值低于公开的 4.09 / 3.81–4.15 CoreMark/MHz：公开数通常是 `-O3` + 裸机，
+而这里是 `-O2` + PIE + 1000 Hz 抢占 + USB 轮询的 TinyOS 用户程序。两边用
+**同一套 flags**，所以 1.28× 是同口径结果；和上一节 smpbench 的 1.5× 相比，
+CoreMark 的差距更小，符合它比 LCG 循环有更多指令级并行的预期。
+
+试过 `TOS_OPT=-O3`，但整个镜像反而慢约 1.7×（`smpbench` 139→237 ms，
+`coremark 6000` 18.7 s），疑似 I-cache/代码布局效应，因此正式数据用 `-O2`。
+
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
