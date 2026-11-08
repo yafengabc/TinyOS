@@ -153,7 +153,16 @@ var Targets = map[string]Target{
 	//
 	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
 	// spin lock will need later, and it costs nothing on this core.
-	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 64 * 1024},
+	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024},
+
+	// rp2350rvsmp: both Hazard3 cores.  Core 1 is parked in the boot ROM's
+	// SIO-FIFO launch loop, not at our reset vector, so the board pushes the
+	// pico-sdk handshake and starts it at _start; start.S then parks it on
+	// cpu_release until the kernel is ready.  mtime is shared but mtimecmp is
+	// core-local (pico-sdk riscv_platform_timer.h), so each hart gets its own
+	// tick.  The second 16 KiB kernel stack comes out of .bss; the heap arena
+	// drops to the same 32 KiB the single-core image uses.
+	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024},
 
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
 	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
@@ -322,6 +331,11 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	// else asks for the copy loop.
 	if b.Target.Board == "rp2350rv" {
 		archFlags = append(archFlags, "-DTOS_COPY_DATA")
+		// RP2350's Hazard3 PMP supports NAPOT but not TOR, so a task's
+		// window must be one naturally aligned power-of-two region.  The
+		// window allocator rounds sizes up and aligns the base to the
+		// size; see kernel/process.c and plat_board_task_protect().
+		archFlags = append(archFlags, "-DTOS_PMP_POW2_WINDOWS=1")
 	}
 
 	// How many harts.  Left undefined for a uniprocessor so that every
@@ -680,7 +694,7 @@ func (b *Builder) buildKernel() error {
 	// that lets those upstream files compile unchanged.  The board directory
 	// joins the include path so tusb_config.h is found by name.
 	tusbDir := filepath.Join(b.Root, "third_party", "tinyusb")
-	useTinyUSB := b.Target.Board == "rp2350"
+	useTinyUSB := b.Target.Board == "rp2350" || b.Target.Board == "rp2350rv"
 	if useTinyUSB {
 		incs = append(incs,
 			filepath.Join(b.Root, "board", b.Target.Board),

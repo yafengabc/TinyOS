@@ -6,6 +6,7 @@
 
 #include "types.h"
 
+#if defined(__arm__)
 static inline void __dsb(void) { __asm__ volatile("dsb 0xf" ::: "memory"); }
 static inline void __dmb(void) { __asm__ volatile("dmb 0xf" ::: "memory"); }
 static inline void __isb(void) { __asm__ volatile("isb 0xf" ::: "memory"); }
@@ -23,5 +24,28 @@ static inline void restore_interrupts(uint32_t status)
 {
     __asm__ volatile("msr primask, %0" :: "r"(status) : "memory");
 }
+#else
+/* RISC-V equivalents.  The RP2040 port only needs these as ordering points
+ * around DPRAM writes, so a full fence is the honest mapping; the USB
+ * controller is an MMIO device, not coherent cached memory. */
+static inline void __dsb(void) { __asm__ volatile("fence" ::: "memory"); }
+static inline void __dmb(void) { __asm__ volatile("fence" ::: "memory"); }
+static inline void __isb(void) { __asm__ volatile("fence.i" ::: "memory"); }
+static inline void __sev(void) { __asm__ volatile("fence" ::: "memory"); }
+static inline void __wfe(void) { __asm__ volatile("wfi"); }
+
+static inline uint32_t save_and_disable_interrupts(void)
+{
+    uint32_t old;
+    __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(old) :: "memory");
+    return old;
+}
+
+static inline void restore_interrupts(uint32_t status)
+{
+    if (status & 8u)
+        __asm__ volatile("csrsi mstatus, 8" ::: "memory");
+}
+#endif
 
 #endif

@@ -2015,17 +2015,21 @@ smpbench [iters]     # 默认 5,000,000 次/worker，best of 2
 
 ## 25. RP2350 RISC-V (Hazard3) 移植
 
-`-target rp2350rv` 在**同一块 ATK-DNRP2350AM** 上把 RP2350 切到它的两个 Hazard3
-核：内核从 XIP flash（0x10000000）原地执行，`.data/.bss` 在 0x20000000 的 SRAM，
-littlefs 仍在 flash 0x80000，用户程序在 0x20020000 起的 384 KiB 窗口里跑 U-mode。
+`-target rp2350rv` / `-target rp2350rvsmp` 在**同一块 ATK-DNRP2350AM** 上把
+RP2350 切到它的 Hazard3 核：内核从 XIP flash（0x10000000）原地执行，
+`.data/.bss` 在 0x20000000 的 SRAM，littlefs 仍在 flash 0x80000，用户程序在
+0x20020000 起的 384 KiB 窗口里跑 U-mode。`rp2350rv` 单 hart；`rp2350rvsmp`
+把第二个 Hazard3 也拉起来。
 
-新增文件：`board/rp2350rv/{kernel.ld,image_def.S,platform.c,layout.c,rp2350rv_memmap.h}`；
-`internal/build/build.go` 多一个 target，`internal/build/uf2.go` 多一个
-`emitRP2350RVUF2`（family **0xe48bff5a**，IMAGE_TYPE **0x1101** = EXE|CPU_RISCV|
-CHIP_RP2350，带 ENTRY_POINT item）。`arch/rv32/start.S` 增加可选的 `.data` 拷贝
-（`TOS_COPY_DATA`）；ROM 只跳到入口点，不会搬段。
+新增文件：`board/rp2350rv/{kernel.ld,image_def.S,platform.c,layout.c,
+rp2350rv_memmap.h}`，以及复用 ARM 侧 TinyUSB 栈的 `usb_cdc.c/.h`、
+`tusb_shim.c`、`tusb_config.h`；`internal/build/build.go` 多两个 target，
+`internal/build/uf2.go` 多一个 `emitRP2350RVUF2`（family **0xe48bff5a**，
+IMAGE_TYPE **0x1101** = EXE|CPU_RISCV|CHIP_RP2350，带 ENTRY_POINT item）。
+`arch/rv32/start.S` 增加可选的 `.data` 拷贝（`TOS_COPY_DATA`）；ROM 只跳到
+入口点，不会搬段。
 
-两个真机坑，都是烧进去才看见的：
+三个真机坑，都是烧进去才看见的：
 
 1. **不要在未切走 clk_sys 的情况下复位 PLL_SYS。** RISC-V boot ROM 可能把
    clk_sys 留在 PLL_SYS 上；第一版照 ARM 端口的顺序直接 reset PLL，CPU 当场停，
@@ -2036,35 +2040,53 @@ CHIP_RP2350，带 ENTRY_POINT item）。`arch/rv32/start.S` 增加可选的 `.da
    `[B] clk=0x08f0d568`。UART 分频和 mtime 间隔始终来自 FC0 的测量值。
 2. **RP2350 的 Hazard3 PMP 不支持 TOR**（A=1 被 WARL 成 OFF）。通用 rv32 层用
    TOR 描述代码/数据区，于是用户程序在窗口基址 0x20020000 立刻 instruction
-   access fault。board hook `plat_board_task_protect()` 改用两个 NAPOT 区覆盖
-   整个任务区：0x20020000/128 KiB + 0x20040000/256 KiB，RWX；内核、flash、
-   MMIO 仍在 U-mode 之外。逐任务隔离需要把窗口尺寸都取整到 2 的幂，是下一步。
+   access fault。现在每个任务窗口按 2 的幂取整、基址对齐到窗口大小
+   （`TOS_PMP_POW2_WINDOWS`，只在 rp2350rv 定义），一个 NAPOT entry 精确覆盖
+   该窗口；U-mode 只能碰自己的 code/data/heap/stack，内核、flash、MMIO 和别的
+   任务都在外面。窗口内部的 code/data/guard 分界仍不细分（要再分得让镜像的
+   `wx` 落在对齐边界上），RP2040 的 flat 模型也是这个粒度。真机上
+   `prot stack` 会越界写进 shell 的窗口并被杀，证明逐任务边界生效。
+3. **RISC-V 的 `sev` 是 Hazard3 的 `h3.unblock`，不是 fence。** core 1 在 boot
+   ROM 里以 `msleep SLEEPONBLOCK|POWERDOWN` 的 `h3.block` 等待；FIFO push 后
+   必须执行 `slt x0, x0, x1`（编码上的 unblock），否则握手超时、只有 1/2 CPU
+   上线。握手序列是 pico-sdk 的 `{0,0,1,mtvec,sp,_start}`；core 1 从 `_start`
+   走 `.Lsecondary`，等 `cpu_release` 后用自己的栈和 `trap_vectors_h1` 进入
+   `cpu_secondary_main`。mtime 是两核共享的，但 **mtimecmp 是 core-local**
+   （pico-sdk riscv_platform_timer.h），所以每 hart 都能有自己的 1 kHz tick。
 
-真机验收（COM6 = UART0，115200；本机 USB CDC 未启用；clk_sys = 150 MHz）：
+USB CDC 使用 ARM 侧同一套 TinyUSB 设备栈，只是把 IRQ 14 改成轮询（Hazard3
+外部中断要走自己的 CSR 窗口）：枚举期间 `usb_cdc_console_init()` 的紧循环负责
+控制传输，之后 CPU 0 在 console idle/tick 里 `usb_cdc_poll()`。因为 shell 可能
+被调度到 CPU 1，输出不能只由 CPU 0 写 FIFO：新增 1 KiB 跨核 TX ring，
+`usb_cdc_putc()` 在任意核入队（短 spinlock + 本核关中断），CPU 0 在 poll 里
+排空。COM7 上 `help`（约 3 KB）和 `cat demo.py | wc` 在双 spin 负载下都完整。
+
+真机验收（COM6 = UART0，COM7 = USB CDC，115200；clk_sys = 150 MHz；
+板子当前烧的是 `rp2350rvsmp`）：
 
 | 项目 | 结果 |
 |---|---|
-| 启动 | `[A] pre-pll ok` → `[B] clk=0x08f0d568` → shell `tos>` |
-| `free` | SRAM 512 KiB，kernel 108 KiB，tasks 384 KiB，heap 64 KiB |
+| 启动 | `[A] pre-pll ok` → `[B] clk=0x08f0d568` → `[U] usb hw=1 cfg=1` → `[smp] 2 of 2 CPU(s) online` |
+| `free` | SRAM 512 KiB，kernel 108 KiB，tasks 384 KiB，heap 32 KiB |
 | `ls` / `df` | 300 KiB littlefs（75 blocks），46 个文件 |
 | `hello` | `hello from ring 3!` |
-| `cat demo.py \| wc` | 116 / 343 / **2788**（与其它板一致） |
+| `cat demo.py \| wc` | 116 / 343 / **2788**（UART 与 USB 都一致） |
 | `py pytest.py` | **54 checks, 0 failed** |
-| `piperace 4 64` | 4 对全部 64 KiB 校验通过 |
+| `piperace 4 64` / `4 128` | 4 对全部校验通过；双 spin 负载下 `4 128` 10/10 |
 | `dd of=... / dd if=...` | 4 KiB 写入、读回、pattern verified、`rm` 后 df 复原 |
-| `reboot` | ROM 正常重启，重新进 shell |
-| `smpbench 5000000` | 单核 1.00x；single 204 ms（ARM M33 为 142 ms） |
+| `reboot` | ROM 正常重启，SMP 重新上线 |
+| `smpbench 5000000` | 单 hart 1.00x；双 hart **1.89–2.01x**（single 209–227 ms） |
 | `sleep 2000` | 主机计时 2.07 s |
 | `tostest compat -targets x86,rv32` | OK |
 
-`free` 的 `plat_now_ns()` 一开始把 mtime 当 150 MHz 算（12 MHz 下 `clock_ms`
-快 12.5 倍，基准看起来像卡死）；改成用实测 `g_clk_hz` 后计时正常。150 MHz 下
-`smpbench` 每 5M 次 204 ms，与 12 MHz 时的 ~2.5 s 正好差 12.5 倍，说明时钟链
-和计时都是一致的。
+`plat_now_ns()` 一开始把 mtime 当 150 MHz 算（12 MHz 下 `clock_ms` 快 12.5 倍，
+基准看起来像卡死）；改成用实测 `g_clk_hz` 后计时正常。150 MHz 下 `smpbench`
+每 5M 次 ~210 ms，与 12 MHz 时的 ~2.5 s 正好差 12.5 倍，说明时钟链和计时都是
+一致的。
 
-尚未做：逐任务 PMP 隔离（NAPOT 窗口取整）、USB CDC、双 Hazard3 核。RP2040
-目标当前因 `user/smp.c` 的 Thumb-2 内联汇编无法在 M0+ 编译而构建失败，与本次
-移植无关。
+尚未做：窗口内部 code/data/guard 的细分（需要用户镜像的 writable 起点对齐）。
+RP2040 目标当前因 `user/smp.c` 的 Thumb-2 内联汇编无法在 M0+ 编译而构建失败，
+与本次移植无关。
 
 
 ## 建议的讨论顺序

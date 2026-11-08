@@ -17,7 +17,7 @@ usage:
   tos build [-v] [-target <target>]
                             build the kernel and filesystem for a target.
                             Targets: x86, rv32, rv32smp, rv32nc, arm,
-                            rp2040, rp2350, rp2350rv, esp32c3.  The flash-backed
+                            rp2040, rp2350, rp2350rv, rp2350rvsmp, esp32c3.  The flash-backed
                             boards also emit build/<target>.uf2.
   tos run   [-headless] [-debug] [-no-build] [-target <target>]
                             build (unless -no-build) and boot in QEMU
@@ -125,7 +125,7 @@ func main() {
 
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
-		for _, name := range []string{"x86", "rv32", "arm", "rp2040", "rp2350", "rp2350rv", "esp32c3"} {
+		for _, name := range []string{"x86", "rv32", "arm", "rp2040", "rp2350", "rp2350rv", "rp2350rvsmp", "esp32c3"} {
 			t := build.Targets[name]
 			tc, err := build.DetectToolchain(t)
 			if err != nil {

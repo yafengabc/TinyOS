@@ -39,4 +39,7 @@ const uint32_t PLAT_LFS_BLOCKS = 75;             /* 300 KiB */
 /* The first milestone is single-hart.  Hazard3 can do SMP, but that needs
  * the second core's launch protocol and a per-core mtimecmp, so it is a
  * separate target when it exists - exactly like rp2350 vs rp2350smp. */
-const uint32_t PLAT_MAX_CPUS = 1;
+#ifndef TOS_MAX_CPUS
+#define TOS_MAX_CPUS 1
+#endif
+const uint32_t PLAT_MAX_CPUS = TOS_MAX_CPUS;

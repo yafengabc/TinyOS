@@ -26,7 +26,11 @@
 #define __time_critical_func(func_name)         func_name
 #define __no_inline_not_in_flash_func(func_name) func_name
 
+#if defined(__arm__)
 #define __breakpoint() __asm__ volatile("bkpt #0")
+#else
+#define __breakpoint() __asm__ volatile("ebreak")
+#endif
 
 /* pico-sdk's escape hatch for handing a volatile peripheral pointer to code
  * that wants a plain one (the port needs it for the SETUP packet in DPRAM).
@@ -41,7 +45,13 @@
 static inline void busy_wait_at_least_cycles(uint32_t minimum_cycles)
 {
     uint32_t n = minimum_cycles / 3u + 1u;
+#if defined(__arm__)
     __asm__ volatile("1: subs %0, #1\n\tbne 1b" : "+r"(n) :: "memory");
+#else
+    /* Right-architecture one-liner for the RISC-V build: the exact cycle
+     * cost only spaces out pull-up toggling, not a protocol deadline. */
+    __asm__ volatile("1: addi %0, %0, -1\n\tbne %0, zero, 1b" : "+r"(n) :: "memory");
+#endif
 }
 
 void panic(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));

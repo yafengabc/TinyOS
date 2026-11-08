@@ -53,6 +53,17 @@ static uint32_t stack_used(const struct proc *p);
  * hole (rv32 PMP, ARM MPU) needs the same number. */
 #define HEAP_GUARD  PLAT_HEAP_GUARD
 
+/* Some PMP implementations (Hazard3 on the RP2350) can only describe a
+ * naturally aligned power-of-two range with one entry, and cannot add a
+ * second region for the code/data split.  On those boards every task window
+ * is rounded up to a power of two and its base is aligned to that size, so
+ * one NAPOT entry isolates the task from the kernel and from every other
+ * task.  The cost is that the code/data/guard split inside the window is
+ * not enforced there; the build defines this for rp2350rv only. */
+#ifndef TOS_PMP_POW2_WINDOWS
+#define TOS_PMP_POW2_WINDOWS 0
+#endif
+
 /* Ticks a task may run before the timer takes the CPU away.  One tick at
    1000 Hz (main.c) makes a slice 1 ms.
 
@@ -298,6 +309,20 @@ static uint32_t align_up(uint32_t v, uint32_t a)
 {
     return (v + a - 1) & ~(a - 1);
 }
+
+#if TOS_PMP_POW2_WINDOWS
+/* Smallest power of two >= v, never below one grain.  A window must be a
+ * power of two so a single NAPOT PMP entry covers it and nothing else; see
+ * TOS_PMP_POW2_WINDOWS at the top of this file. */
+static uint32_t win_pow2(uint32_t v)
+{
+    uint32_t p = PLAT_APP_GRAIN;
+
+    while (p < v && p < PLAT_APP_MAX - PLAT_APP_BASE)
+        p <<= 1;
+    return p;
+}
+#endif
 
 /* Look a task up by pid.  Out of line on purpose: -O2 turns a sixteen-step
  * loop over a static array into ~300 bytes of unrolled code, and there are
@@ -965,6 +990,13 @@ static int win_alloc(proc_t *p, uint32_t bytes)
     for (;;) {
         uint32_t next = end;
 
+#if TOS_PMP_POW2_WINDOWS
+        /* A NAPOT region must start at a multiple of its own size. */
+        cand = align_up(cand, bytes);
+        if (cand >= end)
+            break;
+#endif
+
         /* The nearest window at or above `cand` bounds the gap we are
            standing in. */
         for (int i = 0; i < MAX_PROCS; i++) {
@@ -1297,6 +1329,15 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     uint32_t win = align_up(win_need, PLAT_APP_GRAIN);
     if (win < PLAT_APP_GRAIN)
         win = PLAT_APP_GRAIN;
+#if TOS_PMP_POW2_WINDOWS
+    win = win_pow2(win);
+    if (win > app_total) {
+        kprintf("exec: '%s' needs a %u KiB window, the largest power-of-two "
+                "window is %u KiB\n", path, win / 1024u, app_total / 1024u);
+        proc_retire(p);
+        return NULL;
+    }
+#endif
     if (win_alloc(p, win) != 0) {
         kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
                 path, win / 1024u, win_largest_free() / 1024u);

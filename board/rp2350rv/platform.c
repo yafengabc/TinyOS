@@ -2,6 +2,7 @@
 #include "board.h"
 #include "rp2350rv_memmap.h"
 #include "console.h"
+#include "usb_cdc.h"
 #include "string.h"
 
 /* Board: Raspberry Pi RP2350, Hazard3 RISC-V cores.
@@ -12,9 +13,13 @@
  * gets out of the way.  The kernel then runs in place from the XIP window
  * at 0x10000000, with .data/.bss in SRAM at 0x20000000.
  *
- * Console is UART0 on GPIO0/1 at 115200 8N1 - the CH343 port, not the USB
- * CDC device the ARM image also brings up.  There is one wire for the first
- * milestone; adding TinyUSB to a RISC-V build is a separate exercise.
+ * Console: UART0 on GPIO0/1 at 115200 (the CH343 port) and the on-chip USB
+ * device as a CDC-ACM COM port, both live at once.  USB is the same TinyUSB
+ * device stack the ARM image uses; the only difference is that Hazard3
+ * delivers external interrupts through its own CSRs, so this port polls the
+ * controller (usb_cdc_poll) instead of taking IRQ 14.  The tight loop in
+ * usb_cdc_console_init answers enumeration; after that the 1 ms console
+ * path drains it.
  *
  * Timer is the Hazard3 machine timer, whose mtime/mtimecmp live in the SIO
  * block (0xd0000000 + 0x1b0), not in a CLINT and not in the ARM timer.
@@ -93,6 +98,10 @@ static void rom_reboot_normal(void)
  * PLL that refuses to lock leaves a correct (if slower) board. */
 static uint32_t g_clk_hz = 12000000u;
 
+/* Set once USB CDC came up and the host finished SET_CONFIGURATION.  Before
+ * that, output must not be shunted into a FIFO nobody drains. */
+static int g_usb_ready;
+
 static void uart_init(void)
 {
     uint32_t div;
@@ -133,12 +142,14 @@ void plat_console_putc(char c)
     uint32_t spins;
 
     /* The PL011 FIFO must never stall the kernel forever: a board with no
-     * adapter still has to reach the shell. */
+     * adapter still has to reach the USB console. */
     for (spins = 0; spins < 100000u; spins++) {
         if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF))
             break;
     }
     mmio_write32(RP_UART_DR, (uint8_t)c);
+    if (g_usb_ready)
+        usb_cdc_putc(c);
 }
 
 void plat_console_flush(void)
@@ -149,6 +160,8 @@ void plat_console_flush(void)
         if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_BUSY))
             break;
     }
+    if (g_usb_ready)
+        usb_cdc_flush();
 }
 
 int plat_console_tx_room(void)
@@ -159,6 +172,15 @@ int plat_console_tx_room(void)
 int plat_console_getchar(void)
 {
     int c;
+
+    /* Thread context, called on every console poll: the natural place to
+     * run the USB state machine while the shell is blocked reading. */
+    if (plat_cpu_id() == 0 && g_usb_ready) {
+        usb_cdc_poll();
+        c = usb_cdc_getchar();
+        if (c >= 0)
+            return c;
+    }
 
     if (mmio_read32(RP_UART_FR) & RP_UART_FR_RXFE)
         return -1;
@@ -546,17 +568,16 @@ uint32_t plat_block_count(void)
 
 /* Hazard3 on the RP2350 supports NAPOT and NA4 but not TOR: pmpcfg A=1 is
  * WARL-mapped to OFF, so arch/rv32/platform.c's TOR regions never match and
- * every user fetch faults at the window base.  Describe the user area with
- * two naturally aligned power-of-two NAPOT regions instead:
+ * every user fetch faults at the window base.
  *
- *   0x20020000, 128 KiB      PLAT_APP_BASE .. +0x20000
- *   0x20040000, 256 KiB      .. PLAT_APP_MAX (0x20080000)
- *
- * Together they are exactly the task area, so U-mode still cannot touch the
- * kernel's first 128 KiB, flash, or MMIO.  They do not separate *tasks* from
- * each other - that needs every window rounded to a power of two so one
- * NAPOT entry can describe it, which is the next step; the RP2040 port runs
- * with the same flat user area. */
+ * Every window is therefore rounded up to a power of two and its base is
+ * aligned to that size (TOS_PMP_POW2_WINDOWS in kernel/process.c), which
+ * lets one NAPOT entry describe exactly this task's window.  U-mode can
+ * reach its own code/data/heap/stack and nothing else: not the kernel, not
+ * flash, not MMIO, and not another task.  The code/data/guard split inside
+ * the window is not enforced, because a second region would have to start
+ * on an unaligned image boundary; the RP2040 port runs with the same flat
+ * in-window model. */
 #define PMP_NAPOT 0x18u
 #define PMP_R     0x01u
 #define PMP_W     0x02u
@@ -571,17 +592,108 @@ int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
                             uint32_t brk, uint32_t stack_low,
                             uint32_t stack_top)
 {
-    uint32_t cfg = PMP_NAPOT | PMP_R | PMP_W | PMP_X;
+    uint32_t size = win_end - win_base;
 
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    (void)wx; (void)brk; (void)stack_low; (void)stack_top;
 
-    __asm__ volatile("csrw pmpaddr0, %0" : :
-                     "r"(napot(PLAT_APP_BASE, 128u * 1024u)));
-    __asm__ volatile("csrw pmpaddr1, %0" : :
-                     "r"(napot(PLAT_APP_BASE + 128u * 1024u, 256u * 1024u)));
-    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg | (cfg << 8)));
+    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(napot(win_base, size)));
+    /* Entry 0 is the window; entries 1..3 go OFF.  Entry 4 (the trap
+     * vector, in pmpcfg1) is left alone. */
+    __asm__ volatile("csrw pmpcfg0, %0" : :
+                     "r"(PMP_NAPOT | PMP_R | PMP_W | PMP_X));
     return 1;
+}
+
+/* ---- bringing core 1 up ------------------------------------------------ */
+
+/* Core 1 does not run our reset vector: the RP2350 boot ROM holds it in a
+ * wait-for-FIFO loop until core 0 pushes the launch sequence
+ *
+ *     0  0  1  <mtvec>  <sp>  <_start>
+ *
+ * and echoes every word back.  This is pico-sdk's
+ * multicore_launch_core1_raw() protocol for RISC-V.  _start re-reads
+ * mhartid, takes .Lsecondary, sees cpu_release and joins the scheduler on
+ * its own kernel stack and trap table.  The vector passed here is
+ * overwritten there, but the ROM wants a value, so hand it the same
+ * direct-mode base core 0 uses. */
+
+#define SIO_FIFO_ST  (SIO_BASE + 0x050u)
+#define SIO_FIFO_WR  (SIO_BASE + 0x054u)
+#define SIO_FIFO_RD  (SIO_BASE + 0x058u)
+#define SIO_FIFO_VLD (1u << 0)
+#define SIO_FIFO_RDY (1u << 1)
+
+extern void _start(void);
+extern char trap_vectors[];
+extern char __kernel_stack_top[];
+
+static void sio_fifo_push(uint32_t v)
+{
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (mmio_read32(SIO_FIFO_ST) & SIO_FIFO_RDY)
+            break;
+    }
+    mmio_write32(SIO_FIFO_WR, v);
+
+    /* h3.unblock: the RISC-V equivalent of ARM's SEV.  Core 1 waits in
+     * h3.block (msleep SLEEPONBLOCK|POWERDOWN); a plain fence would not
+     * wake it.  "slt x0, x0, x1" is the custom encoding and is an
+     * architectural no-op on a core without the XH3POWER extension. */
+    __asm__ volatile("slt x0, x0, x1" ::: "memory");
+}
+
+static uint32_t sio_fifo_pop(void)
+{
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (mmio_read32(SIO_FIFO_ST) & SIO_FIFO_VLD)
+            return mmio_read32(SIO_FIFO_RD);
+    }
+    return 0xFFFFFFFFu;         /* nothing came back: the launch failed */
+}
+
+static void sio_fifo_drain(void)
+{
+    while (mmio_read32(SIO_FIFO_ST) & SIO_FIFO_VLD)
+        (void)mmio_read32(SIO_FIFO_RD);
+}
+
+int plat_start_cpu(int id)
+{
+    const uint32_t lead[3] = { 0u, 0u, 1u };
+    uint32_t tail[3];
+    uint32_t seq = 0;
+    int restarts = 0;
+
+    if (id != 1)
+        return 0;               /* this chip has exactly two cores */
+
+    tail[0] = (uint32_t)(uintptr_t)trap_vectors;
+    tail[1] = (uint32_t)(uintptr_t)__kernel_stack_top;
+    tail[2] = (uint32_t)(uintptr_t)_start;
+
+    for (;;) {
+        uint32_t cmd = (seq < 3) ? lead[seq] : tail[seq - 3];
+
+        if (cmd == 0) {
+            /* Drain first: a stale word from an earlier attempt would be
+             * echoed as the "response" to this one. */
+            sio_fifo_drain();
+            __asm__ volatile("fence" ::: "memory");
+        }
+        sio_fifo_push(cmd);
+
+        if (sio_fifo_pop() != cmd) {
+            /* Out of step.  Restart the sequence; only a core that never
+             * answers at all is a failure. */
+            seq = 0;
+            if (++restarts > 4)
+                return 0;
+            continue;
+        }
+        if (++seq == 6)
+            return 1;           /* core 1 is in _start -> .Lsecondary */
+    }
 }
 
 /* ---- boot -------------------------------------------------------------- */
@@ -621,7 +733,24 @@ void plat_board_early(void)
     early_puts("[B] clk=0x");
     early_put_hex(g_clk_hz);
     early_puts(" Hz\r\n");
-    early_puts("TinyOS/RP2350  rv32  uart0=115200\r\n");
+
+    /* USB CDC shares the console with UART0.  The wait inside is bounded
+     * (~1.5 s scaled by the measured clock), so a board with no USB cable
+     * still boots on UART; a cable gets a native COM port as well. */
+    usb_cdc_console_init(g_clk_hz);
+    g_usb_ready = usb_cdc_hw_ready() ? 1 : 0;
+
+    early_puts("[U] usb hw=");
+    early_puts(g_usb_ready ? "1" : "0");
+    early_puts(" cfg=");
+    early_puts(usb_cdc_configured() ? "1" : "0");
+    early_puts(" stage=");
+    plat_console_putc((char)('0' + usb_cdc_init_stage()));
+    early_puts("\r\n");
+
+    early_puts("TinyOS/RP2350  rv32  uart0=115200  usb-cdc=");
+    early_puts(g_usb_ready ? "up" : "down");
+    early_puts("\r\n");
 }
 
 void plat_board_init(void)
