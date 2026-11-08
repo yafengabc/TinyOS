@@ -2136,6 +2136,40 @@ CoreMark 的差距更小，符合它比 LCG 循环有更多指令级并行的预
 试过 `TOS_OPT=-O3`，但整个镜像反而慢约 1.7×（`smpbench` 139→237 ms，
 `coremark 6000` 18.7 s），疑似 I-cache/代码布局效应，因此正式数据用 `-O2`。
 
+### 26.1 设备端口
+
+`board/rp2350rv/` 现在与 ARM 端口设备同源：
+
+- `gpio.c`：GPIO（30 pin）+ ADC0..3 + 片上温度通道（PLL_SYS/4 = 37.5 MHz）。
+- `spi.c`/`spi.h`：PL022 轮询 SPI。
+- `lcd_st7789.c`/`font5x7.h`：ST7789V2 135x240（SPI1 + DMA 通道 10）。
+- `board_devs.c`：ATK-DNRP2350AM 的 11 行设备表（led0/key0/lcd0/tf0/uart0/
+  usb0/adc0..3/flash0）；TF 卡和 ARM 端口一样只描述、不驱动。
+- `board_internal.h`：`plat_led_owned()`，心跳让位给用户。
+- `rp2350rv_memmap.h`：补齐 ADC/SPI/DMA/TIMER 的寄存器定义。
+
+`lcd_delay_ms()` 不再读 SysTick（RV32 没有），改为 RP2350 TIMER0 的
+1 MHz 自由计数器（`0x400b0028`）。原因和 ARM 端口读 SysTick 下计数器一样：
+面板初始化发生在 `plat_irq_enable()` 之前，`g_ticks` 还没开始走。
+
+真机验证（`rp2350rvsmp`）：
+
+| 项目 | 结果 |
+|---|---|
+| `/proc/dev` | 完整 11 行，`board: ATK-DNRP2350AM (RV32)` |
+| `/dev` | `led0 key0 lcd0 screen fb0 gpio adc` |
+| `gpio 3 0/1` | 写读一致（蓝色 LED） |
+| `echo 0/1 > /dev/led0` | 取得所有权后心跳停止，引脚保持用户值 |
+| `cat /dev/key0` | `0`（释放） |
+| `adc 0` / `adc 4` | 0 mV / 866 counts ≈ 697 mV（温度） |
+| `screen` / `screen text` / `screen dev` | 返回并绘制 |
+| `fb info` / `fb demo` | 240x135 RGB565；画完 240x135 位图 |
+| `lcdconsole on` | 控制台镜像到面板 |
+| 设备加入后 | `smpbench 5M` 1.88×、`piperace 2 64` 通过、`reboot` 正常 |
+
+尚未做：窗口内部 code/data/guard 的细分（需要用户镜像的 writable 起点对齐）；
+TF 卡只有设备表描述，没有 SD 驱动（与 ARM 端口一致）。
+
 
 ## 建议的讨论顺序
 

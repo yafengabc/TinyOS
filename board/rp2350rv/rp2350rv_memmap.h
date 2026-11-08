@@ -138,6 +138,71 @@
 #define SIO_GPIO_OUT_SET (SIO_BASE + 0x018u)
 #define SIO_GPIO_OE_SET  (SIO_BASE + 0x038u)
 
+/* ---- peripherals used by the device port ------------------------------ */
+
+#define ADC_BASE        0x400a0000u
+#define SPI0_BASE       0x40080000u
+#define SPI1_BASE       0x40088000u
+#define TIMER0_BASE     0x400b0000u
+#define TIMERAWL_OFFSET 0x00000028u
+
+/* RESETS bits for the blocks the panel/ADC bring up. */
+#define RESET_ADC       (1u << 0)
+#define RESET_DMA       (1u << 2)
+#define RESET_SPI0      (1u << 18)
+#define RESET_SPI1      (1u << 19)
+
+/* clk_adc sits after clk_hstx; its AUXSRC has no clk_sys option, so the
+ * ADC runs from PLL_SYS / 4 = 37.5 MHz at the 150 MHz boot rate. */
+#define CLK_ADC_CTRL_OFFSET     0x6cu
+#define CLK_ADC_DIV_OFFSET      0x70u
+#define CLK_ADC_SELECTED_OFFSET 0x74u
+#define CLK_ADC_CTRL_ENABLE     (1u << 11)
+#define CLK_ADC_CTRL_AUXSRC_PLL_SYS 0x1u
+
+/* SIO GPIO input and output-enable clear. */
+#define SIO_GPIO_IN      (SIO_BASE + 0x004u)
+#define SIO_GPIO_OE_CLR  (SIO_BASE + 0x040u)
+
+#define RP_GPIO_FUNC_SPI  0x01u
+#define RP_GPIO_FUNC_NULL 0x1fu
+
+/* SPI (PL022), same register layout as the ARM port. */
+#define RP_SPI_CR0    (0x00u)
+#define RP_SPI_CR1    (0x04u)
+#define RP_SPI_DR     (0x08u)
+#define RP_SPI_SR     (0x0cu)
+#define RP_SPI_CPSR   (0x10u)
+#define RP_SPI_ICR    (0x14u)
+#define RP_SPI_DMACR  (0x24u)
+
+#define RP_SPI_SR_TFE (1u << 0)
+#define RP_SPI_SR_TNF (1u << 1)
+#define RP_SPI_SR_RNE (1u << 2)
+#define RP_SPI_SR_RFF (1u << 3)
+#define RP_SPI_SR_BSY (1u << 4)
+
+#define RP_SPI_CR0_DSS_8  (7u << 0)
+#define RP_SPI_CR1_SSE    (1u << 1)
+#define RP_SPI_ICR_ROR    (1u << 0)
+#define RP_SPI_DMACR_RXDMAE (1u << 0)
+#define RP_SPI_DMACR_TXDMAE (1u << 1)
+
+/* DMA: sixteen channels, 0x40 bytes apart. */
+#define DMA_BASE             0x50000000u
+#define DMA_CH_OFFSET(n)     ((n) * 0x40u)
+#define DMA_CH_READ_ADDR     (0x00u)
+#define DMA_CH_WRITE_ADDR    (0x04u)
+#define DMA_CH_TRANS_COUNT   (0x08u)
+#define DMA_CH_CTRL_TRIG     (0x0cu)
+
+#define DMA_CTRL_EN          (1u << 0)
+#define DMA_CTRL_DATA_BYTE   (0u << 2)
+#define DMA_CTRL_INCR_READ   (1u << 4)
+#define DMA_CTRL_TREQ(n)     ((n) << 17)
+#define DMA_CTRL_BUSY        (1u << 26)
+#define DREQ_SPI1_TX         26u
+
 /* ATK-DNRP2350AM user LED: GPIO3, wired for sink current (LOW = ON). */
 #define RP_LED_GPIO 3u
 

@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "board.h"
+#include "board_internal.h"
 #include "rp2350rv_memmap.h"
 #include "console.h"
 #include "usb_cdc.h"
@@ -473,7 +474,7 @@ void plat_timer_tick(void)
         g_ticks++;
     mtime_set_cmp(mtime_read() + g_interval);
 
-    if (plat_cpu_id() == 0 && (g_ticks % 1000u) == 0u)
+    if (plat_cpu_id() == 0 && (g_ticks % 1000u) == 0u && !plat_led_owned())
         led_toggle();
 }
 
@@ -790,9 +791,4 @@ void plat_reboot(void)
 uint32_t plat_board_cpu_id(void)
 {
     return mmio_read32(SIO_CPUID);
-}
-
-const char *plat_board_name(void)
-{
-    return "ATK-DNRP2350AM (RV32)";
 }
