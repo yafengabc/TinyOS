@@ -74,6 +74,29 @@ _start:
     addi    t0, t0, 4
     j       1b
 2:
+#ifdef TOS_COPY_DATA
+    /* Loaded-image boards (RP2350 RISC-V) are started by a ROM that only
+       jumps to the entry point: .text runs in place from flash, but .data
+       has to be moved from its flash LMA to its SRAM VMA here, before any
+       global is read.  The RP2350 XIP window is plain memory, so this is a
+       word copy from one address to another.  Both ends are 4-byte aligned
+       and the section is padded to a word by the board's linker script. */
+    .option push
+    .option norelax
+    la      t0, __data_load
+    la      t1, __data_start
+    la      t2, __data_end
+    .option pop
+3:
+    bgeu    t1, t2, 4f
+    lw      t3, 0(t0)
+    sw      t3, 0(t1)
+    addi    t0, t0, 4
+    addi    t1, t1, 4
+    j       3b
+4:
+#endif
+
     .option push
     .option norelax
     la      t0, trap_vectors

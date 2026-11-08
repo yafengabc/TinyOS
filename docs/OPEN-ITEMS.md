@@ -2013,6 +2013,57 @@ smpbench [iters]     # 默认 5,000,000 次/worker，best of 2
 说明工具没有把时间算成两倍。连续 3 次 5M 都是 1.82x，重复性够用。
 
 
+## 25. RP2350 RISC-V (Hazard3) 移植
+
+`-target rp2350rv` 在**同一块 ATK-DNRP2350AM** 上把 RP2350 切到它的两个 Hazard3
+核：内核从 XIP flash（0x10000000）原地执行，`.data/.bss` 在 0x20000000 的 SRAM，
+littlefs 仍在 flash 0x80000，用户程序在 0x20020000 起的 384 KiB 窗口里跑 U-mode。
+
+新增文件：`board/rp2350rv/{kernel.ld,image_def.S,platform.c,layout.c,rp2350rv_memmap.h}`；
+`internal/build/build.go` 多一个 target，`internal/build/uf2.go` 多一个
+`emitRP2350RVUF2`（family **0xe48bff5a**，IMAGE_TYPE **0x1101** = EXE|CPU_RISCV|
+CHIP_RP2350，带 ENTRY_POINT item）。`arch/rv32/start.S` 增加可选的 `.data` 拷贝
+（`TOS_COPY_DATA`）；ROM 只跳到入口点，不会搬段。
+
+两个真机坑，都是烧进去才看见的：
+
+1. **不要在未切走 clk_sys 的情况下复位 PLL_SYS。** RISC-V boot ROM 可能把
+   clk_sys 留在 PLL_SYS 上；第一版照 ARM 端口的顺序直接 reset PLL，CPU 当场停，
+   UART 一个字节都没有。正确顺序是 pico-sdk 的：先把 clk_sys/clk_ref 的 SRC
+   清到 glitchless 源并等 SELECTED，再动 PLL。首版镜像干脆不碰 PLL，只测
+   clk_sys（实测 0x00b722d0 ≈ 11.94 MHz），UART 分频和 mtime 间隔都来自测量值。
+   `pll_sys_init()` 保留但未调用，等这一步单独上板验证。
+2. **RP2350 的 Hazard3 PMP 不支持 TOR**（A=1 被 WARL 成 OFF）。通用 rv32 层用
+   TOR 描述代码/数据区，于是用户程序在窗口基址 0x20020000 立刻 instruction
+   access fault。board hook `plat_board_task_protect()` 改用两个 NAPOT 区覆盖
+   整个任务区：0x20020000/128 KiB + 0x20040000/256 KiB，RWX；内核、flash、
+   MMIO 仍在 U-mode 之外。逐任务隔离需要把窗口尺寸都取整到 2 的幂，是下一步。
+
+真机验收（COM6 = UART0，115200；本机 USB CDC 未启用）：
+
+| 项目 | 结果 |
+|---|---|
+| 启动 | `[A] clocks+reset` → `[B] clk=0x00b722d0` → shell `tos>` |
+| `free` | SRAM 512 KiB，kernel 108 KiB，tasks 384 KiB，heap 64 KiB |
+| `ls` / `df` | 300 KiB littlefs（75 blocks），46 个文件 |
+| `hello` | `hello from ring 3!` |
+| `cat demo.py \| wc` | 116 / 343 / **2788**（与其它板一致） |
+| `py pytest.py` | **54 checks, 0 failed** |
+| `piperace 4 64` | 4 对全部 64 KiB 校验通过 |
+| `dd of=... / dd if=...` | 4 KiB 写入、读回、pattern verified、`rm` 后 df 复原 |
+| `reboot` | ROM 正常重启，重新进 shell |
+| `smpbench 200000` | 单核 1.01x；`2000000` 1.02x |
+| `tostest compat -targets x86,rv32` | OK |
+
+`free` 的 `plat_now_ns()` 一开始把 mtime 当 150 MHz 算（12 MHz 下 `clock_ms`
+快 12.5 倍，基准看起来像卡死）；改成用实测 `g_clk_hz` 后 `sleep 2000` 主机计时
+2.4 s、smpbench 单核 1.0x，正常。
+
+尚未做：150 MHz PLL 切换（`pll_sys_init()` 已就绪）、逐任务 PMP 隔离、USB CDC、
+双 Hazard3 核。RP2040 目标当前因 `user/smp.c` 的 Thumb-2 内联汇编无法在 M0+
+编译而构建失败，与本次移植无关。
+
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。

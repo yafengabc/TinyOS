@@ -24,6 +24,23 @@ void plat_board_early(void);
 void plat_board_init(void);
 void plat_timer_tick(void);
 
+/* Board-specific task PMP programming.  Return nonzero when the board wrote
+ * the PMP itself; the generic layer then leaves it alone.  It exists because
+ * Hazard3 on the RP2350 supports NAPOT (and NA4) but not TOR: writing A=TOR
+ * maps the region to OFF, so the generic TOR layout silently denies every
+ * user fetch.  A board with that core describes the user area with
+ * naturally-aligned power-of-two NAPOT regions instead. */
+int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
+                            uint32_t brk, uint32_t stack_low,
+                            uint32_t stack_top);
+
+/* Board hook polled from plat_panic_halt().  A board whose console works
+ * without interrupts (RP2350's UART0, for instance) can keep watching for a
+ * reflash key after the kernel has died, so a crashed image does not need a
+ * physical BOOTSEL press.  The generic layer provides an empty weak default;
+ * boards that have nothing to poll simply do not define it. */
+void plat_board_panic_poll(void);
+
 /* MMIO helpers shared by both layers.  RV32 has no I/O space, so every
  * peripheral access is a plain load/store. */
 static inline void mmio_write8(uint32_t addr, uint8_t v)

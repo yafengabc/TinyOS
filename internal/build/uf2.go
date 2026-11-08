@@ -32,6 +32,11 @@ const rpLfsOffset = 0x80000
 // 0xe48bff5a and 0xe48bff5b; our image_def.S declares an ARM Secure EXE.
 const rp2350UF2Family = 0xe48bff59
 
+// RP2350 RISC-V Secure EXE.  The family id follows the PICOBIN IMAGE_TYPE,
+// not the chip: an image the ROM boots on Hazard3 must use this one, or the
+// BOOTSEL drive accepts the blocks and the ROM ignores them.
+const rp2350RVUF2Family = 0xe48bff5a
+
 // "Absolute" is a pseudo-family: the ROM treats those blocks as commands
 // rather than flash payload.  RP2350-E10 (A2 boot ROM) breaks UF2
 // drag-and-drop downloads unless the file starts with one such block at
@@ -207,6 +212,18 @@ func rp2350AbsBlock() []byte {
 	return b[:]
 }
 
+// rp2350WriteEndBlock appends the ignored end block that makes the metadata
+// a two-block loop: START, 2BS_IGNORED(1 word), 2BS_LAST(1 word), a negative
+// offset back to the IMAGE_DEF, END.  Byte pattern matches
+// pico_crt0/embedded_end_block.inc.S and the MicroPython release image.
+func rp2350WriteEndBlock(flat []byte, markerOff, endOff uint32) {
+	binary.LittleEndian.PutUint32(flat[endOff+0:endOff+4], 0xffffded3)
+	binary.LittleEndian.PutUint32(flat[endOff+4:endOff+8], 0x000001fe)
+	binary.LittleEndian.PutUint32(flat[endOff+8:endOff+12], 0x000001ff)
+	binary.LittleEndian.PutUint32(flat[endOff+12:endOff+16], markerOff-endOff) // wraps to 2's complement
+	binary.LittleEndian.PutUint32(flat[endOff+16:endOff+20], 0xab123579)
+}
+
 // rp2350CloseBlockLoop turns the single self-referencing IMAGE_DEF into the
 // two-block loop every pico-sdk flash image has (crt0.S defaults
 // PICO_CRT0_INCLUDE_PICOBIN_END_BLOCK to 1).  The ROM walks the loop to
@@ -215,17 +232,34 @@ func rp2350AbsBlock() []byte {
 //
 // endOff is a free flash offset just past the kernel.  The ignored end
 // block's LAST item carries a *negative* offset back to the IMAGE_DEF.
+//
+// This is the ARM layout: IMAGE_TYPE is the only item before LAST, so the
+// next-block word sits 12 bytes into the block.  The RISC-V block also has
+// an ENTRY_POINT item, which moves that word; emitRP2350RVUF2 locates it
+// with rp2350NextBlockWord instead.
 func rp2350CloseBlockLoop(flat []byte, markerOff, endOff uint32) {
 	// IMAGE_DEF: LAST item's next-block word (marker + 12).
 	binary.LittleEndian.PutUint32(flat[markerOff+12:markerOff+16], endOff-markerOff)
-	// Ignored end block: START, 2BS_IGNORED(1 word), 2BS_LAST(1 word),
-	// negative offset back, END.  Byte pattern matches
-	// pico_crt0/embedded_end_block.inc.S and the MicroPython release image.
-	binary.LittleEndian.PutUint32(flat[endOff+0:endOff+4], 0xffffded3)
-	binary.LittleEndian.PutUint32(flat[endOff+4:endOff+8], 0x000001fe)
-	binary.LittleEndian.PutUint32(flat[endOff+8:endOff+12], 0x000001ff)
-	binary.LittleEndian.PutUint32(flat[endOff+12:endOff+16], markerOff-endOff) // wraps to 2's complement
-	binary.LittleEndian.PutUint32(flat[endOff+16:endOff+20], 0xab123579)
+	rp2350WriteEndBlock(flat, markerOff, endOff)
+}
+
+// rp2350NextBlockWord walks the items of an IMAGE_DEF and returns the offset
+// of the "next block" word (the one immediately after the 2BS_LAST item).
+// Item size is in words for ordinary items; LAST is the only 2-byte-size
+// form and is padded to a word boundary before the offset.
+func rp2350NextBlockWord(flat []byte, markerOff, limit int) (int, error) {
+	for pos := markerOff + 4; pos+4 <= limit && pos < markerOff+4096; {
+		id := flat[pos]
+		if id == 0xff { // PICOBIN_BLOCK_ITEM_2BS_LAST
+			return pos + 4, nil
+		}
+		sizeWords := int(flat[pos+1])
+		if sizeWords <= 0 {
+			return 0, fmt.Errorf("PICOBIN item 0x%02x at +%d has zero size", id, pos)
+		}
+		pos += 4 * sizeWords
+	}
+	return 0, fmt.Errorf("no PICOBIN LAST item in the IMAGE_DEF")
 }
 
 // buildBoot2 loads the prebuilt 2nd-stage bootloader (board/rp2040/boot2.bin,
@@ -366,6 +400,99 @@ func (b *Builder) emitRP2350UF2(elfPath string) error {
 	b.logf("      picobin: IMAGE_DEF @0x%x -> ignored end block @0x%x\n", markerOff, endOff)
 
 	uf2 := append(rp2350AbsBlock(), flatToUF2(flat, rp2350UF2Family)...)
+	out := filepath.Join(b.BuildDir, b.Target.Name+".uf2")
+	if err := os.WriteFile(out, uf2, 0o644); err != nil {
+		return err
+	}
+	b.logf("      %s (%d bytes, %d blocks)\n", relName(b.Root, out), len(uf2), len(uf2)/512)
+	b.logf("      flash: hold BOOTSEL, drop %s onto the RP2350 drive\n", relName(b.Root, out))
+	b.logf("      littlefs partition at flash 0x%x (LBA %d)\n", rp2040FlashBase+fsOff, fsOff/512)
+	return nil
+}
+
+// emitRP2350RVUF2 packages the RISC-V RP2350 kernel and its littlefs
+// partition for the same RP2350 BOOTSEL drive.
+//
+// The layout differs from the ARM image in exactly one place: there is no
+// ARM vector table, so the IMAGE_DEF is the first thing in flash and its
+// ENTRY_POINT item says where to jump (_start) and what stack to install.
+// Everything downstream - the littlefs offset, the absolute block, the
+// block-loop closing - is the same as the ARM packer, except for the family
+// id and the next-block word's position in the block.
+func (b *Builder) emitRP2350RVUF2(elfPath string) error {
+	kernel, koff, err := elfToFlashRaw(elfPath)
+	if err != nil {
+		return err
+	}
+	if koff != 0 {
+		return fmt.Errorf("RP2350-RV32 kernel flash image starts at offset 0x%x, not at the start of flash", koff)
+	}
+	if len(kernel) < 0x100 {
+		return fmt.Errorf("RP2350-RV32 kernel flash image is only %d bytes", len(kernel))
+	}
+
+	marker := []byte{0xd3, 0xde, 0xff, 0xff}
+	markerOff := -1
+	for off := 0; off+4 <= len(kernel) && off < 4096; off += 4 {
+		if kernel[off] == marker[0] && kernel[off+1] == marker[1] &&
+			kernel[off+2] == marker[2] && kernel[off+3] == marker[3] {
+			markerOff = off
+			break
+		}
+	}
+	if markerOff < 0 {
+		return fmt.Errorf("RP2350-RV32 kernel has no PICOBIN IMAGE_DEF marker in the first 4 KiB (check KEEP(*(.picobin_block)) in kernel.ld)")
+	}
+
+	// The one mistake that a BOOTSEL drop reports only as "nothing
+	// happened": a RISC-V block the ROM refuses because it is typed ARM or
+	// has no entry point.  IMAGE_TYPE = EXE | CPU_RISCV | CHIP_RP2350.
+	if markerOff+20 > len(kernel) || kernel[markerOff+4] != 0x42 ||
+		binary.LittleEndian.Uint16(kernel[markerOff+6:markerOff+8]) != 0x1101 {
+		return fmt.Errorf("RP2350-RV32 IMAGE_DEF at +%d is not typed EXE|RISCV|RP2350 (0x1101)", markerOff)
+	}
+	if kernel[markerOff+8] != 0x44 {
+		return fmt.Errorf("RP2350-RV32 IMAGE_DEF has no ENTRY_POINT item; the ROM has nothing to jump to")
+	}
+	entry := binary.LittleEndian.Uint32(kernel[markerOff+12 : markerOff+16])
+	sp := binary.LittleEndian.Uint32(kernel[markerOff+16 : markerOff+20])
+	if entry < rp2040FlashBase || entry >= rp2040FlashBase+0x1000000 {
+		return fmt.Errorf("RP2350-RV32 entry point 0x%08x is not in the XIP window", entry)
+	}
+	if sp < 0x20000000 || sp > 0x20082000 {
+		return fmt.Errorf("RP2350-RV32 initial SP 0x%08x is outside SRAM (0x20000000..0x20082000)", sp)
+	}
+
+	nextWord, err := rp2350NextBlockWord(kernel, markerOff, len(kernel))
+	if err != nil {
+		return fmt.Errorf("RP2350-RV32 IMAGE_DEF: %w", err)
+	}
+
+	ramdiskPath := b.fsImage()
+	ramdisk, err := os.ReadFile(ramdiskPath)
+	if err != nil {
+		return fmt.Errorf("littlefs image missing (%s); run a full build first", ramdiskPath)
+	}
+
+	const fsOff = rpLfsOffset
+	if len(kernel) > fsOff {
+		return fmt.Errorf("kernel (%d bytes) overruns littlefs partition at flash 0x%x",
+			len(kernel), rp2040FlashBase+fsOff)
+	}
+	flat := make([]byte, fsOff+len(ramdisk))
+	copy(flat, kernel)
+	copy(flat[fsOff:], ramdisk)
+
+	endOff := uint32((len(kernel) + 15) &^ 15)
+	if endOff+20 > fsOff {
+		return fmt.Errorf("RP2350-RV32 kernel leaves no room for the PICOBIN end block")
+	}
+	binary.LittleEndian.PutUint32(flat[nextWord:nextWord+4], endOff-uint32(markerOff))
+	rp2350WriteEndBlock(flat, uint32(markerOff), endOff)
+	b.logf("      picobin: IMAGE_DEF @0x%x -> ignored end block @0x%x (entry 0x%x, sp 0x%x)\n",
+		markerOff, endOff, entry, sp)
+
+	uf2 := append(rp2350AbsBlock(), flatToUF2(flat, rp2350RVUF2Family)...)
 	out := filepath.Join(b.BuildDir, b.Target.Name+".uf2")
 	if err := os.WriteFile(out, uf2, 0o644); err != nil {
 		return err

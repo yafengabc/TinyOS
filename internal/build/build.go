@@ -139,6 +139,22 @@ var Targets = map[string]Target{
 	// 128 KiB budget.
 	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024},
 
+	// rp2350rv: the same physical board with its Hazard3 RISC-V cores
+	// instead of the Cortex-M33 pair.  RP2350 boots either architecture,
+	// selected by the PICOBIN IMAGE_TYPE in board/rp2350rv/image_def.S, so
+	// this is a separate image rather than a runtime switch.
+	//
+	// The kernel runs in place from XIP flash at 0x10000000; .data/.bss live
+	// in the 520 KiB SRAM at 0x20000000.  The boot ROM does no load at all,
+	// so _start copies .data from its LMA (TOS_COPY_DATA in arch/rv32/
+	// start.S).  The littlefs partition stays in flash at 0x80000, exactly
+	// like the ARM image, and is read through XIP (writes use the ROM's
+	// flash API, see board/rp2350rv/platform.c).
+	//
+	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
+	// spin lock will need later, and it costs nothing on this core.
+	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 64 * 1024},
+
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
 	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
 	// the board launches it from cpu_init() - that is what makes this a
@@ -296,6 +312,16 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	if b.Target.MaxProcs > 0 {
 		archFlags = append(archFlags,
 			fmt.Sprintf("-DTOS_MAX_PROCS=%d", b.Target.MaxProcs))
+	}
+
+	// The RP2350 RISC-V image is linked in flash with .data in SRAM, but
+	// the boot ROM only jumps to the entry point: it does not load any
+	// segment.  _start therefore copies .data from its flash LMA before
+	// kmain can touch a global.  Every other RV32 target is either loaded
+	// whole by QEMU or has a ROM that relocates .data itself, so nothing
+	// else asks for the copy loop.
+	if b.Target.Board == "rp2350rv" {
+		archFlags = append(archFlags, "-DTOS_COPY_DATA")
 	}
 
 	// How many harts.  Left undefined for a uniprocessor so that every
@@ -820,6 +846,10 @@ func (b *Builder) buildKernel() error {
 				}
 			case "rp2350":
 				if err := b.emitRP2350UF2(elfPath); err != nil {
+					return err
+				}
+			case "rp2350rv":
+				if err := b.emitRP2350RVUF2(elfPath); err != nil {
 					return err
 				}
 			}

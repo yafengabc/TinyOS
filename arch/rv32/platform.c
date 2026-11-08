@@ -265,6 +265,11 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
 {
     uint32_t size = stack_top - stack_low;
 
+    /* A board whose PMP cannot express the TOR layout (RP2350 Hazard3 has no
+     * TOR matching) programs its own regions. */
+    if (plat_board_task_protect(win_base, win_end, wx, brk, stack_low, stack_top))
+        return;
+
     /* The window's end is implied by whichever region is highest (the
        stack), so the TOR/NAPOT entries do not need it.  An ARM-style port
        that describes the whole window would. */
@@ -328,8 +333,31 @@ void plat_set_kernel_stack(uint32_t top)
 void plat_panic_halt(void)
 {
     __asm__ volatile("csrci mstatus, 8");
-    for (;;)
-        __asm__ volatile("wfi");
+    /* Spin instead of WFI: a panic can happen with interrupts masked (early
+     * init, or a fault inside a critical section), and WFI would then never
+     * wake to poll the console again.  The board hook is what keeps a dead
+     * RP2350 recoverable from the host. */
+    for (;;) {
+        plat_board_panic_poll();
+        for (volatile int i = 0; i < 200; i++)
+            ;
+    }
+}
+
+__attribute__((weak)) void plat_board_panic_poll(void)
+{
+}
+
+__attribute__((weak)) int plat_board_task_protect(uint32_t win_base,
+                                                  uint32_t win_end,
+                                                  uint32_t wx,
+                                                  uint32_t brk,
+                                                  uint32_t stack_low,
+                                                  uint32_t stack_top)
+{
+    (void)win_base; (void)win_end; (void)wx; (void)brk;
+    (void)stack_low; (void)stack_top;
+    return 0;
 }
 
 /* ---- spin locks -------------------------------------------------------
