@@ -44,7 +44,16 @@
 #endif
 #ifndef COMPILER_FLAGS
 #if defined(__riscv)
-#define COMPILER_FLAGS "-O2 rv32imac -mabi=ilp32"
+#if defined(__riscv_atomic) && defined(__riscv_compressed)
+#define TOS_RISCV_MARCH "rv32imac"
+#elif defined(__riscv_atomic)
+#define TOS_RISCV_MARCH "rv32ima"
+#elif defined(__riscv_compressed)
+#define TOS_RISCV_MARCH "rv32imc"
+#else
+#define TOS_RISCV_MARCH "rv32im"
+#endif
+#define COMPILER_FLAGS "-O2 " TOS_RISCV_MARCH " -mabi=ilp32"
 #elif defined(__arm__)
 #define COMPILER_FLAGS "-O2 thumbv8m.main -mcpu=cortex-m33"
 #else
