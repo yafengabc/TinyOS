@@ -936,3 +936,15 @@ void plat_reboot(void)
     /* Only reached if the reset never happened. */
     plat_panic_halt();
 }
+
+/* APB is half the CPU clock on the C3: 80 MHz APB at the 160 MHz PLL rate,
+ * 10 MHz APB (20 MHz core) on the ROM fallback. */
+const char *plat_cpu_model(void)
+{
+    return "ESP32-C3";
+}
+
+uint32_t plat_cpu_hz(void)
+{
+    return plat_apb_hz() * 2u;
+}

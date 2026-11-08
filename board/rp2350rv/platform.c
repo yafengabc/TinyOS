@@ -792,3 +792,15 @@ uint32_t plat_board_cpu_id(void)
 {
     return mmio_read32(SIO_CPUID);
 }
+
+/* /proc/cpuinfo: the core the image was built for and the measured
+ * clk_sys (150 MHz after the PLL step). */
+const char *plat_cpu_model(void)
+{
+    return "Hazard3 (RP2350)";
+}
+
+uint32_t plat_cpu_hz(void)
+{
+    return g_clk_hz;
+}

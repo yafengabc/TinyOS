@@ -59,6 +59,25 @@ __attribute__((weak)) void plat_wake_cpu(void)
 {
 }
 
+/* CPU description hooks.  A board that knows its core clock and model
+ * overrides these; the architecture ports override the ISA string.  The
+ * weak defaults keep /proc/cpuinfo usable (and every target building)
+ * before a board has filled them in. */
+__attribute__((weak)) uint32_t plat_cpu_hz(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) const char *plat_cpu_model(void)
+{
+    return "unknown";
+}
+
+__attribute__((weak)) const char *plat_cpu_isa(void)
+{
+    return "unknown";
+}
+
 void cpu_init(void)
 {
     int n = (int)PLAT_MAX_CPUS;

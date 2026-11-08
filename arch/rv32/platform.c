@@ -395,3 +395,18 @@ void plat_spin_release(volatile int *v)
     *v = 0;
 }
 #endif
+
+/* The ISA string is a property of this image, not of the board: rv32imc on
+ * the C3, rv32imac on the RP2350's Hazard3 and the SMP QEMU target. */
+const char *plat_cpu_isa(void)
+{
+#if defined(__riscv_atomic) && defined(__riscv_compressed)
+    return "rv32imac";
+#elif defined(__riscv_atomic)
+    return "rv32ima";
+#elif defined(__riscv_compressed)
+    return "rv32imc";
+#else
+    return "rv32im";
+#endif
+}

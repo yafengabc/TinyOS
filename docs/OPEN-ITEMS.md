@@ -2171,6 +2171,49 @@ CoreMark 的差距更小，符合它比 LCG 循环有更多指令级并行的预
 TF 卡只有设备表描述，没有 SD 驱动（与 ARM 端口一致）。
 
 
+## 27. /proc/cpuinfo
+
+Linux 风格的 `/proc/cpuinfo`，和其他 proc 文件一样在 `open()` 时生成快照。
+每个在线 CPU 一段：
+
+```
+processor       : 0
+model name      : Hazard3 (RP2350)
+isa             : rv32imac
+cpu MHz         : 150.000
+
+processor       : 1
+...
+
+board           : ATK-DNRP2350AM (RV32)
+cpus            : 2
+tick Hz         : 1000
+```
+
+三个平台钩子（`kernel/platform.h`，`kernel/cpu.c` 给弱默认）：
+
+- `plat_cpu_model()`：板级填“核 + 芯片”，如 `Hazard3 (RP2350)`、
+  `Cortex-M33 (RP2350)`、`ESP32-C3`；未知返回 `"unknown"`。
+- `plat_cpu_hz()`：板级填实际核心频率（RP2350 用测量后的 `g_clk_hz`，
+  C3 用 `plat_apb_hz() * 2`），不知道返回 0，文件里显示 `unknown`。
+- `plat_cpu_isa()`：架构层按编译宏填，RV32 用
+  `__riscv_atomic`/`__riscv_compressed` 区分 `rv32imac`/`rv32imc`/`rv32im`，
+  ARM 用 `__ARM_ARCH_8M_MAIN__`/`7M`/`6M` 区分 `thumbv8m.main`/`thumbv7m`/
+  `thumbv6m`，x86 返回 `i686`。
+- 每段的数量来自运行时的 `cpu_count`，所以 `rp2350rvsmp` 自动两段。
+
+真机/模拟器实测：
+
+| 目标 | model | isa | cpu MHz | board |
+|---|---|---|---|---|
+| `rp2350rvsmp` | Hazard3 (RP2350) | rv32imac | 150.000 | ATK-DNRP2350AM (RV32) |
+| `rp2350` | Cortex-M33 (RP2350) | thumbv8m.main | 150.000 | ATK-DNRP2350AM |
+| `esp32c3` | ESP32-C3 | rv32imc | 160.000 | ESP32-C3 core (CH340K) |
+| `rv32` (QEMU) | QEMU virt RISC-V | rv32imc | unknown | QEMU virt (RV32) |
+| `arm` (QEMU) | Cortex-M3 (QEMU mps2) | thumbv7m | 25.000 | QEMU mps2-an385 |
+| `x86` (QEMU) | i686 (PC) | i686 | unknown | PC (i686) |
+
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。

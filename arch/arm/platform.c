@@ -1080,4 +1080,20 @@ void plat_panic_halt(void)
     }
 }
 
+/* Thumb/ARM profile as compiled, not as the board might wish. */
+const char *plat_cpu_isa(void)
+{
+#if defined(__ARM_ARCH_8M_MAIN__)
+    return "thumbv8m.main";
+#elif defined(__ARM_ARCH_8M_BASE__)
+    return "thumbv8m.base";
+#elif defined(__ARM_ARCH_7M__)
+    return "thumbv7m";
+#elif defined(__ARM_ARCH_6M__)
+    return "thumbv6m";
+#else
+    return "arm";
+#endif
+}
+
 

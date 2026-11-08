@@ -247,3 +247,20 @@ void plat_reboot(void)
     mmio_write32(RV32_TEST_BASE, 0x7777u);
     plat_panic_halt();
 }
+
+/* QEMU does not expose a meaningful core clock; the CLINT's 10 MHz is the
+ * timer rate, not the CPU's.  /proc/cpuinfo prints "unknown" for it. */
+const char *plat_cpu_model(void)
+{
+    return "QEMU virt RISC-V";
+}
+
+uint32_t plat_cpu_hz(void)
+{
+    return 0;
+}
+
+const char *plat_board_name(void)
+{
+    return "QEMU virt (RV32)";
+}

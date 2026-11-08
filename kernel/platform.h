@@ -138,6 +138,19 @@ extern const uint32_t PLAT_MAX_CPUS;
  * exists (a secondary hart calls kmain-adjacent code with its own id). */
 int plat_cpu_id(void);
 
+/* ---- CPU description (for /proc/cpuinfo) ----------------------------- */
+
+/* Core clock in Hz, or 0 when the port does not know it.  This is the CPU's
+ * own clock, not the scheduler tick (plat_tick_hz) and not the bus clock. */
+uint32_t plat_cpu_hz(void);
+
+/* Human-readable core and ISA names.  The board owns model (the chip/core
+ * combination); the architecture port owns isa because it is a property of
+ * how this image was compiled, not of the board.  Both have weak defaults
+ * that say "unknown" so a new board only has to fill in what it knows. */
+const char *plat_cpu_model(void);
+const char *plat_cpu_isa(void);
+
 /* ---- time ------------------------------------------------------------ */
 
 uint32_t plat_uptime_ms(void);

@@ -349,3 +349,14 @@ uint32_t plat_board_cpu_id(void)
 {
     return mmio_read32(SIO_CPUID);
 }
+
+/* The stage-2 leaves clk_sys at 12 MHz, which is also SysTick's input. */
+const char *plat_cpu_model(void)
+{
+    return "Cortex-M0+ (RP2040)";
+}
+
+uint32_t plat_cpu_hz(void)
+{
+    return ARM_SYSTICK_CLK;
+}

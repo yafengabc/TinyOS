@@ -293,3 +293,26 @@ void plat_reboot(void)
     for (;;)
         hlt();
 }
+
+/* The PC target has no CPUID-derived brand string, and there is no
+ * meaningful clock to report: QEMU/TCG runs the guest at whatever the host
+ * allows. */
+const char *plat_cpu_isa(void)
+{
+    return "i686";
+}
+
+const char *plat_cpu_model(void)
+{
+    return "i686 (PC)";
+}
+
+uint32_t plat_cpu_hz(void)
+{
+    return 0;
+}
+
+const char *plat_board_name(void)
+{
+    return "PC (i686)";
+}

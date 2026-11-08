@@ -5,6 +5,8 @@
 #include "platform.h"
 #include "process.h"
 #include "ramdisk.h"
+#include "cpu.h"
+#include "hwdev.h"
 #include "string.h"
 
 /* Everything under /proc is a snapshot taken at open() time: the text is
@@ -140,6 +142,39 @@ static uint32_t fmt_stack(char *b, uint32_t cap)
     return off;
 }
 
+/* Linux-shaped per-processor blocks, then the machine-level fields once.
+ * The board owns the model and clock, the architecture port owns the ISA
+ * string; a board that supplies neither still gets a valid file because
+ * the hooks have weak defaults.  cpu_count is the number of CPUs that came
+ * online, so an SMP image reports two and a uniprocessor one. */
+static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
+{
+    uint32_t off = 0;
+    uint32_t hz = plat_cpu_hz();
+    int n = cpu_count;
+
+    if (n < 1)
+        n = 1;
+    for (int i = 0; i < n; i++) {
+        off = put(b, cap, off, "processor\t: %d\n", i);
+        off = put(b, cap, off, "model name\t: %s\n", plat_cpu_model());
+        off = put(b, cap, off, "isa\t\t: %s\n", plat_cpu_isa());
+        if (hz) {
+            uint32_t mhz = hz / 1000000u;
+            uint32_t frac = (hz % 1000000u) / 1000u;
+
+            off = put(b, cap, off, "cpu MHz\t\t: %u.%03u\n", mhz, frac);
+        } else {
+            off = put(b, cap, off, "cpu MHz\t\t: unknown\n");
+        }
+        off = put(b, cap, off, "\n");
+    }
+    off = put(b, cap, off, "board\t\t: %s\n", plat_board_name());
+    off = put(b, cap, off, "cpus\t\t: %d\n", n);
+    off = put(b, cap, off, "tick Hz\t\t: %u\n", plat_tick_hz());
+    return off;
+}
+
 static int proc_open(const dev_t *d, void **priv)
 {
     char *b;
@@ -160,6 +195,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_lfs(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/stack"))
         n = fmt_stack(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/cpuinfo"))
+        n = fmt_cpuinfo(b, PROC_CAP);
     else {
         kfree(b);
         return -1;
@@ -222,4 +259,5 @@ void procfs_init(void)
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);
     devfs_register("proc/stack",  &proc_ops, NULL);
+    devfs_register("proc/cpuinfo", &proc_ops, NULL);
 }

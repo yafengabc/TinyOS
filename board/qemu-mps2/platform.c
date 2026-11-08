@@ -233,3 +233,18 @@ uint32_t plat_board_cpu_id(void)
 {
     return 0;
 }
+
+const char *plat_cpu_model(void)
+{
+    return "Cortex-M3 (QEMU mps2)";
+}
+
+uint32_t plat_cpu_hz(void)
+{
+    return ARM_SYSTICK_CLK;
+}
+
+const char *plat_board_name(void)
+{
+    return "QEMU mps2-an385";
+}

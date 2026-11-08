@@ -8,10 +8,11 @@
  *
  * Names are copied into a static pool because drivers want to build them in a
  * loop ("gpio" + itoa(i)) and the table must not point at a local buffer. */
-/* 32 slots is plenty now that pin families are templates: the RP2350 uses 13
- * (7 in /dev - led0, key0, lcd0, screen, fb0, gpio, adc - and 6 in /proc).
- * Before templates it needed 46, thirty of them just for /dev/gpio0..29, and
- * a 48-pin part would have overflowed the old 64. */
+/* 32 slots is plenty now that pin families are templates: the RP2350 uses 14
+ * (7 in /dev - led0, key0, lcd0, screen, fb0, gpio, adc - and 7 in /proc -
+ * uptime, ps, mem, lfs, stack, cpuinfo, dev).  Before templates it needed 46,
+ * thirty of them just for /dev/gpio0..29, and a 48-pin part would have
+ * overflowed the old 64. */
 #define MAX_DEVS     32
 #define DEV_NAME_MAX 16
 
