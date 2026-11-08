@@ -206,9 +206,27 @@ static void unreset(uint32_t bits)
 
 /* clk_ref = XOSC (12 MHz); clk_peri = clk_sys.  The crystal has to be
  * enabled first: XOSC_CTRL_ENABLE resets to DISABLE and a flash boot does
- * not leave it running. */
+ * not leave it running.
+ *
+ * The first two writes are the important part on RISC-V: move clk_sys and
+ * then clk_ref off their aux muxes before anything resets a PLL.  The boot
+ * ROM may have selected PLL_SYS for clk_sys, and resetting the PLL while it
+ * is still feeding the core stops the CPU mid-instruction (pico-sdk's
+ * runtime_init_clocks does exactly this before pll_init). */
 static void clocks_init(void)
 {
+    /* clk_sys = glitchless source 0 (clk_ref), clk_ref = ROSC. */
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);
+    for (uint32_t i = 0; i < 1000000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
+            break;
+    }
+    mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, 0u);
+    for (uint32_t i = 0; i < 1000000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & 1u)
+            break;
+    }
+
     if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE))
         mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
     for (uint32_t i = 0; i < 1000000u; i++) {
@@ -230,25 +248,19 @@ static void clocks_init(void)
                  (CLK_PERI_CTRL_AUXSRC_CLK_SYS << 5));
 }
 
-/* PLL_SYS at 150 MHz.  Failure is benign: the boot continues on the ROM's
- * clk_sys and every divisor is re-derived from the measured value.
+/* PLL_SYS at 150 MHz.  Failure is benign: the boot continues on clk_ref
+ * (12 MHz) and every divisor is re-derived from the measured value.
  *
- * NOT CALLED during bring-up.  The RISC-V boot ROM is allowed to leave
- * clk_sys already running from PLL_SYS, and this function resets and
- * reprograms that PLL.  Doing so without first moving clk_sys to the
- * glitchless clk_ref source stops the CPU in the middle of an instruction
- * (pico-sdk's runtime_init_clocks clears CLK_SYS_CTRL.SRC and waits for
- * selected == 1 before it touches a PLL for exactly this reason).  The
- * first hardware image stays on whatever clock the ROM selected and only
- * measures it; the 150 MHz switch is a second, separately tested change. */
+ * The safety rule is in clocks_init(): clk_sys is already on clk_ref before
+ * this runs, so resetting PLL_SYS cannot stop the CPU.  The RISC-V boot ROM
+ * is allowed to leave clk_sys on PLL_SYS, which is exactly why the switch
+ * away from the aux mux comes first (pico-sdk's runtime_init_clocks order). */
 static void pll_sys_init(void)
 {
     uint32_t i;
 
-    /* Move clk_sys off any aux source (PLL_SYS included) before resetting
-     * the PLL: the glitchless source 0 is clk_ref, which is still running
-     * from ROSC/XOSC at this point.  This is the pico-sdk order and is what
-     * makes the function safe to enable later. */
+    /* Defensive repeat: if this is ever called on its own, moving clk_sys
+     * to the glitchless source is what makes the reset below safe. */
     mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);
     for (i = 0; i < 1000000u; i++) {
         if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
@@ -582,9 +594,10 @@ void plat_board_early(void)
      * sit behind it.  Touching one of those with the clock gated stalls the
      * bus forever, so the clock tree is set up before anything else.
      *
-     * Deliberately no PLL_SYS reset here: see the comment on pll_sys_init().
-     * This measures clk_sys afterwards and derives the UART divisor and the
-     * machine-timer interval from the measured value, 12 MHz or 150 MHz. */
+     * clocks_init() leaves clk_sys on clk_ref (12 MHz) on purpose: only
+     * after that is it safe to reset PLL_SYS.  The [A] marker is printed
+     * before that reset, so a hang in the PLL step is visible on the wire
+     * instead of looking like a dead board. */
     g_clk_hz = 12000000u;
     clocks_init();
 
@@ -592,7 +605,13 @@ void plat_board_early(void)
     led_init();
 
     uart_init();
-    early_puts("\r\n[A] clocks+reset ok\r\n");
+    early_puts("\r\n[A] pre-pll ok\r\n");
+    /* Let the shift register finish before clk_peri changes: the last bytes
+     * of that line would otherwise be clocked out at 150 MHz with the
+     * 12 MHz divisor and arrive as garbage. */
+    plat_console_flush();
+
+    pll_sys_init();
 
     khz = measure_clk_khz();
     if (khz >= 1000u && khz <= 250000u)

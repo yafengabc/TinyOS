@@ -2030,20 +2030,21 @@ CHIP_RP2350，带 ENTRY_POINT item）。`arch/rv32/start.S` 增加可选的 `.da
 1. **不要在未切走 clk_sys 的情况下复位 PLL_SYS。** RISC-V boot ROM 可能把
    clk_sys 留在 PLL_SYS 上；第一版照 ARM 端口的顺序直接 reset PLL，CPU 当场停，
    UART 一个字节都没有。正确顺序是 pico-sdk 的：先把 clk_sys/clk_ref 的 SRC
-   清到 glitchless 源并等 SELECTED，再动 PLL。首版镜像干脆不碰 PLL，只测
-   clk_sys（实测 0x00b722d0 ≈ 11.94 MHz），UART 分频和 mtime 间隔都来自测量值。
-   `pll_sys_init()` 保留但未调用，等这一步单独上板验证。
+   清到 glitchless 源并等 SELECTED，再动 PLL。第一版镜像先用不碰 PLL 的方式
+   上板（实测 clk_sys ≈ 11.94 MHz），确认入口/PMP/UART 都对之后，第二步补上
+   这个顺序：`[A] pre-pll ok` 在 12 MHz 下发出并 flush，随后 PLL_SYS 150 MHz、
+   `[B] clk=0x08f0d568`。UART 分频和 mtime 间隔始终来自 FC0 的测量值。
 2. **RP2350 的 Hazard3 PMP 不支持 TOR**（A=1 被 WARL 成 OFF）。通用 rv32 层用
    TOR 描述代码/数据区，于是用户程序在窗口基址 0x20020000 立刻 instruction
    access fault。board hook `plat_board_task_protect()` 改用两个 NAPOT 区覆盖
    整个任务区：0x20020000/128 KiB + 0x20040000/256 KiB，RWX；内核、flash、
    MMIO 仍在 U-mode 之外。逐任务隔离需要把窗口尺寸都取整到 2 的幂，是下一步。
 
-真机验收（COM6 = UART0，115200；本机 USB CDC 未启用）：
+真机验收（COM6 = UART0，115200；本机 USB CDC 未启用；clk_sys = 150 MHz）：
 
 | 项目 | 结果 |
 |---|---|
-| 启动 | `[A] clocks+reset` → `[B] clk=0x00b722d0` → shell `tos>` |
+| 启动 | `[A] pre-pll ok` → `[B] clk=0x08f0d568` → shell `tos>` |
 | `free` | SRAM 512 KiB，kernel 108 KiB，tasks 384 KiB，heap 64 KiB |
 | `ls` / `df` | 300 KiB littlefs（75 blocks），46 个文件 |
 | `hello` | `hello from ring 3!` |
@@ -2052,16 +2053,18 @@ CHIP_RP2350，带 ENTRY_POINT item）。`arch/rv32/start.S` 增加可选的 `.da
 | `piperace 4 64` | 4 对全部 64 KiB 校验通过 |
 | `dd of=... / dd if=...` | 4 KiB 写入、读回、pattern verified、`rm` 后 df 复原 |
 | `reboot` | ROM 正常重启，重新进 shell |
-| `smpbench 200000` | 单核 1.01x；`2000000` 1.02x |
+| `smpbench 5000000` | 单核 1.00x；single 204 ms（ARM M33 为 142 ms） |
+| `sleep 2000` | 主机计时 2.07 s |
 | `tostest compat -targets x86,rv32` | OK |
 
 `free` 的 `plat_now_ns()` 一开始把 mtime 当 150 MHz 算（12 MHz 下 `clock_ms`
-快 12.5 倍，基准看起来像卡死）；改成用实测 `g_clk_hz` 后 `sleep 2000` 主机计时
-2.4 s、smpbench 单核 1.0x，正常。
+快 12.5 倍，基准看起来像卡死）；改成用实测 `g_clk_hz` 后计时正常。150 MHz 下
+`smpbench` 每 5M 次 204 ms，与 12 MHz 时的 ~2.5 s 正好差 12.5 倍，说明时钟链
+和计时都是一致的。
 
-尚未做：150 MHz PLL 切换（`pll_sys_init()` 已就绪）、逐任务 PMP 隔离、USB CDC、
-双 Hazard3 核。RP2040 目标当前因 `user/smp.c` 的 Thumb-2 内联汇编无法在 M0+
-编译而构建失败，与本次移植无关。
+尚未做：逐任务 PMP 隔离（NAPOT 窗口取整）、USB CDC、双 Hazard3 核。RP2040
+目标当前因 `user/smp.c` 的 Thumb-2 内联汇编无法在 M0+ 编译而构建失败，与本次
+移植无关。
 
 
 ## 建议的讨论顺序
