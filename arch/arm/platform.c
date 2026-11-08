@@ -283,8 +283,15 @@ regs_t *arm_handle_tick(regs_t *f)
     {
         uint32_t icsr = mmio_read32(ARM_ICSR);
 
-        if ((icsr & ARM_ICSR_PENDSVSET) ||
-            ((icsr & ARM_ICSR_VECTPENDING) == (ARM_VEC_SVCALL << 12)))
+        /* Do not switch while *any* exception is pending.  A pended SVCall
+         * can be masked out of VECTPENDING by a higher-priority pending
+         * exception (a second SysTick is the common one), and switching
+         * then leaves the SVC pending while another task runs: the
+         * tail-chained SVC executes against the wrong frame and one syscall
+         * result is lost (measured on the RP2350 as a duplicated 128-byte
+         * pipe block and a writer fault).  Deferring this switch by one
+         * tick costs nothing; leaving an SVC pending does. */
+        if ((icsr & ARM_ICSR_PENDSVSET) || (icsr & ARM_ICSR_VECTPENDING))
             return f;
     }
 
