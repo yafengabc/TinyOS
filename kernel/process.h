@@ -49,6 +49,17 @@ regs_t  *process_saved_frame(struct proc *p);
  * exists. */
 regs_t  *process_current_frame(void);
 
+/* Kernel threads used by the WiFi OSI layer.  They run in M-mode on their
+ * own stack; start.S reads ktask_running because mret clears MPP. */
+extern volatile int ktask_running;
+int      process_ktask_create(const char *name, void (*fn)(void *), void *arg,
+                              uint32_t stack_bytes, int prio);
+/* Opaque handle for the OSI layer (the current proc_t). */
+void    *process_current_task(void);
+void     process_ktask_sleep(uint32_t ticks);
+void     process_ktask_yield(void);
+regs_t  *process_ktask_syscall(regs_t *r);
+
 /* Syscalls that may give up the CPU. */
 regs_t  *process_wait(regs_t *r, int pid);
 regs_t  *process_sleep(regs_t *r, uint32_t ms);

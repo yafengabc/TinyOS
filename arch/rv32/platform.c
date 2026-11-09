@@ -43,6 +43,13 @@ regs_t *trap_handler(regs_t *f)
 {
     uint32_t cause = f->mcause;
 
+    /* A ktask's frame arrived on its own stack (start.S checked the flag);
+     * mret must go back to M-mode even though the hardware cleared MPP when
+     * the thread was first entered.  Force the saved copy before any of the
+     * from_user()/reschedule decisions look at it. */
+    if (ktask_running)
+        f->mstatus = (f->mstatus & ~RV_MSTATUS_MPP_MASK) | RV_MSTATUS_MPP_M;
+
     /* qemu-virt routes the tick through the CLINT (cause 7); the C3 has no
      * CLINT and its INTMTX reports the routed CPU LINE directly:
      * mcause = 0x80000000 | line, so the tick on line 2 arrives as
@@ -54,6 +61,13 @@ regs_t *trap_handler(regs_t *f)
         uint32_t line = cause & ~RV_MCAUSE_IRQ_BIT;
 
         if (!plat_irq_is_tick(line)) {
+            /* Give a board's non-console source (the C3 WiFi MAC) first
+             * refusal.  Weak so boards without one link to zero. */
+            extern int plat_irq_foreign(uint32_t line) __attribute__((weak));
+
+            if (plat_irq_foreign && plat_irq_foreign(line))
+                return process_resched(f);
+
             /* A board interrupt that is not the clock - on the C3 that is
              * console input (UART0 on one line, the USB-Serial/JTAG packet
              * source on another).  Drain it and go straight back to
@@ -96,6 +110,11 @@ regs_t *trap_handler(regs_t *f)
         return syscall_dispatch(f);
     }
 
+    if (cause == RV_MCAUSE_ECALL_M) {
+        f->mepc += 4;
+        return process_ktask_syscall(f);
+    }
+
     if (from_user(f)) {
         /* A load or store that ran off the bottom of the stack may be the
          * stack running out rather than a bug: the guard hole under it is
@@ -120,6 +139,8 @@ regs_t *trap_handler(regs_t *f)
     kprintf("\n*** RV32 TRAP ***\n");
     kprintf("%s: mcause=0x%x mepc=0x%x mtval=0x%x\n",
             cause_name(cause), cause, f->mepc, f->mtval);
+    kprintf("ra=0x%08x sp=0x%08x s0=0x%08x s1=0x%08x a0=0x%08x a1=0x%08x\n",
+            f->ra, f->sp, f->s0, f->s1, f->a0, f->a1);
     plat_panic_halt();
     return f;
 }

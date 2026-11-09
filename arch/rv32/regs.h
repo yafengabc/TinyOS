@@ -32,6 +32,7 @@ typedef struct regs {
 #define RV_MCAUSE_IRQ_M_EXT   0x8000000bu
 #define RV_MCAUSE_IRQ_BIT     0x80000000u
 #define RV_MCAUSE_ECALL_U     8u
+#define RV_MCAUSE_ECALL_M     11u
 #define RV_MCAUSE_ILLEGAL     2u
 #define RV_MCAUSE_LOAD_FAULT  5u
 #define RV_MCAUSE_STORE_FAULT 7u

@@ -125,6 +125,14 @@ kernel/              架构无关内核（C）
   ramdisk.c           littlefs 挂载与文件访问（块设备回调接 ATA）
   heap.c lz4.c libgcc.c console.c string.c
   lfs_config.h        littlefs 的裁剪与配置
+drivers/              按构建配置加入的驱动
+  gpio/{esp32c3,rp2040,rp2350,rp2350rv}/   GPIO/ADC
+  serial/esp32c3/     USB-Serial/JTAG 控制台
+  spi/{rp2350,rp2350rv}/                   SPI
+  display/st7789/{rp2350,rp2350rv}/        ST7789 面板
+  usb/{rp2040,rp2350,rp2350rv}/            USB CDC
+  wifi/esp32c3/       ESP32-C3 WiFi/PHY/WPA2/小型 IPv4 栈 + 预编译 blob
+configs/              构建配置（target / features / drivers / user 排除）
 arch/x86/            x86 实现：entry.S isr.S gdt idt ata serial timer keyboard platform.c
   regs.h usys.h      i386 的 trap 帧布局 / 用户态系统调用入口（int 0x80）
 arch/rv32/           RV32 实现：start.S（入口 + trap 向量，含第二 hart）
@@ -307,7 +315,16 @@ go run ./cmd/tos run   -target rv32smp
 # ARM：编译出 build/kernel-arm.elf，并在 qemu-system-arm（mps2-an385）里启动
 go run ./cmd/tos build -target arm
 go run ./cmd/tos run   -target arm
+
+# 构建配置：默认读仓库根的 tos.conf；-config 选择特性/驱动
+go run ./cmd/tos build -config configs/esp32c3-wifi.conf   # C3 + WiFi + DHCP/ICMP
+go run ./cmd/tos build -config configs/esp32c3.conf        # C3 无 WiFi
 ```
+
+配置文件的 `[build] target`、`[features]`（生成 `-DTOS_<NAME>`）、
+`[drivers]`（加入源码/头文件路径）、`[wifi]`（blob 目录、ROM ld 脚本）和
+`[user] exclude`（裁剪命令）见 `configs/README.md`。命令行 `-target` 仍
+覆盖配置文件里的 target。
 
 进去以后：
 
@@ -596,7 +613,9 @@ cat /proc/uptime / gpio / reboot`；若打开串口时启动提示已打印完�
 shell 重发提示符。启动两行分别打印 ROM 留下的 `clk=` 值（UART 与 USB 各一行），
 用来核对 115200 的分频。littlefs 镜像放在 flash 偏移 `0x100000`（1 MiB），内核在它之前。
 
-板级文件：`board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,gpio.c,usb_cdc.c,usb_cdc.h}`；
+板级文件：`board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c,board_internal.h}`；
+驱动位于 `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、
+`drivers/display/st7789/rp2350/`、`drivers/usb/rp2350/`；
 打包器 `internal/build/uf2.go` 的 `emitRP2350UF2()` 会在写出 UF2 前校验初始 MSP、
 复位向量的 Thumb 位，以及前 4 KiB 里是否真的有 IMAGE_DEF 魔数——BOOTSEL 对"镜像
 不合法"唯一的反馈是"什么都没发生"，所以这个校验放在构建期。

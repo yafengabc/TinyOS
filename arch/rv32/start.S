@@ -258,12 +258,24 @@ trap_vectors_h1:
 \name:
     csrw    mscratch, t0            /* park t0 */
 
+    /* A kernel thread runs in M-mode but mret has already set mstatus.MPP
+     * back to U.  The scheduler's flag, not MPP, says which stack the frame
+     * must go on; without this the entry would switch to the kernel stack
+     * while the ktask frame is on its own stack. */
+    .option push
+    .option norelax
+    la      t0, ktask_running
+    .option pop
+    lbu     t0, 0(t0)
+    bnez    t0, .Lm_\name
+
     csrr    t0, mstatus
     srli    t0, t0, 11
     andi    t0, t0, 3               /* mstatus.MPP */
     beqz    t0, .Luser_\name        /* 0 = came from U-mode */
 
     /* ---- trap from M-mode: the current stack is already a kernel one --- */
+.Lm_\name:
     addi    sp, sp, -FRAME_SIZE
     csrr    t0, mscratch            /* original t0 */
     sw      t0, 20(sp)              /* frame->x5 */
@@ -338,6 +350,26 @@ trap_vectors_h1:
        replace it with a parent's saved frame). */
     mv      sp, a0
     j       .Lrestore
+
+/* First entry of a kernel thread.  The generic M-mode restore derives sp
+ * from the frame address, which for a ktask is proc_t.saved in .bss; this
+ * stub switches to the thread's own stack before any C code runs, then
+ * enables interrupts.  a0/a1 are still the function and its argument. */
+    .section .text.trap, "ax"
+    .align 4
+    .globl ktask_start_stub
+ktask_start_stub:
+    .option push
+    .option norelax
+    la      sp, ktask_entry_sp
+    .option pop
+    lw      sp, 0(sp)
+    csrsi   mstatus, 8
+    .option push
+    .option norelax
+    la      t0, ktask_trampoline    /* XIP, farther than a JAL reaches */
+    .option pop
+    jr      t0
 
 /* -------------------------------------------------------------------- */
 /* Resume a frame: restore CSRs and registers, then mret.  a0 hands the  */

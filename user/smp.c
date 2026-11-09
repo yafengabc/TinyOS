@@ -57,7 +57,8 @@ static void probe_call(uint32_t seq, uint32_t o[4])
     __asm__ volatile("svc #0\n\t"
                      "str r0, [r1, #0]\n\t"
                      "str r3, [r1, #4]\n\t"
-                     "str r12, [r1, #8]\n\t"
+                     "mov r3, r12\n\t"
+                     "str r3, [r1, #8]\n\t"
                      "str r2, [r1, #12]"
                      : "+r"(r0), "+r"(r2)
                      : "r"(p)

@@ -99,13 +99,15 @@ int plat_console_getchar(void)
 
 /* ---- TIMG0 tick + INTMTX --------------------------------------------- */
 
-/* Timer input clock, divided down to 1 MHz; 10000 counts per tick = 100 Hz.
+/* Timer input clock, divided down to 1 MHz; 1000 counts per tick at the
+ * 1 kHz scheduler rate.
  *
  * The input is the APB clock, and which APB this is depends on whether
  * plat_clock_init() got the PLL up (see "CPU clock" below): 80 MHz at
  * 160 MHz CPU, 20 MHz when it falls back to the ROM's XTAL/2.  The count
- * rate is held at 1 MHz either way, so everything downstream - the reload
- * value, the sub-tick microsecond maths in plat_now_ns - is clock-agnostic.
+ * rate is held at 1 MHz either way, so the reload value is clock-agnostic.
+ * This timer is ONLY the scheduler tick; the wall clock is the SYSTIMER
+ * below, which does not lose ticks in an interrupts-off window.
  *
  * History, because the numbers are not arbitrary: the tick used to fire at
  * 25 Hz because the divider was computed for 80 MHz APB while the chip was
@@ -121,11 +123,12 @@ int plat_console_getchar(void)
  * from it at run time, because plat_clock_init() may or may not get the PLL
  * up; see "CPU clock" near the bottom of this file. */
 static uint32_t apb_hz = APB_CLK_FALLBACK_HZ;
+/* CPU clock separately from APB: the C3 runs APB at 80 MHz at both the
+ * 80 and 160 MHz CPU rates, so apb_hz*2 is only right when the divider
+ * write is confirmed.  Reset value is XTAL/2 = 20 MHz. */
+static uint32_t cpu_hz = APB_CLK_FALLBACK_HZ;
 
 #define T0CONFIG_REG   (TIMG0_BASE + 0x00)
-#define T0LO_REG       (TIMG0_BASE + 0x04)
-#define T0HI_REG       (TIMG0_BASE + 0x08)
-#define T0UPDATE_REG   (TIMG0_BASE + 0x0C)
 #define T0ALARMLO_REG  (TIMG0_BASE + 0x10)
 #define T0ALARMHI_REG  (TIMG0_BASE + 0x14)
 #define T0LOADLO_REG   (TIMG0_BASE + 0x18)
@@ -151,6 +154,32 @@ static uint32_t apb_hz = APB_CLK_FALLBACK_HZ;
 
 #define WDT_WKEY       0x50D83AA1u
 #define WDT_EN         (1u << 31)
+
+/* ---- SYSTIMER: the 52-bit 16 MHz timebase ---------------------------- *
+ *
+ * T0 above is the scheduler tick, not the clock.  It reloads every 1 ms and
+ * g_ticks counts the wraps, so every tick that lands in an interrupts-off
+ * window is lost forever: a 10 min soak ended 56 s behind the host, and a
+ * 256 KiB flash write lost 2.4 s in one go.  The SYSTIMER is the chip's
+ * dedicated timebase: unit 0 is a 52-bit counter at a fixed 16 MHz from
+ * XTAL, independent of CPU/APB and of interrupts, and it does not stall with
+ * the core (CORE0_STALL_EN defaults off).  Read it instead; T0 keeps doing
+ * the only job it is good at, firing the tick.
+ *
+ * UNIT0_OP.UPDATE latches the value registers; HI/LO are then a stable
+ * snapshot.  The low 20 bits of HI are the upper half of the 52-bit count,
+ * so the pair wraps only after 2^52 / 16e6 = 8.9 years. */
+#define SYSTIMER_BASE          0x60023000u
+#define SYSTIMER_CONF_REG      (SYSTIMER_BASE + 0x00)
+#define SYSTIMER_UNIT0_OP_REG  (SYSTIMER_BASE + 0x04)
+#define SYSTIMER_UNIT0_HI_REG  (SYSTIMER_BASE + 0x40)
+#define SYSTIMER_UNIT0_LO_REG  (SYSTIMER_BASE + 0x44)
+
+#define SYSTIMER_CLK_FO        (1u << 0)    /* force the counter clock on */
+#define SYSTIMER_UNIT0_WORK_EN (1u << 30)
+#define SYSTIMER_CLK_EN        (1u << 31)   /* register-file clock gate */
+#define SYSTIMER_UNIT0_UPDATE  (1u << 30)
+#define SYSTIMER_UNIT0_VALID   (1u << 29)
 
 /* RTC_CNTL watchdog (the "super watchdog" esptool leaves armed). */
 #define RTC_WDT_BASE            0x60008000u
@@ -254,8 +283,34 @@ static uint32_t tick_reload;
 static uint32_t tick_config;
 static uint32_t cfg_tick_hz = 100u;   /* what plat_timer_init was asked for */
 
+/* SYSTIMER unit 0, latched read.  Called from plat_now_ns() and once from
+ * plat_timer_init() to record the zero. */
+static uint64_t systimer_read(void)
+{
+    /* UPDATE latches the counter, but the first HI/LO read can still return
+     * the previous snapshot: a 3 s busy loop once read as 1 ms because the
+     * code did not wait for VALUE_VALID.  Poll it (bounded - a wedged
+     * handshake must not take the whole kernel with it), then read. */
+    mmio_write32(SYSTIMER_UNIT0_OP_REG, SYSTIMER_UNIT0_UPDATE);
+    for (uint32_t spin = 0; spin < 1000u; spin++) {
+        if (mmio_read32(SYSTIMER_UNIT0_OP_REG) & SYSTIMER_UNIT0_VALID)
+            break;
+    }
+    uint32_t hi = mmio_read32(SYSTIMER_UNIT0_HI_REG) & 0xFFFFFu;
+    uint32_t lo = mmio_read32(SYSTIMER_UNIT0_LO_REG);
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static uint64_t systimer_zero;
+
 void plat_timer_init(uint32_t hz)
 {
+    /* Start the independent timebase before anything can ask for the clock.
+     * T0 below is only the scheduler tick; plat_now_ns() reads this. */
+    mmio_write32(SYSTIMER_CONF_REG,
+                 SYSTIMER_CLK_FO | SYSTIMER_UNIT0_WORK_EN | SYSTIMER_CLK_EN);
+    systimer_zero = systimer_read();
+
     /* 1 MHz count rate whatever the APB is; the field holds the divisor. */
     uint32_t timg_div = apb_hz / TIMG_COUNT_HZ;
 
@@ -370,6 +425,17 @@ int plat_irq_is_tick(uint32_t line)
     return line == CPU_LINE_TICK;
 }
 
+/* Lines this board owns for console input; everything else that is routed
+ * belongs to a driver (the WiFi MAC registered through the OSI table). */
+extern int wifi_irq_dispatch(uint32_t line) __attribute__((weak));
+
+int plat_irq_foreign(uint32_t line)
+{
+    if (line == CPU_LINE_UART || line == CPU_LINE_USJ)
+        return 0;
+    return wifi_irq_dispatch ? wifi_irq_dispatch(line) : 0;
+}
+
 /* The receive-timeout bit is a latch, not a level: it stays set until it is
  * written back, so the interrupt would re-fire immediately on return and
  * starve every task (symptom: keystrokes echo but nothing executes).  The
@@ -394,39 +460,22 @@ uint32_t plat_uptime_ms(void)
     return (uint32_t)(plat_now_ns() / 1000000ull);
 }
 
-/* Sub-tick part of the clock: TG0 always counts at 1 MHz
- * up to its alarm (10 ms) and then reloads from zero, so the elapsed
- * microseconds inside the current period are simply T0LO/T0HI.
- *
- * The two value registers are snapshots, refreshed only when software asks:
- * T0UPDATE bit 0 latches them, then LO is read first because reading LO
- * latches HI (same protocol esp-idf uses).  Putting the two together with
- * g_ticks gives a microsecond-resolution clock without a second timer.
- *
- * The one race worth handling: the counter can wrap and start counting
- * again before the tick ISR gets around to incrementing g_ticks, which would
- * make the sum go backwards by a full 10 ms.  Time is clamped so it never
- * does. */
+/* The clock is the 52-bit SYSTIMER, not g_ticks: at 16 MHz one count is
+ * 62.5 ns, and because the counter is free-running it keeps counting while
+ * interrupts are off (flash erase, exec, a long syscall).  Subtracting the
+ * zero recorded in plat_timer_init makes uptime start at 0 even if the ROM
+ * left the counter somewhere. */
 uint64_t plat_now_ns(void)
 {
-    static uint64_t last_ns;
+    uint64_t ticks = systimer_read();
 
-    mmio_write32(T0UPDATE_REG, 1u);
-    uint32_t lo = mmio_read32(T0LO_REG);
-    uint32_t hi = mmio_read32(T0HI_REG) & 0xFFFFu;
-    uint64_t sub_us = ((uint64_t)hi << 32) | lo;
-
-    /* A counter that has not been started yet (or a value larger than the
-     * period) must not inflate the clock. */
-    if (sub_us > tick_reload)
-        sub_us = tick_reload;
-
-    uint64_t ns = ((g_ticks * tick_reload) + sub_us) * 1000ull;
-
-    if (ns < last_ns)
-        ns = last_ns;
-    last_ns = ns;
-    return ns;
+    if (ticks < systimer_zero) {
+        /* The counter only wraps after 8.9 years; a smaller value means the
+         * first read raced the start.  Treat it as zero rather than a huge
+         * jump backwards. */
+        return 0;
+    }
+    return ((ticks - systimer_zero) * 125ull) >> 1;   /* 16 MHz -> ns */
 }
 
 /* ---- flash block device ---------------------------------------------- */
@@ -666,15 +715,22 @@ uint32_t plat_block_count(void)
  * source would need its divisor recomputed instead, so that case is handled
  * too, just in case a future ROM differs.
  *
- * What the switch is worth, verified on the real chip: the CPU frequency is
- * not directly readable, so APB is measured against the host's wall clock
- * through the tick.  TIMG divides the APB by 80 for a 1 MHz count rate, and
- * `uptime` advanced 6.652 s over 6.652 s of host time: APB really is 80 MHz,
- * and since the C3 runs APB at half the CPU clock, the core is at 160 MHz.
- * A filesystem write of 100 KiB went from 7.2 KiB/s to 85 KiB/s with it. */
+ * What the switch is worth, verified on the real chip: TIMG divides the APB
+ * by 80 for a 1 MHz count rate, and `uptime` advanced 6.652 s over 6.652 s
+ * of host time, so APB really is 80 MHz; a filesystem write of 100 KiB went
+ * from 7.2 KiB/s to 85 KiB/s with it.  This does NOT identify the CPU rate:
+ * the C3 runs APB at 80 MHz for both the 80 and 160 MHz CPU divider, so the
+ * core's own rate needs a throughput check (a 100M-nop loop reads ~80 or
+ * ~160 Mnop/s) and the divider register has to be read back.  See the
+ * +0x008 note below. */
 
 #define SYSTEM_BASE           0x600C0000u
-#define SYSTEM_CPU_PER_CONF   (SYSTEM_BASE + 0x000)
+/* C3 puts CPU_PER_CONF at +0x008, not +0x000 (that offset is a different
+ * register on this chip).  With the wrong offset the CPUPERIOD_SEL and
+ * PLL_FREQ_SEL writes were dropped on the floor and the core stayed at
+ * PLL/6 = 80 MHz while this file printed 160: CoreMark measured ~170
+ * instead of ~350, and a 100M-nop loop ran at 77 Mnop/s. */
+#define SYSTEM_CPU_PER_CONF   (SYSTEM_BASE + 0x008)
 #define SYSTEM_SYSCLK_CONF    (SYSTEM_BASE + 0x058)
 
 #define CPUPERIOD_SEL_M       0x3u          /* 0 = PLL/6 (80), 1 = PLL/3 (160) */
@@ -804,12 +860,24 @@ static void plat_clock_init(void)
         return;
     }
     apb_hz = 80000000u;
+    /* APB is 80 MHz at either CPU divider; only the readback below says
+     * which one the core actually got. */
+    cpu_hz = 80000000u;
 
     /* 7. The console: only an APB-clocked UART needs a new divisor. */
     if (((clkconf >> UART_SCLK_SEL_S) & 3u) == UART_SCLK_APB)
         uart_set_baud(apb_hz, UART_BAUD);
 
-    kprintf("[clk] CPU 160 MHz, APB 80 MHz (PLL up from the ROM's XTAL/2)\n");
+    /* The divider write is only trustworthy after a readback: a wrong
+     * register offset once left it at PLL/6 (80 MHz) while this line
+     * claimed 160.  Say what the hardware says, not what was asked for. */
+    if ((mmio_read32(SYSTEM_CPU_PER_CONF) & CPUPERIOD_SEL_M) == 1u) {
+        cpu_hz = 160000000u;
+        kprintf("[clk] CPU 160 MHz, APB 80 MHz (PLL up from the ROM's XTAL/2)\n");
+    } else {
+        kprintf("[clk] CPU 80 MHz, APB 80 MHz (CPU divider did not take, per=%08x)\n",
+                (unsigned)mmio_read32(SYSTEM_CPU_PER_CONF));
+    }
 }
 
 /* ---- flash XIP ------------------------------------------------------- */
@@ -937,8 +1005,9 @@ void plat_reboot(void)
     plat_panic_halt();
 }
 
-/* APB is half the CPU clock on the C3: 80 MHz APB at the 160 MHz PLL rate,
- * 10 MHz APB (20 MHz core) on the ROM fallback. */
+/* Reported, not derived: APB stays 80 MHz at both 80 and 160 MHz CPU, so
+ * the old apb_hz*2 was a guess.  plat_clock_init() sets this only after the
+ * divider readback confirms it. */
 const char *plat_cpu_model(void)
 {
     return "ESP32-C3";
@@ -946,5 +1015,5 @@ const char *plat_cpu_model(void)
 
 uint32_t plat_cpu_hz(void)
 {
-    return plat_apb_hz() * 2u;
+    return cpu_hz;
 }
