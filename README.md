@@ -341,19 +341,29 @@ tos> wificonn songhome ********
 
 tos> net
 ip 192.168.0.38/255.255.255.0 gw 192.168.0.1 dns 192.168.0.1 bound
+rx frames=391 ip=344 udp=8 icmp=7 tcp=329 drop=2
 
 tos> ping 192.168.0.1 4
+tos> ping www.baidu.com 2
 tos> host www.baidu.com
 [net] www.baidu.com -> 39.156.70.239
 
+tos> http http://www.baidu.com/
 tos> http www.baidu.com 80 /
 [net] http: connected 39.156.70.239:80
-[net] http rx 2048 bytes (truncated)
-[net] HTTP/1.0 200 OK ...
+[net] http rx 4096 bytes (truncated)
+[net] HTTP/1.0 200 OK
+[net] content-type: text/html
+[net] content-length: 17143
+[net] body (3098): <!DOCTYPE html>...
 ```
 
+`http` 接受裸主机名、`http://host/path` 和 `host port path` 三种写法，
+`https://` 会直接提示不支持（没有 TLS）。
+
 `dhcp renew` 强制续租，`dhcp` 重新发现。栈只包含 ARP/IPv4/ICMP、
-DHCP 客户端、DNS 查询和 TCP 客户端，不提供监听端口。
+DHCP 客户端、DNS 查询和 TCP 客户端（校验和、请求重传、分块解码），
+不提供监听端口。
 
 进去以后：
 

@@ -156,13 +156,18 @@ static struct {
     volatile int tcp_got_synack, tcp_got_ack, tcp_got_data;
     volatile int tcp_got_fin, tcp_got_rst, tcp_rx_overflow;
     volatile int tcp_rx_len;
-    uint8_t tcp_rx_buf[2048];
+    uint8_t tcp_rx_buf[4096];
+    uint8_t http_req[256];
+    uint32_t http_req_seq;
+    int http_req_len, http_req_retx;
+    uint32_t http_req_next;
     char http_host[64];
     char http_path[64];
     uint32_t http_ip;
     int http_host_is_ip;
     uint16_t http_port;
     volatile int http_pending;
+    uint32_t rx_frames, rx_ip, rx_udp, rx_icmp, rx_tcp, rx_drop;
 } ns;
 
 static uint8_t tx_frame[ETH_HDR + 20 + MTU];
@@ -671,15 +676,23 @@ static void tcp_input(uint32_t sip, const uint8_t *payload, int len)
     uint32_t seq, ack;
     int hlen, full;
 
-    if (len < 20 || sip != ns.tcp_remote_ip)
+    if (len < 20 || sip != ns.tcp_remote_ip) {
+        ns.rx_drop++;
         return;
+    }
     sport = rd16(&t->sport);
     dport = rd16(&t->dport);
-    if (sport != ns.tcp_remote_port || dport != ns.tcp_local_port)
+    if (sport != ns.tcp_remote_port || dport != ns.tcp_local_port) {
+        ns.rx_drop++;
         return;
+    }
     hlen = (t->off >> 4) * 4;
     if (hlen < 20 || hlen > len)
         return;
+    if (tcp_checksum(sip, ns.ip, payload, len) != 0) {
+        ns.rx_drop++;
+        return;
+    }
     flags = t->flags;
     seq = rd32(&t->seq);
     ack = rd32(&t->ack);
@@ -725,37 +738,168 @@ static void tcp_input(uint32_t sip, const uint8_t *payload, int len)
     }
 }
 
-static void http_print(void)
+static int http_ci_eq(const uint8_t *a, const char *b, int n)
 {
+    for (int i = 0; i < n; i++) {
+        uint8_t x = a[i];
+        uint8_t y = (uint8_t)b[i];
+
+        if (x >= 'A' && x <= 'Z')
+            x = (uint8_t)(x + 32);
+        if (y >= 'A' && y <= 'Z')
+            y = (uint8_t)(y + 32);
+        if (x != y || !y)
+            return 0;
+    }
+    return b[n] == 0;
+}
+
+static int http_header(const uint8_t *p, int hdr_end, const char *name,
+                       char *out, int cap)
+{
+    int i = 0;
+
+    while (i + 1 < hdr_end && !(p[i] == '\r' && p[i + 1] == '\n'))
+        i++;
+    i += 2;
+    while (i < hdr_end) {
+        int e = i, colon;
+
+        while (e + 1 < hdr_end && !(p[e] == '\r' && p[e + 1] == '\n'))
+            e++;
+        colon = i;
+        while (colon < e && p[colon] != ':')
+            colon++;
+        if (colon < e && http_ci_eq(p + i, name, colon - i)) {
+            int v = colon + 1, k = 0;
+
+            while (v < e && (p[v] == ' ' || p[v] == '\t'))
+                v++;
+            while (v < e && k < cap - 1)
+                out[k++] = (char)p[v++];
+            out[k] = 0;
+            return 1;
+        }
+        i = e + 2;
+    }
+    return 0;
+}
+
+static int http_dechunk(const uint8_t *in, int len, uint8_t *out, int cap)
+{
+    int i = 0, o = 0;
+
+    while (i < len) {
+        int sz = 0, digits = 0;
+
+        for (;;) {
+            uint8_t c = in[i];
+            int v;
+
+            if (c >= '0' && c <= '9')
+                v = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                v = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F')
+                v = c - 'A' + 10;
+            else
+                break;
+            sz = sz * 16 + v;
+            i++;
+            digits++;
+            if (i >= len)
+                break;
+        }
+        if (!digits)
+            break;
+        while (i < len && (in[i] == '\r' || in[i] == '\n'))
+            i++;
+        if (sz == 0)
+            break;
+        if (i + sz > len)
+            sz = len - i;
+        for (int k = 0; k < sz && o < cap; k++)
+            out[o++] = in[i + k];
+        i += sz;
+        while (i < len && (in[i] == '\r' || in[i] == '\n'))
+            i++;
+    }
+    return o;
+}
+
+static void http_emit(void)
+{
+    static uint8_t body_buf[512];
     int len = ns.tcp_rx_len;
-    int i, body = -1;
+    int hdr_end = -1, body = 0, blen = 0;
+    int chunked = 0, content_len = 0;
+    char val[96];
 
     kprintf("[net] http rx %d bytes%s\n", len,
             ns.tcp_rx_overflow ? " (truncated)" : "");
-    for (i = 0; i + 3 < len; i++) {
+    for (int i = 0; i + 3 < len; i++) {
         if (ns.tcp_rx_buf[i] == '\r' && ns.tcp_rx_buf[i + 1] == '\n' &&
             ns.tcp_rx_buf[i + 2] == '\r' && ns.tcp_rx_buf[i + 3] == '\n') {
+            hdr_end = i;
             body = i + 4;
             break;
         }
     }
-    kprintf("[net] ");
-    for (i = 0; i < len && i < 120; i++) {
-        uint8_t c = ns.tcp_rx_buf[i];
-
-        if (c == '\r' || c == '\n') {
-            if (i > 0 && ns.tcp_rx_buf[i - 1] == '\r')
-                continue;
-            kprintf(" ");
-            continue;
-        }
-        kprintf("%c", (c >= 32 && c < 127) ? c : '.');
+    if (hdr_end < 0) {
+        kprintf("[net] (no complete header)\n");
+        return;
     }
-    kprintf("\n");
-    if (body >= 0 && body < len) {
-        kprintf("[net] body: ");
-        for (i = 0; i < 120 && body + i < len; i++) {
-            uint8_t c = ns.tcp_rx_buf[body + i];
+    {
+        int e = 0;
+
+        while (e < hdr_end && ns.tcp_rx_buf[e] != '\r' &&
+               ns.tcp_rx_buf[e] != '\n')
+            e++;
+        kprintf("[net] ");
+        for (int i = 0; i < e && i < 90; i++) {
+            uint8_t c = ns.tcp_rx_buf[i];
+
+            kprintf("%c", (c >= 32 && c < 127) ? c : '.');
+        }
+        kprintf("\n");
+    }
+    if (http_header(ns.tcp_rx_buf, hdr_end, "content-type", val,
+                    sizeof(val)))
+        kprintf("[net] content-type: %s\n", val);
+    if (http_header(ns.tcp_rx_buf, hdr_end, "content-length", val,
+                    sizeof(val))) {
+        for (int i = 0; val[i] >= '0' && val[i] <= '9'; i++)
+            content_len = content_len * 10 + (val[i] - '0');
+        kprintf("[net] content-length: %d\n", content_len);
+    }
+    if (http_header(ns.tcp_rx_buf, hdr_end, "transfer-encoding", val,
+                    sizeof(val))) {
+        kprintf("[net] transfer-encoding: %s\n", val);
+        if (val[0] == 'c' || val[0] == 'C')
+            chunked = 1;
+    }
+    if (http_header(ns.tcp_rx_buf, hdr_end, "location", val, sizeof(val)))
+        kprintf("[net] location: %s\n", val);
+
+    blen = len - body;
+    if (blen < 0)
+        blen = 0;
+    if (chunked) {
+        blen = http_dechunk(ns.tcp_rx_buf + body, blen, body_buf,
+                            sizeof(body_buf));
+        if (blen > 0)
+            kprintf("[net] body (%d decoded): ", blen);
+    } else {
+        if (content_len && content_len < blen)
+            blen = content_len;
+        if (blen > 0)
+            kprintf("[net] body (%d): ", blen);
+    }
+    if (blen > 0) {
+        int show = blen > 400 ? 400 : blen;
+
+        for (int i = 0; i < show; i++) {
+            uint8_t c = chunked ? body_buf[i] : ns.tcp_rx_buf[body + i];
 
             kprintf("%c", (c >= 32 && c < 127) ? c : '.');
         }
@@ -766,13 +910,25 @@ static void http_print(void)
 static void http_run(const char *host, uint32_t ip, uint16_t port,
                      const char *path)
 {
-    char req[256];
     uint32_t hop;
     int n, tries, waited, idle;
+    char pathbuf[64];
 
     if (!ns.bound) {
         kprintf("[net] http: no IP address\n");
         return;
+    }
+    /* net_write() runs in the caller's context, so keep a private copy of the
+     * path in case the shell starts another request while this one runs. */
+    {
+        int i = 0;
+
+        while (path[i] && i < (int)sizeof(pathbuf) - 1) {
+            pathbuf[i] = path[i];
+            i++;
+        }
+        pathbuf[i] = 0;
+        path = pathbuf;
     }
     hop = ((ip ^ ns.ip) & ns.mask) ? ns.gw : ip;
     if (arp_resolve(hop, ns.tcp_mac, 1500) != 0) {
@@ -817,15 +973,24 @@ static void http_run(const char *host, uint32_t ip, uint16_t port,
             (unsigned)((ip >> 8) & 255), (unsigned)(ip & 255),
             (unsigned)port);
 
-    n = ksnprintf(req, sizeof(req),
+    n = ksnprintf((char *)ns.http_req, sizeof(ns.http_req),
                   "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: TinyOS\r\n"
                   "Connection: close\r\n\r\n",
                   path, host);
-    if (n > 0)
-        tcp_send_data((const uint8_t *)req, n);
+    if (n <= 0) {
+        ns.tcp_state = TCP_DONE;
+        return;
+    }
+    ns.http_req_len = n;
+    ns.http_req_seq = ns.tcp_snd_nxt;
+    ns.http_req_retx = 0;
+    ns.http_req_next = plat_uptime_ms() + 1000;
+    tcp_send_data(ns.http_req, n);
 
     idle = 0;
-    for (int t = 0; t < 200; t++) {
+    for (int t = 0; t < 300; t++) {
+        uint32_t now = plat_uptime_ms();
+
         if (ns.tcp_got_rst)
             break;
         if (ns.tcp_got_data) {
@@ -837,13 +1002,23 @@ static void http_run(const char *host, uint32_t ip, uint16_t port,
             tcp_tx_at(ns.tcp_snd_nxt, ns.tcp_rcv_nxt, TCP_ACK, NULL, 0);
             break;
         }
+        if (ns.tcp_snd_una != ns.tcp_snd_nxt && ns.http_req_retx < 3 &&
+            (int32_t)(now - ns.http_req_next) >= 0) {
+            tcp_tx_at(ns.http_req_seq, ns.tcp_rcv_nxt, TCP_PSH | TCP_ACK,
+                      ns.http_req, ns.http_req_len);
+            ns.http_req_next = now + 1000;
+            ns.http_req_retx++;
+        }
         idle++;
         if (idle > 40 && ns.tcp_rx_len > 0)
             break;
         process_ktask_sleep(50);
     }
-    http_print();
-    tcp_send_fin();
+    if (ns.tcp_got_rst)
+        kprintf("[net] http: reset\n");
+    http_emit();
+    if (!ns.tcp_got_rst)
+        tcp_send_fin();
     ns.tcp_state = TCP_DONE;
 }
 
@@ -949,6 +1124,7 @@ static int net_rx(void *buffer, uint16_t len, void *eb)
     const struct eth_hdr *e;
     uint16_t type;
 
+    ns.rx_frames++;
     if (len < ETH_HDR) {
         esp_wifi_internal_free_rx_buffer(eb);
         return 0;
@@ -995,9 +1171,11 @@ static int net_rx(void *buffer, uint16_t len, void *eb)
         payload = frame + ETH_HDR + ihl;
         if (dip != ns.ip && dip != 0xffffffffu)
             goto out;
+        ns.rx_ip++;
         if (ip->proto == IP_ICMP && tot - ihl >= 8) {
             const struct icmp_hdr *ic = (const struct icmp_hdr *)payload;
 
+            ns.rx_icmp++;
             if (ic->type == 8)
                 icmp_reply(frame, len);
             else if (ic->type == 0 && rd16(&ic->id) == ns.ping_id) {
@@ -1008,11 +1186,13 @@ static int net_rx(void *buffer, uint16_t len, void *eb)
             const struct udp_hdr *u = (const struct udp_hdr *)payload;
             uint16_t dport = rd16(&u->dport);
 
+            ns.rx_udp++;
             if (dport == DHCP_CLIENT_PORT && tot - ihl >= 8 + 240)
                 dhcp_parse(payload + 8, tot - ihl - 8);
             else if (dport == DNS_LOCAL_PORT && tot - ihl >= 8 + 12)
                 dns_parse(payload + 8, tot - ihl - 8);
         } else if (ip->proto == IP_TCP && tot - ihl >= 20) {
+            ns.rx_tcp++;
             tcp_input(rd32((const uint8_t *)ip + 12), payload, tot - ihl);
         }
     }
@@ -1260,7 +1440,8 @@ static int net_read(void *priv, uint32_t off, void *buf, uint32_t len)
     if (off)
         return 0;
     n = ksnprintf(line, sizeof(line),
-                  "ip %u.%u.%u.%u/%u.%u.%u.%u gw %u.%u.%u.%u dns %u.%u.%u.%u %s\n",
+                  "ip %u.%u.%u.%u/%u.%u.%u.%u gw %u.%u.%u.%u dns %u.%u.%u.%u %s\n"
+                  "rx frames=%u ip=%u udp=%u icmp=%u tcp=%u drop=%u\n",
                   (unsigned)((ns.ip >> 24) & 255), (unsigned)((ns.ip >> 16) & 255),
                   (unsigned)((ns.ip >> 8) & 255), (unsigned)(ns.ip & 255),
                   (unsigned)((ns.mask >> 24) & 255), (unsigned)((ns.mask >> 16) & 255),
@@ -1269,7 +1450,10 @@ static int net_read(void *priv, uint32_t off, void *buf, uint32_t len)
                   (unsigned)((ns.gw >> 8) & 255), (unsigned)(ns.gw & 255),
                   (unsigned)((ns.dns >> 24) & 255), (unsigned)((ns.dns >> 16) & 255),
                   (unsigned)((ns.dns >> 8) & 255), (unsigned)(ns.dns & 255),
-                  ns.bound ? "bound" : "down");
+                  ns.bound ? "bound" : "down",
+                  (unsigned)ns.rx_frames, (unsigned)ns.rx_ip,
+                  (unsigned)ns.rx_udp, (unsigned)ns.rx_icmp,
+                  (unsigned)ns.rx_tcp, (unsigned)ns.rx_drop);
     if (n < 0)
         return 0;
     if ((uint32_t)n > len)
@@ -1380,26 +1564,50 @@ static int net_write(void *priv, uint32_t off, const void *buf, uint32_t len)
     }
     if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
         const char *hp;
+        int hn = 0;
 
         p += 4;
-        if (copy_token(&p, ns.http_host, sizeof(ns.http_host)) == 0)
-            return -1;
-        ns.http_port = 80;
-        hp = ns.http_host;
-        ns.http_host_is_ip = (parse_ipv4(&hp, &ns.http_ip) == 0 && *hp == 0);
         while (*p == ' ')
             p++;
-        if (*p >= '0' && *p <= '9') {
+        if (strncmp(p, "https:", 6) == 0) {
+            kprintf("[net] https is not supported (no TLS)\n");
+            return (int)len;
+        }
+        if (strncmp(p, "http://", 7) == 0)
+            p += 7;
+        else if (p[0] == ':' && p[1] == '/' && p[2] == '/')
+            p += 3;
+        while (*p && *p != ':' && *p != '/' && *p != ' ' && *p != '\n' &&
+               *p != '\r' && hn < (int)sizeof(ns.http_host) - 1)
+            ns.http_host[hn++] = *p++;
+        ns.http_host[hn] = 0;
+        if (hn == 0)
+            return -1;
+        ns.http_port = 80;
+        if (*p == ':') {
             int port = 0;
 
+            p++;
             while (*p >= '0' && *p <= '9')
                 port = port * 10 + (*p++ - '0');
-            ns.http_port = (uint16_t)port;
+            if (port)
+                ns.http_port = (uint16_t)port;
         }
         while (*p == ' ')
             p++;
         if (*p == '/') {
             copy_token(&p, ns.http_path, sizeof(ns.http_path));
+        } else if (*p >= '0' && *p <= '9') {
+            int port = 0;
+
+            while (*p >= '0' && *p <= '9')
+                port = port * 10 + (*p++ - '0');
+            if (port)
+                ns.http_port = (uint16_t)port;
+            while (*p == ' ')
+                p++;
+            if (*p == '/')
+                copy_token(&p, ns.http_path, sizeof(ns.http_path));
         } else if (*p && *p != '\n' && *p != '\r') {
             ns.http_path[0] = '/';
             copy_token(&p, ns.http_path + 1, sizeof(ns.http_path) - 1);
@@ -1408,6 +1616,8 @@ static int net_write(void *priv, uint32_t off, const void *buf, uint32_t len)
             ns.http_path[0] = '/';
             ns.http_path[1] = 0;
         }
+        hp = ns.http_host;
+        ns.http_host_is_ip = (parse_ipv4(&hp, &ns.http_ip) == 0 && *hp == 0);
         ns.http_pending = 1;
         return (int)len;
     }

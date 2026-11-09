@@ -129,7 +129,10 @@ static int wifi_init_once(void)
     kprintf("[wifi] start rc=%d\n", rc);
     if (rc == 0) {
         extern uint32_t g_log_level;
+        extern int esp_wifi_set_ps(int type);
+        int ps = esp_wifi_set_ps(0);   /* WIFI_PS_NONE */
 
+        kprintf("[wifi] ps off rc=%d\n", ps);
         /* Errors only: the driver's per-frame debug is far too chatty for
          * the shell.  Bump this to 7 when bringing up a new AP. */
         esp_wifi_internal_set_log_level(1);
