@@ -631,25 +631,38 @@ static uint16_t tcp_checksum(uint32_t src, uint32_t dst, const uint8_t *tcp,
 static int tcp_tx_at(uint32_t seq, uint32_t ack, uint8_t flags,
                      const uint8_t *data, int len)
 {
-    uint8_t buf[20 + 256];
+    uint8_t buf[32 + 256];
     struct tcp_hdr *t = (struct tcp_hdr *)buf;
+    int hlen = 20;
 
     if (len < 0 || len > 256)
         return -1;
-    memset(t, 0, 20);
+    memset(buf, 0, sizeof(buf));
     wr16(&t->sport, ns.tcp_local_port);
     wr16(&t->dport, ns.tcp_remote_port);
     wr32(&t->seq, seq);
     wr32(&t->ack, ack);
-    t->off = 5 << 4;
     t->flags = flags;
     wr16(&t->win, 2048);
     wr16(&t->urg, 0);
+    if (flags & TCP_SYN) {
+        /* MSS 1460, SACK permitted, two NOPs.  Besides telling the peer our
+         * segment size this keeps the frame at the 60-byte Ethernet minimum,
+         * which some APs drop shorter frames over. */
+        uint8_t *opt = buf + 20;
+
+        opt[0] = 2; opt[1] = 4;
+        wr16(opt + 2, 1460);
+        opt[4] = 1; opt[5] = 1;
+        opt[6] = 4; opt[7] = 2;
+        hlen = 28;
+    }
+    t->off = (uint8_t)((hlen / 4) << 4);
     if (len)
-        memcpy(buf + 20, data, (size_t)len);
+        memcpy(buf + hlen, data, (size_t)len);
     wr16(&t->check, 0);
-    wr16(&t->check, tcp_checksum(ns.ip, ns.tcp_remote_ip, buf, 20 + len));
-    return transmit_ip(ns.tcp_mac, ns.tcp_remote_ip, IP_TCP, buf, 20 + len, 0);
+    wr16(&t->check, tcp_checksum(ns.ip, ns.tcp_remote_ip, buf, hlen + len));
+    return transmit_ip(ns.tcp_mac, ns.tcp_remote_ip, IP_TCP, buf, hlen + len, 0);
 }
 
 static int tcp_send_data(const uint8_t *data, int len)
@@ -1254,9 +1267,21 @@ static void dhcp_send_renew(int force_broadcast)
 
 static void net_task(void *arg)
 {
+    uint32_t ps_next = 0;
+
     (void)arg;
     for (;;) {
         uint32_t now = plat_uptime_ms();
+
+        /* Re-assert WIFI_PS_NONE: esp_wifi_connect() re-applies the default
+         * power-save mode, and with modem sleep on this port inbound
+         * unicast (TCP SYN-ACK, ICMP replies) stops arriving. */
+        if ((int32_t)(now - ps_next) >= 0) {
+            extern int esp_wifi_set_ps(int type);
+
+            esp_wifi_set_ps(0);
+            ps_next = now + 2000;
+        }
 
         if (!ns.bound) {
             if (ns.dhcp_state == 0 && (int32_t)(now - ns.dhcp_next) >= 0) {
