@@ -112,6 +112,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -125,14 +128,16 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          repo="${GITHUB_REPOSITORY}"
           mapfile -t files < <(find dist -type f | sort)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "no artifacts downloaded"; exit 1
           fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --repo "$repo" --clobber
           else
             gh release create "$tag" "${files[@]}" \
+              --repo "$repo" \
               --title "TinyOS $tag" \
-              --generate-notes
+              --notes "TinyOS $tag flashable images for ESP32-C3, RP2040 and RP2350 (ARM/RISC-V, single and dual core)."
           fi
