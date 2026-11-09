@@ -1,0 +1,138 @@
+name: Build flashable images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - esp32c3
+          - rp2040
+          - rp2350
+          - rp2350smp
+          - rp2350rv
+          - rp2350rvsmp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      # The build drives clang for every target and ld.lld directly for
+      # linking; mklfs is a normal host C program compiled by the same clang.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld libc6-dev
+
+      - name: Show toolchain
+        run: |
+          clang --version
+          ld.lld --version
+          go version
+
+      - name: Build ${{ matrix.target }}
+        run: go run ./cmd/tos build -target ${{ matrix.target }}
+
+      - name: Collect images
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          out="dist/$target"
+          mkdir -p "$out"
+
+          if [ "$target" = "esp32c3" ]; then
+            cp build/esp32c3.bin "$out/"
+            cp build/ramdisk-esp32c3.bin "$out/"
+            {
+              echo "TinyOS ESP32-C3 flash image"
+              echo
+              echo "The kernel boot image goes to flash offset 0x0, the"
+              echo "littlefs/ramdisk image to offset 0x80000:"
+              echo
+              echo "  esptool.py --chip esp32c3 write-flash 0x0     esp32c3.bin"
+              echo "  esptool.py --chip esp32c3 write-flash 0x80000 ramdisk-esp32c3.bin"
+              echo
+              echo "Newer esptool syntax allows both in one command:"
+              echo "  esptool --chip esp32c3 write-flash 0x0 esp32c3.bin 0x80000 ramdisk-esp32c3.bin"
+              echo
+              echo "Put the board in download mode first (hold BOOT, tap RESET)."
+            } > "$out/FLASH-$target.txt"
+          else
+            cp "build/$target.uf2" "$out/"
+            {
+              echo "TinyOS $target UF2 image"
+              echo
+              echo "Hold BOOTSEL while connecting USB, then copy the .uf2"
+              echo "file to the RPI-RP2 (or RP2350) mass-storage drive."
+              echo "The board reboots into TinyOS when the copy completes."
+            } > "$out/FLASH-$target.txt"
+          fi
+
+          for f in "$out"/*; do
+            test -s "$f" || { echo "empty file: $f"; exit 1; }
+          done
+          ls -l "$out"
+
+      - name: Upload ${{ matrix.target }} artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyos-${{ matrix.target }}
+          path: dist/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tinyos-*
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mapfile -t files < <(find dist -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no artifacts downloaded"; exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" \
+              --title "TinyOS $tag" \
+              --generate-notes
+          fi

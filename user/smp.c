@@ -49,7 +49,7 @@ static void dec(char *buf, int v)
  * the caller. */
 static void probe_call(uint32_t seq, uint32_t o[4])
 {
-#if defined(__arm__) || defined(__thumb__)
+#if (defined(__arm__) || defined(__thumb__)) && !defined(TOS_ARM_M0P)
     register int r0 __asm__("r0") = SYS_GETCPU;
     register uint32_t *p __asm__("r1") = o;
     register uint32_t r2 __asm__("r2") = seq;
