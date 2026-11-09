@@ -298,12 +298,13 @@ func ESPImageFromELF(path string, withSHA256 bool, xipOffset uint32) ([]byte, []
 				return nil, nil, fmt.Errorf("%s: segment at 0x%x is in the flash window but no XIP offset was given",
 					path, p.Vaddr)
 			}
-			if p.Filesz%4 != 0 {
-				return nil, nil, fmt.Errorf("%s: XIP segment at 0x%x is %d bytes, not a multiple of 4",
-					path, p.Vaddr, p.Filesz)
-			}
-			buf := make([]byte, p.Filesz)
-			if _, err := p.ReadAt(buf, 0); err != nil {
+			/* Vendor blobs can leave a 2-byte tail section at the end
+			 * of .text; pad the flash blob rather than failing the image.
+			 * The padding is behind the last instruction and the loader
+			 * copies whole words. */
+			n := (p.Filesz + 3) &^ 3
+			buf := make([]byte, n)
+			if _, err := p.ReadAt(buf[:p.Filesz], 0); err != nil {
 				return nil, nil, fmt.Errorf("%s: reading XIP segment at 0x%x: %w", path, p.Vaddr, err)
 			}
 			xip = append(xip, ESPSegment{Addr: uint32(p.Vaddr), Data: buf})

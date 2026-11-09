@@ -87,10 +87,22 @@ type Target struct {
 	// start.S, kernel/cpu.c and kernel/process.c all read, and asks QEMU to
 	// start that many harts.
 	CPUs int
+
+	// Drivers lists the board's default driver directories, relative to the
+	// tree root.  They are compiled even when no -config is given, so
+	// `tos build -target <board>` keeps working; a config's [drivers] adds
+	// to this list.
+	Drivers []string
 }
 
-var Targets = map[string]Target{
-	// The kernel heap has to hold one decompressed program image at a
+var (
+	esp32c3Drivers  = []string{"drivers/gpio/esp32c3", "drivers/serial/esp32c3"}
+	rp2040Drivers   = []string{"drivers/gpio/rp2040", "drivers/usb/rp2040"}
+	rp2350Drivers   = []string{"drivers/gpio/rp2350", "drivers/spi/rp2350", "drivers/display/st7789/rp2350", "drivers/usb/rp2350"}
+	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv"}
+)
+
+var Targets = map[string]Target{	// The kernel heap has to hold one decompressed program image at a
 	// time: exec() unpacks the program into a kernel buffer before it
 	// copies it into the task window.  The default 32 KiB is enough for
 	// the small tools, but not for the Python interpreter, whose image is
@@ -121,9 +133,13 @@ var Targets = map[string]Target{
 	// four slots it drops return 3 KiB to .bss.  XipFlashBase is what
 	// selects board/esp32c3/kernel-xip.ld; set it to 0 for the all-RAM
 	// layout.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 8 * 1024, MaxProcs: 8, XipFlashBase: 0x40000},
+	// XipFlashBase must stay 64 KiB aligned: the MMU maps whole 64 KiB
+	// pages and the packer places 0x42000000 at this offset.  0x10000
+	// leaves 448 KiB (0x10000..0x80000) for kernel + WiFi code before the
+	// littlefs partition at 0x80000, instead of the old 256 KiB.
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 80 * 1024, MaxProcs: 8, XipFlashBase: 0x10000, Drivers: esp32c3Drivers},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
-	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600},
+	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600, Drivers: rp2040Drivers},
 	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
 	// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
 	// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
@@ -137,7 +153,7 @@ var Targets = map[string]Target{
 	// one, and .bss still has to stay below PLAT_KERNEL_MAX (0x20020000): the
 	// panel's DMA row buffer (3.8 KiB in lcd_st7789.c) comes out of the same
 	// 128 KiB budget.
-	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024},
+	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024, Drivers: rp2350Drivers},
 
 	// rp2350rv: the same physical board with its Hazard3 RISC-V cores
 	// instead of the Cortex-M33 pair.  RP2350 boots either architecture,
@@ -153,7 +169,7 @@ var Targets = map[string]Target{
 	//
 	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
 	// spin lock will need later, and it costs nothing on this core.
-	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024},
+	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers},
 
 	// rp2350rvsmp: both Hazard3 cores.  Core 1 is parked in the boot ROM's
 	// SIO-FIFO launch loop, not at our reset vector, so the board pushes the
@@ -162,7 +178,7 @@ var Targets = map[string]Target{
 	// core-local (pico-sdk riscv_platform_timer.h), so each hart gets its own
 	// tick.  The second 16 KiB kernel stack comes out of .bss; the heap arena
 	// drops to the same 32 KiB the single-core image uses.
-	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024},
+	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers},
 
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
 	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
@@ -171,7 +187,7 @@ var Targets = map[string]Target{
 	// stack drops to 16 KiB (KSTACK_BYTES in kernel/cpu.h is per arch), so
 	// two cores still reserve the 32 KiB the single-core image did and the
 	// 60 KiB exec arena is untouched.
-	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024},
+	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers},
 
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what
@@ -195,6 +211,17 @@ type Builder struct {
 	Verbose  bool
 	Target   Target
 
+	Config       *Config
+	Features     map[string]bool
+	DriverDirs   []string
+	driverDirsInit bool
+	UserExclude  map[string]bool
+	SourceExclude map[string]bool
+	WiFiLibDir   string
+	WiFiLDScript string
+	WiFiLDSymbol string
+	LDExtra      []string
+
 	mu sync.Mutex
 }
 
@@ -217,8 +244,11 @@ func FindRoot() (string, error) {
 
 func New(root string) *Builder {
 	return &Builder{
-		Root:     root,
-		BuildDir: filepath.Join(root, "build"),
+		Root:          root,
+		BuildDir:      filepath.Join(root, "build"),
+		Features:      map[string]bool{},
+		UserExclude:   map[string]bool{},
+		SourceExclude: map[string]bool{},
 	}
 }
 
@@ -444,6 +474,9 @@ func (b *Builder) link(objs []string, script, out string, extra ...string) error
 	}
 
 	args = append(args, "-T", script, "-nostdlib", w("-static"))
+	if extraEnv := os.Getenv("TOS_LD_EXTRA"); extraEnv != "" {
+		args = append(args, strings.Fields(extraEnv)...)
+	}
 	// Drop unreferenced sections.  Everything is compiled with
 	// -ffunction-sections/-fdata-sections, so this prunes e.g. the
 	// littlefs entry points the kernel never calls (lfs_rename & co),
@@ -509,6 +542,12 @@ func (b *Builder) linkPIE(objs []string, script, out string) error {
 	}
 
 	args = append(args, "-T", script, "-nostdlib", w("-pie"))
+	/* Bring-up hook: extra linker fragments/roots for the WiFi blobs
+	 * (-T esp32c3.rom.ld, -u wifi_probe) without baking the Espressif
+	 * SDK into every build. */
+	if extra := os.Getenv("TOS_LD_EXTRA"); extra != "" {
+		args = append(args, strings.Fields(extra)...)
+	}
 	args = append(args,
 		w("--gc-sections"),
 		w("-z"), w("max-page-size=16"),
@@ -569,6 +608,7 @@ func (b *Builder) Build() error {
 	if b.Target.Name == "" {
 		b.Target = Targets["x86"]
 	}
+	b.ensureDriverDirs()
 	b.TC, err = DetectToolchain(b.Target)
 	if err != nil {
 		return err
@@ -680,12 +720,37 @@ func (b *Builder) buildKernel() error {
 	kdir := filepath.Join(b.Root, "kernel")
 	lfsDir := filepath.Join(b.Root, "third_party", "littlefs")
 	// arch/<arch> is on the include path so platform.h can pull the port's
-	// register frame (arch/<arch>/regs.h).
+	// register frame (arch/<arch>/regs.h).  Driver directories come from the
+	// build config and are added both as source roots and include roots.
 	incs := []string{
 		filepath.Join(b.Root, "include"),
 		kdir,
 		lfsDir,
+		filepath.Join(b.Root, "board", b.Target.Board),
 		filepath.Join(b.Root, "arch", b.Target.Arch),
+	}
+
+	/* Backward compatibility: an old TOS_WIFI_LIB environment build still
+	 * pulls the in-tree WiFi driver directory. */
+	wifiEnv := os.Getenv("TOS_WIFI_LIB") != ""
+	driverDirs := append([]string(nil), b.DriverDirs...)
+	if (b.feature("wifi") || wifiEnv) && !hasFileInDirs(driverDirs, "wifi_drv.c") {
+		driverDirs = append(driverDirs, filepath.Join(b.Root, "drivers", "wifi", "esp32c3"))
+	}
+	seenDir := map[string]bool{}
+	addUnique := func(list []string, d string) []string {
+		d = filepath.Clean(d)
+		if seenDir[d] {
+			return list
+		}
+		seenDir[d] = true
+		return append(list, d)
+	}
+	for _, d := range driverDirs {
+		incs = addUnique(incs, d)
+		if st, err := os.Stat(filepath.Join(d, "include")); err == nil && st.IsDir() {
+			incs = addUnique(incs, filepath.Join(d, "include"))
+		}
 	}
 
 	// The RP2350 console is a TinyUSB CDC-ACM device (board/rp2350/usb_cdc.c).
@@ -697,21 +762,22 @@ func (b *Builder) buildKernel() error {
 	useTinyUSB := b.Target.Board == "rp2350" || b.Target.Board == "rp2350rv"
 	if useTinyUSB {
 		incs = append(incs,
-			filepath.Join(b.Root, "board", b.Target.Board),
 			filepath.Join(tusbDir, "src"),
 			filepath.Join(tusbDir, "port_rp2", "include"),
 		)
 	}
 
-	// Sources come from three places: the arch-independent core, the
-	// architecture port, and the board support package.  Which arch and
-	// board directory is used depends on the build target.
+	// Sources come from four places: the arch-independent core, the
+	// architecture port, the board support package and the config-selected
+	// driver directories.  Which arch and board directory is used depends on
+	// the build target.
 	var srcs []string
 	dirs := []string{
 		kdir,
 		filepath.Join(b.Root, "arch", b.Target.Arch),
 		filepath.Join(b.Root, "board", b.Target.Board),
 	}
+	dirs = append(dirs, driverDirs...)
 	for _, dir := range dirs {
 		cs, err := globFiles(dir, "*.c")
 		if err != nil {
@@ -723,6 +789,24 @@ func (b *Builder) buildKernel() error {
 		}
 		srcs = append(srcs, ss...)
 		srcs = append(srcs, cs...)
+	}
+	if len(b.SourceExclude) != 0 {
+		kept := srcs[:0]
+		for _, s := range srcs {
+			if b.SourceExclude[filepath.ToSlash(filepath.Clean(s))] {
+				continue
+			}
+			kept = append(kept, s)
+		}
+		srcs = kept
+	}
+
+	featDefs := b.featureDefines()
+	if (b.feature("wifi") || wifiEnv) && !containsString(featDefs, "-DTOS_WIFI") {
+		featDefs = append(featDefs, "-DTOS_WIFI")
+	}
+	if (b.feature("net") || wifiEnv) && !containsString(featDefs, "-DTOS_NET") {
+		featDefs = append(featDefs, "-DTOS_NET")
 	}
 
 	// Vendored TinyUSB, RP2350 only: the seven translation units that make up
@@ -758,9 +842,10 @@ func (b *Builder) buildKernel() error {
 		obj := filepath.Join(b.BuildDir, "kernel", name)
 		objs = append(objs, obj)
 		srcCopy, objCopy := src, obj
+		relCopy := filepath.ToSlash(rel)
 		tasks = append(tasks, task{label: name, fn: func() error {
-			b.logf("      CC  kernel/%s\n", filepath.Base(srcCopy))
-			return b.compile(srcCopy, objCopy, incs)
+			b.logf("      CC  %s\n", relCopy)
+			return b.compile(srcCopy, objCopy, incs, featDefs...)
 		}})
 	}
 
@@ -799,6 +884,27 @@ func (b *Builder) buildKernel() error {
 		return err
 	}
 
+	/* Espressif's prebuilt WiFi/PHY/coex blobs.  The config's [wifi]
+	 * lib_dir is the primary source; TOS_WIFI_LIB stays as a bring-up
+	 * override for one-off builds. */
+	if b.Target.Name == "esp32c3" && (b.feature("wifi") || wifiEnv) {
+		dir := b.WiFiLibDir
+		if dir == "" {
+			if env := os.Getenv("TOS_WIFI_LIB"); env != "" {
+				dir = b.abs(env)
+			}
+		}
+		if dir == "" {
+			return fmt.Errorf("wifi is enabled but no lib directory is configured (set [wifi] lib_dir or TOS_WIFI_LIB)")
+		}
+		for _, n := range []string{
+			"libnet80211.a", "libpp.a", "libcore.a",
+			"libphy.a", "libcoexist.a",
+		} {
+			objs = append(objs, filepath.Join(dir, n))
+		}
+	}
+
 	// RV32 has no boot sector and no flat binary: QEMU and the board
 	// bootloader both load the ELF directly.  A board may supply its own
 	// linker script (different RAM base); the arch default is the fallback.
@@ -823,7 +929,7 @@ func (b *Builder) buildKernel() error {
 			}
 			script = xip
 		}
-		if err := b.link(objs, script, elfPath); err != nil {
+		if err := b.link(objs, script, elfPath, b.kernelLDArgs()...); err != nil {
 			return err
 		}
 		if end, err := ELFEndAddress(elfPath); err == nil {
@@ -872,7 +978,7 @@ func (b *Builder) buildKernel() error {
 	}
 
 	elfPath := filepath.Join(b.BuildDir, "kernel.elf")
-	if err := b.link(objs, filepath.Join(kdir, "kernel.ld"), elfPath); err != nil {
+	if err := b.link(objs, filepath.Join(kdir, "kernel.ld"), elfPath, b.kernelLDArgs()...); err != nil {
 		return err
 	}
 
@@ -985,7 +1091,7 @@ func (b *Builder) buildUser() ([]string, error) {
 	// the board's APP_BASE, so one binary runs on QEMU and on real hardware.
 	// -fPIC (not just -fPIE) is needed because the linker rejects GOT-free
 	// absolute references against local symbols in a shared-style link.
-	userPIEFlags := []string{"-fPIC"}
+	userPIEFlags := append([]string{"-fPIC"}, b.featureDefines()...)
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
@@ -1023,16 +1129,23 @@ func (b *Builder) buildUser() ([]string, error) {
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() {
+			if b.UserExclude[name] {
+				continue
+			}
 			dirs = append(dirs, name)
 			continue
 		}
 		if !strings.HasSuffix(name, ".c") {
 			continue
 		}
+		prog := strings.TrimSuffix(name, ".c")
+		if b.UserExclude[prog] {
+			continue
+		}
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" {
 			continue
 		}
-		progs = append(progs, strings.TrimSuffix(name, ".c"))
+		progs = append(progs, prog)
 	}
 	sort.Strings(progs)
 	sort.Strings(dirs)

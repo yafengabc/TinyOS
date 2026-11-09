@@ -103,6 +103,14 @@ void kmain(void)
                 (unsigned)plat_ticks());
     }
 
+#ifdef TOS_WIFI
+    /* TEMP WiFi probe: shell first, then the driver task. */
+    {
+        extern void wifi_test_start(void);
+        wifi_test_start();
+    }
+#endif
+
     kprintf("\nstarting /bin/sh ...\n\n");
     process_start_shell("bin/sh");
     panic("shell returned");

@@ -110,6 +110,7 @@ enum {
     ST_WAIT_INPUT,
     ST_WAIT_SLEEP,
     ST_WAIT_PIPE,
+    ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
      * exist as a state of its own: on SMP two exec()s can be building two
      * tasks at the same time, and a slot that is only "not FREE yet" is
@@ -177,6 +178,8 @@ typedef struct proc {
      * into non-writable code below and writable data above; win_size is how
      * many bytes the allocator handed out (zero = no window, which is what
      * a free table entry reads as). */
+    uint8_t  is_ktask;      /* runs in M-mode on its own stack, no window */
+    uint8_t  kstack_slot;   /* index into the ktask stack pool          */
     uint32_t win_base;
     uint32_t win_size;
     uint32_t wx_start;
@@ -219,8 +222,12 @@ typedef struct proc {
     uint32_t wbuf;
     uint32_t wlen;
 
-    /* Everything the task needs while it is not on the CPU. */
+    /* Everything the task needs while it is not on the CPU.  A kernel
+     * thread's live frame is on its own stack (kframe); saved is only the
+     * initial bootstrap frame, because the generic M-mode restore derives
+     * sp from the frame address itself. */
     regs_t   saved;
+    regs_t  *kframe;
 
     file_t fds[MAX_FDS];
 } proc_t;
@@ -228,6 +235,34 @@ typedef struct proc {
 static proc_t procs[MAX_PROCS];
 static proc_t *init_proc;
 static int next_pid = 1;
+
+/* Trap entry cannot trust mstatus.MPP to tell it where it came from: mret
+ * always writes MPP=U, so a kernel thread entered through a trap frame would
+ * look like a user task on its *next* trap and the entry would switch to the
+ * kernel stack while the frame is on the ktask stack.  This flag is set by
+ * the scheduler whenever a kernel thread is current; start.S selects the
+ * current-stack path from it, and trap_handler forces the saved frame's
+ * MPP back to M before mret. */
+volatile int ktask_running;
+/* Set by the scheduler immediately before it returns a ktask's first frame;
+ * the bootstrap stub in start.S reads it to get off the frame's stack and
+ * onto the ktask's own stack before calling any C code. */
+volatile uint32_t ktask_entry_sp;
+
+/* Kernel-thread stacks.  Four slots of 6 KiB; see the layout comment in
+ * board/esp32c3/layout.c for the 160 KiB kernel-region budget.  The ktask
+ * machinery is RV32-only: it rides the M-mode trap path and start.S. */
+#if defined(__riscv)
+#define KTASK_SLOTS       6
+#define KTASK_STACK_BYTES 6144u
+static uint8_t ktask_stacks[KTASK_SLOTS][KTASK_STACK_BYTES]
+    __attribute__((aligned(16)));
+static uint32_t ktask_stack_used;
+
+void ktask_trampoline(void (*fn)(void *), void *arg);
+static void ktask_exit(void) __attribute__((noreturn));
+extern void ktask_start_stub(void);
+#endif
 
 /* ---- what became per-CPU ---------------------------------------------
  *
@@ -367,8 +402,9 @@ static void make_ready(proc_t *p, int32_t val)
      * them on, and a tick landing between the acquire and the release calls
      * this again on the same CPU, spinning on a lock it already holds. */
     uint32_t irq = plat_irq_save();
+    regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
 
-    plat_frame_set_ret(&p->saved, (uint32_t)val);
+    plat_frame_set_ret(frame, (uint32_t)val);
     spin_lock(&proc_lock);
     p->state = ST_READY;
     spin_unlock(&proc_lock);
@@ -406,7 +442,7 @@ static int proc_waiting(void)
     for (int i = 0; i < MAX_PROCS; i++) {
         int st = procs[i].state;
         if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP ||
-            st == ST_WAIT_PIPE)
+            st == ST_WAIT_PIPE || st == ST_KT_WAIT)
             return 1;
     }
     return 0;
@@ -532,6 +568,7 @@ static regs_t *sched_switch(regs_t *r)
              * `piperace 4 64`. */
             if (prev && prev->state == ST_RUNNING && prev->cpu == cpu_id()) {
                 prev->saved = *r;
+                prev->kframe = r;
                 prev->state = ST_READY;
                 prev->cpu = -1;
 
@@ -560,6 +597,7 @@ static regs_t *sched_switch(regs_t *r)
             next->state = ST_RUNNING;
             next->cpu = cpu_id();
             current = next;
+            ktask_running = next->is_ktask ? 1 : 0;
             quantum = QUANTUM;
             spin_unlock(&proc_lock);
             /* A task can move to another core, and on ARM the kernel stack
@@ -568,7 +606,15 @@ static regs_t *sched_switch(regs_t *r)
              * on the ports where the kernel stack is per task (rv32) or
              * lives behind a TSS (x86). */
             plat_set_kernel_stack(KSTACK_TOP);
-            apply_protection(next);
+            if (!next->is_ktask)
+                apply_protection(next);
+            /* A ktask's live frame is on its own stack; only the bootstrap
+             * frame is in proc_t.  The stub in start.S uses the entry sp to
+             * leave that frame behind before it touches a C stack. */
+            if (next->is_ktask) {
+                ktask_entry_sp = next->stack_top;
+                return next->kframe ? next->kframe : &next->saved;
+            }
             /* Leave interrupts closed: the caller is trap exit and mret
                restores MIE from MPIE, which is the state we came in with. */
             return &next->saved;
@@ -673,8 +719,12 @@ void process_tick(regs_t *r)
 
     /* Cheapest moment to notice a blown kernel stack: the tick runs no
        matter what the task is doing, and r points at the trap frame on
-       that very stack. */
-    kstack_check(r);
+       that very stack.  A kernel thread's frame is on its own stack. */
+    /* Only a live user task owns the kernel stack.  A ktask frame is on its
+     * own stack, and during SYS_KTASK_EXIT the current slot is already free
+     * (or NULL) while the frame is still on that stack. */
+    if (current && !current->is_ktask && current->state != ST_FREE)
+        kstack_check(r);
 
     if (current && current->state == ST_RUNNING) {
         current->cpu_ticks++;
@@ -708,7 +758,8 @@ void process_tick(regs_t *r)
     now = plat_ticks();
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
-        if (p->state == ST_WAIT_SLEEP && (int64_t)(now - p->wake_tick) >= 0)
+        if ((p->state == ST_WAIT_SLEEP || p->state == ST_KT_WAIT) &&
+            p->wake_tick && (int64_t)(now - p->wake_tick) >= 0)
             make_ready(p, 0);
     }
 
@@ -867,6 +918,11 @@ void process_init(void)
 int process_current_pid(void)
 {
     return current ? current->pid : 0;
+}
+
+void *process_current_task(void)
+{
+    return current;
 }
 
 /* The cwd is per task.  When no task is current (early boot, before the
@@ -1193,6 +1249,172 @@ static void set_name(proc_t *p, const char *path)
     }
     p->name[i] = '\0';
 }
+
+#if defined(__riscv)
+/* ---- kernel threads -------------------------------------------------- *
+ *
+ * A kernel thread is a proc_t with is_ktask set: no user window, its own
+ * stack, M-mode code.  It is scheduled by the same frames as a user task,
+ * but two RISC-V details have to be handled explicitly: *
+ *   - mret always writes mstatus.MPP=U, so the next trap entry would mistake
+ *     a kernel thread for a user task and switch stacks.  ktask_running is
+ *     what start.S checks instead; trap_handler forces the saved MPP back to
+ *     M so the return stays in machine mode.
+ *   - the tick never preempts a kernel thread (process_tick only reschedules
+ *     U-mode frames), so a thread gives up the CPU only at an OSI block or
+ *     yield.  That is the right shape for the WiFi blob: its tasks park on
+ *     queues and are woken by the WiFi interrupt. */
+#define SYS_KTASK_SLEEP 60
+#define SYS_KTASK_YIELD 61
+#define SYS_KTASK_EXIT  62
+
+void ktask_trampoline(void (*fn)(void *), void *arg)
+{
+    fn(arg);
+    ktask_exit();
+}
+
+static void ktask_exit(void)
+{
+    register int a7 __asm__("a7") = SYS_KTASK_EXIT;
+
+    __asm__ volatile("ecall" : : "r"(a7) : "memory");
+    for (;;)
+        ;
+}
+
+void process_ktask_sleep(uint32_t ticks)
+{
+    register int a0 __asm__("a0") = (int)ticks;
+    register int a7 __asm__("a7") = SYS_KTASK_SLEEP;
+
+    __asm__ volatile("ecall" : "+r"(a0) : "r"(a7) : "memory");
+}
+
+void process_ktask_yield(void)
+{
+    register int a7 __asm__("a7") = SYS_KTASK_YIELD;
+
+    __asm__ volatile("ecall" : : "r"(a7) : "memory");
+}
+
+int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
+                         uint32_t stack_bytes, int prio)
+{
+    proc_t *p;
+    int slot = -1;
+
+    if (!fn)
+        return -1;
+    if (stack_bytes == 0 || stack_bytes > KTASK_STACK_BYTES)
+        stack_bytes = KTASK_STACK_BYTES;
+
+    uint32_t irq = plat_irq_save();
+    for (int i = 0; i < KTASK_SLOTS; i++) {
+        if (!(ktask_stack_used & (1u << i))) {
+            slot = i;
+            ktask_stack_used |= 1u << i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        plat_irq_restore(irq);
+        return -1;
+    }
+
+    p = proc_alloc();
+    if (!p) {
+        ktask_stack_used &= ~(1u << slot);
+        plat_irq_restore(irq);
+        return -1;
+    }
+
+    p->is_ktask = 1;
+    p->kstack_slot = (uint8_t)slot;
+    p->prio = prio;
+    p->win_base = 0;
+    p->win_size = 0;
+    p->wx_start = 0;
+    p->stack_top = (uint32_t)&ktask_stacks[slot][KTASK_STACK_BYTES];
+    p->stack_size = stack_bytes;
+    p->brk = 0;
+    p->cpu = -1;
+    p->start_ns = plat_uptime_ms();
+    set_name(p, name);
+
+    memset(&p->saved, 0, sizeof(p->saved));
+    p->saved.mstatus = RV_MSTATUS_MPP_M;   /* MPIE=0: the stub enables it */
+    p->saved.mepc = (uint32_t)ktask_start_stub;
+    p->saved.sp = 0;                        /* unused; the stub sets sp */
+    p->saved.ra = (uint32_t)ktask_exit;
+    p->saved.a0 = (uint32_t)fn;
+    p->saved.a1 = (uint32_t)arg;
+    p->kframe = &p->saved;
+
+    spin_lock(&proc_lock);
+    p->pid = next_pid++;
+    p->state = ST_READY;
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
+    return p->pid;
+}
+
+regs_t *process_ktask_syscall(regs_t *r)
+{
+    proc_t *p = current;
+
+    if (!p || !p->is_ktask) {
+        plat_frame_set_ret(r, (uint32_t)-1);
+        return r;
+    }
+
+    /* The trap entry came through the ktask path, so the frame is on the
+     * ktask stack.  Force MPP back to M: mret must return to machine mode,
+     * and mret will clear MPP again for the next entry (which uses the
+     * flag, not MPP). */
+    r->mstatus = (r->mstatus & ~RV_MSTATUS_MPP_MASK) | RV_MSTATUS_MPP_M;
+
+    switch (r->a7) {
+    case SYS_KTASK_SLEEP: {
+        uint32_t ticks = r->a0 ? (uint32_t)r->a0 : 1u;
+
+        p->saved = *r;
+        p->kframe = r;
+        plat_frame_set_ret(r, 0);
+        p->wake_tick = plat_ticks() + ticks;
+        p->state = ST_KT_WAIT;
+        p->cpu = -1;
+        return sched_switch(r);
+    }
+
+    case SYS_KTASK_YIELD:
+        p->saved = *r;
+        p->kframe = r;
+        plat_frame_set_ret(r, 0);
+        p->state = ST_READY;
+        p->cpu = -1;
+        return sched_switch(r);
+
+    case SYS_KTASK_EXIT: {
+        uint32_t irq = plat_irq_save();
+
+        ktask_stack_used &= ~(1u << p->kstack_slot);
+        p->is_ktask = 0;
+        p->kstack_slot = 0;
+        spin_lock(&proc_lock);
+        proc_retire_locked(p);
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        current = NULL;
+        return sched_switch(r);
+    }
+
+    default:
+        plat_frame_set_ret(r, (uint32_t)-1);
+        return r;
+    }
+}
+#endif /* __riscv */
 
 /* A TOS_STACK() request (or the same value arriving in an envelope hint)
    has to be one the protection unit can describe and the window grain can
@@ -2025,6 +2247,7 @@ static const char *state_name(int st)
     case ST_WAIT_INPUT: return "tty  ";
     case ST_WAIT_SLEEP: return "sleep";
     case ST_WAIT_PIPE:  return "pipe ";
+    case ST_KT_WAIT:    return "ktwait";
     case ST_NEW:        return "new  ";
     default:            return "free ";
     }
@@ -2097,7 +2320,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
         char cpubuf[4];
         uint32_t age, busy, pct10, stk10;
 
-        if (p->state == ST_FREE)
+        if (p->state == ST_FREE || p->is_ktask)
             continue;
 
         if (p->cpu < 0 || p->state != ST_RUNNING) {

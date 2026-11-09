@@ -543,7 +543,7 @@ B 档还要补 10 个 hosted libc shim 头、约 20 个软浮点辅助（`__adds
 3. **时钟**：现在是"XOSC 12 MHz，UART 分频和 SysTick 都按这个算"，没有像
    RP2350 那样用 FC0 实测。第一件事就是把实测值打出来——不然波特率错了会表现为
    **乱码而不是无输出**，很容易误判成驱动问题。
-4. **控制台**：`board/rp2040/usb_cdc.c` 是手写 CDC（RP2350 后来换成 TinyUSB 了），
+4. **控制台**：`drivers/usb/rp2040/usb_cdc.c` 是手写 CDC（RP2350 后来换成 TinyUSB 了），
    这段代码从没跑过。先用 UART0（GPIO0/1 + USB-TTL，115200）接通，再接 USB。
 5. **XIP vs SRAM**：`kernel.ld` 把内核链在 `0x10000100` 就地执行，`.data/.bss`
    在 SRAM；文档 §RP2040 里"或拷到 SRAM 运行"那句只是选项，**没有实现**。
@@ -2022,8 +2022,11 @@ RP2350 切到它的 Hazard3 核：内核从 XIP flash（0x10000000）原地执�
 把第二个 Hazard3 也拉起来。
 
 新增文件：`board/rp2350rv/{kernel.ld,image_def.S,platform.c,layout.c,
-rp2350rv_memmap.h}`，以及复用 ARM 侧 TinyUSB 栈的 `usb_cdc.c/.h`、
-`tusb_shim.c`、`tusb_config.h`；`internal/build/build.go` 多两个 target，
+board_devs.c,board_internal.h,rp2350rv_memmap.h}`；驱动位于
+`drivers/gpio/rp2350rv/`、`drivers/spi/rp2350rv/`、
+`drivers/display/st7789/rp2350rv/`、`drivers/usb/rp2350rv/`（复用 ARM 侧
+TinyUSB 栈：`usb_cdc.c/.h`、`tusb_shim.c`、`tusb_config.h`）；
+`internal/build/build.go` 多两个 target，
 `internal/build/uf2.go` 多一个 `emitRP2350RVUF2`（family **0xe48bff5a**，
 IMAGE_TYPE **0x1101** = EXE|CPU_RISCV|CHIP_RP2350，带 ENTRY_POINT item）。
 `arch/rv32/start.S` 增加可选的 `.data` 拷贝（`TOS_COPY_DATA`）；ROM 只跳到
@@ -2138,11 +2141,11 @@ CoreMark 的差距更小，符合它比 LCG 循环有更多指令级并行的预
 
 ### 26.1 设备端口
 
-`board/rp2350rv/` 现在与 ARM 端口设备同源：
+`board/rp2350rv/` 现在与 ARM 端口设备同源（驱动位于 `drivers/.../rp2350rv/`）：
 
-- `gpio.c`：GPIO（30 pin）+ ADC0..3 + 片上温度通道（PLL_SYS/4 = 37.5 MHz）。
-- `spi.c`/`spi.h`：PL022 轮询 SPI。
-- `lcd_st7789.c`/`font5x7.h`：ST7789V2 135x240（SPI1 + DMA 通道 10）。
+- `drivers/gpio/rp2350rv/gpio.c`：GPIO（30 pin）+ ADC0..3 + 片上温度通道（PLL_SYS/4 = 37.5 MHz）。
+- `drivers/spi/rp2350rv/spi.c`/`spi.h`：PL022 轮询 SPI。
+- `drivers/display/st7789/rp2350rv/lcd_st7789.c`/`font5x7.h`：ST7789V2 135x240（SPI1 + DMA 通道 10）。
 - `board_devs.c`：ATK-DNRP2350AM 的 11 行设备表（led0/key0/lcd0/tf0/uart0/
   usb0/adc0..3/flash0）；TF 卡和 ARM 端口一样只描述、不驱动。
 - `board_internal.h`：`plat_led_owned()`，心跳让位给用户。

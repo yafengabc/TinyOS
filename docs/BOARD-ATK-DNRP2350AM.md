@@ -191,7 +191,7 @@ adc 4                      # 片内温度传感器，打印原始值与 mV
 
 **ADC 的 bring-up 是这块板自己的事**：`RESET_ADC` 上电是**断言**的（模块被按在
 复位里），`CLK_ADC` 也是**关的**，谁都不碰就一直超时（早期的
-`adc: conversion failed` 就是这个）。`board/rp2350/gpio.c` 的 `adc_init_hw()`
+`adc: conversion failed` 就是这个）。`drivers/gpio/rp2350/gpio.c` 的 `adc_init_hw()`
 在第一次读时补上：解除复位 → 开 `CLK_ADC`（该芯片的 AUXSRC **没有 clk_sys**，
 只有 pll_usb/pll_sys/rosc/xosc，所以走 PLL_SYS 四分频 = 37.5 MHz，低于 48 MHz
 上限）→ 把 26..29 的 pad 拉出隔离、关掉数字输入。`adc4` 还要额外置 `CS.TS_EN`，

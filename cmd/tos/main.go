@@ -14,12 +14,14 @@ func usage() {
 	fmt.Print(`TinyOS build tool
 
 usage:
-  tos build [-v] [-target <target>]
+  tos build [-v] [-target <target>] [-config <file>]
                             build the kernel and filesystem for a target.
                             Targets: x86, rv32, rv32smp, rv32nc, arm,
                             rp2040, rp2350, rp2350rv, rp2350rvsmp, esp32c3.  The flash-backed
                             boards also emit build/<target>.uf2.
-  tos run   [-headless] [-debug] [-no-build] [-target <target>]
+                            -config selects features/drivers from a file; the
+                            default is tos.conf when it exists (see configs/).
+  tos run   [-headless] [-debug] [-no-build] [-target <target>] [-config <file>]
                             build (unless -no-build) and boot in QEMU
   tos espimg <elf> <out.bin>
                             package a linked ELF as an ESP32-C3 boot image,
@@ -35,6 +37,7 @@ environment:
   TOS_LD    custom linker command line
   TOS_QEMU  path to the QEMU binary for the selected target
   TOS_OPT   optimisation level, default -Oz (try -O2 or -Og when debugging)
+  TOS_CONFIG default build config (tos.conf; -config wins)
 `)
 }
 
@@ -55,15 +58,14 @@ func main() {
 	case "build":
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
 		verbose := fs.Bool("v", false, "print full compiler command lines")
-		target := fs.String("target", "x86", "build target: x86, rv32 or arm")
+		target := fs.String("target", "", "build target (default: config or x86)")
+		config := fs.String("config", "", "build config file (default: tos.conf)")
 		fs.Parse(os.Args[2:])
 		b.Verbose = *verbose
-		t, ok := build.Targets[*target]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown target %q (see 'tos help')\n", *target)
+		if err := configure(b, root, *config, *target); err != nil {
+			fmt.Fprintln(os.Stderr, "tos:", err)
 			os.Exit(2)
 		}
-		b.Target = t
 		if err := b.Build(); err != nil {
 			fmt.Fprintln(os.Stderr, "\ntos:", err)
 			os.Exit(1)
@@ -80,15 +82,14 @@ func main() {
 		debug := fs.Bool("debug", false, "log interrupts / CPU resets to build/qemu.log")
 		noBuild := fs.Bool("no-build", false, "do not rebuild before running")
 		verbose := fs.Bool("v", false, "verbose build")
-		target := fs.String("target", "x86", "build target: x86, rv32 or arm")
+		target := fs.String("target", "", "build target (default: config or x86)")
+		config := fs.String("config", "", "build config file (default: tos.conf)")
 		fs.Parse(os.Args[2:])
 		b.Verbose = *verbose
-		t, ok := build.Targets[*target]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown target %q (see 'tos help')\n", *target)
+		if err := configure(b, root, *config, *target); err != nil {
+			fmt.Fprintln(os.Stderr, "tos:", err)
 			os.Exit(2)
 		}
-		b.Target = t
 		if !*noBuild {
 			if err := b.Build(); err != nil {
 				fmt.Fprintln(os.Stderr, "\ntos:", err)
@@ -186,4 +187,39 @@ func version(tool, arg string) {
 		line += string(c)
 	}
 	fmt.Printf("              %s\n", line)
+}
+
+/* loadConfig resolves the config path: -config wins, then TOS_CONFIG, then
+ * tos.conf at the tree root.  A missing default file simply means "no
+ * config", so old command lines keep working. */
+func loadConfig(root, path string) (*build.Config, error) {
+	if path == "" {
+		path = os.Getenv("TOS_CONFIG")
+	}
+	if path == "" {
+		p := filepath.Join(root, "tos.conf")
+		if _, err := os.Stat(p); err != nil {
+			return nil, nil
+		}
+		path = p
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	return build.LoadConfig(path)
+}
+
+func configure(b *build.Builder, root, configPath, target string) error {
+	cfg, err := loadConfig(root, configPath)
+	if err != nil {
+		return err
+	}
+	if target != "" {
+		t, ok := build.Targets[target]
+		if !ok {
+			return fmt.Errorf("unknown target %q (see 'tos help')", target)
+		}
+		b.Target = t
+	}
+	return b.ApplyConfig(cfg)
 }

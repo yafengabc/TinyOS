@@ -54,12 +54,12 @@ SECTIONS
     __kernel_end = .;
 
     /* The first task window starts at PLAT_APP_BASE (board/esp32c3/layout.c,
-     * 0x40390000), and nothing else separates the two: an overflow links
+     * 0x403B0000), and nothing else separates the two: an overflow links
      * quietly and then shows up as pid 1's image being overwritten by kernel
      * globals, which reads as a random user-program crash.  Same assertion
      * as board/rp2040/kernel.ld, same reason. */
-    ASSERT(__kernel_end <= 0x40390000,
-           "kernel image overflows PLAT_KERNEL_MAX (0x40390000), the first task window")
+    ASSERT(__kernel_end <= 0x403B0000,
+           "kernel image overflows PLAT_KERNEL_MAX (0x403B0000), the first task window")
 
     /DISCARD/ : {
         *(.comment)

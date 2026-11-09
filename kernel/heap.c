@@ -1,5 +1,6 @@
 #include "heap.h"
 #include "cpu.h"
+#include "string.h"
 
 /* First-fit allocator over a static arena with free-block coalescing.
    The kernel's .bss is cleared by entry.S, so the arena starts zeroed;
@@ -167,6 +168,26 @@ void *kmalloc(size_t size)
     p = kmalloc_locked(size);
     spin_unlock(&heap_lock);
     return p;
+}
+
+void *krealloc(void *ptr, size_t size)
+{
+    if (!ptr)
+        return kmalloc(size);
+    if (!size) {
+        kfree(ptr);
+        return NULL;
+    }
+    blk_t *b = header_of(ptr);
+    size_t old = b->size & ~ALLOC_BIT;
+    if (old >= size)
+        return ptr;
+    void *n = kmalloc(size);
+    if (!n)
+        return NULL;
+    memcpy(n, ptr, old);
+    kfree(ptr);
+    return n;
 }
 
 void kfree(void *ptr)

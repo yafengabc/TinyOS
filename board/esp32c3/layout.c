@@ -23,29 +23,31 @@ const uint32_t PLAT_KERNEL_BASE = 0x40380000;
 const uint32_t PLAT_RAM_BASE   = 0x40380000;   /* SRAM, instruction alias */
 const uint32_t PLAT_RAM_TOP    = 0x403DC710;
 
-/* Image + .bss must stay below this: 64 KiB.  It was 176 KiB while the code
- * half of the kernel also lived in SRAM, then 128 KiB once XIP moved .text
- * and .rodata to flash - and 128 KiB turned out to be an arbitrary number
- * that left 50.8 KiB of dead space between __kernel_end and the first task
- * window, which neither the kernel nor a window could ever use.
+/* Image + .bss must stay below this: 160 KiB.  The old split was 64 KiB,
+ * which was enough for the kernel alone (48.6 KiB .bss after streaming
+ * exec), but WiFi's static data and its heap have to live below the first
+ * task window too.  The kernel code itself is XIP in flash; this region is
+ * only .data/.bss/heap.
  *
- * 64 KiB is 4 grains, i.e. a boundary the task area can start on.  The
- * kernel's .bss is 48.6 KiB after streaming exec (16 KiB kernel stack,
- * 8 KiB arena, 8 process slots), which leaves ~15.4 KiB of headroom.  The
- * build asserts the fit in kernel-xip.ld, so growth past it is a link error
- * rather than pid 1's image being overwritten.
+ * 160 KiB leaves 208 KiB for task windows.  It is sized for the scan-only
+ * WiFi PoC: the Espressif net80211/pp/phy/coexist blobs add roughly 18 KiB
+ * of .data/.bss, the rest is the WiFi heap (malloc/realloc are called by
+ * the blobs and by lwIP later).  The build asserts the fit in kernel-xip.ld,
+ * so growth past it is a link error rather than pid 1's image being
+ * overwritten.
  *
  * Every number here is a lever on the task area: each 16 KiB the kernel
  * gives back is one more window, and a window is a whole program. */
-const uint32_t PLAT_KERNEL_MAX  = 0x40390000;
+const uint32_t PLAT_KERNEL_MAX  = 0x403B0000;   /* 0x40380000 + 192 KiB */
 
-/* Task windows are carved out of the remaining 304 KiB (19 x 16 KiB) and
+/* Task windows are carved out of the remaining 208 KiB (13 x 16 KiB) and
  * sized to their image, in 16 KiB steps: a shell takes 32 KiB, the editor
  * 32, a 1 KiB tool 16, and the rest of the area stays usable by whatever
- * comes next.  Stack at the top of every window, image below it, guard hole
- * between image and stack; see kernel/platform.h for the constraints this
- * grain has to satisfy. */
-const uint32_t PLAT_APP_BASE   = 0x40390000;
+ * comes next.  The Python interpreter's 128 KiB window plus the shell's
+ * 32 KiB still fit.  Stack at the top of every window, image below it,
+ * guard hole between image and stack; see kernel/platform.h for the
+ * constraints this grain has to satisfy. */
+const uint32_t PLAT_APP_BASE   = 0x403B0000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
 const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See

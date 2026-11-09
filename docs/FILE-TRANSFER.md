@@ -87,7 +87,7 @@ FAILED: board's rx does not report its chunk size (stale filesystem image): flas
 
 | 改动 | 位置 | 作用 |
 |---|---|---|
-| USJ 发送环形缓冲 1 KiB + `SERIAL_IN_EMPTY` 中断 | `board/esp32c3/usj_console.c` | 控制台**永不**阻塞在 USB 上；没有主机就填满即丢（和 UART 满发送器同性质） |
+| USJ 发送环形缓冲 1 KiB + `SERIAL_IN_EMPTY` 中断 | `drivers/serial/esp32c3/usj_console.c` | 控制台**永不**阻塞在 USB 上；没有主机就填满即丢（和 UART 满发送器同性质） |
 | USJ 接收中断（`SERIAL_OUT_RECV_PKT` = bit 2，INTMTX source 26 → CPU line 4） | 同上 + `board/esp32c3/platform.c` | 原生 USB 那路的输入也即时排空 |
 | raw 环 256 B → 512 B（当时定 1 KiB，后按实测缩回，见下），cooked 队列 → 1 KiB 字节池 | `kernel/tty.c` | 一次突发整段落进队列，不必按 tick 切片（两个队列的来历见下） |
 | `process_console_kick()`，接收中断里直接交数据给阻塞的读者 | `kernel/process.c`、`arch/rv32/platform.c` | 读者不再等下一个 tick 才被唤醒（原来每 tick 一次 = 吞吐天花板） |
