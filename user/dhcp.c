@@ -1,7 +1,8 @@
 #include "lib.h"
 
-/* dhcp: drop the current lease and restart discovery. */
-int main(void)
+/* dhcp [renew]: drop the current lease and restart discovery, or force a
+ * renewal of the current lease. */
+int main(int argc, char *argv[])
 {
     int fd = open("/dev/net");
 
@@ -9,8 +10,11 @@ int main(void)
         puts("dhcp: /dev/net not ready\n");
         return 1;
     }
-    write(fd, "dhcp\n", 5);
+    if (argc > 1 && strcmp(argv[1], "renew") == 0)
+        write(fd, "renew\n", 6);
+    else
+        write(fd, "dhcp\n", 5);
     close(fd);
-    puts("dhcp restart requested\n");
+    puts(argc > 1 ? "dhcp renew requested\n" : "dhcp restart requested\n");
     return 0;
 }

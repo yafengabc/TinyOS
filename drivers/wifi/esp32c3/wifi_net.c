@@ -31,10 +31,13 @@ extern int esp_wifi_get_macaddr_internal(uint8_t ifx, uint8_t *mac);
 #define ETH_ARP  0x0806
 #define ETH_IP   0x0800
 #define IP_ICMP  1
+#define IP_TCP   6
 #define IP_UDP   17
 
 #define DHCP_CLIENT_PORT 68
 #define DHCP_SERVER_PORT 67
+#define DNS_PORT         53
+#define DNS_LOCAL_PORT   5353
 
 struct eth_hdr {
     uint8_t dst[6];
@@ -82,6 +85,29 @@ struct udp_hdr {
     uint16_t check;
 } __attribute__((packed));
 
+struct tcp_hdr {
+    uint16_t sport;
+    uint16_t dport;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t off;
+    uint8_t flags;
+    uint16_t win;
+    uint16_t check;
+    uint16_t urg;
+} __attribute__((packed));
+
+#define TCP_FIN  0x01
+#define TCP_SYN  0x02
+#define TCP_RST  0x04
+#define TCP_PSH  0x08
+#define TCP_ACK  0x10
+
+#define TCP_CLOSED   0
+#define TCP_SYN_SENT 1
+#define TCP_ESTAB    2
+#define TCP_DONE     3
+
 static struct {
     uint8_t mac[6];
     uint32_t ip, mask, gw, dns;
@@ -92,6 +118,12 @@ static struct {
     uint32_t dhcp_xid;
     uint32_t dhcp_next;
     int dhcp_tries;
+    uint32_t dhcp_renew_at;     /* uptime ms for T1 */
+    uint32_t dhcp_rebind_at;    /* uptime ms for T2 */
+    int dhcp_renewing;          /* 0 none, 1 unicast renew, 2 broadcast rebind */
+    uint32_t dhcp_t1_s, dhcp_t2_s;
+    uint8_t dhcp_server_mac[6];
+    int dhcp_server_mac_valid;
     volatile int dhcp_rx_type;  /* 2 offer, 5 ack, 6 nak */
     volatile uint32_t dhcp_yiaddr, dhcp_server, dhcp_mask, dhcp_gw, dhcp_dns;
     volatile uint32_t arp_want_ip;
@@ -105,6 +137,32 @@ static struct {
     volatile int ping_pending;
     volatile uint32_t ping_target;
     volatile int ping_count;
+    uint8_t dns_mac[6];
+    int dns_mac_valid;
+    uint16_t dns_next_id;
+    volatile uint16_t dns_id;
+    volatile int dns_done, dns_ok;
+    volatile uint32_t dns_result;
+    char lookup_name[64];
+    volatile int lookup_pending;
+    char ping_host[64];
+    volatile int ping_host_pending;
+    uint8_t tcp_mac[6];
+    int tcp_mac_valid;
+    uint32_t tcp_remote_ip;
+    uint16_t tcp_remote_port, tcp_local_port;
+    uint32_t tcp_snd_nxt, tcp_snd_una, tcp_rcv_nxt, tcp_iss;
+    volatile int tcp_state;
+    volatile int tcp_got_synack, tcp_got_ack, tcp_got_data;
+    volatile int tcp_got_fin, tcp_got_rst, tcp_rx_overflow;
+    volatile int tcp_rx_len;
+    uint8_t tcp_rx_buf[2048];
+    char http_host[64];
+    char http_path[64];
+    uint32_t http_ip;
+    int http_host_is_ip;
+    uint16_t http_port;
+    volatile int http_pending;
 } ns;
 
 static uint8_t tx_frame[ETH_HDR + 20 + MTU];
@@ -269,18 +327,20 @@ static int arp_resolve(uint32_t ip, uint8_t mac[6], int timeout_ms)
 
 /* ---- DHCP ------------------------------------------------------------ */
 
-static int dhcp_send(int type, uint32_t requested, uint32_t server)
+static int dhcp_tx(int type, uint32_t ciaddr, uint32_t requested,
+                   uint32_t server, int broadcast, const uint8_t *dst_mac)
 {
     int n = 0, opt = 0;
     uint8_t *p = dhcp_pkt;
-    uint32_t src = ns.bound ? ns.ip : 0;
+    uint32_t dst_ip = broadcast ? 0xffffffffu : server;
 
     memset(dhcp_pkt, 0, sizeof(dhcp_pkt));
     p[0] = 1;                   /* BOOTREQUEST */
     p[1] = 1;                   /* Ethernet */
     p[2] = 6;                   /* hlen */
     wr32(p + 4, ns.dhcp_xid);
-    wr16(p + 10, 0x8000);       /* broadcast */
+    wr16(p + 10, broadcast ? 0x8000 : 0);
+    wr32(p + 12, ciaddr);       /* ciaddr for RENEWING/REBINDING */
     memcpy(p + 28, ns.mac, 6);  /* chaddr */
     wr32(p + 236, 0x63825363);  /* magic cookie */
 
@@ -293,7 +353,9 @@ static int dhcp_send(int type, uint32_t requested, uint32_t server)
     p[opt++] = 1;
     memcpy(p + opt, ns.mac, 6);
     opt += 6;
-    if (type == 3 && requested) {
+    /* Requested IP and server identifier belong to SELECTING only; a
+     * RENEWING/REBINDING request carries ciaddr instead. */
+    if (type == 3 && requested && ciaddr == 0) {
         p[opt++] = 50;
         p[opt++] = 4;
         wr32(p + opt, requested);
@@ -323,8 +385,9 @@ static int dhcp_send(int type, uint32_t requested, uint32_t server)
         wr16(&u->len, (uint16_t)(8 + n));
         wr16(&u->check, 0);
         memcpy(udp + 8, dhcp_pkt, (size_t)n);
-        return transmit_ip((const uint8_t *)"\xff\xff\xff\xff\xff\xff",
-                           0xffffffffu, IP_UDP, udp, 8 + n, 0);
+        return transmit_ip(broadcast ? (const uint8_t *)"\xff\xff\xff\xff\xff\xff"
+                                      : dst_mac,
+                           dst_ip, IP_UDP, udp, 8 + n, 0);
     }
 }
 
@@ -333,6 +396,7 @@ static void dhcp_parse(const uint8_t *p, int len)
     int opt;
     uint8_t type = 0;
     uint32_t yi = 0, mask = 0, gw = 0, dns = 0, server = 0;
+    uint32_t lease = 0, t1 = 0, t2 = 0;
 
     if (len < 240 || p[0] != 2 || rd32(p + 4) != ns.dhcp_xid)
         return;
@@ -369,9 +433,21 @@ static void dhcp_parse(const uint8_t *p, int len)
             if (l >= 4)
                 dns = rd32(p + opt + 2);
             break;
+        case 51:
+            if (l >= 4)
+                lease = rd32(p + opt + 2);
+            break;
         case 54:
             if (l >= 4)
                 server = rd32(p + opt + 2);
+            break;
+        case 58:
+            if (l >= 4)
+                t1 = rd32(p + opt + 2);
+            break;
+        case 59:
+            if (l >= 4)
+                t2 = rd32(p + opt + 2);
             break;
         }
         opt += 2 + l;
@@ -381,7 +457,394 @@ static void dhcp_parse(const uint8_t *p, int len)
     ns.dhcp_gw = gw;
     ns.dhcp_dns = dns;
     ns.dhcp_server = server;
+    if (lease)
+        ns.lease = lease;
+    if (t1)
+        ns.dhcp_t1_s = t1;
+    if (t2)
+        ns.dhcp_t2_s = t2;
     ns.dhcp_rx_type = type;
+}
+
+/* ---- DNS ------------------------------------------------------------- */
+
+static int dns_skip_name(const uint8_t *p, int len, int off)
+{
+    while (off < len) {
+        uint8_t b = p[off];
+
+        if (b == 0)
+            return off + 1;
+        if ((b & 0xc0) == 0xc0)
+            return off + 2;
+        off += 1 + b;
+    }
+    return -1;
+}
+
+static void dns_parse(const uint8_t *p, int len)
+{
+    int off, qd, an, i;
+
+    if (len < 12 || rd16(p) != ns.dns_id || !(p[2] & 0x80))
+        return;
+    qd = rd16(p + 4);
+    an = rd16(p + 6);
+    off = 12;
+    for (i = 0; i < qd; i++) {
+        off = dns_skip_name(p, len, off);
+        if (off < 0 || off + 4 > len)
+            return;
+        off += 4;
+    }
+    for (i = 0; i < an; i++) {
+        uint16_t type, class_, rdlen;
+
+        off = dns_skip_name(p, len, off);
+        if (off < 0 || off + 10 > len)
+            return;
+        type = rd16(p + off);
+        class_ = rd16(p + off + 2);
+        rdlen = rd16(p + off + 8);
+        off += 10;
+        if (off + rdlen > len)
+            return;
+        if (type == 1 && class_ == 1 && rdlen == 4) {
+            ns.dns_result = rd32(p + off);
+            ns.dns_ok = 1;
+            break;
+        }
+        off += rdlen;
+    }
+    ns.dns_done = 1;
+}
+
+static int send_udp(uint32_t dst_ip, const uint8_t *dst_mac, uint16_t sport,
+                    uint16_t dport, const uint8_t *payload, int len)
+{
+    uint8_t buf[8 + 256];
+    struct udp_hdr *u = (struct udp_hdr *)buf;
+
+    if (len < 0 || len > 248)
+        return -1;
+    wr16(&u->sport, sport);
+    wr16(&u->dport, dport);
+    wr16(&u->len, (uint16_t)(8 + len));
+    wr16(&u->check, 0);
+    memcpy(buf + 8, payload, (size_t)len);
+    return transmit_ip(dst_mac, dst_ip, IP_UDP, buf, 8 + len, 0);
+}
+
+static int dns_resolve(const char *name, uint32_t *out)
+{
+    uint8_t q[128];
+    int off = 12;
+    uint16_t id;
+    const char *s = name;
+
+    if (!ns.bound || !ns.dns)
+        return -1;
+    memset(q, 0, sizeof(q));
+    id = ++ns.dns_next_id;
+    if (!id)
+        id = ++ns.dns_next_id;
+    wr16(q, id);
+    q[2] = 0x01;                /* recursion desired */
+    wr16(q + 4, 1);             /* qdcount */
+    for (;;) {
+        int n = 0;
+
+        while (*s && *s != '.' && n < 63) {
+            q[off + 1 + n] = (uint8_t)*s++;
+            n++;
+        }
+        if (n == 0 || off + 2 + n >= (int)sizeof(q))
+            return -1;
+        q[off] = (uint8_t)n;
+        off += 1 + n;
+        if (*s == '.') {
+            s++;
+            continue;
+        }
+        break;
+    }
+    q[off++] = 0;
+    if (off + 4 > (int)sizeof(q))
+        return -1;
+    wr16(q + off, 1);           /* QTYPE A */
+    wr16(q + off + 2, 1);       /* QCLASS IN */
+    off += 4;
+
+    ns.dns_id = id;
+    ns.dns_done = 0;
+    ns.dns_ok = 0;
+    if (!ns.dns_mac_valid) {
+        if (arp_resolve(ns.dns, ns.dns_mac, 500) == 0)
+            ns.dns_mac_valid = 1;
+        else
+            return -1;
+    }
+    for (int attempt = 0; attempt < 3; attempt++) {
+        int waited = 0;
+
+        send_udp(ns.dns, ns.dns_mac, DNS_LOCAL_PORT, DNS_PORT, q, off);
+        while (waited < 1500) {
+            process_ktask_sleep(50);
+            waited += 50;
+            if (ns.dns_done)
+                break;
+        }
+        if (ns.dns_done) {
+            if (ns.dns_ok) {
+                *out = ns.dns_result;
+                return 0;
+            }
+            return -1;
+        }
+    }
+    return -1;
+}
+
+/* ---- TCP + HTTP ------------------------------------------------------ */
+
+static uint16_t tcp_checksum(uint32_t src, uint32_t dst, const uint8_t *tcp,
+                             int len)
+{
+    uint8_t ph[12];
+    uint32_t sum = 0;
+
+    wr32(ph, src);
+    wr32(ph + 4, dst);
+    ph[8] = 0;
+    ph[9] = IP_TCP;
+    wr16(ph + 10, (uint16_t)len);
+    sum = csum_add(sum, ph, 12);
+    sum = csum_add(sum, tcp, len);
+    return csum_fin(sum);
+}
+
+static int tcp_tx_at(uint32_t seq, uint32_t ack, uint8_t flags,
+                     const uint8_t *data, int len)
+{
+    uint8_t buf[20 + 256];
+    struct tcp_hdr *t = (struct tcp_hdr *)buf;
+
+    if (len < 0 || len > 256)
+        return -1;
+    memset(t, 0, 20);
+    wr16(&t->sport, ns.tcp_local_port);
+    wr16(&t->dport, ns.tcp_remote_port);
+    wr32(&t->seq, seq);
+    wr32(&t->ack, ack);
+    t->off = 5 << 4;
+    t->flags = flags;
+    wr16(&t->win, 2048);
+    wr16(&t->urg, 0);
+    if (len)
+        memcpy(buf + 20, data, (size_t)len);
+    wr16(&t->check, 0);
+    wr16(&t->check, tcp_checksum(ns.ip, ns.tcp_remote_ip, buf, 20 + len));
+    return transmit_ip(ns.tcp_mac, ns.tcp_remote_ip, IP_TCP, buf, 20 + len, 0);
+}
+
+static int tcp_send_data(const uint8_t *data, int len)
+{
+    int rc = tcp_tx_at(ns.tcp_snd_nxt, ns.tcp_rcv_nxt, TCP_PSH | TCP_ACK,
+                       data, len);
+
+    if (rc == 0)
+        ns.tcp_snd_nxt += (uint32_t)len;
+    return rc;
+}
+
+static void tcp_send_fin(void)
+{
+    tcp_tx_at(ns.tcp_snd_nxt, ns.tcp_rcv_nxt, TCP_FIN | TCP_ACK, NULL, 0);
+    ns.tcp_snd_nxt++;
+}
+
+static void tcp_input(uint32_t sip, const uint8_t *payload, int len)
+{
+    const struct tcp_hdr *t = (const struct tcp_hdr *)payload;
+    uint16_t sport, dport;
+    uint8_t flags;
+    uint32_t seq, ack;
+    int hlen, full;
+
+    if (len < 20 || sip != ns.tcp_remote_ip)
+        return;
+    sport = rd16(&t->sport);
+    dport = rd16(&t->dport);
+    if (sport != ns.tcp_remote_port || dport != ns.tcp_local_port)
+        return;
+    hlen = (t->off >> 4) * 4;
+    if (hlen < 20 || hlen > len)
+        return;
+    flags = t->flags;
+    seq = rd32(&t->seq);
+    ack = rd32(&t->ack);
+
+    if (flags & TCP_RST) {
+        ns.tcp_got_rst = 1;
+        ns.tcp_state = TCP_DONE;
+        return;
+    }
+    if ((flags & TCP_SYN) && (flags & TCP_ACK) &&
+        ns.tcp_state == TCP_SYN_SENT) {
+        ns.tcp_rcv_nxt = seq + 1;
+        if ((int32_t)(ack - ns.tcp_snd_una) > 0)
+            ns.tcp_snd_una = ack;
+        ns.tcp_got_synack = 1;
+        return;
+    }
+    if (flags & TCP_ACK) {
+        if ((int32_t)(ack - ns.tcp_snd_una) > 0)
+            ns.tcp_snd_una = ack;
+        ns.tcp_got_ack = 1;
+    }
+    full = len - hlen;
+    if (full > 0) {
+        if (seq == ns.tcp_rcv_nxt) {
+            int room = (int)sizeof(ns.tcp_rx_buf) - ns.tcp_rx_len;
+            int copy = full > room ? room : full;
+
+            if (copy > 0) {
+                memcpy(ns.tcp_rx_buf + ns.tcp_rx_len, payload + hlen,
+                       (size_t)copy);
+                ns.tcp_rx_len += copy;
+            }
+            if (copy < full)
+                ns.tcp_rx_overflow = 1;
+            ns.tcp_rcv_nxt += (uint32_t)full;
+        }
+        ns.tcp_got_data = 1;
+    }
+    if (flags & TCP_FIN) {
+        ns.tcp_rcv_nxt++;
+        ns.tcp_got_fin = 1;
+    }
+}
+
+static void http_print(void)
+{
+    int len = ns.tcp_rx_len;
+    int i, body = -1;
+
+    kprintf("[net] http rx %d bytes%s\n", len,
+            ns.tcp_rx_overflow ? " (truncated)" : "");
+    for (i = 0; i + 3 < len; i++) {
+        if (ns.tcp_rx_buf[i] == '\r' && ns.tcp_rx_buf[i + 1] == '\n' &&
+            ns.tcp_rx_buf[i + 2] == '\r' && ns.tcp_rx_buf[i + 3] == '\n') {
+            body = i + 4;
+            break;
+        }
+    }
+    kprintf("[net] ");
+    for (i = 0; i < len && i < 120; i++) {
+        uint8_t c = ns.tcp_rx_buf[i];
+
+        if (c == '\r' || c == '\n') {
+            if (i > 0 && ns.tcp_rx_buf[i - 1] == '\r')
+                continue;
+            kprintf(" ");
+            continue;
+        }
+        kprintf("%c", (c >= 32 && c < 127) ? c : '.');
+    }
+    kprintf("\n");
+    if (body >= 0 && body < len) {
+        kprintf("[net] body: ");
+        for (i = 0; i < 120 && body + i < len; i++) {
+            uint8_t c = ns.tcp_rx_buf[body + i];
+
+            kprintf("%c", (c >= 32 && c < 127) ? c : '.');
+        }
+        kprintf("\n");
+    }
+}
+
+static void http_run(const char *host, uint32_t ip, uint16_t port,
+                     const char *path)
+{
+    char req[256];
+    uint32_t hop;
+    int n, tries, waited, idle;
+
+    if (!ns.bound) {
+        kprintf("[net] http: no IP address\n");
+        return;
+    }
+    hop = ((ip ^ ns.ip) & ns.mask) ? ns.gw : ip;
+    if (arp_resolve(hop, ns.tcp_mac, 1500) != 0) {
+        kprintf("[net] http: arp timeout\n");
+        return;
+    }
+    ns.tcp_remote_ip = ip;
+    ns.tcp_remote_port = port;
+    ns.tcp_local_port = (uint16_t)(40000 + (plat_uptime_ms() & 0x3fff));
+    ns.tcp_iss = plat_uptime_ms() * 2654435761u + 0x9e3779b9u;
+    ns.tcp_snd_nxt = ns.tcp_iss;
+    ns.tcp_snd_una = ns.tcp_iss;
+    ns.tcp_rcv_nxt = 0;
+    ns.tcp_rx_len = 0;
+    ns.tcp_rx_overflow = 0;
+    ns.tcp_got_synack = ns.tcp_got_ack = ns.tcp_got_data = 0;
+    ns.tcp_got_fin = ns.tcp_got_rst = 0;
+    ns.tcp_state = TCP_SYN_SENT;
+
+    for (tries = 0; tries < 3; tries++) {
+        tcp_tx_at(ns.tcp_iss, 0, TCP_SYN, NULL, 0);
+        waited = 0;
+        while (waited < 1000) {
+            process_ktask_sleep(50);
+            waited += 50;
+            if (ns.tcp_got_synack || ns.tcp_got_rst)
+                break;
+        }
+        if (ns.tcp_got_synack || ns.tcp_got_rst)
+            break;
+    }
+    if (!ns.tcp_got_synack || ns.tcp_got_rst) {
+        kprintf("[net] http: connect failed\n");
+        ns.tcp_state = TCP_DONE;
+        return;
+    }
+    ns.tcp_snd_nxt = ns.tcp_iss + 1;
+    tcp_tx_at(ns.tcp_snd_nxt, ns.tcp_rcv_nxt, TCP_ACK, NULL, 0);
+    ns.tcp_state = TCP_ESTAB;
+    kprintf("[net] http: connected %u.%u.%u.%u:%u\n",
+            (unsigned)((ip >> 24) & 255), (unsigned)((ip >> 16) & 255),
+            (unsigned)((ip >> 8) & 255), (unsigned)(ip & 255),
+            (unsigned)port);
+
+    n = ksnprintf(req, sizeof(req),
+                  "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: TinyOS\r\n"
+                  "Connection: close\r\n\r\n",
+                  path, host);
+    if (n > 0)
+        tcp_send_data((const uint8_t *)req, n);
+
+    idle = 0;
+    for (int t = 0; t < 200; t++) {
+        if (ns.tcp_got_rst)
+            break;
+        if (ns.tcp_got_data) {
+            ns.tcp_got_data = 0;
+            tcp_tx_at(ns.tcp_snd_nxt, ns.tcp_rcv_nxt, TCP_ACK, NULL, 0);
+            idle = 0;
+        }
+        if (ns.tcp_got_fin) {
+            tcp_tx_at(ns.tcp_snd_nxt, ns.tcp_rcv_nxt, TCP_ACK, NULL, 0);
+            break;
+        }
+        idle++;
+        if (idle > 40 && ns.tcp_rx_len > 0)
+            break;
+        process_ktask_sleep(50);
+    }
+    http_print();
+    tcp_send_fin();
+    ns.tcp_state = TCP_DONE;
 }
 
 /* ---- ICMP ------------------------------------------------------------ */
@@ -547,6 +1010,10 @@ static int net_rx(void *buffer, uint16_t len, void *eb)
 
             if (dport == DHCP_CLIENT_PORT && tot - ihl >= 8 + 240)
                 dhcp_parse(payload + 8, tot - ihl - 8);
+            else if (dport == DNS_LOCAL_PORT && tot - ihl >= 8 + 12)
+                dns_parse(payload + 8, tot - ihl - 8);
+        } else if (ip->proto == IP_TCP && tot - ihl >= 20) {
+            tcp_input(rd32((const uint8_t *)ip + 12), payload, tot - ihl);
         }
     }
 
@@ -557,6 +1024,54 @@ out:
 
 /* ---- control task ---------------------------------------------------- */
 
+static void dhcp_apply_ack(uint32_t now)
+{
+    uint32_t lease = ns.lease ? ns.lease : 3600;
+    uint32_t t1 = ns.dhcp_t1_s ? ns.dhcp_t1_s : lease / 2;
+    uint32_t t2 = ns.dhcp_t2_s ? ns.dhcp_t2_s : (lease * 7) / 8;
+
+    if (ns.dhcp_yiaddr)
+        ns.ip = ns.dhcp_yiaddr;
+    if (ns.dhcp_mask)
+        ns.mask = ns.dhcp_mask;
+    if (ns.dhcp_gw)
+        ns.gw = ns.dhcp_gw;
+    if (ns.dhcp_dns)
+        ns.dns = ns.dhcp_dns;
+    if (t1 < 30)
+        t1 = 30;
+    if (t2 <= t1)
+        t2 = t1 + lease / 4;
+    ns.dhcp_renew_at = now + t1 * 1000u;
+    ns.dhcp_rebind_at = now + t2 * 1000u;
+    ns.dhcp_state = 3;
+    ns.dhcp_renewing = 0;
+    ns.dns_mac_valid = 0;
+    ns.bound = 1;
+}
+
+static void dhcp_send_renew(int force_broadcast)
+{
+    int broadcast = force_broadcast;
+
+    if (!broadcast) {
+        if (!ns.dhcp_server_mac_valid) {
+            uint8_t mac[6];
+
+            if (ns.dhcp_server &&
+                arp_resolve(ns.dhcp_server, mac, 500) == 0) {
+                memcpy(ns.dhcp_server_mac, mac, 6);
+                ns.dhcp_server_mac_valid = 1;
+            } else {
+                broadcast = 1;
+            }
+        }
+    }
+    ns.dhcp_renewing = broadcast ? 2 : 1;
+    dhcp_tx(3, ns.ip, 0, ns.dhcp_server, broadcast,
+            broadcast ? NULL : ns.dhcp_server_mac);
+}
+
 static void net_task(void *arg)
 {
     (void)arg;
@@ -566,20 +1081,21 @@ static void net_task(void *arg)
         if (!ns.bound) {
             if (ns.dhcp_state == 0 && (int32_t)(now - ns.dhcp_next) >= 0) {
                 ns.dhcp_xid = dhcp_xid_next++;
-                dhcp_send(1, 0, 0);
+                ns.dhcp_server_mac_valid = 0;
+                dhcp_tx(1, 0, 0, 0, 1, NULL);
                 ns.dhcp_state = 1;
                 ns.dhcp_next = now + 2000;
                 ns.dhcp_tries = 1;
                 kprintf("[net] dhcp discover (xid %08x)\n", (unsigned)ns.dhcp_xid);
             } else if (ns.dhcp_state == 1 &&
                        (int32_t)(now - ns.dhcp_next) >= 0) {
-                dhcp_send(1, 0, 0);
+                dhcp_tx(1, 0, 0, 0, 1, NULL);
                 ns.dhcp_next = now + 2000;
                 ns.dhcp_tries++;
             } else if (ns.dhcp_state == 2 &&
                        (int32_t)(now - ns.dhcp_next) >= 0) {
-                dhcp_send(3, (uint32_t)ns.dhcp_yiaddr,
-                          (uint32_t)ns.dhcp_server);
+                dhcp_tx(3, 0, (uint32_t)ns.dhcp_yiaddr,
+                        (uint32_t)ns.dhcp_server, 1, NULL);
                 ns.dhcp_next = now + 2000;
                 ns.dhcp_tries++;
                 if (ns.dhcp_tries > 6) {
@@ -589,7 +1105,8 @@ static void net_task(void *arg)
             }
             if (ns.dhcp_rx_type == 2 && ns.dhcp_state == 1) {
                 ns.dhcp_rx_type = 0;
-                dhcp_send(3, (uint32_t)ns.dhcp_yiaddr, (uint32_t)ns.dhcp_server);
+                dhcp_tx(3, 0, (uint32_t)ns.dhcp_yiaddr,
+                        (uint32_t)ns.dhcp_server, 1, NULL);
                 ns.dhcp_state = 2;
                 ns.dhcp_next = now + 2000;
                 kprintf("[net] dhcp offer %u.%u.%u.%u\n",
@@ -599,13 +1116,9 @@ static void net_task(void *arg)
                         (unsigned)(ns.dhcp_yiaddr & 255));
             } else if (ns.dhcp_rx_type == 5 && ns.dhcp_state >= 1) {
                 ns.dhcp_rx_type = 0;
-                ns.ip = ns.dhcp_yiaddr;
-                ns.mask = ns.dhcp_mask ? ns.dhcp_mask : 0xffffff00u;
-                ns.gw = ns.dhcp_gw;
-                ns.dns = ns.dhcp_dns;
-                ns.dhcp_state = 3;
-                ns.bound = 1;
-                kprintf("[net] dhcp bound ip=%u.%u.%u.%u gw=%u.%u.%u.%u\n",
+                dhcp_apply_ack(now);
+                ns.dhcp_server_mac_valid = 0;
+                kprintf("[net] dhcp bound ip=%u.%u.%u.%u gw=%u.%u.%u.%u lease=%us\n",
                         (unsigned)((ns.ip >> 24) & 255),
                         (unsigned)((ns.ip >> 16) & 255),
                         (unsigned)((ns.ip >> 8) & 255),
@@ -613,7 +1126,8 @@ static void net_task(void *arg)
                         (unsigned)((ns.gw >> 24) & 255),
                         (unsigned)((ns.gw >> 16) & 255),
                         (unsigned)((ns.gw >> 8) & 255),
-                        (unsigned)(ns.gw & 255));
+                        (unsigned)(ns.gw & 255),
+                        (unsigned)(ns.lease ? ns.lease : 3600));
                 /* Announce the new address so the router/switch learns the
                  * MAC before the first data frame. */
                 send_arp(tx_frame,
@@ -623,7 +1137,105 @@ static void net_task(void *arg)
                 ns.dhcp_rx_type = 0;
                 kprintf("[net] dhcp nak, restarting\n");
                 ns.dhcp_state = 0;
+                ns.bound = 0;
                 ns.dhcp_next = now;
+            }
+        } else {
+            if (ns.dhcp_rx_type == 5) {
+                ns.dhcp_rx_type = 0;
+                dhcp_apply_ack(now);
+                kprintf("[net] dhcp renewed ip=%u.%u.%u.%u lease=%us\n",
+                        (unsigned)((ns.ip >> 24) & 255),
+                        (unsigned)((ns.ip >> 16) & 255),
+                        (unsigned)((ns.ip >> 8) & 255),
+                        (unsigned)(ns.ip & 255),
+                        (unsigned)(ns.lease ? ns.lease : 3600));
+            } else if (ns.dhcp_rx_type == 6) {
+                ns.dhcp_rx_type = 0;
+                kprintf("[net] dhcp nak, restarting\n");
+                ns.bound = 0;
+                ns.dhcp_state = 0;
+                ns.dhcp_next = now;
+            } else if (ns.dhcp_renewing == 0 &&
+                       (int32_t)(now - ns.dhcp_rebind_at) >= 0) {
+                ns.dhcp_xid = dhcp_xid_next++;
+                ns.dhcp_tries = 1;
+                ns.dhcp_next = now + 4000;
+                dhcp_send_renew(1);
+                kprintf("[net] dhcp rebind\n");
+            } else if (ns.dhcp_renewing == 0 &&
+                       (int32_t)(now - ns.dhcp_renew_at) >= 0) {
+                ns.dhcp_xid = dhcp_xid_next++;
+                ns.dhcp_tries = 1;
+                ns.dhcp_next = now + 4000;
+                dhcp_send_renew(0);
+                kprintf("[net] dhcp renew\n");
+            } else if (ns.dhcp_renewing &&
+                       (int32_t)(now - ns.dhcp_next) >= 0) {
+                ns.dhcp_tries++;
+                if (ns.dhcp_tries <= 4) {
+                    dhcp_send_renew(ns.dhcp_renewing == 2);
+                    ns.dhcp_next = now + 4000;
+                } else {
+                    /* Lease expired without a server: start over. */
+                    kprintf("[net] dhcp lease lost\n");
+                    ns.bound = 0;
+                    ns.dhcp_state = 0;
+                    ns.dhcp_renewing = 0;
+                    ns.dhcp_next = now;
+                }
+            }
+        }
+        if (ns.http_pending) {
+            uint32_t ip = ns.http_ip;
+            char host[64];
+
+            ns.http_pending = 0;
+            memcpy(host, ns.http_host, sizeof(host));
+            host[sizeof(host) - 1] = 0;
+            if (ns.http_host_is_ip ||
+                dns_resolve(host, &ip) == 0) {
+                if (!ns.http_host_is_ip)
+                    kprintf("[net] %s -> %u.%u.%u.%u\n", host,
+                            (unsigned)((ip >> 24) & 255),
+                            (unsigned)((ip >> 16) & 255),
+                            (unsigned)((ip >> 8) & 255),
+                            (unsigned)(ip & 255));
+                http_run(host, ip, ns.http_port, ns.http_path);
+            } else {
+                kprintf("[net] %s: lookup failed\n", host);
+            }
+        }
+        if (ns.lookup_pending) {
+            uint32_t ip;
+
+            ns.lookup_pending = 0;
+            if (dns_resolve(ns.lookup_name, &ip) == 0)
+                kprintf("[net] %s -> %u.%u.%u.%u\n", ns.lookup_name,
+                        (unsigned)((ip >> 24) & 255),
+                        (unsigned)((ip >> 16) & 255),
+                        (unsigned)((ip >> 8) & 255),
+                        (unsigned)(ip & 255));
+            else
+                kprintf("[net] %s: lookup failed\n", ns.lookup_name);
+        }
+        if (ns.ping_host_pending) {
+            uint32_t ip;
+            char host[64];
+            int count = ns.ping_count;
+
+            ns.ping_host_pending = 0;
+            memcpy(host, ns.ping_host, sizeof(host));
+            host[sizeof(host) - 1] = 0;
+            if (dns_resolve(host, &ip) == 0) {
+                kprintf("[net] %s -> %u.%u.%u.%u\n", host,
+                        (unsigned)((ip >> 24) & 255),
+                        (unsigned)((ip >> 16) & 255),
+                        (unsigned)((ip >> 8) & 255),
+                        (unsigned)(ip & 255));
+                ping_run(ip, count);
+            } else {
+                kprintf("[net] %s: lookup failed\n", host);
             }
         }
         if (ns.ping_pending) {
@@ -666,12 +1278,67 @@ static int net_read(void *priv, uint32_t off, void *buf, uint32_t len)
     return n;
 }
 
+static int parse_ipv4(const char **pp, uint32_t *out)
+{
+    const char *p = *pp;
+    uint32_t ip = 0;
+
+    for (int part = 0; part < 4; part++) {
+        int v = 0, digits = 0;
+
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (*p++ - '0');
+            digits++;
+            if (v > 255)
+                return -1;
+        }
+        if (!digits)
+            return -1;
+        ip = (ip << 8) | (uint32_t)v;
+        if (part < 3) {
+            if (*p != '.')
+                return -1;
+            p++;
+        }
+    }
+    *pp = p;
+    *out = ip;
+    return 0;
+}
+
+static int copy_token(const char **pp, char *dst, int cap)
+{
+    const char *p = *pp;
+    int n = 0;
+
+    while (*p == ' ')
+        p++;
+    while (*p && *p != ' ' && *p != '\n' && *p != '\r' && n < cap - 1)
+        dst[n++] = *p++;
+    dst[n] = 0;
+    *pp = p;
+    return n;
+}
+
+static void parse_count(const char **pp, int *count)
+{
+    const char *p = *pp;
+
+    while (*p == ' ')
+        p++;
+    if (*p >= '0' && *p <= '9')
+        *count = 0;
+    while (*p >= '0' && *p <= '9')
+        *count = *count * 10 + (*p++ - '0');
+    *pp = p;
+}
+
 static int net_write(void *priv, uint32_t off, const void *buf, uint32_t len)
 {
     char cmd[64];
     uint32_t n = len < sizeof(cmd) - 1 ? len : sizeof(cmd) - 1;
     char *p;
-    uint32_t ip = 0;
+    uint32_t ip;
     int count = 4;
 
     (void)priv;
@@ -681,31 +1348,72 @@ static int net_write(void *priv, uint32_t off, const void *buf, uint32_t len)
     p = cmd;
     while (*p == ' ')
         p++;
+
     if (p[0] == 'p' && p[1] == 'i' && p[2] == 'n' && p[3] == 'g') {
+        const char *save;
+
         p += 4;
         while (*p == ' ')
             p++;
-        for (int part = 0; part < 4; part++) {
-            int v = 0;
+        save = p;
+        if (parse_ipv4(&p, &ip) == 0) {
+            parse_count(&p, &count);
+            ns.ping_target = ip;
+            ns.ping_count = count;
+            ns.ping_pending = 1;
+        } else {
+            p = save;
+            if (copy_token(&p, ns.ping_host, sizeof(ns.ping_host)) == 0)
+                return -1;
+            parse_count(&p, &count);
+            ns.ping_count = count;
+            ns.ping_host_pending = 1;
+        }
+        return (int)len;
+    }
+    if (p[0] == 'h' && p[1] == 'o' && p[2] == 's' && p[3] == 't') {
+        p += 4;
+        if (copy_token(&p, ns.lookup_name, sizeof(ns.lookup_name)) == 0)
+            return -1;
+        ns.lookup_pending = 1;
+        return (int)len;
+    }
+    if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
+        const char *hp;
+
+        p += 4;
+        if (copy_token(&p, ns.http_host, sizeof(ns.http_host)) == 0)
+            return -1;
+        ns.http_port = 80;
+        hp = ns.http_host;
+        ns.http_host_is_ip = (parse_ipv4(&hp, &ns.http_ip) == 0 && *hp == 0);
+        while (*p == ' ')
+            p++;
+        if (*p >= '0' && *p <= '9') {
+            int port = 0;
 
             while (*p >= '0' && *p <= '9')
-                v = v * 10 + (*p++ - '0');
-            ip = (ip << 8) | (uint32_t)(v & 255);
-            if (part < 3) {
-                if (*p != '.')
-                    return -1;
-                p++;
-            }
+                port = port * 10 + (*p++ - '0');
+            ns.http_port = (uint16_t)port;
         }
         while (*p == ' ')
             p++;
-        if (*p >= '0' && *p <= '9')
-            count = 0;
-        while (*p >= '0' && *p <= '9')
-            count = count * 10 + (*p++ - '0');
-        ns.ping_target = ip;
-        ns.ping_count = count;
-        ns.ping_pending = 1;
+        if (*p == '/') {
+            copy_token(&p, ns.http_path, sizeof(ns.http_path));
+        } else if (*p && *p != '\n' && *p != '\r') {
+            ns.http_path[0] = '/';
+            copy_token(&p, ns.http_path + 1, sizeof(ns.http_path) - 1);
+        }
+        if (!ns.http_path[0]) {
+            ns.http_path[0] = '/';
+            ns.http_path[1] = 0;
+        }
+        ns.http_pending = 1;
+        return (int)len;
+    }
+    if (p[0] == 'r' && p[1] == 'e' && p[2] == 'n' && p[3] == 'e' &&
+        p[4] == 'w') {
+        ns.dhcp_renew_at = plat_uptime_ms();
         return (int)len;
     }
     if (p[0] == 'd' && p[1] == 'h' && p[2] == 'c' && p[3] == 'p') {
@@ -713,6 +1421,11 @@ static int net_write(void *priv, uint32_t off, const void *buf, uint32_t len)
         ns.dhcp_state = 0;
         ns.dhcp_next = plat_uptime_ms();
         ns.dhcp_rx_type = 0;
+        ns.dhcp_renewing = 0;
+        ns.lease = 0;
+        ns.dhcp_t1_s = 0;
+        ns.dhcp_t2_s = 0;
+        ns.dhcp_server_mac_valid = 0;
         return (int)len;
     }
     return (int)len;
@@ -743,6 +1456,11 @@ void wifi_net_start(void)
     ns.dhcp_state = 0;
     ns.dhcp_rx_type = 0;
     ns.dhcp_tries = 0;
+    ns.dhcp_renewing = 0;
+    ns.lease = 0;
+    ns.dhcp_t1_s = 0;
+    ns.dhcp_t2_s = 0;
+    ns.dhcp_server_mac_valid = 0;
     ns.dhcp_next = plat_uptime_ms();
 }
 
@@ -751,6 +1469,7 @@ void wifi_net_stop(void)
     ns.bound = 0;
     ns.dhcp_state = 0;
     ns.dhcp_rx_type = 0;
+    ns.dhcp_renewing = 0;
     ns.ping_pending = 0;
 }
 

@@ -151,6 +151,7 @@ user/                用户态程序（freestanding C）
   lib.c syscall.c         与架构无关；系统调用入口来自 arch/<arch>/usys.h
   sh.c hello.c hello_printf.c echo.c ls.c cat.c crash.c mem.c uptime.c wfile.c reloc.c
   gpio.c adc.c reboot.c smp.c wc.c
+  wificonn.c wifiscan.c net.c ping.c host.c dhcp.c http.c   (WiFi/net 目标)
   user.ld            PIE 链接脚本（基址 0，由内核重定位）
 cmd/tos/             Go 构建工具（build / run / doctor / clean）
 cmd/mkmini/          [未采用] TOSX 容器工具（见 internal/build/minielf.go 头注释）
@@ -325,6 +326,34 @@ go run ./cmd/tos build -config configs/esp32c3.conf        # C3 无 WiFi
 `[drivers]`（加入源码/头文件路径）、`[wifi]`（blob 目录、ROM ld 脚本）和
 `[user] exclude`（裁剪命令）见 `configs/README.md`。命令行 `-target` 仍
 覆盖配置文件里的 target。
+
+### ESP32-C3 联网（WiFi + 小型 IPv4 栈）
+
+烧写 `build/esp32c3.bin` 到 `0x0`、`build/ramdisk-esp32c3.bin` 到 `0x80000`：
+
+```
+tos> wificonn songhome ********
+[wpa] rx 1/4, sent 2/4
+[wpa] rx 3/4, sent 4/4
+[wpa] handshake done
+[net] dhcp bound ip=192.168.0.38 gw=192.168.0.1 lease=7200s
+[wifi] connected songhome ch=1 rssi=-31
+
+tos> net
+ip 192.168.0.38/255.255.255.0 gw 192.168.0.1 dns 192.168.0.1 bound
+
+tos> ping 192.168.0.1 4
+tos> host www.baidu.com
+[net] www.baidu.com -> 39.156.70.239
+
+tos> http www.baidu.com 80 /
+[net] http: connected 39.156.70.239:80
+[net] http rx 2048 bytes (truncated)
+[net] HTTP/1.0 200 OK ...
+```
+
+`dhcp renew` 强制续租，`dhcp` 重新发现。栈只包含 ARP/IPv4/ICMP、
+DHCP 客户端、DNS 查询和 TCP 客户端，不提供监听端口。
 
 进去以后：
 

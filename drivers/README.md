@@ -41,7 +41,7 @@ drivers/
     wifi_osi.c          Espressif OSI table, DMA aliases, timers, PHY/MAC
     wifi_crypto.c       ROM SHA/AES/PBKDF2/CMAC callbacks
     wifi_wpa.c          wpa_funcs table + WPA2-PSK 4-way handshake
-    wifi_net.c          ARP/IPv4/ICMP + DHCP client (/dev/net)
+    wifi_net.c          ARP/IPv4/ICMP, DHCP client+renew, DNS, TCP client
     wifi_shim.c         libc/soft-float/printf shims for the blobs
     wifi_phy_data.c     default C3 PHY init data
     lib/                Espressif prebuilt libs + esp32c3.rom.ld
