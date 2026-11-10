@@ -79,7 +79,11 @@ __vector_table:
     .word   arm_default_handler     /* 18  IRQ 2                        */
     .word   arm_default_handler     /* 19  IRQ 3                        */
     .word   arm_default_handler     /* 20  IRQ 4                        */
+#ifdef TOS_ARM_M0P
+    .word   arm_usbctrl_irq         /* 21  IRQ 5   USBCTRL (RP2040)     */
+#else
     .word   arm_default_handler     /* 21  IRQ 5                        */
+#endif
     .word   arm_default_handler     /* 22  IRQ 6                        */
     .word   arm_default_handler     /* 23  IRQ 7                        */
     .word   arm_default_handler     /* 24  IRQ 8                        */

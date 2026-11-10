@@ -58,7 +58,7 @@
 #define ARM_SYSTICK_CAL  (ARM_SCS_BASE + 0x001Cu)
 #define ARM_SYSTICK_CTRL ARM_SYSTICK_CSR
 
-#define ARM_SYSTICK_CLK  12000000u
+#define ARM_SYSTICK_CLK  48000000u
 
 /* Cortex-M0+ vector table offset register.  The stage-2 leaves VTOR pointing
  * at the boot ROM (0x00000000); we must repoint it at our own vector table at

@@ -11,7 +11,11 @@
 
 #define USBCTRL_DPRAM_BASE _u(0x50100000)
 #define USBCTRL_REGS_BASE  _u(0x50110000)
+#if defined(TOS_ARM_M0P)
+#define USBCTRL_IRQ        _u(5)
+#else
 #define USBCTRL_IRQ        _u(14)
+#endif
 
 #define USB_NUM_ENDPOINTS  16
 #define USB_MAX_ENDPOINTS  USB_NUM_ENDPOINTS

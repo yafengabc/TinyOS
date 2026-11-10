@@ -901,7 +901,7 @@ func (b *Builder) buildKernel() error {
 	// that lets those upstream files compile unchanged.  The board directory
 	// joins the include path so tusb_config.h is found by name.
 	tusbDir := filepath.Join(b.Root, "third_party", "tinyusb")
-	useTinyUSB := b.Target.Board == "rp2350" || b.Target.Board == "rp2350rv"
+	useTinyUSB := b.Target.Board == "rp2040" || b.Target.Board == "rp2350" || b.Target.Board == "rp2350rv"
 	if useTinyUSB {
 		incs = append(incs,
 			filepath.Join(tusbDir, "src"),

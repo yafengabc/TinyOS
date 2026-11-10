@@ -2,6 +2,7 @@
 #include "board.h"
 #include "arm_memmap.h"
 #include "usb_cdc.h"
+#include "uart_dbg.h"
 #include "console.h"
 #include "string.h"
 
@@ -78,7 +79,10 @@ static void led_set(int on);
 
 void plat_console_init(void)
 {
-    usb_cdc_console_init();
+    dbg_uart_puts("[usb] console init\n");
+    usb_cdc_console_init(48000000u);
+    usb_cdc_irq_enable();
+    dbg_uart_puts("[usb] console init returned\n");
     /* Enumerated: the LED has done its job (see led_init). */
     if (usb_cdc_configured())
         led_set(0);
@@ -101,6 +105,7 @@ int plat_console_tx_room(void)
 
 int plat_console_getchar(void)
 {
+    usb_cdc_poll();
     return usb_cdc_getchar();
 }
 
@@ -166,6 +171,7 @@ uint64_t plat_now_ns(void)
 void plat_timer_tick(void)
 {
     g_ticks++;
+    usb_cdc_poll();
     /* SysTick reloads itself; nothing to re-arm. */
 }
 
@@ -280,8 +286,42 @@ static void led_set(int on)
     mmio_write32(SIO_BASE + (on ? 0x014u : 0x018u), 1u << RP_LED_GPIO);
 }
 
+/* Bring-up beacon: GPIO0 as a ~1 Hz square wave for a few seconds.  The pad
+ * register is at PADS_BANK0 + 0x04 + 4*n (offset 0 is VOLTAGE_SELECT); the
+ * first version forgot the +4 and never configured GPIO0's pad. */
+static void dbg_beacon(void)
+{
+    uint32_t pad = mmio_read32(PADS_BANK0_BASE + 0x04u);
+    mmio_write32(PADS_BANK0_BASE + 0x04u,
+                 (pad | (1u << 6)) & ~(1u << 7) & ~(1u << 8));
+    mmio_write32(IO_BANK0_BASE + 0x04u, 5u);        /* GPIO0 = SIO         */
+    mmio_write32(SIO_BASE + 0x024u, 1u);            /* OE_SET 0            */
+    for (int i = 0; i < 6; i++) {
+        mmio_write32(SIO_BASE + 0x014u, 1u);        /* high                */
+        for (volatile int j = 0; j < 1000000; j++)
+            ;
+        mmio_write32(SIO_BASE + 0x018u, 1u);        /* low                 */
+        for (volatile int j = 0; j < 1000000; j++)
+            ;
+    }
+    mmio_write32(SIO_BASE + 0x018u, 1u);
+}
+
 void plat_board_early(void)
 {
+    /* Release the GPIO banks/UART0 before touching them; this also makes
+     * the beacon below actually drive GP0. */
+    dbg_uart_init(48000000u);
+    dbg_uart_puts("\n[b48]\n");
+    dbg_uart_init(125000000u);
+    dbg_uart_puts("\n[b125]\n");
+    dbg_uart_init(12000000u);
+    dbg_uart_puts("\n[b12]\n");
+
+    dbg_beacon();
+    dbg_uart_init(12000000u);
+    dbg_uart_puts("\n[rp2040] boot\n");
+
     led_init();
     led_set(1);
 
