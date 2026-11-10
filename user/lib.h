@@ -246,6 +246,16 @@ struct pollfd {
 
 int poll(struct pollfd *fds, int nfds, int timeout_ms);
 
+#ifdef TOS_MAILBOX
+/* Global message pool (menuconfig: Kernel -> Mailbox).  Four 256-byte slots
+ * in the kernel, copied in and out; no shared memory and no per-task buffer.
+ * send never blocks (-1 when the pool is full); msg_recv sleeps 1 ms until
+ * a message arrives. */
+int msg_send(int pid, const void *buf, int len);
+int msg_tryrecv(void *buf, int len);   /* bytes, -1 error, MSG_EAGAIN empty */
+int msg_recv(void *buf, int len);      /* blocks until one arrives */
+#endif
+
 #ifdef TOS_THREADS
 /* Cooperative user-space threads (menuconfig: Kernel -> Threads).  One
  * process runs one thread at a time; switching happens at thread_yield(),

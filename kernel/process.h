@@ -71,6 +71,11 @@ regs_t  *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len);
 int      process_exec(regs_t *r, const char *path, char *const argv[], int argc);
 
 int      process_current_pid(void);
+
+/* Is `pid` a live task?  The mailbox uses it to reject a bad destination
+ * before spending a pool slot.  Takes proc_lock itself. */
+int      process_pid_exists(int pid);
+
 /* Move a task to another priority level (0 = highest, 2 = lowest).  A task
  * cannot climb above the caller's own level, except that the first task
  * (the shell) may place a child anywhere - that is how a 1 ms job is given

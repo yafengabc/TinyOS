@@ -51,11 +51,15 @@ type Config struct {
 	// Kernel trimming.  Each one is a compile-time switch: the code (and,
 	// for the .bss ones, the memory) is not in the image when it is off.  The
 	// defaults are the full feature set, so an old config keeps its image.
-	HistBytes     int  // command history pool; 0 = no recall
-	ProcLite      bool // /proc keeps ps+uptime, drops mem/dev/lfs/stack/cpuinfo
-	DevNodes      bool // /dev device classes and the GPIO/ADC syscalls
-	Panel         bool // text mirror on a pixel panel (needs DevNodes to start)
-	FSReadOnly    bool // mount littlefs read-only; create/write/unlink fail
+	HistBytes  int  // command history pool; 0 = no recall
+	ProcLite   bool // /proc keeps ps+uptime, drops mem/dev/lfs/stack/cpuinfo
+	DevNodes   bool // /dev device classes and the GPIO/ADC syscalls
+	Panel      bool // text mirror on a pixel panel (needs DevNodes to start)
+	FSReadOnly bool // mount littlefs read-only; create/write/unlink fail
+	// Mailbox is the global 4 x 256 B message pool (SYS_MSG_SEND/RECV).
+	// Off by default: the code and the 1 KiB pool are only in the image when
+	// a config asks for them.
+	Mailbox       bool
 	WiFiLibDir    string
 	WiFiLDScript  string
 	WiFiLDSymbol  string
@@ -102,6 +106,7 @@ func LoadConfig(path string) (*Config, error) {
 			c.Panel = parseOnOff(raw)
 		}
 		c.FSReadOnly = parseOnOff(s["fs_ro"])
+		c.Mailbox = parseOnOff(s["mailbox"])
 		if raw := s["features"]; raw != "" {
 			for _, f := range splitList(raw) {
 				c.Features[strings.ToLower(f)] = true
@@ -263,6 +268,7 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	b.DevNodes = c.DevNodes
 	b.Panel = c.Panel
 	b.FSReadOnly = c.FSReadOnly
+	b.Mailbox = c.Mailbox
 	b.ensureDriverDirs()
 	for _, d := range c.Drivers {
 		p := b.abs(d)

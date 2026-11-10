@@ -341,6 +341,7 @@ type Builder struct {
 	DevNodes   bool
 	Panel      bool
 	FSReadOnly bool
+	Mailbox    bool
 
 	mu sync.Mutex
 }
@@ -967,6 +968,9 @@ func (b *Builder) buildKernel() error {
 	if b.FSReadOnly {
 		featDefs = append(featDefs, "-DTOS_LFS_RO")
 	}
+	if b.Mailbox {
+		featDefs = append(featDefs, "-DTOS_MAILBOX=1")
+	}
 
 	// Vendored TinyUSB, RP2350 only: the seven translation units that make up
 	// a CDC-ACM device.  Everything else in upstream's tree (host stack, the
@@ -1257,6 +1261,9 @@ func (b *Builder) buildUser() ([]string, error) {
 	if b.Threads {
 		userPIEFlags = append(userPIEFlags, "-DTOS_THREADS")
 	}
+	if b.Mailbox {
+		userPIEFlags = append(userPIEFlags, "-DTOS_MAILBOX=1")
+	}
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
@@ -1342,6 +1349,9 @@ func (b *Builder) buildUser() ([]string, error) {
 		 * an image built without threads would be a program that can only
 		 * say "off". */
 		if name == "threadtest.c" && !b.Threads {
+			continue
+		}
+		if name == "mailtest.c" && !b.Mailbox {
 			continue
 		}
 		progs = append(progs, prog)

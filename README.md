@@ -56,6 +56,9 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   `thread_create/join`、每线程一个从用户堆分配的栈、`mutex_*`；切换只发生在
   `thread_yield/thread_read`，普通 `read` 仍会挂起整个进程。关闭时 API 不参与编译；
   开启后不调用它的程序也不变大（`--gc-sections`），内核则完全不变
+- **消息邮箱**（menuconfig `Kernel → Mailbox`，`mailbox = 1`）：全局 4×256 B 池，
+  `msg_send` 不阻塞、`msg_recv` 睡眠 1 ms 重试；每任务零缓冲，不做共享内存。
+  关闭时池不分配（C3 实测 text +468 B、bss +1,088 B）
 - **内核可裁剪**（menuconfig `Kernel`）：进程表 4/6/8/12/16、命令历史、
   `/proc` 诊断条目、`/dev` + GPIO/ADC 层、LCD 文本镜像、只读 littlefs。
   关闭即不编译也不占 `.bss`；C3 全部关闭实测 text −18.7 KiB、bss −4 KiB

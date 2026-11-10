@@ -28,6 +28,7 @@ func TestRenderRoundTrip(t *testing.T) {
 	st.DevNodes = false
 	st.Panel = false
 	st.FSReadOnly = true
+	st.Mailbox = true
 	st.DriverExclude["drivers/display/st7789/rp2350"] = true
 
 	if err := st.Save(); err != nil {
@@ -60,6 +61,9 @@ func TestRenderRoundTrip(t *testing.T) {
 		!got.FSReadOnly {
 		t.Fatalf("trim knobs lost: hist=%d proclite=%v dev=%v panel=%v ro=%v",
 			got.HistBytes, got.ProcLite, got.DevNodes, got.Panel, got.FSReadOnly)
+	}
+	if !got.Mailbox {
+		t.Fatal("mailbox flag lost")
 	}
 	if !got.DriverExclude["drivers/display/st7789/rp2350"] {
 		t.Fatalf("driver exclude lost: %+v", got.DriverExclude)

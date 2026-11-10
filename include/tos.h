@@ -46,6 +46,15 @@
  * needs no wait queue for it. */
 #define SYS_POLL     37
 
+/* Mailbox: a small global pool of copied messages (TOS_MAILBOX builds).
+ * Send is try-only; recv returns MSG_EAGAIN when the queue is empty, so the
+ * blocking loop lives in user land (sleep 1 ms), exactly like poll(). */
+#define SYS_MSG_SEND 38  /* msg_send(pid, buf, len) -> 0 or -1        */
+#define SYS_MSG_RECV 39  /* msg_tryrecv(buf, len) -> bytes, -1, -2    */
+
+#define MSG_EAGAIN   (-2)
+#define TOS_MSG_MAX  256    /* bytes per pool slot (mailbox.h) */
+
 /* One entry in a poll() set.  Same layout as user/lib.h's struct pollfd. */
 struct tos_pollfd {
     int   fd;

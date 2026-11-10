@@ -170,6 +170,28 @@ int poll(struct pollfd *fds, int nfds, int timeout_ms)
     }
 }
 
+#ifdef TOS_MAILBOX
+int msg_send(int pid, const void *buf, int len)
+{
+    return tos_sys3(SYS_MSG_SEND, pid, (int)buf, len);
+}
+
+int msg_tryrecv(void *buf, int len)
+{
+    return tos_sys2(SYS_MSG_RECV, (int)buf, len);
+}
+
+int msg_recv(void *buf, int len)
+{
+    for (;;) {
+        int n = msg_tryrecv(buf, len);
+        if (n != MSG_EAGAIN)
+            return n;
+        sleep(1);               /* one tick of latency, no kernel wait state */
+    }
+}
+#endif
+
 int getcpu(void)
 {
     return tos_sys0(SYS_GETCPU);

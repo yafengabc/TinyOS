@@ -8,6 +8,7 @@
 #include "lz4.h"
 #include "pipe.h"
 #include "devfs.h"
+#include "mailbox.h"
 #include "platform.h"
 #include "cpu.h"
 #include "tos.h"
@@ -376,6 +377,18 @@ static proc_t *proc_by_pid(int pid)
             return &procs[i];
     }
     return NULL;
+}
+
+int process_pid_exists(int pid)
+{
+    uint32_t irq = plat_irq_save();
+    proc_t *p;
+
+    spin_lock(&proc_lock);
+    p = proc_by_pid(pid);
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
+    return p != NULL;
 }
 
 /* ---- scheduler ------------------------------------------------------- */
@@ -1962,6 +1975,10 @@ regs_t *process_exit(regs_t *r, int code)
         panic("no current process");
 
     task_release(p);
+
+    /* Nothing can read messages addressed to a task that is leaving; give
+     * their slots back now instead of waiting for the pool to fill up. */
+    mailbox_drop(p->pid);
 
     int is_init = (p == init_proc);
     if (is_init) {

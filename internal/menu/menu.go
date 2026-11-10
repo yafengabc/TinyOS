@@ -45,6 +45,7 @@ type State struct {
 	DevNodes      bool
 	Panel         bool
 	FSReadOnly    bool
+	Mailbox       bool
 	WiFiLibDir    string
 	WiFiLDScript  string
 	WiFiLDSymbol  string
@@ -90,6 +91,7 @@ func Load(c *build.Config, path string) *State {
 	s.DevNodes = c.DevNodes
 	s.Panel = c.Panel
 	s.FSReadOnly = c.FSReadOnly
+	s.Mailbox = c.Mailbox
 	s.WiFiLibDir = c.WiFiLibDir
 	s.WiFiLDScript = c.WiFiLDScript
 	s.WiFiLDSymbol = c.WiFiLDSymbol
@@ -304,6 +306,9 @@ func (s *State) Render() string {
 	}
 	if s.FSReadOnly {
 		b.WriteString("fs_ro = 1\n")
+	}
+	if s.Mailbox {
+		b.WriteString("mailbox = 1\n")
 	}
 
 	features := make([]string, 0, len(s.Features))

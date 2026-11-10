@@ -9,6 +9,7 @@
 #include "tty.h"
 #include "elf.h"
 #include "string.h"
+#include "mailbox.h"
 
 #define MAX_EXEC_ARGS 12
 
@@ -405,6 +406,35 @@ static regs_t *dispatch(regs_t *r)
                 ready++;
         }
         plat_frame_set_ret(r, (uint32_t)ready);
+        return r;
+    }
+
+    case SYS_MSG_SEND: {
+        uint32_t ptr = sc.a1;
+        int dst = (int)sc.a0;
+        int len = (int)sc.a2;
+
+        if (len < 0 || len > TOS_MSG_MAX ||
+            !process_user_ok(ptr, (uint32_t)len)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)mailbox_send(dst,
+            process_current_pid(), (const void *)ptr, len));
+        return r;
+    }
+
+    case SYS_MSG_RECV: {
+        uint32_t ptr = sc.a0;
+        int cap = (int)sc.a1;
+
+        if (cap <= 0 || cap > TOS_MSG_MAX ||
+            !process_user_ok(ptr, (uint32_t)cap)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)mailbox_recv(
+            process_current_pid(), (void *)ptr, cap));
         return r;
     }
 

@@ -351,6 +351,16 @@ func (a *app) kernelPage() page {
 				help: "Builds littlefs with LFS_READONLY and stubs out create/write/unlink (fs_ro = 1).  Several KiB of text for an appliance image; `edit` and shell redirection then fail with -1 instead of writing.",
 			},
 			{
+				label: "Mailbox (4 x 256 B)", kind: kBool,
+				text: func() string { return onOff(a.st.Mailbox) },
+				act: func(int) {
+					a.st.Mailbox = !a.st.Mailbox
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "Global message pool: msg_send copies into one of four 256-byte slots (non-blocking), msg_recv copies out and blocks by sleeping 1 ms.  One KiB of .bss and a few hundred bytes of text, no per-task buffers and no PMP/MPU changes; off removes the pool entirely.",
+			},
+			{
 				label: "< Back", kind: kBack,
 				act:  func(int) { a.pop() },
 				help: "Return to the main menu.",
@@ -451,6 +461,9 @@ func (a *app) programPage() page {
 	for _, name := range a.progs {
 		if name == "threadtest" && !a.st.Threads {
 			continue /* only meaningful when the library is built */
+		}
+		if name == "mailtest" && !a.st.Mailbox {
+			continue
 		}
 		name := name
 		rows = append(rows, row{
