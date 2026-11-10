@@ -18,6 +18,11 @@ func TestRenderRoundTrip(t *testing.T) {
 	st.Exclude["ping"] = true
 	st.Exclude["http"] = true
 	st.LDExtra = []string{"-Wl,--gc-sections"}
+	st.HeapBytes = 48 << 10
+	st.MaxProcs = 8
+	st.KStack = 8 << 10
+	st.Opt = "-Oz"
+	st.DriverExclude["drivers/display/st7789/rp2350"] = true
 
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
@@ -36,6 +41,14 @@ func TestRenderRoundTrip(t *testing.T) {
 	}
 	if !got.Exclude["ping"] || !got.Exclude["http"] {
 		t.Fatalf("excludes lost: %+v", got.Exclude)
+	}
+	if got.HeapBytes != 48<<10 || got.MaxProcs != 8 || got.KStack != 8<<10 ||
+		got.Opt != "-Oz" {
+		t.Fatalf("kernel knobs lost: heap=%d procs=%d stack=%d opt=%q",
+			got.HeapBytes, got.MaxProcs, got.KStack, got.Opt)
+	}
+	if !got.DriverExclude["drivers/display/st7789/rp2350"] {
+		t.Fatalf("driver exclude lost: %+v", got.DriverExclude)
 	}
 	drivers := got.EffectiveDrivers()
 	if len(drivers) != 1 || drivers[0] != wifiDriverDir {
@@ -196,6 +209,8 @@ func visible(s string) string {
 
 func TestRenderLayout(t *testing.T) {
 	st := Load(nil, "tos.conf")
+	st.HeapBytes = 8 << 10
+	st.KStack = 8 << 10
 	a := &app{st: st, progs: []string{"hello", "net"}}
 	a.stack = []page{a.mainPage()}
 
@@ -211,6 +226,15 @@ func TestRenderLayout(t *testing.T) {
 		}
 		if !strings.Contains(visible(lines[0]), "TinyOS configuration") {
 			t.Fatalf("title missing: %q", visible(lines[0]))
+		}
+		found := false
+		for _, line := range lines {
+			if strings.Contains(visible(line), "heap 8K, stack 8K") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("kernel summary missing")
 		}
 	}
 
