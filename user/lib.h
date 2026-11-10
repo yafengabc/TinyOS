@@ -245,6 +245,24 @@ struct pollfd {
 #define POLLNVAL TOS_POLLNVAL
 
 int poll(struct pollfd *fds, int nfds, int timeout_ms);
+
+#ifdef TOS_THREADS
+/* Cooperative user-space threads (menuconfig: Kernel -> Threads).  One
+ * process runs one thread at a time; switching happens at thread_yield(),
+ * thread_read() and mutex waits.  Four threads total, main included, and
+ * each stack comes from the program's heap (TOS_HEAP). */
+typedef struct { int locked; } mutex_t;
+
+int  thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
+void thread_exit(int code) __attribute__((noreturn));
+int  thread_join(int tid, int *code);
+int  thread_self(void);
+int  thread_yield(void);                 /* 1 if it switched */
+int  thread_read(int fd, void *buf, int len); /* poll + yield, then read */
+void mutex_init(mutex_t *m);
+void mutex_lock(mutex_t *m);
+void mutex_unlock(mutex_t *m);
+#endif
 int  wait(int pid);
 int  yield(void);
 int  ps(void);

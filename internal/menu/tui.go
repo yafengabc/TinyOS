@@ -283,6 +283,16 @@ func (a *app) kernelPage() page {
 				help: "Compiler optimisation (opt = ... in [build]).  TOS_OPT in the environment still wins; -Oz is smaller, -O2 is faster under QEMU.",
 			},
 			{
+				label: "Threads (cooperative)", kind: kBool,
+				text: func() string { return onOff(a.st.Threads) },
+				act: func(int) {
+					a.st.Threads = !a.st.Threads
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "Build the user-space thread library (threads = 1 in [build]).  thread_create/join, a stack per thread from the program's heap, and mutex_lock; switches happen only at yield/thread_read, so a plain read() still parks the whole process.  Adds ~1 KiB to each program that uses it and nothing to the kernel.",
+			},
+			{
 				label: "< Back", kind: kBack,
 				act:  func(int) { a.pop() },
 				help: "Return to the main menu.",
@@ -381,6 +391,9 @@ func cycleStr(vals []string, get func() string, set func(string)) func(int) {
 func (a *app) programPage() page {
 	rows := make([]row, 0, len(a.progs)+1)
 	for _, name := range a.progs {
+		if name == "threadtest" && !a.st.Threads {
+			continue /* only meaningful when the library is built */
+		}
 		name := name
 		rows = append(rows, row{
 			label: name, kind: kBool,

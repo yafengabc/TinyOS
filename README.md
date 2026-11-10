@@ -52,6 +52,10 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
   外加 `clock/getcpu/gpio/adc/pipe/dup2/lseek/fstat/dup/readdir_at/poll/ioctl`
+- **可选协作线程**（menuconfig `Kernel → Threads`，`threads = 1`）：
+  `thread_create/join`、每线程一个从用户堆分配的栈、`mutex_*`；切换只发生在
+  `thread_yield/thread_read`，普通 `read` 仍会挂起整个进程。关闭时 API 不参与编译；
+  开启后不调用它的程序也不变大（`--gc-sections`），内核则完全不变
 - **抢占式调度**：时间片轮转（1 ms）、`exec` 创建子任务、`wait` 收退出码、
   `read/wait/sleep` 阻塞而不忙等；只在用户态帧上抢占，内核调用不会被撕裂
 - **真实时钟**：`uptime`/`clock_ns()` 读硬件自由运行计数器（CLINT `mtime`、

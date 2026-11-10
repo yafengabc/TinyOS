@@ -335,6 +335,7 @@ type Builder struct {
 	MaxProcs  int
 	KStack    int
 	Opt       string
+	Threads   bool
 
 	mu sync.Mutex
 }
@@ -1224,6 +1225,9 @@ func (b *Builder) buildUser() ([]string, error) {
 	// -fPIC (not just -fPIE) is needed because the linker rejects GOT-free
 	// absolute references against local symbols in a shared-style link.
 	userPIEFlags := append([]string{"-fPIC"}, b.featureDefines()...)
+	if b.Threads {
+		userPIEFlags = append(userPIEFlags, "-DTOS_THREADS")
+	}
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
@@ -1239,6 +1243,15 @@ func (b *Builder) buildUser() ([]string, error) {
 	// compiled with (see TOS_SOFTFLOAT_MIN there).
 	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
 		"aeabi.c", "fix16.c", "floatprint.c", "faeabi.c", "softfloat32.c"}
+
+	// Threads are optional code, not a kernel feature: when the config turns
+	// them on, one more library and its per-arch switch are linked into every
+	// program, and --gc-sections drops both from a program that never calls
+	// thread_create().  When the config is off, the API does not exist at all
+	// (lib.h hides it), so a stale call is a link error rather than silence.
+	if b.Threads {
+		common = append(common, "thread.c", "thread_switch.S")
+	}
 
 	// The numeric runtimes are size-sensitive and not on any hot kernel path;
 	// -Oz saves ~20% over the tree default (-O2) without changing semantics.
@@ -1292,7 +1305,14 @@ func (b *Builder) buildUser() ([]string, error) {
 		}
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
 			name == "softfloat32.c" || name == "fix16.c" ||
-			name == "floatprint.c" || name == "faeabi.c" {
+			name == "floatprint.c" || name == "faeabi.c" ||
+			name == "thread.c" {
+			continue
+		}
+		/* The thread demo needs the feature it demonstrates; leaving it in
+		 * an image built without threads would be a program that can only
+		 * say "off". */
+		if name == "threadtest.c" && !b.Threads {
 			continue
 		}
 		progs = append(progs, prog)

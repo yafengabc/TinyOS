@@ -22,6 +22,7 @@ func TestRenderRoundTrip(t *testing.T) {
 	st.MaxProcs = 8
 	st.KStack = 8 << 10
 	st.Opt = "-Oz"
+	st.Threads = true
 	st.DriverExclude["drivers/display/st7789/rp2350"] = true
 
 	if err := st.Save(); err != nil {
@@ -46,6 +47,9 @@ func TestRenderRoundTrip(t *testing.T) {
 		got.Opt != "-Oz" {
 		t.Fatalf("kernel knobs lost: heap=%d procs=%d stack=%d opt=%q",
 			got.HeapBytes, got.MaxProcs, got.KStack, got.Opt)
+	}
+	if !got.Threads {
+		t.Fatal("threads flag lost")
 	}
 	if !got.DriverExclude["drivers/display/st7789/rp2350"] {
 		t.Fatalf("driver exclude lost: %+v", got.DriverExclude)
@@ -146,6 +150,24 @@ func TestSubmenus(t *testing.T) {
 	a.handle([]byte{' '})
 	if st.HeapBytes == before {
 		t.Fatal("heap did not change")
+	}
+
+	/* And the thread library switch, which is the optional-code toggle. */
+	found = false
+	for i, r := range a.curPage().rows {
+		if strings.Contains(r.label, "Threads") {
+			a.cur = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("threads switch missing from the kernel page")
+	}
+	beforeBool := st.Threads
+	a.handle([]byte{' '})
+	if st.Threads == beforeBool {
+		t.Fatal("threads switch did not change")
 	}
 
 	/* Drivers page: turn off the display driver on rp2350. */

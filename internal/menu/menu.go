@@ -26,7 +26,7 @@ const (
 // Sources in user/ that are runtime libraries, not programs.
 var librarySources = map[string]bool{
 	"lib": true, "syscall": true, "aeabi": true, "softfloat32": true,
-	"fix16": true, "floatprint": true, "faeabi": true,
+	"fix16": true, "floatprint": true, "faeabi": true, "thread": true,
 }
 
 type State struct {
@@ -39,6 +39,7 @@ type State struct {
 	MaxProcs      int
 	KStack        int
 	Opt           string
+	Threads       bool
 	WiFiLibDir    string
 	WiFiLDScript  string
 	WiFiLDSymbol  string
@@ -75,6 +76,7 @@ func Load(c *build.Config, path string) *State {
 	s.MaxProcs = c.MaxProcs
 	s.KStack = c.KStack
 	s.Opt = c.Opt
+	s.Threads = c.Threads
 	s.WiFiLibDir = c.WiFiLibDir
 	s.WiFiLDScript = c.WiFiLDScript
 	s.WiFiLDSymbol = c.WiFiLDSymbol
@@ -271,6 +273,9 @@ func (s *State) Render() string {
 	}
 	if s.Opt != "" {
 		b.WriteString("opt = " + s.Opt + "\n")
+	}
+	if s.Threads {
+		b.WriteString("threads = 1\n")
 	}
 
 	features := make([]string, 0, len(s.Features))

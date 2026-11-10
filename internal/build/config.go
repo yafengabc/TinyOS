@@ -33,21 +33,26 @@ import (
 //
 // Relative paths are resolved against the source tree root.
 type Config struct {
-	Path    string
-	Target  string
-	Features map[string]bool
-	Drivers []string
+	Path          string
+	Target        string
+	Features      map[string]bool
+	Drivers       []string
 	DriverExclude []string
 	// Kernel knobs.  Zero means "use the target's default".
 	HeapBytes int
 	MaxProcs  int
 	KStack    int
 	Opt       string
-	WiFiLibDir   string
-	WiFiLDScript string
-	WiFiLDSymbol string
-	LDExtra      []string
-	UserExclude  map[string]bool
+	// Threads compiles the cooperative user-space thread library (user/
+	// thread.c and its per-arch switch) into every program.  Off by default:
+	// a program that does not call thread_create() pays nothing either way,
+	// but the flag is the switch the images are reproducible from.
+	Threads       bool
+	WiFiLibDir    string
+	WiFiLDScript  string
+	WiFiLDSymbol  string
+	LDExtra       []string
+	UserExclude   map[string]bool
 	SourceExclude map[string]bool
 }
 
@@ -72,6 +77,7 @@ func LoadConfig(path string) (*Config, error) {
 		c.MaxProcs = parseSize(s["max_procs"])
 		c.KStack = parseSize(s["kstack"])
 		c.Opt = strings.TrimSpace(s["opt"])
+		c.Threads = parseOnOff(s["threads"])
 		if raw := s["features"]; raw != "" {
 			for _, f := range splitList(raw) {
 				c.Features[strings.ToLower(f)] = true
@@ -174,6 +180,16 @@ func truthy(s string) bool {
 	return false
 }
 
+// parseOnOff is the boolean form used by [build] keys such as threads.
+// Absent or unrecognised is off, which is the default for optional code.
+func parseOnOff(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // parseSize reads "81920", "80k" or "1m" as bytes (or a plain count for
 // max_procs).  Anything unparsable is 0, which means "use the default".
 func parseSize(s string) int {
@@ -217,6 +233,7 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	b.MaxProcs = c.MaxProcs
 	b.KStack = c.KStack
 	b.Opt = c.Opt
+	b.Threads = c.Threads
 	b.ensureDriverDirs()
 	for _, d := range c.Drivers {
 		p := b.abs(d)
