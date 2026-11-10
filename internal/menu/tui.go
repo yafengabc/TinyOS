@@ -269,7 +269,7 @@ func (a *app) kernelPage() page {
 				},
 				act:  cycleInt(procs, func() int { return a.st.MaxProcs }, func(v int) { a.st.MaxProcs = v; a.dirty = true }),
 				live: func() bool { return true },
-				help: "Process table slots (TOS_MAX_PROCS).  A proc_t is ~1.7 KiB of .bss on the C3 (measured), so dropping from 8 to 4 frees ~6.8 KiB; 4 is the floor for a shell plus one child, and 8 leaves room for a few background tasks.",
+				help: "Process table slots (TOS_MAX_PROCS).  sizeof(proc_t) is 856 B on the C3 (measured: fds[12] 432, saved trap frame 144, cwd 64), so 8 slots cost 6.8 KiB of .bss and 4 cost 3.4 KiB; 4 is the floor for a shell plus one child, 8 leaves room for a few background tasks.",
 			},
 			{
 				label: "Optimisation", kind: kChoice,

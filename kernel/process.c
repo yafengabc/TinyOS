@@ -12,9 +12,10 @@
 #include "cpu.h"
 #include "tos.h"
 
-/* Per-target: the table costs ~1.7 KiB an entry on the C3 (measured:
- * procs[8] is 13,696 B), and a board can only run as many tasks as it has
- * windows.  max_procs is a menuconfig knob now: 4 is the floor for a shell
+/* Per-target: sizeof(proc_t) is 856 bytes on the C3 (measured with
+ * -fdump-record-layouts: fds[12] alone is 432, the saved trap frame 144,
+ * cwd 64), so procs[8] is 6,848 B of .bss, not the 11,648 a 16-slot table
+ * used to cost.  max_procs is a menuconfig knob: 4 is the floor for a shell
  * plus one child, 16 keeps the historical default for boards that do not
  * override it. */
 #ifndef TOS_MAX_PROCS
