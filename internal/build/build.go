@@ -1111,6 +1111,12 @@ func (b *Builder) buildUser() ([]string, error) {
 	if b.feature("softfloat") {
 		common = append(common, "softfloat32.c")
 	}
+
+	// The numeric runtimes are size-sensitive and not on any hot kernel path;
+	// -Oz saves ~20% over the tree default (-O2) without changing semantics.
+	sizeOpt := map[string]bool{
+		"softfloat32.c": true, "floatprint.c": true, "fix16.c": true,
+	}
 	var commonObjs []string
 	var tasks []task
 	for _, name := range common {
@@ -1121,6 +1127,8 @@ func (b *Builder) buildUser() ([]string, error) {
 		flags := userPIEFlags
 		if strings.HasSuffix(name, ".S") {
 			flags = nil // assembler: no -fPIE, it just emits relative code
+		} else if sizeOpt[name] {
+			flags = append(append([]string{}, flags...), "-Oz")
 		}
 		tasks = append(tasks, task{fn: func() error {
 			return b.compile(srcCopy, objCopy, incs, flags...)
