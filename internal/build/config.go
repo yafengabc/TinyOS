@@ -47,7 +47,15 @@ type Config struct {
 	// thread.c and its per-arch switch) into every program.  Off by default:
 	// a program that does not call thread_create() pays nothing either way,
 	// but the flag is the switch the images are reproducible from.
-	Threads       bool
+	Threads bool
+	// Kernel trimming.  Each one is a compile-time switch: the code (and,
+	// for the .bss ones, the memory) is not in the image when it is off.  The
+	// defaults are the full feature set, so an old config keeps its image.
+	HistBytes     int  // command history pool; 0 = no recall
+	ProcLite      bool // /proc keeps ps+uptime, drops mem/dev/lfs/stack/cpuinfo
+	DevNodes      bool // /dev device classes and the GPIO/ADC syscalls
+	Panel         bool // text mirror on a pixel panel (needs DevNodes to start)
+	FSReadOnly    bool // mount littlefs read-only; create/write/unlink fail
 	WiFiLibDir    string
 	WiFiLDScript  string
 	WiFiLDSymbol  string
@@ -70,6 +78,9 @@ func LoadConfig(path string) (*Config, error) {
 		Features:      map[string]bool{},
 		UserExclude:   map[string]bool{},
 		SourceExclude: map[string]bool{},
+		HistBytes:     512,
+		DevNodes:      true,
+		Panel:         true,
 	}
 	if s := sections["build"]; s != nil {
 		c.Target = strings.TrimSpace(s["target"])
@@ -78,6 +89,19 @@ func LoadConfig(path string) (*Config, error) {
 		c.KStack = parseSize(s["kstack"])
 		c.Opt = strings.TrimSpace(s["opt"])
 		c.Threads = parseOnOff(s["threads"])
+		if raw, ok := s["hist"]; ok {
+			c.HistBytes = parseSize(raw)
+		}
+		if raw, ok := s["proc_lite"]; ok {
+			c.ProcLite = parseOnOff(raw)
+		}
+		if raw, ok := s["devnodes"]; ok {
+			c.DevNodes = parseOnOff(raw)
+		}
+		if raw, ok := s["panel"]; ok {
+			c.Panel = parseOnOff(raw)
+		}
+		c.FSReadOnly = parseOnOff(s["fs_ro"])
 		if raw := s["features"]; raw != "" {
 			for _, f := range splitList(raw) {
 				c.Features[strings.ToLower(f)] = true
@@ -234,6 +258,11 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	b.KStack = c.KStack
 	b.Opt = c.Opt
 	b.Threads = c.Threads
+	b.HistBytes = c.HistBytes
+	b.ProcLite = c.ProcLite
+	b.DevNodes = c.DevNodes
+	b.Panel = c.Panel
+	b.FSReadOnly = c.FSReadOnly
 	b.ensureDriverDirs()
 	for _, d := range c.Drivers {
 		p := b.abs(d)
@@ -312,6 +341,15 @@ func (b *Builder) featureDefines() []string {
 
 func (b *Builder) feature(name string) bool {
 	return b.Features[name]
+}
+
+// boolInt writes a boolean into a -D flag, where "absent" is not the same as
+// "0" (the kernel headers test the number).
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // ensureDriverDirs seeds the list with the target's board-default drivers

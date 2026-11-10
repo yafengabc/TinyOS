@@ -12,11 +12,11 @@
 #include "cpu.h"
 #include "tos.h"
 
-/* Per-target: the table costs 792 bytes an entry, and a board can only run
- * as many tasks as it has 16 KiB windows.  The ESP32-C3 has 12, so 16
- * entries were mostly zeroed memory; it asks for 14 through TOS_MAX_PROCS
- * (12 live tasks plus two slots for children that have exited but not been
- * reaped yet).  Everything else keeps 16. */
+/* Per-target: the table costs ~1.7 KiB an entry on the C3 (measured:
+ * procs[8] is 13,696 B), and a board can only run as many tasks as it has
+ * windows.  max_procs is a menuconfig knob now: 4 is the floor for a shell
+ * plus one child, 16 keeps the historical default for boards that do not
+ * override it. */
 #ifndef TOS_MAX_PROCS
 #define TOS_MAX_PROCS 16
 #endif

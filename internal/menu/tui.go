@@ -228,8 +228,9 @@ func (a *app) kernelPage() page {
 	heaps := []int{0, 8 << 10, 12 << 10, 16 << 10, 24 << 10, 32 << 10,
 		48 << 10, 64 << 10, 80 << 10, 96 << 10, 128 << 10, 192 << 10, 256 << 10}
 	stacks := []int{0, 8 << 10, 16 << 10, 32 << 10}
-	procs := []int{0, 8, 12, 16}
+	procs := []int{0, 4, 6, 8, 12, 16}
 	opts := []string{"", "-O2", "-Oz", "-Os", "-Og"}
+	hists := []int{0, 256, 512, 1024}
 
 	return page{
 		title: "Kernel",
@@ -268,7 +269,7 @@ func (a *app) kernelPage() page {
 				},
 				act:  cycleInt(procs, func() int { return a.st.MaxProcs }, func(v int) { a.st.MaxProcs = v; a.dirty = true }),
 				live: func() bool { return true },
-				help: "Process table slots (TOS_MAX_PROCS).  Each proc_t is ~792 bytes of .bss; 8 is the practical floor (shell plus one foreground child).",
+				help: "Process table slots (TOS_MAX_PROCS).  A proc_t is ~1.7 KiB of .bss on the C3 (measured), so dropping from 8 to 4 frees ~6.8 KiB; 4 is the floor for a shell plus one child, and 8 leaves room for a few background tasks.",
 			},
 			{
 				label: "Optimisation", kind: kChoice,
@@ -291,6 +292,63 @@ func (a *app) kernelPage() page {
 				},
 				live: func() bool { return true },
 				help: "Build the user-space thread library (threads = 1 in [build]).  thread_create/join, a stack per thread from the program's heap, and mutex_lock; switches happen only at yield/thread_read, so a plain read() still parks the whole process.  Adds ~1 KiB to each program that uses it and nothing to the kernel.",
+			},
+			{
+				label: "Command history", kind: kChoice,
+				text: func() string {
+					if a.st.HistBytes > 0 {
+						return fmt.Sprintf("%d B", a.st.HistBytes)
+					}
+					return "off"
+				},
+				act:  cycleInt(hists, func() int { return a.st.HistBytes }, func(v int) { a.st.HistBytes = v; a.dirty = true }),
+				live: func() bool { return true },
+				help: "Line-discipline history pool (TOS_HIST_BYTES).  Off removes the arrow-key recall and the `history` builtin's data, saving up to 1 KiB of .bss and a little text; the rest of line editing stays.",
+			},
+			{
+				label: "Diagnostic /proc", kind: kBool,
+				text: func() string {
+					if a.st.ProcLite {
+						return "ps + uptime only"
+					}
+					return "all entries"
+				},
+				act: func(int) {
+					a.st.ProcLite = !a.st.ProcLite
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "Drops /proc/{mem,dev,lfs,stack,cpuinfo} (proc_lite = 1) and keeps /proc/{ps,uptime}, which msh's `ps` needs.  Saves ~1.5 KiB of text; the matching meminfo()/dfinfo() syscalls still work for free and df.",
+			},
+			{
+				label: "Device layer (/dev, GPIO/ADC)", kind: kBool,
+				text: func() string { return onOff(a.st.DevNodes) },
+				act: func(int) {
+					a.st.DevNodes = !a.st.DevNodes
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "Compiles out kernel/hwdev.c and kernel/periph.c: /dev/{led,key,gpio,adc,lcd}, the GPIO/ADC syscalls and the board device table.  Saves ~5.5 KiB of text and ~2 KiB of .bss on a headless board; program calls fail with -1.  The panel mirror follows this switch.",
+			},
+			{
+				label: "Panel text mirror", kind: kBool,
+				text: func() string { return onOff(a.st.Panel) },
+				act: func(int) {
+					a.st.Panel = !a.st.Panel
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "Compiles out kernel/screen.c, the console-on-panel mirror and its 20x48 shadow grid (panel = 0).  Saves ~2.2 KiB of text and 960 B of .bss on boards with no LCD.",
+			},
+			{
+				label: "Read-only filesystem", kind: kBool,
+				text: func() string { return onOff(a.st.FSReadOnly) },
+				act: func(int) {
+					a.st.FSReadOnly = !a.st.FSReadOnly
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "Builds littlefs with LFS_READONLY and stubs out create/write/unlink (fs_ro = 1).  Several KiB of text for an appliance image; `edit` and shell redirection then fail with -1 instead of writing.",
 			},
 			{
 				label: "< Back", kind: kBack,

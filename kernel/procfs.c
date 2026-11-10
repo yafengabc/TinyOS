@@ -1,4 +1,8 @@
 #include "procfs.h"
+
+#ifndef TOS_PROC_LITE
+#define TOS_PROC_LITE 0
+#endif
 #include "devfs.h"
 #include "heap.h"
 #include "console.h"
@@ -69,6 +73,7 @@ static uint32_t put_label(char *b, uint32_t cap, uint32_t off, const char *s,
     return off;
 }
 
+#if !TOS_PROC_LITE
 static uint32_t fmt_mem(char *b, uint32_t cap)
 {
     uint32_t off = 0;
@@ -174,6 +179,7 @@ static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
     off = put(b, cap, off, "tick Hz\t\t: %u\n", plat_tick_hz());
     return off;
 }
+#endif
 
 static int proc_open(const dev_t *d, void **priv)
 {
@@ -189,6 +195,7 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_uptime(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/ps"))
         n = process_ps_text(b, PROC_CAP);
+#if !TOS_PROC_LITE
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/lfs"))
@@ -197,6 +204,7 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_stack(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/cpuinfo"))
         n = fmt_cpuinfo(b, PROC_CAP);
+#endif
     else {
         kfree(b);
         return -1;
@@ -256,8 +264,10 @@ void procfs_init(void)
 {
     devfs_register("proc/uptime", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
+#if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);
     devfs_register("proc/stack",  &proc_ops, NULL);
     devfs_register("proc/cpuinfo", &proc_ops, NULL);
+#endif
 }

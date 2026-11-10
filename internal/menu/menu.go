@@ -40,6 +40,11 @@ type State struct {
 	KStack        int
 	Opt           string
 	Threads       bool
+	HistBytes     int
+	ProcLite      bool
+	DevNodes      bool
+	Panel         bool
+	FSReadOnly    bool
 	WiFiLibDir    string
 	WiFiLDScript  string
 	WiFiLDSymbol  string
@@ -58,6 +63,9 @@ func Load(c *build.Config, path string) *State {
 		DriverExclude: map[string]bool{},
 		Exclude:       map[string]bool{},
 		SourceExclude: map[string]bool{},
+		HistBytes:     512,
+		DevNodes:      true,
+		Panel:         true,
 	}
 	if c == nil {
 		return s
@@ -77,6 +85,11 @@ func Load(c *build.Config, path string) *State {
 	s.KStack = c.KStack
 	s.Opt = c.Opt
 	s.Threads = c.Threads
+	s.HistBytes = c.HistBytes
+	s.ProcLite = c.ProcLite
+	s.DevNodes = c.DevNodes
+	s.Panel = c.Panel
+	s.FSReadOnly = c.FSReadOnly
 	s.WiFiLibDir = c.WiFiLibDir
 	s.WiFiLDScript = c.WiFiLDScript
 	s.WiFiLDSymbol = c.WiFiLDSymbol
@@ -276,6 +289,21 @@ func (s *State) Render() string {
 	}
 	if s.Threads {
 		b.WriteString("threads = 1\n")
+	}
+	if s.HistBytes != 512 {
+		b.WriteString(fmt.Sprintf("hist = %d\n", s.HistBytes))
+	}
+	if s.ProcLite {
+		b.WriteString("proc_lite = 1\n")
+	}
+	if !s.DevNodes {
+		b.WriteString("devnodes = 0\n")
+	}
+	if !s.Panel {
+		b.WriteString("panel = 0\n")
+	}
+	if s.FSReadOnly {
+		b.WriteString("fs_ro = 1\n")
 	}
 
 	features := make([]string, 0, len(s.Features))

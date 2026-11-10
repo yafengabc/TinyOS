@@ -4,6 +4,12 @@
 #include "console.h"
 #include "string.h"
 
+#ifndef TOS_PERIPH
+#define TOS_PERIPH 1
+#endif
+
+#if TOS_PERIPH
+
 /* Peripheral front end.
  *
  * The kernel keeps no device table: a board implements the handful of
@@ -303,3 +309,21 @@ void periph_init_devs(void)
     if (na > 0)
         devfs_register_template("dev/adc", na, adc_resolve);
 }
+
+#else  /* !TOS_PERIPH: no GPIO/ADC syscalls, no /dev/gpioN or /dev/adcN */
+
+int periph_gpio(int op, int pin, int arg)
+{
+    (void)op; (void)pin; (void)arg;
+    return -1;
+}
+
+int periph_adc(int op, int chan)
+{
+    (void)op; (void)chan;
+    return -1;
+}
+
+void periph_init_devs(void) {}
+
+#endif

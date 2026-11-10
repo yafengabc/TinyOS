@@ -5,6 +5,12 @@
 #include "types.h"
 #include "cpu.h"      /* spin_t: the mirror runs inside console output */
 
+#ifndef TOS_PANEL
+#define TOS_PANEL 1
+#endif
+
+#if TOS_PANEL
+
 /* A text screen on top of a pixel panel.
  *
  * The panel driver only knows how to paint one character cell; everything
@@ -269,3 +275,25 @@ void screen_invert(int on)
 }
 
 int screen_inverted(void) { return inverted; }
+
+#else  /* !TOS_PANEL: no shadow grid, no panel text, every call is a no-op */
+
+int  screen_init(void) { return -1; }
+void screen_putc(char c) { (void)c; }
+void screen_puts(const char *s) { (void)s; }
+void screen_clear(uint16_t color) { (void)color; }
+int  screen_cols(void) { return 0; }
+int  screen_rows(void) { return 0; }
+void screen_mirror(int on) { (void)on; }
+int  screen_mirror_on(void) { return 0; }
+void screen_mirror_putc(char c) { (void)c; }
+void screen_cursor(int col, int row) { (void)col; (void)row; }
+int  screen_cursor_col(void) { return 0; }
+int  screen_cursor_row(void) { return 0; }
+void screen_colors(uint16_t fg, uint16_t bg) { (void)fg; (void)bg; }
+uint16_t screen_fg(void) { return 0; }
+uint16_t screen_bg(void) { return 0; }
+void screen_invert(int on) { (void)on; }
+int  screen_inverted(void) { return 0; }
+
+#endif

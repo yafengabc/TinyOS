@@ -4,6 +4,12 @@
 #include "console.h"
 #include "string.h"
 
+#ifndef TOS_DEVNODES
+#define TOS_DEVNODES 1
+#endif
+
+#if TOS_DEVNODES
+
 /* The device classes, with the board behind them.
  *
  * Nothing here knows a part number.  A board reports "led0, GPIO3, active
@@ -635,3 +641,62 @@ void hwdev_init(void)
         console_write(msg, (size_t)n);
     }
 }
+
+#else  /* !TOS_DEVNODES: no /dev nodes, no board table, no class code.
+        * The panel mirror may still be on (TOS_PANEL): it only needs the
+        * weak display hooks, which stay here as empty defaults. */
+
+__attribute__((weak)) const char *plat_board_name(void) { return "TinyOS"; }
+__attribute__((weak)) int plat_display_count(void) { return 0; }
+
+__attribute__((weak)) int plat_display_info(int idx, int *w, int *h,
+                                            int *cell_w, int *cell_h)
+{
+    (void)idx; (void)w; (void)h; (void)cell_w; (void)cell_h;
+    return -1;
+}
+
+__attribute__((weak)) int plat_display_cell(int idx, int col, int row, char c,
+                                            uint16_t fg, uint16_t bg)
+{
+    (void)idx; (void)col; (void)row; (void)c; (void)fg; (void)bg;
+    return -1;
+}
+
+__attribute__((weak)) int plat_display_row(int idx, int row, const char *chars,
+                                           int ncols, uint16_t fg, uint16_t bg)
+{
+    (void)idx; (void)row; (void)chars; (void)ncols; (void)fg; (void)bg;
+    return -1;
+}
+
+__attribute__((weak)) int plat_display_scan(int idx, int x, int y, int w,
+                                            const uint8_t *px)
+{
+    (void)idx; (void)x; (void)y; (void)w; (void)px;
+    return -1;
+}
+
+__attribute__((weak)) void plat_display_sync(int idx) { (void)idx; }
+
+__attribute__((weak)) int plat_display_clear(int idx, uint16_t color)
+{
+    (void)idx; (void)color;
+    return -1;
+}
+
+__attribute__((weak)) int plat_display_backlight(int idx, int on)
+{
+    (void)idx; (void)on;
+    return -1;
+}
+
+__attribute__((weak)) int plat_display_backlight_get(int idx)
+{
+    (void)idx;
+    return -1;
+}
+
+void hwdev_init(void) {}
+
+#endif

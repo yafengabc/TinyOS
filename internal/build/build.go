@@ -331,11 +331,16 @@ type Builder struct {
 	WiFiLDSymbol   string
 	LDExtra        []string
 	// Config overrides for the kernel; 0/"" keeps the target's default.
-	HeapBytes int
-	MaxProcs  int
-	KStack    int
-	Opt       string
-	Threads   bool
+	HeapBytes  int
+	MaxProcs   int
+	KStack     int
+	Opt        string
+	Threads    bool
+	HistBytes  int
+	ProcLite   bool
+	DevNodes   bool
+	Panel      bool
+	FSReadOnly bool
 
 	mu sync.Mutex
 }
@@ -364,6 +369,9 @@ func New(root string) *Builder {
 		Features:      map[string]bool{},
 		UserExclude:   map[string]bool{},
 		SourceExclude: map[string]bool{},
+		HistBytes:     512,
+		DevNodes:      true,
+		Panel:         true,
 	}
 }
 
@@ -942,6 +950,24 @@ func (b *Builder) buildKernel() error {
 		featDefs = append(featDefs, "-DTOS_NET")
 	}
 
+	// Kernel trimming.  These are compile-time: an off feature contributes
+	// no code and no .bss.  The panel needs the device layer to be started
+	// (hwdev_init() is what calls screen_init()), so it follows DevNodes.
+	hist := b.HistBytes
+	if hist < 0 || hist > 4096 {
+		hist = 512
+	}
+	featDefs = append(featDefs,
+		fmt.Sprintf("-DTOS_HIST_BYTES=%d", hist),
+		fmt.Sprintf("-DTOS_PROC_LITE=%d", boolInt(b.ProcLite)),
+		fmt.Sprintf("-DTOS_DEVNODES=%d", boolInt(b.DevNodes)),
+		fmt.Sprintf("-DTOS_PERIPH=%d", boolInt(b.DevNodes)),
+		fmt.Sprintf("-DTOS_PANEL=%d", boolInt(b.Panel)),
+	)
+	if b.FSReadOnly {
+		featDefs = append(featDefs, "-DTOS_LFS_RO")
+	}
+
 	// Vendored TinyUSB, RP2350 only: the seven translation units that make up
 	// a CDC-ACM device.  Everything else in upstream's tree (host stack, the
 	// other device classes, other chips' ports) is not checked in.
@@ -984,6 +1010,10 @@ func (b *Builder) buildKernel() error {
 
 	/* vendored littlefs, with the kernel config force-included */
 	lfsCfg := filepath.Join(kdir, "lfs_config.h")
+	lfsFlags := []string{"-include", lfsCfg}
+	if b.FSReadOnly {
+		lfsFlags = append(lfsFlags, "-DTOS_LFS_RO")
+	}
 	for _, src := range []string{"lfs.c", "lfs_util.c"} {
 		full := filepath.Join(lfsDir, src)
 		obj := filepath.Join(b.BuildDir, "kernel", "lfs_"+strings.TrimSuffix(src, ".c")+".o")
@@ -991,8 +1021,7 @@ func (b *Builder) buildKernel() error {
 		srcCopy, objCopy := src, obj
 		tasks = append(tasks, task{label: src, fn: func() error {
 			b.logf("      CC  third_party/littlefs/%s\n", srcCopy)
-			return b.compile(full, objCopy, incs,
-				"-include", lfsCfg)
+			return b.compile(full, objCopy, incs, lfsFlags...)
 		}})
 	}
 

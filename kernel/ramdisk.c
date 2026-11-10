@@ -219,6 +219,7 @@ static int bd_sync(const struct lfs_config *c)
 
 /* Exercise the write path once at boot so a broken ATA write shows up
    immediately instead of silently corrupting the filesystem later. */
+#ifndef TOS_LFS_RO
 static void write_selftest(void)
 {
     const char *path = "selftest.tmp";
@@ -252,6 +253,7 @@ static void write_selftest(void)
     else
         kprintf("[ramdisk] block device write test FAILED\n");
 }
+#endif  /* !TOS_LFS_RO */
 
 /* Walk one directory level only: list the immediate children of `dirpath`
    as entries and do NOT descend into subdirectories.  This keeps `ls`
@@ -405,6 +407,7 @@ void ramdisk_init(void)
         return;
     }
 
+#ifndef TOS_LFS_RO
     /* Grow to the real partition size.  littlefs 2.9 decides free blocks by
      * tree reachability (lfs_alloc_scan walks every referenced block), not
      * by erased state, and erases a block the first time it allocates it -
@@ -414,11 +417,14 @@ void ramdisk_init(void)
     if (lfs_fs_grow(&lfs, PLAT_LFS_BLOCKS) < 0)
         kprintf("[ramdisk] warning: fs grow to %u blocks failed\n",
                 PLAT_LFS_BLOCKS);
+#endif
 
     /* Readdir walks the tree on demand, so there is nothing to snapshot. */
     ok = 1;
 
+#ifndef TOS_LFS_RO
     write_selftest();
+#endif
 }
 
 int ramdisk_ok(void)
@@ -520,6 +526,7 @@ static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
  *
  * The snapshot is dropped: a listing taken before the removal must not
  * survive it. */
+#ifndef TOS_LFS_RO
 static int unlink_locked(const char *path)
 {
     if (!ok)
@@ -539,6 +546,7 @@ static int unlink_locked(const char *path)
     dent_drop();
     return lfs_remove(&lfs, path) < 0 ? -1 : 0;
 }
+#endif
 
 /* Report littlefs partition usage.  `total` is the configured volume size;
    `used` is what littlefs has actually consumed.  Note lfs_fs_size()
@@ -614,16 +622,22 @@ int ramdisk_open(const char *path)
  * would hand it a read-only handle that fails on the first write. */
 int ramdisk_open_rw(const char *path)
 {
+#ifdef TOS_LFS_RO
+    (void)path;
+    return -1;
+#else
     int h;
 
     spin_lock(&fs_lock);
     h = open_with(path, LFS_O_RDWR);
     spin_unlock(&fs_lock);
     return h;
+#endif
 }
 
 /* Create (or truncate) a file for writing.  Opened read-write so the
    caller can verify what it wrote. */
+#ifndef TOS_LFS_RO
 static int create_locked(const char *path)
 {
     if (!ok)
@@ -664,6 +678,7 @@ static int create_locked(const char *path)
     openfiles[h].path[sizeof(openfiles[h].path) - 1] = '\0';
     return h;
 }
+#endif  /* !TOS_LFS_RO */
 
 static uint32_t size_locked(int h)
 {
@@ -680,6 +695,7 @@ static int read_locked(int h, void *buf, uint32_t len)
     return n < 0 ? -1 : (int)n;
 }
 
+#ifndef TOS_LFS_RO
 static int write_locked(int h, const void *buf, uint32_t len)
 {
     if (h < 0 || h >= MAX_OPEN || !openfiles[h].used)
@@ -691,6 +707,7 @@ static int write_locked(int h, const void *buf, uint32_t len)
     }
     return n < 0 ? -1 : (int)n;
 }
+#endif
 
 /* Move the handle's position.  A duplicated descriptor keeps the position it
  * was copied from (fd_clone), but the new littlefs handle starts at 0, so
@@ -768,12 +785,17 @@ int ramdisk_stat(const char *path, uint32_t *size, uint8_t *type)
 
 int ramdisk_unlink(const char *path)
 {
+#ifdef TOS_LFS_RO
+    (void)path;
+    return -1;
+#else
     int r;
 
     spin_lock(&fs_lock);
     r = unlink_locked(path);
     spin_unlock(&fs_lock);
     return r;
+#endif
 }
 
 void ramdisk_io_stats(struct lfs_io_stats *s)
@@ -795,12 +817,17 @@ int ramdisk_df(uint32_t *total, uint32_t *used)
 
 int ramdisk_create(const char *path)
 {
+#ifdef TOS_LFS_RO
+    (void)path;
+    return -1;
+#else
     int h;
 
     spin_lock(&fs_lock);
     h = create_locked(path);
     spin_unlock(&fs_lock);
     return h;
+#endif
 }
 
 uint32_t ramdisk_size(int h)
@@ -825,12 +852,17 @@ int ramdisk_read(int h, void *buf, uint32_t len)
 
 int ramdisk_write(int h, const void *buf, uint32_t len)
 {
+#ifdef TOS_LFS_RO
+    (void)h; (void)buf; (void)len;
+    return -1;
+#else
     int n;
 
     spin_lock(&fs_lock);
     n = write_locked(h, buf, len);
     spin_unlock(&fs_lock);
     return n;
+#endif
 }
 
 int ramdisk_seek(int h, uint32_t pos)

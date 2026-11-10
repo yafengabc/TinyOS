@@ -14,6 +14,12 @@
 #define LFS_NO_TRACE
 #define LFS_NO_ASSERT
 
+/* A read-only appliance build: littlefs drops its allocation, file-write and
+ * remove paths, and ramdisk.c stubs the matching entry points. */
+#ifdef TOS_LFS_RO
+#define LFS_READONLY
+#endif
+
 /* No libc malloc.  Route littlefs allocations through the kernel heap.
    LFS_NO_MALLOC skips <stdlib.h>; defining LFS_MALLOC/LFS_FREE makes the
    inline lfs_malloc/lfs_free wrappers call our allocator instead. */

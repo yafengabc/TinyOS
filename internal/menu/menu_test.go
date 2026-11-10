@@ -23,6 +23,11 @@ func TestRenderRoundTrip(t *testing.T) {
 	st.KStack = 8 << 10
 	st.Opt = "-Oz"
 	st.Threads = true
+	st.HistBytes = 256
+	st.ProcLite = true
+	st.DevNodes = false
+	st.Panel = false
+	st.FSReadOnly = true
 	st.DriverExclude["drivers/display/st7789/rp2350"] = true
 
 	if err := st.Save(); err != nil {
@@ -50,6 +55,11 @@ func TestRenderRoundTrip(t *testing.T) {
 	}
 	if !got.Threads {
 		t.Fatal("threads flag lost")
+	}
+	if got.HistBytes != 256 || !got.ProcLite || got.DevNodes || got.Panel ||
+		!got.FSReadOnly {
+		t.Fatalf("trim knobs lost: hist=%d proclite=%v dev=%v panel=%v ro=%v",
+			got.HistBytes, got.ProcLite, got.DevNodes, got.Panel, got.FSReadOnly)
 	}
 	if !got.DriverExclude["drivers/display/st7789/rp2350"] {
 		t.Fatalf("driver exclude lost: %+v", got.DriverExclude)
@@ -168,6 +178,41 @@ func TestSubmenus(t *testing.T) {
 	a.handle([]byte{' '})
 	if st.Threads == beforeBool {
 		t.Fatal("threads switch did not change")
+	}
+
+	/* The trim switches: history is a choice, the filesystem a bool. */
+	found = false
+	for i, r := range a.curPage().rows {
+		if strings.Contains(r.label, "Command history") {
+			a.cur = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("history switch missing from the kernel page")
+	}
+	beforeHist := st.HistBytes
+	a.handle([]byte{' '})
+	if st.HistBytes == beforeHist {
+		t.Fatal("history switch did not change")
+	}
+
+	found = false
+	for i, r := range a.curPage().rows {
+		if strings.Contains(r.label, "Read-only") {
+			a.cur = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("read-only switch missing from the kernel page")
+	}
+	beforeRO := st.FSReadOnly
+	a.handle([]byte{' '})
+	if st.FSReadOnly == beforeRO {
+		t.Fatal("read-only switch did not change")
 	}
 
 	/* Drivers page: turn off the display driver on rp2350. */
