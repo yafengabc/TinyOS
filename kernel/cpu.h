@@ -38,11 +38,15 @@ struct proc;
  * recursive user program like `py` recurses on its own stack, so half of a
  * 32 KiB reservation was never touched.  i386 keeps 32 KiB because
  * arch/x86/entry.S reserves exactly that. */
+#ifndef TOS_KSTACK_BYTES
 #if defined(__arm__) || defined(__thumb__) || defined(__riscv)
-#define KSTACK_BYTES 16384u
+#define TOS_KSTACK_BYTES 16384
 #else
-#define KSTACK_BYTES 32768u
+#define TOS_KSTACK_BYTES 32768
 #endif
+#endif
+
+#define KSTACK_BYTES ((uint32_t)TOS_KSTACK_BYTES)
 
 /* Where CPU `id`'s kernel stack sits.  The linker lays the blocks out back
  * to back with hart 0's at the top, so this is arithmetic rather than a

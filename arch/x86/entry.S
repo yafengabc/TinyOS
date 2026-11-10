@@ -19,6 +19,11 @@ _start:
 1:  hlt
     jmp 1b
 
+#ifndef TOS_KSTACK_BYTES
+#define TOS_KSTACK_BYTES 32768
+#endif
+#define KSTACK_BYTES TOS_KSTACK_BYTES
+
     .section .bss
     .balign 16
     .globl __kernel_stack
@@ -29,6 +34,6 @@ __kernel_stack:
      * which on i386 landed 16 KiB below the stack - inside the process
      * table.  `ps` grew a phantom entry whose state was 0x5354414B ("STAK").
      * cpu_init() now checks the two against each other at boot. */
-    .space 32768
+    .space KSTACK_BYTES
     .globl __kernel_stack_top
 __kernel_stack_top:

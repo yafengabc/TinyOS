@@ -29,7 +29,22 @@
  * frame plus a syscall, not a user recursion - `py` recurses on its own stack
  * in user mode.  A whole 16 KiB of .bss buys a task window on boards this
  * small. */
-#define KSTACK_SHIFT 14                 /* 16 KiB */
+#ifndef TOS_KSTACK_BYTES
+#define TOS_KSTACK_BYTES 16384
+#endif
+
+/* The entry code shifts hart ids, so the size has to be a power of two. */
+#if TOS_KSTACK_BYTES == 8192
+#define KSTACK_SHIFT 13
+#elif TOS_KSTACK_BYTES == 16384
+#define KSTACK_SHIFT 14
+#elif TOS_KSTACK_BYTES == 32768
+#define KSTACK_SHIFT 15
+#elif TOS_KSTACK_BYTES == 65536
+#define KSTACK_SHIFT 16
+#else
+#error "TOS_KSTACK_BYTES must be 8192, 16384, 32768 or 65536"
+#endif
 
     .section .text.entry, "ax"
     .globl _start

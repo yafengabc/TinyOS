@@ -34,6 +34,11 @@ exclude = ping,net,dhcp
 ```
 
 - `[build] target` picks an entry from `internal/build/build.go`'s `Targets`.
+- `[build]` also takes kernel knobs, all optional and defaulting to the
+  target's value: `heap = 81920` (kernel arena in bytes, `80k` works too),
+  `max_procs = 8` (process table slots), `kstack = 16384` (per-CPU kernel
+  stack, 8192/16384/32768; the linker pool and `kernel/cpu.h` read the same
+  define) and `opt = -Oz` (compiler optimisation; `TOS_OPT` still wins).
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
 - Both numeric runtimes are always linked: `user/fix16.c` provides the
@@ -49,7 +54,9 @@ exclude = ping,net,dhcp
   program depends on those IEEE corner cases.
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
-  target's board-default drivers (`Targets[..].Drivers`).
+  target's board-default drivers (`Targets[..].Drivers`).  A special key
+  `exclude = drivers/display/st7789/rp2350` removes directories from the
+  target's default list (GPIO, serial/USB console and SPI are required).
 - `[wifi]` supplies the Espressif blob directory, the ROM symbol linker
   script and the symbol that keeps `wifi_probe` alive.
 - `[user] exclude` drops named `user/*.c` programs or `user/<dir>` programs.

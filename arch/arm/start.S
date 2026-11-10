@@ -34,7 +34,10 @@
  * to link, it puts the overflow guard word somewhere else).  ARM uses half
  * the RV32/x86 size: the RP2350 has 128 KiB for the whole kernel, and two
  * 32 KiB stacks would not fit next to the 60 KiB exec arena. */
-#define ARM_KSTACK_BYTES 16384
+#ifndef TOS_KSTACK_BYTES
+#define TOS_KSTACK_BYTES 16384
+#endif
+#define ARM_KSTACK_BYTES TOS_KSTACK_BYTES
 
 #ifndef TOS_MAX_CPUS
 #define TOS_MAX_CPUS 1

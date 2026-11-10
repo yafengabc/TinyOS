@@ -23,12 +23,15 @@ const (
 	kChoice
 	kSub
 	kBack
+	kRadio
 )
 
 type row struct {
 	label string
 	help  string
 	kind  int
+	// note explains why a row is disabled ("required", "esp32c3 only", ...).
+	note string
 	// text is the right-hand value ("on", "esp32c3", ...).
 	text func() string
 	// act is called with 0 for space/enter and +/-1 for right/left.
@@ -93,32 +96,39 @@ func Run(st *State, root string) error {
 func (a *app) curPage() *page { return &a.stack[len(a.stack)-1] }
 
 func (a *app) mainPage() page {
-	names := targetNames()
-	pick := func(dir int) func(int) {
-		return func(d int) {
-			if d == 0 {
-				d = dir
-			}
-			i := 0
-			for i < len(names) && names[i] != a.st.Target {
-				i++
-			}
-			if i == len(names) {
-				i = 0
-			}
-			i = (i + d + len(names)) % len(names)
-			a.st.SetTarget(names[i])
-			a.dirty = true
-		}
-	}
 	return page{
 		title: "TinyOS",
 		rows: []row{
 			{
-				label: "Target", kind: kChoice,
+				label: "Target", kind: kSub,
 				text: func() string { return a.st.Target },
-				act:  pick(+1), live: func() bool { return true },
+				act:  func(int) { a.push(a.targetPage()) },
 				help: "Board/emulator the image is built for.  WiFi exists only on esp32c3.",
+			},
+			{
+				label: "Kernel", kind: kSub,
+				text: func() string {
+					return fmt.Sprintf("heap %dK, stack %dK",
+						a.st.heapActual()/1024, a.st.kstackActual()/1024)
+				},
+				act:  func(int) { a.push(a.kernelPage()) },
+				help: "Heap arena, per-CPU kernel stack, process table size and optimisation level.",
+			},
+			{
+				label: "Drivers", kind: kSub,
+				text: func() string {
+					n := len(a.st.DriverChoices())
+					off := 0
+					for range a.st.DriverExclude {
+						off++
+					}
+					if off > 0 {
+						return fmt.Sprintf("%d dirs, %d off", n, off)
+					}
+					return fmt.Sprintf("%d dirs", n)
+				},
+				act:  func(int) { a.push(a.driverPage()) },
+				help: "Optional driver directories for the selected target (display, USB, ...).",
 			},
 			{
 				label: "WiFi support", kind: kBool,
@@ -130,6 +140,7 @@ func (a *app) mainPage() page {
 					}
 				},
 				live: func() bool { return a.st.WiFiCapable() },
+				note: "esp32c3 only",
 				help: "Link the Espressif WiFi/PHY blobs plus the WPA2 supplicant.  Enabling it also adds the driver directory and the [wifi] paths on save.",
 			},
 			{
@@ -142,6 +153,7 @@ func (a *app) mainPage() page {
 					}
 				},
 				live: func() bool { return a.st.WiFi() },
+				note: "needs WiFi",
 				help: "The built-in network stack on /dev/net: ARP, ICMP, DHCP client, DNS, TCP client and the http command.",
 			},
 			{
@@ -162,6 +174,201 @@ func (a *app) mainPage() page {
 				help: "Choose which user/*.c programs and user/<dir> interpreters are packed into the littlefs image.",
 			},
 		},
+	}
+}
+
+func (a *app) targetPage() page {
+	names := targetNames()
+	rows := make([]row, 0, len(names)+1)
+	for _, name := range names {
+		name := name
+		t := build.Targets[name]
+		desc := t.Arch + " / " + t.Board
+		if t.CPUs > 1 {
+			desc += fmt.Sprintf(" / %d cores", t.CPUs)
+		}
+		rows = append(rows, row{
+			label: name, kind: kRadio,
+			text: func() string {
+				if a.st.Target == name {
+					return "(*)"
+				}
+				return "( )"
+			},
+			act: func(int) {
+				a.st.SetTarget(name)
+				a.dirty = true
+				a.pop()
+			},
+			help: desc + " -- " + targetBlurb(name),
+		})
+	}
+	rows = append(rows, row{
+		label: "< Back", kind: kBack,
+		act:  func(int) { a.pop() },
+		help: "Return without changing the target.",
+	})
+	return page{title: "Target", rows: rows}
+}
+
+func targetBlurb(name string) string {
+	switch name {
+	case "x86":
+		return "the PC image, boots in QEMU from a disk with the littlefs image"
+	case "rv32":
+		return "qemu-virt RISC-V, the reference for the MCU ports"
+	case "rv32smp", "rp2350smp", "rp2350rvsmp":
+		return "both cores"
+	case "esp32c3":
+		return "the only WiFi target"
+	case "rp2040":
+		return "Cortex-M0+, no FPU, no hardware divide"
+	case "rp2350":
+		return "Cortex-M33"
+	case "rp2350rv":
+		return "RP2350 Hazard3 (RISC-V)"
+	case "arm":
+		return "qemu mps2-an385 Cortex-M3"
+	}
+	return ""
+}
+
+func (a *app) kernelPage() page {
+	heaps := []int{0, 8 << 10, 12 << 10, 16 << 10, 24 << 10, 32 << 10,
+		48 << 10, 64 << 10, 80 << 10, 96 << 10, 128 << 10, 192 << 10, 256 << 10}
+	stacks := []int{0, 8 << 10, 16 << 10, 32 << 10}
+	procs := []int{0, 8, 12, 16}
+	opts := []string{"", "-O2", "-Oz", "-Os", "-Og"}
+
+	return page{
+		title: "Kernel",
+		rows: []row{
+			{
+				label: "Heap arena", kind: kChoice,
+				text: func() string {
+					if a.st.HeapBytes > 0 {
+						return fmt.Sprintf("%d KiB", a.st.HeapBytes/1024)
+					}
+					return fmt.Sprintf("%d KiB (target)", a.st.HeapDefault()/1024)
+				},
+				act:  cycleInt(heaps, func() int { return a.st.HeapBytes }, func(v int) { a.st.HeapBytes = v; a.dirty = true }),
+				live: func() bool { return true },
+				help: "Kernel malloc arena (TOS_HEAP_BYTES).  littlefs and exec work out of it; 8 KiB is the measured floor on the C3.",
+			},
+			{
+				label: "Kernel stack", kind: kChoice,
+				text: func() string {
+					if a.st.KStack > 0 {
+						return fmt.Sprintf("%d KiB", a.st.KStack/1024)
+					}
+					return fmt.Sprintf("%d KiB (arch)", a.st.KStackDefault()/1024)
+				},
+				act:  cycleInt(stacks, func() int { return a.st.KStack }, func(v int) { a.st.KStack = v; a.dirty = true }),
+				live: func() bool { return true },
+				help: "Per-CPU trap/syscall stack (TOS_KSTACK_BYTES).  The linker pool and kernel/cpu.h read the same value, and cpu_init() panics if they disagree.",
+			},
+			{
+				label: "Max processes", kind: kChoice,
+				text: func() string {
+					if a.st.MaxProcs > 0 {
+						return fmt.Sprintf("%d", a.st.MaxProcs)
+					}
+					return fmt.Sprintf("%d (default)", a.st.ProcsDefault())
+				},
+				act:  cycleInt(procs, func() int { return a.st.MaxProcs }, func(v int) { a.st.MaxProcs = v; a.dirty = true }),
+				live: func() bool { return true },
+				help: "Process table slots (TOS_MAX_PROCS).  Each proc_t is ~792 bytes of .bss; 8 is the practical floor (shell plus one foreground child).",
+			},
+			{
+				label: "Optimisation", kind: kChoice,
+				text: func() string {
+					if a.st.Opt != "" {
+						return a.st.Opt
+					}
+					return "-O2 (default)"
+				},
+				act:  cycleStr(opts, func() string { return a.st.Opt }, func(v string) { a.st.Opt = v; a.dirty = true }),
+				live: func() bool { return true },
+				help: "Compiler optimisation (opt = ... in [build]).  TOS_OPT in the environment still wins; -Oz is smaller, -O2 is faster under QEMU.",
+			},
+			{
+				label: "< Back", kind: kBack,
+				act:  func(int) { a.pop() },
+				help: "Return to the main menu.",
+			},
+		},
+	}
+}
+
+func (a *app) driverPage() page {
+	dirs := a.st.DriverChoices()
+	rows := make([]row, 0, len(dirs)+1)
+	for _, d := range dirs {
+		d := d
+		required := DriverRequired(d)
+		rows = append(rows, row{
+			label: d, kind: kBool,
+			text: func() string {
+				if a.st.DriverExclude[d] {
+					return "off"
+				}
+				return "on"
+			},
+			act: func(int) {
+				if required {
+					return
+				}
+				if a.st.DriverExclude[d] {
+					delete(a.st.DriverExclude, d)
+				} else {
+					a.st.DriverExclude[d] = true
+				}
+				a.dirty = true
+			},
+			live: func() bool { return !required },
+			note: "required",
+			help: "Compile the sources in this directory.  Disabling an optional driver saves its code (and sometimes .bss), but programs that use it stop working.",
+		})
+	}
+	rows = append(rows, row{
+		label: "< Back", kind: kBack,
+		act:  func(int) { a.pop() },
+		help: "Return to the main menu.",
+	})
+	return page{title: "Drivers", rows: rows}
+}
+
+func cycleInt(vals []int, get func() int, set func(int)) func(int) {
+	return func(dir int) {
+		if dir == 0 {
+			dir = 1
+		}
+		cur := 0
+		for i, v := range vals {
+			if v == get() {
+				cur = i
+				break
+			}
+		}
+		cur = (cur + dir + len(vals)) % len(vals)
+		set(vals[cur])
+	}
+}
+
+func cycleStr(vals []string, get func() string, set func(string)) func(int) {
+	return func(dir int) {
+		if dir == 0 {
+			dir = 1
+		}
+		cur := 0
+		for i, v := range vals {
+			if v == get() {
+				cur = i
+				break
+			}
+		}
+		cur = (cur + dir + len(vals)) % len(vals)
+		set(vals[cur])
 	}
 }
 
@@ -376,11 +583,7 @@ func (a *app) render(w, h int) []string {
 
 	help := ""
 	if a.cur < len(p.rows) {
-		r := p.rows[a.cur]
-		help = r.help
-		if r.live != nil && !r.live() && r.kind == kBool && r.label == "WiFi support" {
-			help = "WiFi is only available on esp32c3; change the target first."
-		}
+		help = p.rows[a.cur].help
 	}
 	hl := wrap(help, w)
 	for i := 0; i < 2; i++ {
@@ -408,19 +611,29 @@ func (a *app) rowText(r row, enabled bool) string {
 			box = "[x]"
 		}
 		left = box + " " + r.label
+	case kRadio:
+		mark := "( )"
+		if r.text != nil {
+			mark = r.text()
+		}
+		left = "  " + mark + " " + r.label
 	case kBack:
 		return r.label
 	default:
 		left = "  " + r.label
-	}
-	if r.kind == kChoice && r.text != nil {
-		left = "  " + r.label + "  " + r.text()
+		if r.text != nil {
+			left += "  " + r.text()
+		}
 	}
 	if r.kind == kSub {
 		left += "  >"
 	}
 	if !enabled {
-		left += "  (unavailable)"
+		if r.note != "" {
+			left += "  (" + r.note + ")"
+		} else {
+			left += "  (unavailable)"
+		}
 	}
 	return left
 }

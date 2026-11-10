@@ -34,6 +34,11 @@ type State struct {
 	Target        string
 	Features      map[string]bool
 	Drivers       []string
+	DriverExclude map[string]bool
+	HeapBytes     int
+	MaxProcs      int
+	KStack        int
+	Opt           string
 	WiFiLibDir    string
 	WiFiLDScript  string
 	WiFiLDSymbol  string
@@ -49,6 +54,7 @@ func Load(c *build.Config, path string) *State {
 		Path:          path,
 		Target:        "x86",
 		Features:      map[string]bool{},
+		DriverExclude: map[string]bool{},
 		Exclude:       map[string]bool{},
 		SourceExclude: map[string]bool{},
 	}
@@ -62,6 +68,13 @@ func Load(c *build.Config, path string) *State {
 		s.Features[strings.ToLower(k)] = v
 	}
 	s.Drivers = append([]string{}, c.Drivers...)
+	for _, d := range c.DriverExclude {
+		s.DriverExclude[filepath.ToSlash(filepath.Clean(d))] = true
+	}
+	s.HeapBytes = c.HeapBytes
+	s.MaxProcs = c.MaxProcs
+	s.KStack = c.KStack
+	s.Opt = c.Opt
 	s.WiFiLibDir = c.WiFiLibDir
 	s.WiFiLDScript = c.WiFiLDScript
 	s.WiFiLDSymbol = c.WiFiLDSymbol
@@ -89,6 +102,83 @@ func (s *State) SetFeature(name string, on bool) {
 func (s *State) WiFi() bool    { return s.Features["wifi"] }
 func (s *State) Net() bool     { return s.Features["net"] }
 func (s *State) SoftMin() bool { return s.Features["softfloat-min"] }
+
+// DriverChoices lists the driver directories that apply to the current
+// target: its board defaults plus whatever the config added.  The WiFi driver
+// is controlled by the WiFi feature and is not shown here.
+func (s *State) DriverChoices() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(d string) {
+		d = filepath.ToSlash(filepath.Clean(d))
+		if d == wifiDriverDir || seen[d] {
+			return
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	if t, ok := build.Targets[s.Target]; ok {
+		for _, d := range t.Drivers {
+			add(d)
+		}
+	}
+	for _, d := range s.Drivers {
+		add(d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DriverRequired marks the directories the board cannot boot or talk to the
+// host without: GPIO, the console serial/USB and the SPI bus the panel sits
+// on.  Everything else (the LCD driver, config-added directories) is optional.
+func DriverRequired(d string) bool {
+	d = filepath.ToSlash(filepath.Clean(d))
+	for _, p := range []string{"drivers/gpio/", "drivers/serial/",
+		"drivers/usb/", "drivers/spi/"} {
+		if strings.HasPrefix(d, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *State) target() build.Target { return build.Targets[s.Target] }
+
+func (s *State) HeapDefault() int {
+	if h := s.target().HeapBytes; h > 0 {
+		return h
+	}
+	return 32768
+}
+
+func (s *State) KStackDefault() int {
+	if s.target().Arch == "x86" {
+		return 32768
+	}
+	return 16384
+}
+
+func (s *State) ProcsDefault() int {
+	if p := s.target().MaxProcs; p > 0 {
+		return p
+	}
+	return 16
+}
+
+func (s *State) heapActual() int {
+	if s.HeapBytes > 0 {
+		return s.HeapBytes
+	}
+	return s.HeapDefault()
+}
+
+func (s *State) kstackActual() int {
+	if s.KStack > 0 {
+		return s.KStack
+	}
+	return s.KStackDefault()
+}
 
 // SetTarget keeps the feature set consistent with what the target supports:
 // WiFi only exists on the ESP32-C3 port, and net needs WiFi.
@@ -170,6 +260,18 @@ func (s *State) Render() string {
 	b.WriteString("# TinyOS build configuration -- written by `tos menuconfig`\n")
 	b.WriteString("[build]\n")
 	b.WriteString("target = " + s.Target + "\n")
+	if s.HeapBytes > 0 {
+		b.WriteString(fmt.Sprintf("heap = %d\n", s.HeapBytes))
+	}
+	if s.MaxProcs > 0 {
+		b.WriteString(fmt.Sprintf("max_procs = %d\n", s.MaxProcs))
+	}
+	if s.KStack > 0 {
+		b.WriteString(fmt.Sprintf("kstack = %d\n", s.KStack))
+	}
+	if s.Opt != "" {
+		b.WriteString("opt = " + s.Opt + "\n")
+	}
 
 	features := make([]string, 0, len(s.Features))
 	for k, on := range s.Features {
@@ -186,7 +288,7 @@ func (s *State) Render() string {
 	}
 
 	drivers := s.EffectiveDrivers()
-	if len(drivers) > 0 {
+	if len(drivers) > 0 || len(s.DriverExclude) > 0 {
 		b.WriteString("\n[drivers]\n")
 		seen := map[string]int{}
 		for _, d := range drivers {
@@ -196,6 +298,14 @@ func (s *State) Render() string {
 			}
 			seen[filepath.Base(filepath.Clean(d))]++
 			b.WriteString(key + " = " + filepath.ToSlash(d) + "\n")
+		}
+		if len(s.DriverExclude) > 0 {
+			names := make([]string, 0, len(s.DriverExclude))
+			for d := range s.DriverExclude {
+				names = append(names, filepath.ToSlash(d))
+			}
+			sort.Strings(names)
+			b.WriteString("exclude = " + strings.Join(names, ",") + "\n")
 		}
 	}
 

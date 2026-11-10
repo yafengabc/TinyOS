@@ -71,18 +71,18 @@ func TestKeyDrivesState(t *testing.T) {
 	a := &app{st: st}
 	a.stack = []page{a.mainPage()}
 
-	/* rows: 0 target, 1 wifi, 2 net, 3 soft-float, 4 user programs */
-	a.cur = 1
+	/* rows: 0 target, 1 kernel, 2 drivers, 3 wifi, 4 net, 5 float, 6 programs */
+	a.cur = 3
 	a.handle([]byte{' '}) /* toggle wifi */
 	if !st.WiFi() {
 		t.Fatal("space did not enable wifi")
 	}
-	a.cur = 2
+	a.cur = 4
 	a.handle([]byte{' '})
 	if !st.Net() {
 		t.Fatal("space did not enable net")
 	}
-	a.cur = 1
+	a.cur = 3
 	a.handle([]byte{' '}) /* wifi off implies net off */
 	if st.WiFi() || st.Net() {
 		t.Fatal("net stayed on after wifi was disabled")
@@ -91,10 +91,66 @@ func TestKeyDrivesState(t *testing.T) {
 		t.Fatal("edits did not mark the config dirty")
 	}
 
-	a.cur = 3
+	a.cur = 5
 	a.handle([]byte{' '})
 	if !st.SoftMin() {
 		t.Fatal("space did not enable softfloat-min")
+	}
+}
+
+func TestSubmenus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.conf")
+	st := Load(nil, path)
+	st.SetTarget("esp32c3")
+	a := &app{st: st, progs: []string{"hello"}}
+	a.stack = []page{a.mainPage()}
+
+	/* Target submenu: pick rp2350. */
+	a.push(a.targetPage())
+	found := false
+	for i, r := range a.curPage().rows {
+		if r.label == "rp2350" {
+			a.cur = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("rp2350 missing from the target list")
+	}
+	a.handle([]byte{'\r'})
+	if st.Target != "rp2350" {
+		t.Fatalf("target = %q", st.Target)
+	}
+	if len(a.stack) != 1 {
+		t.Fatalf("target page did not close: depth %d", len(a.stack))
+	}
+
+	/* Kernel page: cycle the heap to the next value. */
+	a.push(a.kernelPage())
+	a.cur = 0
+	before := st.HeapBytes
+	a.handle([]byte{' '})
+	if st.HeapBytes == before {
+		t.Fatal("heap did not change")
+	}
+
+	/* Drivers page: turn off the display driver on rp2350. */
+	a.push(a.driverPage())
+	found = false
+	for i, r := range a.curPage().rows {
+		if strings.Contains(r.label, "display") {
+			a.cur = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("display driver missing on rp2350")
+	}
+	a.handle([]byte{' '})
+	if len(st.DriverExclude) == 0 {
+		t.Fatal("driver exclude not recorded")
 	}
 }
 

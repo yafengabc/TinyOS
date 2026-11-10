@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -36,6 +37,12 @@ type Config struct {
 	Target  string
 	Features map[string]bool
 	Drivers []string
+	DriverExclude []string
+	// Kernel knobs.  Zero means "use the target's default".
+	HeapBytes int
+	MaxProcs  int
+	KStack    int
+	Opt       string
 	WiFiLibDir   string
 	WiFiLDScript string
 	WiFiLDSymbol string
@@ -61,6 +68,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if s := sections["build"]; s != nil {
 		c.Target = strings.TrimSpace(s["target"])
+		c.HeapBytes = parseSize(s["heap"])
+		c.MaxProcs = parseSize(s["max_procs"])
+		c.KStack = parseSize(s["kstack"])
+		c.Opt = strings.TrimSpace(s["opt"])
 		if raw := s["features"]; raw != "" {
 			for _, f := range splitList(raw) {
 				c.Features[strings.ToLower(f)] = true
@@ -77,6 +88,10 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
+			if name == "exclude" {
+				c.DriverExclude = append(c.DriverExclude, splitList(s[name])...)
+				continue
+			}
 			for _, d := range splitList(s[name]) {
 				if d != "" {
 					c.Drivers = append(c.Drivers, d)
@@ -159,6 +174,29 @@ func truthy(s string) bool {
 	return false
 }
 
+// parseSize reads "81920", "80k" or "1m" as bytes (or a plain count for
+// max_procs).  Anything unparsable is 0, which means "use the default".
+func parseSize(s string) int {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return 0
+	}
+	mul := 1
+	switch {
+	case strings.HasSuffix(s, "k"):
+		mul = 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "m"):
+		mul = 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n * mul
+}
+
 // ApplyConfig copies the parsed values into the builder and resolves paths
 // against the tree root.  A target already chosen on the command line wins
 // over the config file.
@@ -175,6 +213,10 @@ func (b *Builder) ApplyConfig(c *Config) error {
 		b.Target = t
 	}
 	b.Features = c.Features
+	b.HeapBytes = c.HeapBytes
+	b.MaxProcs = c.MaxProcs
+	b.KStack = c.KStack
+	b.Opt = c.Opt
 	b.ensureDriverDirs()
 	for _, d := range c.Drivers {
 		p := b.abs(d)
@@ -184,6 +226,19 @@ func (b *Builder) ApplyConfig(c *Config) error {
 		if !containsString(b.DriverDirs, p) {
 			b.DriverDirs = append(b.DriverDirs, p)
 		}
+	}
+	if len(c.DriverExclude) > 0 {
+		drop := map[string]bool{}
+		for _, d := range c.DriverExclude {
+			drop[filepath.Clean(b.abs(d))] = true
+		}
+		kept := b.DriverDirs[:0]
+		for _, d := range b.DriverDirs {
+			if !drop[filepath.Clean(d)] {
+				kept = append(kept, d)
+			}
+		}
+		b.DriverDirs = kept
 	}
 	b.UserExclude = c.UserExclude
 	b.SourceExclude = map[string]bool{}

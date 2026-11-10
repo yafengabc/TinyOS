@@ -221,6 +221,11 @@ type Builder struct {
 	WiFiLDScript string
 	WiFiLDSymbol string
 	LDExtra      []string
+	// Config overrides for the kernel; 0/"" keeps the target's default.
+	HeapBytes int
+	MaxProcs  int
+	KStack    int
+	Opt       string
 
 	mu sync.Mutex
 }
@@ -275,6 +280,9 @@ func (b *Builder) runTool(name string, args []string, label string) error {
 
 func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	opt := os.Getenv("TOS_OPT")
+	if opt == "" {
+		opt = b.Opt
+	}
 	if opt == "" {
 		opt = "-O2"
 	}
@@ -334,10 +342,21 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	}
 
 	// Kernel heap arena size: .bss on every board, so the board decides how
-	// much of its SRAM the allocator may claim.
-	if b.Target.HeapBytes > 0 {
+	// much of its SRAM the allocator may claim.  The config can override it.
+	heap := b.HeapBytes
+	if heap == 0 {
+		heap = b.Target.HeapBytes
+	}
+	if heap > 0 {
 		archFlags = append(archFlags,
-			fmt.Sprintf("-DTOS_HEAP_BYTES=%d", b.Target.HeapBytes))
+			fmt.Sprintf("-DTOS_HEAP_BYTES=%d", heap))
+	}
+
+	// Kernel stack per CPU.  cpu.h and the arch start.S must agree; both read
+	// the same define, so the config value cannot drift between them.
+	if b.KStack > 0 {
+		archFlags = append(archFlags,
+			fmt.Sprintf("-DTOS_KSTACK_BYTES=%d", b.KStack))
 	}
 
 	// XIP: the boot stub needs the flash offset to map the IROM window to.
@@ -348,9 +367,13 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 
 	// Process table size (kernel/process.c).  Left undefined on boards that
 	// can run 16 or more tasks, so they keep tty-independent defaults.
-	if b.Target.MaxProcs > 0 {
+	procs := b.MaxProcs
+	if procs == 0 {
+		procs = b.Target.MaxProcs
+	}
+	if procs > 0 {
 		archFlags = append(archFlags,
-			fmt.Sprintf("-DTOS_MAX_PROCS=%d", b.Target.MaxProcs))
+			fmt.Sprintf("-DTOS_MAX_PROCS=%d", procs))
 	}
 
 	// The RP2350 RISC-V image is linked in flash with .data in SRAM, but
