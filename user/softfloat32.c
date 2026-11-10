@@ -107,9 +107,16 @@ static uint32_t sf_unpack(uint32_t u, int *ep)
 {
     int e = (int)((u >> 23) & 0xFF);
     uint32_t m = u & F_FRAC;
+#ifndef TOS_SOFTFLOAT_MIN
     int sh;
+#endif
 
     if (e == 0) {
+#ifdef TOS_SOFTFLOAT_MIN
+        /* No subnormals: everything below 2^-126 is zero. */
+        *ep = 0;
+        return 0;
+#else
         *ep = 0;
         if (m == 0)
             return 0;
@@ -120,7 +127,14 @@ static uint32_t sf_unpack(uint32_t u, int *ep)
         }
         *ep = 1 - sh;
         return m << 3;
+#endif
     }
+#ifdef TOS_SOFTFLOAT_MIN
+    if (e == 0xFF) {            /* no NaN/Inf: read as the largest finite */
+        *ep = 0xFE;
+        return 0x7FFFFF8u;
+    }
+#endif
     *ep = e;
     return (m | 0x00800000u) << 3;
 }
@@ -151,6 +165,13 @@ static float sf_finish(uint32_t v, int e, int neg)
     sticky = v & 1u;
     frac = v >> 3;              /* 24-bit significand, leading one at bit 23 */
 
+#ifdef TOS_SOFTFLOAT_MIN
+    /* Saturation instead of Inf; underflow is zero. */
+    if (e >= 0xFF)
+        return from_bits((neg ? F_SIGN : 0u) | 0x7F7FFFFFu);
+    if (e <= 0)
+        return from_bits(sf_zero(neg));
+#else
     if (e >= 0xFF)
         return from_bits(sf_inf(neg));
     if (e <= 0) {
@@ -171,6 +192,7 @@ static float sf_finish(uint32_t v, int e, int neg)
         /* w == 0x800000 carries into exponent 1, the smallest normal. */
         return from_bits((neg ? F_SIGN : 0u) | w);
     }
+#endif
     if (guard && (round || sticky || (frac & 1u))) {
         frac++;
         if (frac == 0x01000000u) {
@@ -178,8 +200,13 @@ static float sf_finish(uint32_t v, int e, int neg)
             e++;
         }
     }
+#ifdef TOS_SOFTFLOAT_MIN
+    if (e >= 0xFF)
+        return from_bits((neg ? F_SIGN : 0u) | 0x7F7FFFFFu);
+#else
     if (e >= 0xFF)
         return from_bits(sf_inf(neg));
+#endif
     return from_bits((neg ? F_SIGN : 0u) | ((uint32_t)e << 23) |
                      (frac & F_FRAC));
 }
@@ -192,13 +219,16 @@ static float sf_addsub(float fa, float fb, int sub)
     uint32_t va, vb, sum;
     int ea, eb, e, na, nb, neg;
 
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(ua) || sf_is_nan(ub))
         return from_bits(F_QNAN);
+#endif
     if (sub)
         ub ^= F_SIGN;
     na = (int)(ua >> 31);
     nb = (int)(ub >> 31);
 
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_inf(ua) || sf_is_inf(ub)) {
         if (sf_is_inf(ua) && sf_is_inf(ub)) {
             if (na != nb)
@@ -208,6 +238,7 @@ static float sf_addsub(float fa, float fb, int sub)
         neg = sf_is_inf(ua) ? na : nb;
         return from_bits(sf_inf(neg));
     }
+#endif
     if (sf_is_zero(ua) && sf_is_zero(ub))
         return from_bits(sf_zero(sub && na == nb));
     if (sf_is_zero(ua))
@@ -260,14 +291,18 @@ float __mulsf3(float a, float b)
     uint32_t ma, mb, hi, lo, v, lost;
     int ea, eb, e, s, neg, top;
 
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(ua) || sf_is_nan(ub))
         return from_bits(F_QNAN);
+#endif
     neg = (int)((ua ^ ub) >> 31);
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_inf(ua) || sf_is_inf(ub)) {
         if (sf_is_zero(ua) || sf_is_zero(ub))
             return from_bits(F_QNAN);           /* inf * 0 */
         return from_bits(sf_inf(neg));
     }
+#endif
     if (sf_is_zero(ua) || sf_is_zero(ub))
         return from_bits(sf_zero(neg));
 
@@ -305,9 +340,12 @@ float __divsf3(float a, float b)
     uint32_t ma, mb, q, r, v, tmp;
     int ea, eb, e, t, neg, msb;
 
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(ua) || sf_is_nan(ub))
         return from_bits(F_QNAN);
+#endif
     neg = (int)((ua ^ ub) >> 31);
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_inf(ua)) {
         if (sf_is_inf(ub))
             return from_bits(F_QNAN);           /* inf / inf */
@@ -320,6 +358,13 @@ float __divsf3(float a, float b)
             return from_bits(F_QNAN);           /* 0 / 0 */
         return from_bits(sf_inf(neg));
     }
+#else
+    if (sf_is_zero(ub)) {
+        if (sf_is_zero(ua))
+            return from_bits(sf_zero(neg));
+        return from_bits((neg ? F_SIGN : 0u) | 0x7F7FFFFFu);
+    }
+#endif
     if (sf_is_zero(ua))
         return from_bits(sf_zero(neg));
 
@@ -363,8 +408,10 @@ static int sf_cmp(float a, float b)
     uint32_t ua = to_bits(a), ub = to_bits(b);
     int sa, sb, c;
 
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(ua) || sf_is_nan(ub))
         return 0;
+#endif
     if ((ua << 1) == 0 && (ub << 1) == 0)
         return 0;                               /* -0 == +0 */
     sa = (int)(ua >> 31);
@@ -379,15 +426,19 @@ static int sf_cmp(float a, float b)
 
 int __eqsf2(float a, float b)
 {
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(to_bits(a)) || sf_is_nan(to_bits(b)))
         return 1;
+#endif
     return sf_cmp(a, b) == 0 ? 0 : 1;
 }
 
 int __nesf2(float a, float b)
 {
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(to_bits(a)) || sf_is_nan(to_bits(b)))
         return 0;
+#endif
     return sf_cmp(a, b) == 0 ? 0 : 1;
 }
 
@@ -396,21 +447,31 @@ int __gtsf2(float a, float b) { return sf_cmp(a, b); }
 
 int __lesf2(float a, float b)
 {
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(to_bits(a)) || sf_is_nan(to_bits(b)))
         return 1;
+#endif
     return sf_cmp(a, b) <= 0 ? -1 : 1;
 }
 
 int __gesf2(float a, float b)
 {
+#ifndef TOS_SOFTFLOAT_MIN
     if (sf_is_nan(to_bits(a)) || sf_is_nan(to_bits(b)))
         return -1;
+#endif
     return sf_cmp(a, b) >= 0 ? 1 : -1;
 }
 
 int __unordsf2(float a, float b)
 {
+#ifdef TOS_SOFTFLOAT_MIN
+    (void)a;
+    (void)b;
+    return 0;
+#else
     return (sf_is_nan(to_bits(a)) || sf_is_nan(to_bits(b))) ? 1 : 0;
+#endif
 }
 
 /* ---- float <-> integer ------------------------------------------------ */

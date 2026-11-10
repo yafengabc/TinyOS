@@ -36,6 +36,11 @@ exclude = ping,net,dhcp
   API (`user/fix16.c`), the small/fast path (Q16.16, +/-32767.99998, step
   1/65536).  There is no automatic float-on-fixed-point emulation, so neither
   mode pays a per-operation conversion.
+- `[features] softfloat-min = true` goes one step further: the same runtime
+  compiled with `TOS_SOFTFLOAT_MIN`, which drops subnormals (flush to zero)
+  and NaN/Inf (inputs clamp to the largest finite value, overflow and x/0
+  saturate).  It saves another ~300 bytes; use plain `softfloat` when the
+  program depends on those IEEE corner cases.
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
   target's board-default drivers (`Targets[..].Drivers`).
@@ -53,6 +58,7 @@ Examples:
 | `configs/esp32c3.conf` | C3 kernel only, no WiFi/net commands |
 | `configs/esp32c3-wifi.conf` | C3 + WiFi + DHCP/ICMP, all commands |
 | `configs/esp32c3-wifi-soft.conf` | the same, plus the 32-bit soft-float runtime |
+| `configs/esp32c3-wifi-softmin.conf` | soft float without NaN/Inf/subnormals |
 | `configs/esp32c3-wifi-nonet.conf` | C3 + WiFi association only |
 | `configs/rp2040.conf` | RP2040, WiFi commands excluded |
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |

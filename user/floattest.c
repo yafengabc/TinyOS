@@ -38,6 +38,15 @@ int main(void)
 #endif
     int i, t0, t1;
 
+    puts("float backend: ");
+#if defined(TOS_SOFTFLOAT_MIN)
+    puts("IEEE binary32 (min)\n");
+#elif defined(TOS_SOFTFLOAT)
+    puts("IEEE binary32\n");
+#else
+    puts("fix16 only\n");
+#endif
+
     puts("value\tfix16");
 #if defined(TOS_SOFTFLOAT)
     puts("\tfloat");

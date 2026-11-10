@@ -1108,7 +1108,7 @@ func (b *Builder) buildUser() ([]string, error) {
 	// them.
 	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
 		"aeabi.c", "fix16.c", "floatprint.c", "faeabi.c"}
-	if b.feature("softfloat") {
+	if b.feature("softfloat") || b.feature("softfloat-min") {
 		common = append(common, "softfloat32.c")
 	}
 
