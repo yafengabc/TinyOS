@@ -40,9 +40,20 @@ int unlink(const char *path)
     return tos_sys1(SYS_UNLINK, (int)path);
 }
 
-int readdir(int index, char *name, int len)
+int readdir_index(int index, char *name, int len)
 {
     return tos_sys3(SYS_READDIR, index, (int)name, len);
+}
+
+int readdir_path(const char *path, int index, char *name, int len)
+{
+    struct tos_dirent_req req;
+
+    req.path  = path;
+    req.index = index;
+    req.name  = name;
+    req.cap   = len;
+    return tos_sys1(SYS_READDIR_AT, (int)&req);
 }
 
 int stat(const char *path, struct stat *st)

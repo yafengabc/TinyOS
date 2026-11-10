@@ -125,7 +125,30 @@ struct stat {
 #define SEEK_CUR 1
 #define SEEK_END 2
 
-int  readdir(int index, char *name, int len);
+/* Raw enumeration: entry `index` of the cwd, or of `path` for the _path
+ * variant.  Both return the bytes written including the NUL, 0 at the end,
+ * -1 on a bad argument.  The path is resolved when the call runs; a
+ * directory stream needs it resolved once, in opendir(), so a later chdir()
+ * does not move the stream. */
+int  readdir_index(int index, char *name, int len);
+int  readdir_path(const char *path, int index, char *name, int len);
+
+/* Directory streams, POSIX shaped: no directory fd is opened, and d_ino is 0
+ * because this filesystem has no inode numbers.  d_type is TOS_FTYPE_* (not
+ * the DT_* numbers), filled by stat()ing the entry under the stream's own
+ * path so a relative opendir() survives a chdir() too.  Four streams can be
+ * open at once and none of them needs a heap. */
+struct dirent {
+    unsigned      d_ino;      /* always 0                              */
+    unsigned char d_type;     /* TOS_FTYPE_REG / _DIR / _CHR           */
+    char          d_name[64];
+};
+
+typedef struct DIR DIR;
+
+DIR           *opendir(const char *path);
+struct dirent *readdir(DIR *d);
+int            closedir(DIR *d);
 int  stat(const char *path, struct stat *st);
 /* The same description for a descriptor that is already open. */
 int  fstat(int fd, struct stat *st);

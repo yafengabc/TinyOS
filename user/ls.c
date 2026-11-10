@@ -48,7 +48,7 @@ int main(int argc, char **argv)
     char name[64];
     struct stat es;
     for (int i = 0;; i++) {
-        int n = readdir(i, name, sizeof(name));
+        int n = readdir_index(i, name, sizeof(name));
         if (n <= 0)
             break;
         if (stat(name, &es) != 0)

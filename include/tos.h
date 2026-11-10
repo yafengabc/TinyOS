@@ -39,6 +39,17 @@
 #define SYS_LSEEK    33  /* lseek(fd, off, whence) -> new pos    */
 #define SYS_FSTAT    34  /* fstat(fd, &st) -> 0 or -1            */
 #define SYS_DUP      35  /* dup(fd) -> lowest free fd or -1      */
+#define SYS_READDIR_AT 36 /* readdir_at(&req) -> name length or 0 */
+
+/* SYS_READDIR_AT: one name from `path`, without changing the cwd.  The cwd
+ * version (SYS_READDIR) is what `ls` used to chdir for; userland's
+ * opendir()/readdir() keeps one of these per open stream instead. */
+struct tos_dirent_req {
+    const char *path;   /* directory, resolved against the cwd    */
+    int         index;  /* 0-based entry number                   */
+    char       *name;   /* receives the name, NUL terminated      */
+    int         cap;    /* bytes available at name                */
+};
 
 /* Signals.  There are no handlers: a signal either kills the task or parks
  * it, both decided by the kernel. */
@@ -54,6 +65,7 @@
 #define TOS_FTYPE_REG 0   /* regular file                        */
 #define TOS_FTYPE_DIR 1   /* directory                           */
 #define TOS_FTYPE_CHR 2   /* character device (/dev, /proc)      */
+#define TOS_FTYPE_UNKNOWN 255 /* readdir() could not stat the entry */
 
 /* Pin modes for gpio_mode(), and the op codes the two multiplexed
  * peripheral syscalls take.  These are ABI: the kernel's periph.h maps them

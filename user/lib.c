@@ -362,3 +362,110 @@ void free(void *p)
 {
     (void)p; /* bump allocator, nothing to do */
 }
+
+/* ---- directory streams ------------------------------------------------ */
+
+struct DIR {
+    char          path[64];   /* absolute, so a later chdir() cannot move it */
+    int           index;
+    int           used;
+    struct dirent ent;
+};
+
+/* A stream is a path and a cursor, so the pool costs ~150 bytes per slot and
+ * no user heap: opendir() must work for a program that never called
+ * malloc().  The array is in .bss and -fdata-sections/--gc-sections drops it
+ * from every program that does not open a directory. */
+#define DIR_STREAMS 4
+static struct DIR dir_pool[DIR_STREAMS];
+
+/* Join `dir` and `name`.  A path is at most 63 bytes and so is a name, which
+ * is why readdir() can stat an entry in one 128-byte buffer. */
+static int dir_join(const char *dir, const char *name, char *out, int cap)
+{
+    int dlen = (int)strlen(dir);
+    int nlen = (int)strlen(name);
+    int sep  = (dlen > 0 && dir[dlen - 1] == '/') ? 0 : 1;
+
+    if (dlen + sep + nlen + 1 > cap)
+        return -1;
+    memcpy(out, dir, (size_t)dlen);
+    if (sep)
+        out[dlen] = '/';
+    memcpy(out + dlen + sep, name, (size_t)nlen + 1);
+    return 0;
+}
+
+DIR *opendir(const char *path)
+{
+    struct stat st;
+    DIR *d = 0;
+
+    if (!path || stat(path, &st) < 0 || st.type != TOS_FTYPE_DIR)
+        return 0;
+    for (int i = 0; i < DIR_STREAMS; i++)
+        if (!dir_pool[i].used) {
+            d = &dir_pool[i];
+            break;
+        }
+    if (!d)
+        return 0;           /* four streams already open */
+    d->used  = 1;
+    d->index = 0;
+
+    /* Resolve the path now.  The kernel would resolve it on every readdir()
+     * call instead, and then a chdir() between calls would move the stream. */
+    if (path[0] == '/') {
+        int n = (int)strlen(path);
+
+        if (n >= (int)sizeof(d->path)) {
+            d->used = 0;
+            return 0;
+        }
+        memcpy(d->path, path, (size_t)n + 1);
+    } else {
+        char cwd[64];
+
+        if (getcwd(cwd, sizeof(cwd)) <= 0 ||
+            dir_join(cwd, path, d->path, (int)sizeof(d->path)) < 0) {
+            d->used = 0;
+            return 0;
+        }
+    }
+    d->ent.d_ino = 0;
+    d->ent.d_type = TOS_FTYPE_UNKNOWN;
+    d->ent.d_name[0] = '\0';
+    return d;
+}
+
+struct dirent *readdir(DIR *d)
+{
+    char full[128];
+    struct stat st;
+    int n;
+
+    if (!d || !d->used)
+        return 0;
+    n = readdir_path(d->path, d->index, d->ent.d_name,
+                     (int)sizeof(d->ent.d_name));
+    if (n <= 0)
+        return 0;
+    d->index++;
+
+    /* The entry name is relative to the stream's directory, not the cwd, so
+     * the type comes from a stat() under that path.  A file removed between
+     * the two calls keeps TOS_FTYPE_UNKNOWN rather than a wrong letter. */
+    d->ent.d_type = TOS_FTYPE_UNKNOWN;
+    if (dir_join(d->path, d->ent.d_name, full, (int)sizeof(full)) == 0 &&
+        stat(full, &st) == 0)
+        d->ent.d_type = st.type;
+    return &d->ent;
+}
+
+int closedir(DIR *d)
+{
+    if (!d || !d->used)
+        return -1;
+    d->used = 0;
+    return 0;
+}

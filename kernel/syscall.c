@@ -204,6 +204,29 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
     return r;
 }
 
+/* Name of entry `index` in `dir`, for the two readdir syscalls.  /dev and
+ * /proc are enumerated from the device table; anything else is littlefs.
+ * The root is both, so its device directories ("dev", "proc") come first and
+ * the littlefs files follow - that split needs both enumerators, which is
+ * why it lives here and not inside either of them.
+ *
+ * Both enumerators copy into `name` under the filesystem lock; returning a
+ * pointer into a shared buffer would let another CPU rewrite it before the
+ * caller's copy. */
+static int list_name_at(const char *dir, uint32_t index, char *name, int cap)
+{
+    int dc = devfs_dir_count(dir);
+
+    if (dc >= 0) {
+        if ((int)index < dc)
+            return devfs_dir_name(dir, index, name, cap);
+        if (!strcmp(dir, "/"))
+            return ramdisk_list_name("/", index - (uint32_t)dc, name, cap);
+        return 0;
+    }
+    return ramdisk_list_name(dir, index, name, cap);
+}
+
 /* Every handler returns the frame to resume: most hand back the one that
  * came in, but a syscall that blocks gives the CPU to another task and
  * returns its frame instead. */
@@ -305,31 +328,12 @@ static regs_t *dispatch(regs_t *r)
         uint32_t index = sc.a0, ptr = sc.a1, len = sc.a2;
         char dir[64];
         char name[96];
-        int dc, n = 0;
+        int n;
 
         strncpy(dir, process_cwd_str(), sizeof(dir) - 1);
         dir[sizeof(dir) - 1] = '\0';
 
-        /* /dev and /proc are enumerated from the device table; anything else
-         * is littlefs.  The root is both, so its device directories ("dev",
-         * "proc") come first and the littlefs files follow - that split is
-         * the one thing here that needs both enumerators, which is why it
-         * lives in the syscall and not inside either of them.
-         *
-         * Both enumerators copy into `name` under the filesystem lock; this
-         * used to hand back a pointer into a shared buffer, which another CPU
-         * could rewrite between the call and the memcpy below. */
-        dc = devfs_dir_count(dir);
-        if (dc >= 0) {
-            if ((int)index < dc)
-                n = devfs_dir_name(dir, index, name, (int)sizeof(name));
-            else if (!strcmp(dir, "/"))
-                n = ramdisk_list_name("/", index - (uint32_t)dc, name,
-                                      (int)sizeof(name));
-        } else {
-            n = ramdisk_list_name(dir, index, name, (int)sizeof(name));
-        }
-
+        n = list_name_at(dir, index, name, (int)sizeof(name));
         if (n <= 0) {
             plat_frame_set_ret(r, 0);
             return r;
@@ -343,6 +347,41 @@ static regs_t *dispatch(regs_t *r)
         }
         memcpy((void *)ptr, name, copy);
         ((char *)ptr)[copy - 1] = '\0';
+        plat_frame_set_ret(r, copy);
+        return r;
+    }
+
+    case SYS_READDIR_AT: {
+        struct tos_dirent_req req;
+        char upath[64], path[64], name[96];
+        uint32_t copy;
+        int n;
+
+        if (!process_user_ok(sc.a0, sizeof(req))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        memcpy(&req, (void *)sc.a0, sizeof(req));
+        if (req.index < 0 || req.cap <= 0 ||
+            !copy_user_string(upath, (uint32_t)req.path, sizeof(upath))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        resolve_path(upath, path, sizeof(path));
+        n = list_name_at(path, (uint32_t)req.index, name, (int)sizeof(name));
+        if (n <= 0) {
+            plat_frame_set_ret(r, 0);
+            return r;
+        }
+        copy = (uint32_t)n + 1;
+        if (copy > (uint32_t)req.cap)
+            copy = (uint32_t)req.cap;
+        if (!process_user_ok((uint32_t)req.name, copy)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        memcpy((void *)req.name, name, copy);
+        ((char *)req.name)[copy - 1] = '\0';
         plat_frame_set_ret(r, copy);
         return r;
     }
