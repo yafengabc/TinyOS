@@ -119,8 +119,19 @@ struct stat {
     uint8_t  type;   /* TOS_FTYPE_* */
 };
 
+/* lseek() whence.  Positions are kept per descriptor, so two descriptors on
+ * the same file (dup, or the same path opened twice) move independently. */
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 int  readdir(int index, char *name, int len);
 int  stat(const char *path, struct stat *st);
+/* The same description for a descriptor that is already open. */
+int  fstat(int fd, struct stat *st);
+int  lseek(int fd, int off, int whence);
+/* Lowest free descriptor sharing the same file; -1 if the table is full. */
+int  dup(int fd);
 
 /* Kernel heap statistics returned by meminfo(). */
 struct meminfo {

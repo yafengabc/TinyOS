@@ -121,6 +121,17 @@ int  process_pipe(int *fds);
  * gets its own per-open state, a pipe shares its end by refcount. */
 int  process_dup2(int oldfd, int newfd);
 
+/* The same copy, onto the lowest free descriptor. */
+int  process_dup(int fd);
+
+/* Move a regular file's position.  -1 for a pipe, a device or a position
+ * outside [0, size] (there is no ESPIPE/errno in this ABI). */
+int  process_lseek(int fd, int off, int whence);
+
+/* Describe an open descriptor the way stat() describes its path: size and
+ * TOS_FTYPE_* type.  Console, pipe, /dev and /proc read as TOS_FTYPE_CHR. */
+int  process_fstat(int fd, uint32_t *size, uint8_t *type);
+
 /* Configuration on an open character device (pin direction, ADC metadata).
  * -1 for anything that is not a device, or a device without an ioctl. */
 int  process_ioctl(int fd, int cmd, int arg);

@@ -50,6 +50,21 @@ int stat(const char *path, struct stat *st)
     return tos_sys2(SYS_STAT, (int)path, (int)st);
 }
 
+int fstat(int fd, struct stat *st)
+{
+    return tos_sys2(SYS_FSTAT, fd, (int)st);
+}
+
+int lseek(int fd, int off, int whence)
+{
+    return tos_sys3(SYS_LSEEK, fd, off, whence);
+}
+
+int dup(int fd)
+{
+    return tos_sys1(SYS_DUP, fd);
+}
+
 int meminfo(struct meminfo *m)
 {
     return tos_sys1(SYS_MEMINFO, (int)m);

@@ -598,6 +598,31 @@ static regs_t *dispatch(regs_t *r)
         plat_frame_set_ret(r, (uint32_t)process_dup2((int)sc.a0, (int)sc.a1));
         return r;
 
+    case SYS_DUP:
+        plat_frame_set_ret(r, (uint32_t)process_dup((int)sc.a0));
+        return r;
+
+    case SYS_LSEEK:
+        plat_frame_set_ret(r, (uint32_t)process_lseek((int)sc.a0, (int)sc.a1,
+                                                      (int)sc.a2));
+        return r;
+
+    case SYS_FSTAT: {
+        uint32_t ptr = sc.a1;          /* struct stat * in user space */
+        uint32_t size = 0;
+        uint8_t  type = 0;
+
+        if (process_fstat((int)sc.a0, &size, &type) < 0 ||
+            !process_user_ok(ptr, 8)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        *(uint32_t *)ptr = size;
+        *((uint8_t *)ptr + 4) = type;
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
     case SYS_IOCTL:
         plat_frame_set_ret(r, (uint32_t)process_ioctl((int)sc.a0, (int)sc.a1,
                                                      (int)sc.a2));

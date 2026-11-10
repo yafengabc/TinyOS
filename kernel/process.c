@@ -2777,8 +2777,14 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
 
     case FD_FILE: {
         int n = ramdisk_write(f->fh, (const void *)ubuf, len);
-        if (n > 0)
-            f->size += (uint32_t)n;
+        if (n > 0) {
+            /* The descriptor, not the littlefs handle, is what lseek() and
+             * fd_clone() speak: keep the mirror in step so a write followed
+             * by lseek(SEEK_CUR) lands where the bytes ended. */
+            f->pos += (uint32_t)n;
+            if (f->pos > f->size)
+                f->size = f->pos;
+        }
         return done(r, (uint32_t)n);
     }
 
@@ -2982,6 +2988,77 @@ int process_dup2(int oldfd, int newfd)
     fd_close_in(me, newfd);
     *n = tmp;
     return newfd;
+}
+
+/* Duplicate onto the lowest free descriptor.  dup2() with the target chosen
+ * from the table, so every type costs exactly what it costs there. */
+int process_dup(int fd)
+{
+    proc_t *me = current;
+    file_t *src = fd_slot(me, fd);
+    int nfd;
+
+    if (!src || src->type == FD_NONE)
+        return -1;
+    nfd = fd_alloc(me);
+    if (nfd < 0)
+        return -1;
+    /* fd_clone() zeroes the slot before it fills it and leaves it empty when
+     * it fails, so a failure needs no cleanup here. */
+    if (fd_clone(&me->fds[nfd], src) < 0)
+        return -1;
+    return nfd;
+}
+
+/* Move a regular file's position.  The position lives in the descriptor and
+ * the littlefs handle has to follow it, because read() advances the handle
+ * itself.  A pipe or a device has no position, and a seek past either end of
+ * the file is refused: this is the drive-a-file subset, not a way to grow
+ * one. */
+int process_lseek(int fd, int off, int whence)
+{
+    proc_t *me = current;
+    file_t *f = fd_slot(me, fd);
+    int32_t base, pos;
+
+    if (!f || f->type != FD_FILE)
+        return -1;
+
+    switch (whence) {
+    case 0:  base = 0;                 break;   /* SEEK_SET */
+    case 1:  base = (int32_t)f->pos;   break;   /* SEEK_CUR */
+    case 2:  base = (int32_t)f->size;  break;   /* SEEK_END */
+    default:
+        return -1;
+    }
+    pos = base + off;
+    if (pos < 0 || (uint32_t)pos > f->size)
+        return -1;
+    if (ramdisk_seek(f->fh, (uint32_t)pos) < 0)
+        return -1;
+    f->pos = (uint32_t)pos;
+    return pos;
+}
+
+/* Describe an open descriptor the way path_stat() describes its path, so a
+ * program that has the fd does not need to remember the name it opened. */
+int process_fstat(int fd, uint32_t *size, uint8_t *type)
+{
+    proc_t *me = current;
+    file_t *f = fd_slot(me, fd);
+
+    if (!f || f->type == FD_NONE)
+        return -1;
+    if (f->type == FD_FILE) {
+        *size = f->size;
+        *type = TOS_FTYPE_REG;
+    } else {
+        /* Console, pipe, /dev or /proc: a character stream, which is what
+         * stat() says about the same node too. */
+        *size = 0;
+        *type = TOS_FTYPE_CHR;
+    }
+    return 0;
 }
 
 void process_start_shell(const char *path)

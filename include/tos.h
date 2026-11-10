@@ -36,6 +36,9 @@
 #define SYS_IOCTL    30  /* ioctl(fd, cmd, arg) -> depends on cmd */
 #define SYS_UNLINK   31  /* unlink(path) -> 0 or -1             */
 #define SYS_HIST     32  /* hist(op, idx, buf, cap) -> depends   */
+#define SYS_LSEEK    33  /* lseek(fd, off, whence) -> new pos    */
+#define SYS_FSTAT    34  /* fstat(fd, &st) -> 0 or -1            */
+#define SYS_DUP      35  /* dup(fd) -> lowest free fd or -1      */
 
 /* Signals.  There are no handlers: a signal either kills the task or parks
  * it, both decided by the kernel. */
