@@ -244,7 +244,7 @@ func (a *app) kernelPage() page {
 				},
 				act:  cycleInt(heaps, func() int { return a.st.HeapBytes }, func(v int) { a.st.HeapBytes = v; a.dirty = true }),
 				live: func() bool { return true },
-				help: "Kernel malloc arena (TOS_HEAP_BYTES).  littlefs and exec work out of it; 8 KiB is the measured floor on the C3.",
+				help: "Kernel malloc arena (TOS_HEAP_BYTES).  littlefs and exec work out of it; 8 KiB is the measured floor on the C3.  Growing it moves the kernel .bss end; the link fails with 'kernel image overflows PLAT_KERNEL_MAX' when it no longer fits the board's kernel window.",
 			},
 			{
 				label: "Kernel stack", kind: kChoice,
