@@ -118,30 +118,21 @@ func (a *app) mainPage() page {
 				label: "Drivers", kind: kSub,
 				text: func() string {
 					n := len(a.st.DriverChoices())
+					s := fmt.Sprintf("%d dirs", n)
+					if a.st.WiFi() {
+						s += " + wifi"
+					}
 					off := 0
 					for range a.st.DriverExclude {
 						off++
 					}
 					if off > 0 {
-						return fmt.Sprintf("%d dirs, %d off", n, off)
+						s += fmt.Sprintf(", %d off", off)
 					}
-					return fmt.Sprintf("%d dirs", n)
+					return s
 				},
 				act:  func(int) { a.push(a.driverPage()) },
 				help: "Optional driver directories for the selected target (display, USB, ...).",
-			},
-			{
-				label: "WiFi support", kind: kBool,
-				text: func() string { return onOff(a.st.WiFi()) },
-				act: func(d int) {
-					if d == 0 {
-						a.st.SetWiFi(!a.st.WiFi())
-						a.dirty = true
-					}
-				},
-				live: func() bool { return a.st.WiFiCapable() },
-				note: "esp32c3 only",
-				help: "Link the Espressif WiFi/PHY blobs plus the WPA2 supplicant.  Enabling it also adds the driver directory and the [wifi] paths on save.",
 			},
 			{
 				label: "IPv4 / DHCP / DNS / TCP", kind: kBool,
@@ -153,8 +144,8 @@ func (a *app) mainPage() page {
 					}
 				},
 				live: func() bool { return a.st.WiFi() },
-				note: "needs WiFi",
-				help: "The built-in network stack on /dev/net: ARP, ICMP, DHCP client, DNS, TCP client and the http command.",
+				note: "needs the WiFi driver",
+				help: "The built-in network stack on /dev/net: ARP, ICMP, DHCP client, DNS, TCP client and the http command.  Enable the WiFi driver first.",
 			},
 			{
 				label: "Soft float: saturating (no NaN/Inf)", kind: kBool,
@@ -301,8 +292,23 @@ func (a *app) kernelPage() page {
 }
 
 func (a *app) driverPage() page {
+	var rows []row
+	/* WiFi is a driver too: the directory is only half of it, the other half
+	 * is the Espressif blob set and its ROM linker script, which the [wifi]
+	 * section names.  Keeping the switch here makes that visible. */
+	rows = append(rows, row{
+		label: "WiFi (esp32c3 blobs + WPA2)", kind: kBool,
+		text: func() string { return onOff(a.st.WiFi()) },
+		act: func(int) {
+			a.st.SetWiFi(!a.st.WiFi())
+			a.dirty = true
+		},
+		live: func() bool { return a.st.WiFiCapable() },
+		note: "esp32c3 only",
+		help: "Adds drivers/wifi/esp32c3 and links the Espressif net80211/pp/phy/coexist blobs with the ROM linker script; the [wifi] paths are filled in on save.  The IPv4 stack has its own switch.",
+	})
+
 	dirs := a.st.DriverChoices()
-	rows := make([]row, 0, len(dirs)+1)
 	for _, d := range dirs {
 		d := d
 		required := DriverRequired(d)

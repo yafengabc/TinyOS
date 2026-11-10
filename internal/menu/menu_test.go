@@ -68,30 +68,30 @@ func TestKeyDrivesState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.conf")
 	st := Load(nil, path)
 	st.SetTarget("esp32c3")
+	st.SetWiFi(true)
 	a := &app{st: st}
 	a.stack = []page{a.mainPage()}
 
-	/* rows: 0 target, 1 kernel, 2 drivers, 3 wifi, 4 net, 5 float, 6 programs */
+	/* rows: 0 target, 1 kernel, 2 drivers, 3 IPv4, 4 float, 5 programs */
 	a.cur = 3
-	a.handle([]byte{' '}) /* toggle wifi */
-	if !st.WiFi() {
-		t.Fatal("space did not enable wifi")
-	}
-	a.cur = 4
 	a.handle([]byte{' '})
 	if !st.Net() {
 		t.Fatal("space did not enable net")
 	}
-	a.cur = 3
-	a.handle([]byte{' '}) /* wifi off implies net off */
+
+	/* WiFi is a driver now: turning it off must also turn the stack off. */
+	a.push(a.driverPage())
+	a.cur = 0 /* the WiFi row */
+	a.handle([]byte{' '})
 	if st.WiFi() || st.Net() {
-		t.Fatal("net stayed on after wifi was disabled")
+		t.Fatal("net stayed on after the WiFi driver was disabled")
 	}
 	if !a.dirty {
 		t.Fatal("edits did not mark the config dirty")
 	}
 
-	a.cur = 5
+	a.pop()
+	a.cur = 4
 	a.handle([]byte{' '})
 	if !st.SoftMin() {
 		t.Fatal("space did not enable softfloat-min")
