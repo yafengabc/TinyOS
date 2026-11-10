@@ -150,7 +150,9 @@ user/                用户态程序（freestanding C）
   crt0_x86.S crt0_rv32.S  按目标选择的启动桩
   lib.c syscall.c         与架构无关；系统调用入口来自 arch/<arch>/usys.h
   sh.c hello.c hello_printf.c echo.c ls.c cat.c crash.c mem.c uptime.c wfile.c reloc.c
-  gpio.c adc.c reboot.c smp.c wc.c
+  gpio.c adc.c reboot.c smp.c wc.c floattest.c
+  softfloat32.c softfloat32.h  float 运行时（32 位整数实现）
+  fix16.c fix16.h              Q16.16 定点，用于和软浮点对比
   wificonn.c wifiscan.c net.c ping.c host.c dhcp.c http.c   (WiFi/net 目标)
   user.ld            PIE 链接脚本（基址 0，由内核重定位）
 cmd/tos/             Go 构建工具（build / run / doctor / clean）

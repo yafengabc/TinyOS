@@ -90,4 +90,21 @@ __asm__(
     "    pop     {r4, r5, pc}\n"
     "    .size   __aeabi_idivmod, . - __aeabi_idivmod\n");
 
+/* Cortex-M0+ has no CLZ, and clang lowers the normalisation loops in the
+ * soft-float and fixed-point libraries to a call.  Binary search, five
+ * steps, no table. */
+uint32_t __clzsi2(uint32_t x)
+{
+    uint32_t n = 0;
+
+    if (x == 0)
+        return 32;
+    if (!(x & 0xFFFF0000u)) { n += 16; x <<= 16; }
+    if (!(x & 0xFF000000u)) { n += 8;  x <<= 8;  }
+    if (!(x & 0xF0000000u)) { n += 4;  x <<= 4;  }
+    if (!(x & 0xC0000000u)) { n += 2;  x <<= 2;  }
+    if (!(x & 0x80000000u)) { n += 1; }
+    return n;
+}
+
 #endif /* __arm__ */

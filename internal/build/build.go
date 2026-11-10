@@ -1097,8 +1097,11 @@ func (b *Builder) buildUser() ([]string, error) {
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
 	// aeabi.c supplies the EABI division helpers the Cortex-M0+ needs (it
 	// has no hardware divide); on the M3, rv32 and i386 nothing references
-	// it and --gc-sections drops it.
-	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c", "aeabi.c"}
+	// it and --gc-sections drops it.  softfloat32.c/fix16.c are the float
+	// and Q16.16 runtimes: only the functions a program calls survive the
+	// link, so listing them here costs nothing when unused.
+	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
+		"aeabi.c", "softfloat32.c", "fix16.c"}
 	var commonObjs []string
 	var tasks []task
 	for _, name := range common {
@@ -1142,7 +1145,8 @@ func (b *Builder) buildUser() ([]string, error) {
 		if b.UserExclude[prog] {
 			continue
 		}
-		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" {
+		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
+		    name == "softfloat32.c" || name == "fix16.c" {
 			continue
 		}
 		progs = append(progs, prog)
