@@ -13,15 +13,18 @@
 
 /* ---- memory layout (provided by the board) --------------------------- */
 
-/* Where the kernel image was linked and may occupy.  The kernel's .bss
- * (including the 32 KiB heap arena) must end below PLAT_KERNEL_MAX; there
- * is no frame allocator, so this is purely a sanity bound. */
+/* Where the kernel image was linked.  There is no frame allocator: the
+ * kernel owns [PLAT_KERNEL_BASE, __kernel_end) and the task area starts right
+ * after it. */
 extern const uint32_t PLAT_KERNEL_BASE;
-extern const uint32_t PLAT_KERNEL_MAX;
 
-/* Where user programs are loaded (position independent images are
- * relocated here).  Identical binaries work on every board. */
-extern const uint32_t PLAT_APP_BASE;
+/* First address a task window may use.  The linker rounds the kernel's end up
+ * to PLAT_APP_GRAIN and exports it as __app_base, so shrinking the heap, the
+ * kernel stack or the process table automatically enlarges the task area
+ * instead of leaving a fixed gap.  Identical binaries still run on every
+ * board: only the address they are relocated to changes. */
+extern uint8_t __app_base[];
+#define PLAT_APP_BASE ((uint32_t)__app_base)
 extern const uint32_t PLAT_APP_MAX;
 
 /* Allocation granularity of task windows inside [APP_BASE, APP_MAX).
@@ -313,12 +316,12 @@ extern const uint32_t PLAT_HEAP_GUARD;
  *   - PLAT_APP_BASE is aligned to it.
  *
  * The last two are what make a single NAPOT PMP entry describe the stack
- * exactly.  The C3's windows start at 0x40390000 - 16 KiB aligned, because
- * PLAT_KERNEL_MAX is - so a 32 KiB stack would encode as the 32 KiB
- * region *containing* the stack instead: the guard page below it becomes
- * writable and the upper half of the real stack does not (found on the real
- * chip by leaving one PMP rule out of a test program).  The same test is why
- * TOS_STACK() cannot ask for more than the grain.
+ * exactly.  The C3's windows start on a 16 KiB boundary, because the linker
+ * aligns __app_base to PLAT_APP_GRAIN - so a 32 KiB stack would encode as the
+ * 32 KiB region *containing* the stack instead: the guard page below it
+ * becomes writable and the upper half of the real stack does not (found on
+ * the real chip by leaving one PMP rule out of a test program).  The same
+ * test is why TOS_STACK() cannot ask for more than the grain.
  *
  * The default is the floor of every window, which is why it should be small:
  * measured high-water marks (ps's stk column) are under 1 KiB for every

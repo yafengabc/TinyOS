@@ -7,7 +7,6 @@
  * link time, and so other translation units can reference them. */
 
 const uint32_t PLAT_KERNEL_BASE = 0x00010000;   /* loaded by the boot sector   */
-const uint32_t PLAT_KERNEL_MAX  = 0x00400000;   /* image + .bss must stay below */
 const uint32_t PLAT_RAM_TOP     = 0x08000000;   /* the 128 MiB QEMU is given */
 const uint32_t PLAT_RAM_BASE    = 0x00010000;   /* RAM starts under the kernel */
 
@@ -15,7 +14,6 @@ const uint32_t PLAT_RAM_BASE    = 0x00010000;   /* RAM starts under the kernel *
  * 128 MiB of RAM that QEMU is started with, and every task gets its own
  * window, sized to its image in 64 KiB steps, so a synchronous exec never
  * overwrites its parent. */
-const uint32_t PLAT_APP_BASE   = 0x01000000;
 const uint32_t PLAT_APP_MAX    = 0x08000000;
 const uint32_t PLAT_APP_GRAIN  = 0x00010000;   /* 64 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See

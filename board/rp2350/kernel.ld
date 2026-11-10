@@ -62,8 +62,10 @@ SECTIONS
 
     ASSERT(__image_def_end - ORIGIN(FLASH) <= 4096,
            "RP2350 IMAGE_DEF fell outside the first 4 KiB of flash")
-    ASSERT(__kernel_end <= 0x20020000,
-           "kernel image overflows the SRAM reserved for it (PLAT_KERNEL_MAX)")
+    /* User windows start at the first 16 KiB boundary after the kernel. */
+    __app_base = ALIGN(__kernel_end, 0x4000);
+    ASSERT(__app_base + 0x4000 <= 0x20080000,
+           "kernel leaves no room for a task window")
 
     /DISCARD/ : {
         *(.comment)

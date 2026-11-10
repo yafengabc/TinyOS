@@ -32,6 +32,14 @@ SECTIONS
         __bss_end = .;
     }
 
+    __kernel_end = .;
+
+    /* Task windows start at the first 64 KiB boundary after the kernel, so a
+     * smaller heap or kernel stack hands the freed bytes to user windows. */
+    __app_base = ALIGN(__kernel_end, 0x10000);
+    ASSERT(__app_base + 0x10000 <= 0x81400000,
+           "kernel leaves no room for a task window")
+
     /DISCARD/ : {
         *(.comment)
         *(.eh_frame*)

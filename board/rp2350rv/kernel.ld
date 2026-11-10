@@ -11,8 +11,9 @@
  * loads no segments for a RISC-V flash image.  The littlefs partition stays
  * in flash at 0x80000 and is read through the XIP window.
  *
- * The first 128 KiB of SRAM are the kernel's (PLAT_KERNEL_MAX); the striped
- * banks above 0x20020000 are task windows, exactly like the ARM port. */
+ * The kernel owns SRAM from 0x20000000 up to its link-time end; the task
+ * windows start at the next 16 KiB boundary (__app_base), exactly like the
+ * ARM port. */
 
 MEMORY
 {
@@ -62,8 +63,10 @@ SECTIONS
 
     ASSERT(__image_def_end - ORIGIN(FLASH) <= 4096,
            "RP2350 RISC-V IMAGE_DEF fell outside the first 4 KiB of flash")
-    ASSERT(__kernel_end <= 0x20020000,
-           "kernel image overflows the SRAM reserved for it (PLAT_KERNEL_MAX)")
+    /* User windows start at the first 16 KiB boundary after the kernel. */
+    __app_base = ALIGN(__kernel_end, 0x4000);
+    ASSERT(__app_base + 0x4000 <= 0x20080000,
+           "kernel leaves no room for a task window")
 
     /DISCARD/ : {
         *(.comment)

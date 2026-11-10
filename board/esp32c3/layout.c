@@ -5,7 +5,7 @@
  * Addresses use the instruction-bus window throughout: the chip aliases one
  * physical SRAM at 0x3FC80000 (data) and 0x40380000 (instruction), and the
  * real chip refuses to fetch from the 0x3FC8 window (verified, see
- * docs/PLATFORM-DESIGN.md §8.1).  Everything - kernel, windows, PMP - lives
+ * docs/PLATFORM-DESIGN.md ?8.1).  Everything - kernel, windows, PMP - lives
  * in 0x4038 space; data accesses work on both aliases, so picking the
  * instruction one costs nothing.
  *
@@ -23,31 +23,23 @@ const uint32_t PLAT_KERNEL_BASE = 0x40380000;
 const uint32_t PLAT_RAM_BASE   = 0x40380000;   /* SRAM, instruction alias */
 const uint32_t PLAT_RAM_TOP    = 0x403DC710;
 
-/* Image + .bss must stay below this: 160 KiB.  The old split was 64 KiB,
- * which was enough for the kernel alone (48.6 KiB .bss after streaming
- * exec), but WiFi's static data and its heap have to live below the first
- * task window too.  The kernel code itself is XIP in flash; this region is
+/* Image + .bss: the kernel owns everything from PLAT_KERNEL_BASE up to the
+ * link-time __kernel_end, and the task area starts at the first 16 KiB
+ * boundary after it.  The kernel code itself is XIP in flash; this region is
  * only .data/.bss/heap.
  *
- * 160 KiB leaves 208 KiB for task windows.  It is sized for the scan-only
- * WiFi PoC: the Espressif net80211/pp/phy/coexist blobs add roughly 18 KiB
- * of .data/.bss, the rest is the WiFi heap (malloc/realloc are called by
- * the blobs and by lwIP later).  The build asserts the fit in kernel-xip.ld,
- * so growth past it is a link error rather than pid 1's image being
- * overwritten.
- *
- * Every number here is a lever on the task area: each 16 KiB the kernel
- * gives back is one more window, and a window is a whole program. */
-const uint32_t PLAT_KERNEL_MAX  = 0x403B0000;   /* 0x40380000 + 192 KiB */
+ * The split is derived at link time (__app_base in kernel-xip.ld), so every
+ * 16 KiB the heap or kernel stack does not use is one more window: a window
+ * is a whole program.  The link only fails if the kernel leaves no room for
+ * a single window. */
 
-/* Task windows are carved out of the remaining 208 KiB (13 x 16 KiB) and
- * sized to their image, in 16 KiB steps: a shell takes 32 KiB, the editor
+/* Task windows are carved out of the rest of SRAM above __app_base, in
+ * 16 KiB steps: a shell takes 32 KiB, the editor
  * 32, a 1 KiB tool 16, and the rest of the area stays usable by whatever
  * comes next.  The Python interpreter's 128 KiB window plus the shell's
  * 32 KiB still fit.  Stack at the top of every window, image below it,
  * guard hole between image and stack; see kernel/platform.h for the
  * constraints this grain has to satisfy. */
-const uint32_t PLAT_APP_BASE   = 0x403B0000;
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
 const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
 /* Stack at the top of every task window, and the hole left under it.  See
@@ -72,7 +64,7 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 /* The littlefs partition lives on SPI flash at offset 0x80000 (the
  * kernel keeps the first 512 KiB), served by plat_block_read/write/erase
  * in platform.c (ROM reader + writer, SPI1 hardware erase; see
- * docs/PLATFORM-DESIGN.md §8.7).  PLAT_LFS_BLOCKS sizes it to the rest of
+ * docs/PLATFORM-DESIGN.md ?8.7).  PLAT_LFS_BLOCKS sizes it to the rest of
  * the 4 MiB flash: (0x400000 - 0x80000) / 4096 = 896 blocks = 3.5 MiB. */
 const uint32_t PLAT_LFS_LBA = 0x80000 / 512;   /* 1024 */
 const uint32_t PLAT_LFS_BLOCKS = (0x400000u - 0x80000u) / 4096u;

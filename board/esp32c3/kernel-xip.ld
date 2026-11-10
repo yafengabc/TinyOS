@@ -58,13 +58,11 @@ SECTIONS
 
     __kernel_end = .;
 
-    /* The first task window starts at PLAT_APP_BASE (board/esp32c3/layout.c,
-     * 0x403B0000), and nothing else separates the two: an overflow links
-     * quietly and then shows up as pid 1's image being overwritten by kernel
-     * globals, which reads as a random user-program crash.  Same assertion
-     * as board/rp2040/kernel.ld, same reason. */
-    ASSERT(__kernel_end <= 0x403B0000,
-           "kernel image overflows PLAT_KERNEL_MAX (0x403B0000), the first task window")
+    /* The task area starts at the first 16 KiB boundary after the kernel, so
+     * a smaller heap or kernel stack hands the freed bytes to user windows. */
+    __app_base = ALIGN(__kernel_end, 0x4000);
+    ASSERT(__app_base + 0x4000 <= 0x403DC000,
+           "kernel leaves no room for a task window")
 
     /* The code half.  Its vaddr must start exactly at the window base: the
      * packer indexes the blob by (vaddr - 0x42000000). */

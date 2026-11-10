@@ -46,10 +46,11 @@ SECTIONS
 
     __kernel_end = .;
 
-    /* The user windows start at PLAT_APP_BASE (board/qemu-mps2/layout.c).
-       Nothing checks that at compile time, so catch a growing image here
-       instead of letting the loader overwrite kernel .bss or the stack. */
-    ASSERT(__kernel_end <= 0x20080000, "kernel image overflows the SRAM reserved for it")
+    /* The task area starts at the first 64 KiB boundary after the kernel, so
+       a smaller heap or kernel stack hands the freed bytes to user windows. */
+    __app_base = ALIGN(__kernel_end, 0x10000);
+    ASSERT(__app_base + 0x10000 <= 0x20400000,
+           "kernel leaves no room for a task window")
 
     /DISCARD/ : {
         *(.comment)

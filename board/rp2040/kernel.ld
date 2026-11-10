@@ -51,9 +51,10 @@ SECTIONS
 
     __kernel_end = .;
 
-    /* The kernel image + 32 KiB kernel stack must fit in the SRAM reserved
-       for it before the user windows begin at PLAT_APP_BASE. */
-    ASSERT(__kernel_end <= 0x20020000, "kernel image overflows the SRAM reserved for it (PLAT_KERNEL_MAX)")
+    /* User windows start at the first 16 KiB boundary after the kernel. */
+    __app_base = ALIGN(__kernel_end, 0x4000);
+    ASSERT(__app_base + 0x4000 <= 0x20042000,
+           "kernel leaves no room for a task window")
 
     /DISCARD/ : {
         *(.comment)

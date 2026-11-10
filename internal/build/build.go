@@ -150,9 +150,9 @@ var Targets = map[string]Target{	// The kernel heap has to hold one decompressed
 	// and the biggest program (py) wanted ~49 KiB.  Streaming exec made that
 	// reasoning obsolete - the heap now only carries littlefs's working set -
 	// but the value is left alone until an rp2350 board can confirm a smaller
-	// one, and .bss still has to stay below PLAT_KERNEL_MAX (0x20020000): the
-	// panel's DMA row buffer (3.8 KiB in lcd_st7789.c) comes out of the same
-	// 128 KiB budget.
+	// one.  The link places __app_base after whatever .bss turns out to be, so
+	// the panel's DMA row buffer (3.8 KiB in lcd_st7789.c) no longer has to fit
+	// a fixed 128 KiB line.
 	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024, Drivers: rp2350Drivers},
 
 	// rp2350rv: the same physical board with its Hazard3 RISC-V cores

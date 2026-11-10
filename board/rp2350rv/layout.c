@@ -16,9 +16,7 @@
  * code, data/heap and stack and nothing else. */
 
 const uint32_t PLAT_KERNEL_BASE = 0x20000000u;
-const uint32_t PLAT_KERNEL_MAX  = 0x20020000u;   /* 128 KiB for the kernel */
 
-const uint32_t PLAT_APP_BASE   = 0x20020000u;
 const uint32_t PLAT_APP_MAX    = 0x20080000u;   /* 512 KiB striped SRAM   */
 const uint32_t PLAT_RAM_TOP    = 0x20080000u;
 const uint32_t PLAT_RAM_BASE   = 0x20000000u;

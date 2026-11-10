@@ -14,13 +14,11 @@
  */
 
 const uint32_t PLAT_KERNEL_BASE = 0x00000000;
-const uint32_t PLAT_KERNEL_MAX  = 0x20080000;   /* 512 KiB of SRAM for image + .bss */
 const uint32_t PLAT_RAM_TOP     = 0x20400000;   /* end of the 4 MiB of SRAM */
 /* Code is linked at 0 and copied to SRAM, so the kernel's RAM does not
  * start at PLAT_KERNEL_BASE here. */
 const uint32_t PLAT_RAM_BASE    = 0x20000000;
 
-const uint32_t PLAT_APP_BASE   = 0x20080000;
 const uint32_t PLAT_APP_MAX    = 0x20400000;   /* end of the 4 MiB of SRAM */
 const uint32_t PLAT_APP_GRAIN  = 0x00010000;   /* 64 KiB per step: 56 fit */
 /* Stack at the top of every task window, and the hole left under it.  See

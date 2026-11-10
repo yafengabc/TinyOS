@@ -18,10 +18,7 @@
 
 const uint32_t PLAT_KERNEL_BASE = 0x20000000u;   /* SRAM reserved for the
                                                    kernel image + .bss      */
-const uint32_t PLAT_KERNEL_MAX  = 0x20020000u;   /* 128 KiB: kernel .data/
-                                                   .bss/stack must end below */
 
-const uint32_t PLAT_APP_BASE   = 0x20020000u;
 const uint32_t PLAT_APP_MAX    = 0x20042000u;   /* 264 KiB SRAM ends here   */
 const uint32_t PLAT_RAM_TOP    = 0x20042000u;   /* same end: all SRAM is ours */
 const uint32_t PLAT_RAM_BASE   = 0x20000000u;   /* .data/.bss start of SRAM  */

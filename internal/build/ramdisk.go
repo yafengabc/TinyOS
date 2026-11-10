@@ -167,8 +167,8 @@ func ELFToFlat(path string) (data []byte, base uint64, err error) {
 // including .bss (p_memsz), so the layout can be checked for collisions.
 // ELFEndBelow is ELFEndAddress with an upper bound: segments at or above limit
 // are ignored.  A kernel that executes its code in place has two regions - one
-// in RAM, bounded by PLAT_KERNEL_MAX, and one in the flash window - and the
-// headroom only means anything for the first.
+// in RAM, bounded by the task area (__app_base), and one in the flash window
+// - and the headroom only means anything for the first.
 func ELFEndBelow(path string, limit uint64) (uint64, error) {
 	f, err := elf.Open(path)
 	if err != nil {
