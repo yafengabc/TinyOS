@@ -150,6 +150,26 @@ uint32_t clock_ms(void)
     return c.ms;
 }
 
+/* Wait for readiness.  The syscall is a single non-blocking check; the
+ * waiting is here so the kernel needs no wakeup queue that every device
+ * would have to feed.  One tick (1 ms) of latency is below what a person or
+ * a 115200-baud console can notice. */
+int poll(struct pollfd *fds, int nfds, int timeout_ms)
+{
+    uint32_t start = clock_ms();
+
+    for (;;) {
+        int n = (int)tos_sys2(SYS_POLL, (int)fds, nfds);
+
+        if (n != 0 || timeout_ms == 0)
+            return n;
+        if (timeout_ms > 0 &&
+            (uint32_t)(clock_ms() - start) >= (uint32_t)timeout_ms)
+            return 0;
+        sleep(1);
+    }
+}
+
 int getcpu(void)
 {
     return tos_sys0(SYS_GETCPU);

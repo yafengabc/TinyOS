@@ -286,6 +286,17 @@ int printf(const char *fmtstr, ...)
     return n;
 }
 
+/* The same formatter, into a caller's buffer: render a screen row without
+ * sending it, so a frame can be compared and written once. */
+int snprintf(char *buf, int cap, const char *fmtstr, ...)
+{
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmtstr);
+    int n = tos_vsnprintf(buf, cap, fmtstr, ap);
+    __builtin_va_end(ap);
+    return n;
+}
+
 void puts(const char *s)
 {
     write_all(1, s, (int)strlen(s));

@@ -386,6 +386,28 @@ static regs_t *dispatch(regs_t *r)
         return r;
     }
 
+    case SYS_POLL: {
+        uint32_t ptr = sc.a0;
+        int nfds = (int)sc.a1;
+        struct tos_pollfd *fds = (struct tos_pollfd *)ptr;
+        int ready = 0;
+
+        if (nfds < 0 || nfds > 16 ||
+            !process_user_ok(ptr, (uint32_t)nfds * sizeof(*fds))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        for (int i = 0; i < nfds; i++) {
+            short rev = process_poll(fds[i].fd, fds[i].events);
+
+            fds[i].revents = rev;
+            if (rev)
+                ready++;
+        }
+        plat_frame_set_ret(r, (uint32_t)ready);
+        return r;
+    }
+
     case SYS_STAT: {
         char upath[64];
         if (!copy_user_string(upath, sc.a0, sizeof(upath))) {

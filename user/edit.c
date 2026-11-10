@@ -129,37 +129,92 @@ static void clamp_cx(void)
 
 /* ---- drawing --------------------------------------------------------- */
 
-static void draw(void)
+/* The last frame, one string per screen row, trailing blanks trimmed.  A
+ * row is only sent when its content differs from this, so typing one
+ * character costs one line and the status line instead of the whole 24-row
+ * screen - on a 115200-baud console that is the difference between ~15 ms
+ * and ~170 ms per keystroke. */
+static char scr[ROWS][COLS + 1];
+
+static void render_row(int r, char *dst)
 {
-    printf("\x1b[?25l\x1b[H");          /* hide the cursor while drawing */
+    int n = 0;
 
-    printf("\x1b[K  TinyOS edit: %s%s\n", fname,
-           dirty ? "   [modified]" : "");
+    dst[0] = '\0';
+    if (r == 0) {
+        snprintf(dst, COLS + 1, "  TinyOS edit: %s%s", fname,
+                      dirty ? "   [modified]" : "");
+        return;
+    }
+    if (r <= TEXT_ROWS) {
+        int ln = top + r - 1;
 
-    for (int r = 0; r < TEXT_ROWS; r++) {
-        int ln = top + r;
-        printf("\x1b[K");
         if (ln < nlines) {
             int len = line_len(ln);
             int col0 = (ln == cy) ? hscroll : 0;
+
             if (col0 > len)
                 col0 = len;
-            int n = len - col0;
+            n = len - col0;
             if (n > COLS - 1)
                 n = COLS - 1;
             if (n > 0)
-                write(1, text + line_off[ln] + col0, n);
+                memcpy(dst, text + line_off[ln] + col0, (size_t)n);
         }
-        putchar('\n');
+        dst[n] = '\0';
+        return;
+    }
+    if (r == TEXT_ROWS + 1) {
+        snprintf(dst, COLS + 1, " line %d/%d  col %d  %s",
+                      cy + 1, nlines, cx + 1, msg);
+        return;
+    }
+    snprintf(dst, COLS + 1,
+                  " ^S save  ^X exit  ^K cut line  ^A/^E line ends");
+}
+
+static void draw(void)
+{
+    char row[COLS + 1];
+    char seq[24];
+    int hidden = 0;
+
+    for (int r = 0; r < ROWS; r++) {
+        int n;
+
+        render_row(r, row);
+        n = (int)strlen(row);
+        while (n > 0 && row[n - 1] == ' ')
+            row[--n] = '\0';
+        if (!strcmp(row, scr[r]))
+            continue;
+
+        if (!hidden) {                  /* no cursor flicker mid-frame */
+            puts("\x1b[?25l");
+            hidden = 1;
+        }
+        snprintf(seq, sizeof(seq), "\x1b[%d;1H\x1b[K", r + 1);
+        puts(seq);
+        if (n > 0)
+            write_all(1, row, n);
+        memcpy(scr[r], row, (size_t)n + 1);
     }
 
-    printf("\x1b[K line %d/%d  col %d  ", cy + 1, nlines, cx + 1);
-    if (msg[0])
-        puts(msg);
-    putchar('\n');
-    printf("\x1b[K ^S save  ^X exit  ^K cut line  ^A/^E line ends");
+    snprintf(seq, sizeof(seq), "\x1b[%d;%dH", cy - top + 2,
+                  cx - hscroll + 1);
+    puts(seq);
+    if (hidden)
+        puts("\x1b[?25h");
+}
 
-    printf("\x1b[%d;%dH\x1b[?25h", cy - top + 2, cx - hscroll + 1);
+static int key_pending(void)
+{
+    struct pollfd p;
+
+    p.fd = 0;
+    p.events = POLLIN;
+    p.revents = 0;
+    return poll(&p, 1, 0) > 0 && (p.revents & POLLIN);
 }
 
 /* ---- editing --------------------------------------------------------- */
@@ -352,6 +407,78 @@ static void load_file(void)
         set_msg("truncated: file too large");
 }
 
+/* Apply one key.  Returns 0 when the editor should exit. */
+static int handle_key(int k)
+{
+    /* Any key but ^X disarms the quit, so "press ^X twice" really
+     * means twice in a row. */
+    if (k != 24)
+        quit_armed = 0;
+
+    if (k == K_UP) {
+        if (cy > 0)
+            cy--;
+        clamp_cx();
+    } else if (k == K_DOWN) {
+        if (cy + 1 < nlines)
+            cy++;
+        clamp_cx();
+    } else if (k == K_LEFT) {
+        if (cx > 0)
+            cx--;
+        fix_hscroll();
+    } else if (k == K_RIGHT) {
+        if (cx < line_len(cy))
+            cx++;
+        fix_hscroll();
+    } else if (k == K_HOME) {
+        cx = 0;
+        fix_hscroll();
+    } else if (k == K_END) {
+        cx = line_len(cy);
+        fix_hscroll();
+    } else if (k == K_DEL) {
+        do_delete();
+    } else if (k == '\r' || k == '\n') {
+        do_enter();
+    } else if (k == 8 || k == 127) {
+        do_backspace();
+    } else if (k == 9) {
+        do_tab();
+    } else if (k == 19) {               /* ^S */
+        do_save();
+    } else if (k == 24) {               /* ^X */
+        if (dirty && !quit_armed) {
+            quit_armed = 1;
+            set_msg("unsaved changes - ^X again to quit, ^S to save");
+        } else {
+            return 0;
+        }
+    } else if (k == 11) {               /* ^K */
+        do_cut_line();
+    } else if (k == 1) {                /* ^A */
+        cx = 0;
+        fix_hscroll();
+    } else if (k == 5) {                /* ^E */
+        cx = line_len(cy);
+        fix_hscroll();
+    } else if (k == 12) {               /* ^L: full redraw */
+        puts("\x1b[2J");
+        memset(scr, 0, sizeof(scr));
+    } else if (k >= 32 && k < 127) {
+        do_insert(k);
+    }
+
+    /* Keep the cursor on screen. */
+    if (cy < top)
+        top = cy;
+    if (cy >= top + TEXT_ROWS)
+        top = cy - TEXT_ROWS + 1;
+    if (top < 0)
+        top = 0;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -367,85 +494,37 @@ int main(int argc, char **argv)
     load_file();
 
     int old = ttyraw(1);
-    printf("\x1b[2J\x1b[H");
+    puts("\x1b[2J\x1b[H");
 
     int running = 1;
     while (running) {
-        draw();
-        msg[0] = '\0';
+        /* Handle everything already queued before the next frame, so a
+         * paste costs one draw instead of one per byte.  poll() is what
+         * makes that a question we can ask without blocking. */
+        while (running && key_pending()) {
+            int k = getkey();
 
-        int k = getkey();
-        if (k == K_ERR)
+            if (k == K_ERR) {
+                running = 0;
+                break;
+            }
+            running = handle_key(k);
+        }
+        if (!running)
             break;
 
-        /* Any key but ^X disarms the quit, so "press ^X twice" really
-         * means twice in a row. */
-        if (k != 24)
-            quit_armed = 0;
+        draw();
+        if (key_pending())
+            continue;               /* burst: keep coalescing */
 
-        if (k == K_UP) {
-            if (cy > 0)
-                cy--;
-            clamp_cx();
-        } else if (k == K_DOWN) {
-            if (cy + 1 < nlines)
-                cy++;
-            clamp_cx();
-        } else if (k == K_LEFT) {
-            if (cx > 0)
-                cx--;
-            fix_hscroll();
-        } else if (k == K_RIGHT) {
-            if (cx < line_len(cy))
-                cx++;
-            fix_hscroll();
-        } else if (k == K_HOME) {
-            cx = 0;
-            fix_hscroll();
-        } else if (k == K_END) {
-            cx = line_len(cy);
-            fix_hscroll();
-        } else if (k == K_DEL) {
-            do_delete();
-        } else if (k == '\r' || k == '\n') {
-            do_enter();
-        } else if (k == 8 || k == 127) {
-            do_backspace();
-        } else if (k == 9) {
-            do_tab();
-        } else if (k == 19) {               /* ^S */
-            do_save();
-        } else if (k == 24) {               /* ^X */
-            if (dirty && !quit_armed) {
-                quit_armed = 1;
-                set_msg("unsaved changes - ^X again to quit, ^S to save");
-            } else {
-                running = 0;
-            }
-        } else if (k == 11) {               /* ^K */
-            do_cut_line();
-        } else if (k == 1) {                /* ^A */
-            cx = 0;
-            fix_hscroll();
-        } else if (k == 5) {                /* ^E */
-            cx = line_len(cy);
-            fix_hscroll();
-        } else if (k == 12) {               /* ^L: full redraw */
-            printf("\x1b[2J");
-        } else if (k >= 32 && k < 127) {
-            do_insert(k);
-        }
-
-        /* Keep the cursor on screen. */
-        if (cy < top)
-            top = cy;
-        if (cy >= top + TEXT_ROWS)
-            top = cy - TEXT_ROWS + 1;
-        if (top < 0)
-            top = 0;
+        msg[0] = '\0';
+        int k = getkey();           /* idle: sleep until a key arrives */
+        if (k == K_ERR)
+            break;
+        running = handle_key(k);
     }
 
-    printf("\x1b[2J\x1b[H");
+    puts("\x1b[2J\x1b[H");
     ttyraw(old);
     return 0;
 }

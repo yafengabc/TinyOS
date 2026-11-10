@@ -41,6 +41,23 @@
 #define SYS_DUP      35  /* dup(fd) -> lowest free fd or -1      */
 #define SYS_READDIR_AT 36 /* readdir_at(&req) -> name length or 0 */
 
+/* SYS_POLL: readiness without blocking.  The timeout lives in user land
+ * (sleep between calls), so this syscall never parks a task and the kernel
+ * needs no wait queue for it. */
+#define SYS_POLL     37
+
+/* One entry in a poll() set.  Same layout as user/lib.h's struct pollfd. */
+struct tos_pollfd {
+    int   fd;
+    short events;       /* TOS_POLL* the caller cares about */
+    short revents;      /* TOS_POLL* that are true right now */
+};
+
+#define TOS_POLLIN   0x001
+#define TOS_POLLOUT  0x004
+#define TOS_POLLERR  0x008
+#define TOS_POLLNVAL 0x020
+
 /* SYS_READDIR_AT: one name from `path`, without changing the cwd.  The cwd
  * version (SYS_READDIR) is what `ls` used to chdir for; userland's
  * opendir()/readdir() keeps one of these per open stream instead. */

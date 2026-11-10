@@ -132,6 +132,12 @@ int  process_lseek(int fd, int off, int whence);
  * TOS_FTYPE_* type.  Console, pipe, /dev and /proc read as TOS_FTYPE_CHR. */
 int  process_fstat(int fd, uint32_t *size, uint8_t *type);
 
+/* Readiness for poll(): what a read()/write() on this descriptor would do
+ * right now.  The console's line discipline is the only descriptor that can
+ * say "not yet"; the rest have data, space, or return promptly.  Returns
+ * TOS_POLL* bits, masked to `events` plus the error bits. */
+short process_poll(int fd, short events);
+
 /* Configuration on an open character device (pin direction, ADC metadata).
  * -1 for anything that is not a device, or a device without an ioctl. */
 int  process_ioctl(int fd, int cmd, int arg);

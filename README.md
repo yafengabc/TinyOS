@@ -51,7 +51,7 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   解压**之前**就把窗口分配好
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
-  外加 `clock/getcpu/gpio/adc/pipe/dup2/lseek/fstat/dup/readdir_at/ioctl`
+  外加 `clock/getcpu/gpio/adc/pipe/dup2/lseek/fstat/dup/readdir_at/poll/ioctl`
 - **抢占式调度**：时间片轮转（1 ms）、`exec` 创建子任务、`wait` 收退出码、
   `read/wait/sleep` 阻塞而不忙等；只在用户态帧上抢占，内核调用不会被撕裂
 - **真实时钟**：`uptime`/`clock_ns()` 读硬件自由运行计数器（CLINT `mtime`、

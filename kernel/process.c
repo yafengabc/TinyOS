@@ -3061,6 +3061,66 @@ int process_fstat(int fd, uint32_t *size, uint8_t *type)
     return 0;
 }
 
+/* Readiness for poll().  Only the console can be "not yet": /proc and /dev
+ * produce their text on demand, a file has a position and an EOF, and a pipe
+ * has a count.  A regular file reports both directions because read() at EOF
+ * returns 0 at once and write() either takes the bytes or fails at once. */
+short process_poll(int fd, short events)
+{
+    proc_t *me = current;
+    file_t *f = fd_slot(me, fd);
+    short rev = 0;
+
+    if (!f || f->type == FD_NONE)
+        return TOS_POLLNVAL;
+
+    switch (f->type) {
+    case FD_CONSOLE:
+        if (fd == 0) {
+            if (tty_is_raw() ? tty_raw_ready() : tty_line_ready())
+                rev |= TOS_POLLIN;
+        } else {
+            rev |= TOS_POLLOUT;
+        }
+        break;
+
+    case FD_FILE:
+        rev |= TOS_POLLIN | TOS_POLLOUT;
+        break;
+
+    case FD_CHRDEV:
+        rev |= TOS_POLLIN | TOS_POLLOUT;
+        break;
+
+    case FD_PIPE_R: {
+        uint32_t irq = plat_irq_save();
+
+        spin_lock(&proc_lock);
+        if (pipe_readable(f->pipe))
+            rev |= TOS_POLLIN;
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        break;
+    }
+
+    case FD_PIPE_W: {
+        uint32_t irq = plat_irq_save();
+
+        spin_lock(&proc_lock);
+        if (pipe_writable(f->pipe))
+            rev |= TOS_POLLOUT;
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return rev & (events | TOS_POLLERR | TOS_POLLNVAL);
+}
+
 void process_start_shell(const char *path)
 {
     /* Published already claimed: see proc_create_claim().  On an SMP build

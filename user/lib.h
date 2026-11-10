@@ -228,6 +228,23 @@ int adc_bits(void);
  * live writer blocks, and returns 0 (EOF) once every writer has closed. */
 int pipe(int fds[2]);
 int dup2(int oldfd, int newfd);
+
+/* Readiness without blocking: same shape as POSIX poll().  timeout 0 checks
+ * once, < 0 waits until something is ready, > 0 waits at most that many ms.
+ * The waiting is sleep(1) between non-blocking checks, so the kernel syscall
+ * itself never parks the task. */
+struct pollfd {
+    int   fd;
+    short events;
+    short revents;
+};
+
+#define POLLIN   TOS_POLLIN
+#define POLLOUT  TOS_POLLOUT
+#define POLLERR  TOS_POLLERR
+#define POLLNVAL TOS_POLLNVAL
+
+int poll(struct pollfd *fds, int nfds, int timeout_ms);
 int  wait(int pid);
 int  yield(void);
 int  ps(void);
@@ -260,6 +277,7 @@ int    printf(const char *fmt, ...);
  * width, which is all the kernel formatter supports too. */
 int    tos_vsnprintf(char *buf, int cap, const char *fmt,
                      __builtin_va_list ap);
+int    snprintf(char *buf, int cap, const char *fmt, ...);
 void   puts(const char *s);
 void   putchar(int c);
 int    putint(int v);
