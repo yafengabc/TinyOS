@@ -30,6 +30,11 @@ exclude = ping,net,dhcp
 - `[build] target` picks an entry from `internal/build/build.go`'s `Targets`.
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
+- `[features] softfloat = true` links the 32-bit soft-float runtime
+  (`user/softfloat32.c`) so programs can use `float`.  It is off by default:
+  the image then only carries Q16.16 (`user/fix16.c`), and a float operation
+  fails at link time instead of silently adding ~1.8 KiB of code.  The
+  `floattest` demo adapts to either mode.
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
   target's board-default drivers (`Targets[..].Drivers`).
@@ -46,6 +51,7 @@ Examples:
 | `tos.conf` | default target (x86) |
 | `configs/esp32c3.conf` | C3 kernel only, no WiFi/net commands |
 | `configs/esp32c3-wifi.conf` | C3 + WiFi + DHCP/ICMP, all commands |
+| `configs/esp32c3-wifi-soft.conf` | the same, plus the 32-bit soft-float runtime |
 | `configs/esp32c3-wifi-nonet.conf` | C3 + WiFi association only |
 | `configs/rp2040.conf` | RP2040, WiFi commands excluded |
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |

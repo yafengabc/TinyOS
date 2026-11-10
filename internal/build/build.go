@@ -1097,11 +1097,18 @@ func (b *Builder) buildUser() ([]string, error) {
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
 	// aeabi.c supplies the EABI division helpers the Cortex-M0+ needs (it
 	// has no hardware divide); on the M3, rv32 and i386 nothing references
-	// it and --gc-sections drops it.  softfloat32.c/fix16.c are the float
-	// and Q16.16 runtimes: only the functions a program calls survive the
-	// link, so listing them here costs nothing when unused.
+	// it and --gc-sections drops it.
+	//
+	// Q16.16 is always available and is the default numeric runtime.  The
+	// 32-bit soft-float runtime is opt-in ([features] softfloat = true)
+	// because `float` in a program then costs ~1.8 KiB of code; without the
+	// feature a float operation fails at link time rather than silently
+	// pulling it in.
 	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
-		"aeabi.c", "softfloat32.c", "fix16.c"}
+		"aeabi.c", "fix16.c"}
+	if b.feature("softfloat") {
+		common = append(common, "softfloat32.c")
+	}
 	var commonObjs []string
 	var tasks []task
 	for _, name := range common {
