@@ -322,6 +322,11 @@ go run ./cmd/tos run   -target arm
 # 构建配置：默认读仓库根的 tos.conf；-config 选择特性/驱动
 go run ./cmd/tos build -config configs/esp32c3-wifi.conf   # C3 + WiFi + DHCP/ICMP
 go run ./cmd/tos build -config configs/esp32c3.conf        # C3 无 WiFi
+
+# 交互式配置（方向键/空格/回车，s 保存，q 退出）
+go run ./cmd/tos menuconfig                     # 编辑 tos.conf
+go run ./cmd/tos menuconfig -config configs/esp32c3-wifi.conf
+go run ./cmd/tos menuconfig -print -config configs/esp32c3-wifi.conf   # 只输出规范化后的 INI
 ```
 
 配置文件的 `[build] target`、`[features]`（生成 `-DTOS_<NAME>`）、

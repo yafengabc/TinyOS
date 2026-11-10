@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"tinyos/internal/build"
+	"tinyos/internal/menu"
 )
 
 func usage() {
@@ -23,6 +24,10 @@ usage:
                             default is tos.conf when it exists (see configs/).
   tos run   [-headless] [-debug] [-no-build] [-target <target>] [-config <file>]
                             build (unless -no-build) and boot in QEMU
+  tos menuconfig [-config <file>] [-print]
+                            edit the build config with a small ncurses-style
+                            menu; -print just writes the canonical file text to
+                            stdout
   tos espimg <elf> <out.bin>
                             package a linked ELF as an ESP32-C3 boot image,
                             ready to be written at flash offset 0 (-sha=false
@@ -55,6 +60,38 @@ func main() {
 	b := build.New(root)
 
 	switch os.Args[1] {
+	case "menuconfig":
+		flags := flag.NewFlagSet("menuconfig", flag.ExitOnError)
+		config := flags.String("config", "", "config file to edit (default tos.conf)")
+		printOnly := flags.Bool("print", false, "print the canonical config and exit")
+		flags.Parse(os.Args[2:])
+
+		path := *config
+		if path == "" {
+			path = os.Getenv("TOS_CONFIG")
+		}
+		if path == "" {
+			path = "tos.conf"
+		}
+		abs := path
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(root, abs)
+		}
+		cfg, err := loadConfig(root, path)
+		if err != nil && !os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "tos:", err)
+			os.Exit(1)
+		}
+		st := menu.Load(cfg, abs)
+		if *printOnly {
+			fmt.Print(st.Render())
+			return
+		}
+		if err := menu.Run(st, root); err != nil {
+			fmt.Fprintln(os.Stderr, "tos:", err)
+			os.Exit(1)
+		}
+
 	case "build":
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
 		verbose := fs.Bool("v", false, "print full compiler command lines")

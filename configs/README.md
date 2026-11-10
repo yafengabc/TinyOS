@@ -4,6 +4,12 @@
 `-config configs/<name>.conf` (or set `TOS_CONFIG`) to choose another file.
 `-target` still overrides `[build] target`.
 
+`tos menuconfig [-config <file>]` edits a config interactively: arrows move,
+space toggles or cycles, enter opens a submenu, `s` saves, `q` quits.  It only
+exposes the common knobs (target, WiFi/net, soft-float variant, user
+programs); anything else in the file is preserved.  `-print` writes the
+canonical INI to stdout and exits, without the UI.
+
 The format is flat INI: sections, `key = value`, `#`/`;` comments.  Relative
 paths are resolved against the tree root.
 
