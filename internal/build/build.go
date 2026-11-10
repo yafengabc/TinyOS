@@ -1099,17 +1099,17 @@ func (b *Builder) buildUser() ([]string, error) {
 	// has no hardware divide); on the M3, rv32 and i386 nothing references
 	// it and --gc-sections drops it.
 	//
-	// Q16.16 is always available and is the default backend.  The float
-	// *source syntax* works in both modes: user/softfix.c maps __addsf3 and
-	// friends onto Q16.16, while [features] softfloat = true swaps in the
-	// IEEE binary32 runtime (user/softfloat32.c).  floatprint.c and faeabi.c
-	// are backend-neutral and only pulled in by programs that use them.
+	// Numeric runtimes.  Q16.16 is always linked and is used explicitly
+	// through fix16_*; it is the small/fast path.  `float` needs the IEEE
+	// binary32 runtime, linked only when [features] softfloat = true - the
+	// build does not emulate float on top of fixed point, so there is no
+	// per-operation conversion either way.  floatprint.c and faeabi.c are
+	// the backend-independent parts and only pulled in by programs that use
+	// them.
 	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
 		"aeabi.c", "fix16.c", "floatprint.c", "faeabi.c"}
 	if b.feature("softfloat") {
 		common = append(common, "softfloat32.c")
-	} else {
-		common = append(common, "softfix.c")
 	}
 	var commonObjs []string
 	var tasks []task
@@ -1156,8 +1156,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		}
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
 		    name == "softfloat32.c" || name == "fix16.c" ||
-		    name == "softfix.c" || name == "floatprint.c" ||
-		    name == "faeabi.c" {
+		    name == "floatprint.c" || name == "faeabi.c" {
 			continue
 		}
 		progs = append(progs, prog)

@@ -30,14 +30,12 @@ exclude = ping,net,dhcp
 - `[build] target` picks an entry from `internal/build/build.go`'s `Targets`.
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
-- `[features] softfloat = true` swaps the float backend from Q16.16 to IEEE
-  binary32.  Source code writes `float` either way: by default
-  `user/softfix.c` maps `__addsf3` and friends onto `user/fix16.c`, so `float`
-  has Q16.16 range (+/-32767.99998, step 1/65536) and clamps outside it; the
-  feature links `user/softfloat32.c` for the full IEEE range and precision.
-  For float-heavy code the IEEE backend is actually the smaller/faster of the
-  two; reach for the raw `fix16_*` API when size or speed is the priority.
-  `floattest` prints which backend is active.
+- `[features] softfloat = true` links the IEEE binary32 runtime
+  (`user/softfloat32.c`), which `float` arithmetic and `print_float` need.
+  It is off by default: numeric code then uses the always-linked `fix16_*`
+  API (`user/fix16.c`), the small/fast path (Q16.16, +/-32767.99998, step
+  1/65536).  There is no automatic float-on-fixed-point emulation, so neither
+  mode pays a per-operation conversion.
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
   target's board-default drivers (`Targets[..].Drivers`).
