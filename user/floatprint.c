@@ -6,7 +6,7 @@
  * The conversion is done entirely on the IEEE bit pattern with integer
  * arithmetic, so printing never pulls in the float runtime: a program that
  * only formats a value links ~700 bytes instead of ~1.4 KiB.  printf is left
- * alone; call print_float()/float_to_str().
+ * alone; call printfloat()/float_to_str().
  *
  * value = M * 2^(e-150), so value * 10^d = M * 10^d * 2^(e-150).  That
  * product (48 bits) is shifted into a 64-bit D and divided by 10^d once, which
@@ -199,7 +199,7 @@ int float_to_str(char *out, int cap, float v, int decimals)
     return n;
 }
 
-int print_float_n(float v, int decimals)
+int printfloat_n(float v, int decimals)
 {
     char buf[40];
     int n = float_to_str(buf, sizeof(buf), v, decimals);
@@ -210,7 +210,7 @@ int print_float_n(float v, int decimals)
     return n;
 }
 
-int print_float(float v)
+int printfloat(float v)
 {
-    return print_float_n(v, 4);
+    return printfloat_n(v, 4);
 }

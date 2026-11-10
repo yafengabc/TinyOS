@@ -55,10 +55,10 @@ int main(void)
     for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
         puts(cases[i].name);
         puts("\t");
-        print_fix16(cases[i].q);
+        printfix16(cases[i].q);
 #if defined(TOS_SOFTFLOAT)
         puts("\t");
-        print_float(cases[i].f);
+        printfloat(cases[i].f);
 #endif
         puts("\n");
     }
@@ -70,7 +70,7 @@ int main(void)
         for (i = 0; i < 10; i++)
             q = fix16_add(q, 6554);
         puts("fix16 ");
-        print_fix16(q);
+        printfix16(q);
 #if defined(TOS_SOFTFLOAT)
         {
             float f = 0.0f;
@@ -78,7 +78,7 @@ int main(void)
             for (i = 0; i < 10; i++)
                 f = f + 0.1f;
             puts("   float ");
-            print_float(f);
+            printfloat(f);
         }
 #endif
         puts("\n");
@@ -90,14 +90,14 @@ int main(void)
 
         q = fix16_mul(q, 3 * FIX16_ONE);
         puts("fix16 ");
-        print_fix16(q);
+        printfix16(q);
 #if defined(TOS_SOFTFLOAT)
         {
             float f = __divsf3(1.0f, 3.0f);
 
             f = f * 3.0f;
             puts("   float ");
-            print_float(f);
+            printfloat(f);
         }
 #endif
         puts("\n");
@@ -114,7 +114,7 @@ int main(void)
     puts("fix16 ");
     putint(t1 - t0);
     puts(" ms  result ");
-    print_fix16(qa);
+    printfix16(qa);
     puts("\n");
 
 #if defined(TOS_SOFTFLOAT)
@@ -125,7 +125,7 @@ int main(void)
     puts("float ");
     putint(t1 - t0);
     puts(" ms  result ");
-    print_float(fa);
+    printfloat(fa);
     puts("\n");
 #endif
     return 0;

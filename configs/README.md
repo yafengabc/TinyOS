@@ -31,7 +31,7 @@ exclude = ping,net,dhcp
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
 - `[features] softfloat = true` links the IEEE binary32 runtime
-  (`user/softfloat32.c`), which `float` arithmetic and `print_float` need.
+  (`user/softfloat32.c`), which `float` arithmetic and `printfloat` need.
   It is off by default: numeric code then uses the always-linked `fix16_*`
   API (`user/fix16.c`), the small/fast path (Q16.16, +/-32767.99998, step
   1/65536).  There is no automatic float-on-fixed-point emulation, so neither

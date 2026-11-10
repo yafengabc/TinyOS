@@ -52,11 +52,11 @@ int __aeabi_f2iz(float a);
 unsigned int __aeabi_f2uiz(float a);
 
 /* Format/print a float without touching printf.  `float_to_str` writes at most
- * cap-1 characters plus NUL and returns the length it wanted.  `print_float`
+ * cap-1 characters plus NUL and returns the length it wanted.  `printfloat`
  * writes to stdout with four decimals and no trailing newline.  Values of
  * 2^31 and above print as "big". */
 int  float_to_str(char *out, int cap, float v, int decimals);
-int  print_float_n(float v, int decimals);
-int  print_float(float v);
+int  printfloat_n(float v, int decimals);
+int  printfloat(float v);
 
 #endif /* TINYOS_SOFTFLOAT32_H */

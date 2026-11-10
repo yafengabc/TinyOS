@@ -28,9 +28,9 @@ fix16_t fix16_mul(fix16_t a, fix16_t b);
 fix16_t fix16_div(fix16_t a, fix16_t b);
 fix16_t fix16_abs(fix16_t v);
 
-/* Same interface as float_to_str/print_float, up to four decimals. */
+/* Same interface as float_to_str/printfloat, up to four decimals. */
 int  fix16_to_str(char *out, int cap, fix16_t v, int decimals);
-int  print_fix16_n(fix16_t v, int decimals);
-int  print_fix16(fix16_t v);
+int  printfix16_n(fix16_t v, int decimals);
+int  printfix16(fix16_t v);
 
 #endif /* TINYOS_FIX16_H */

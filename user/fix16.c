@@ -143,7 +143,7 @@ int fix16_to_str(char *out, int cap, fix16_t v, int decimals)
     return n;
 }
 
-int print_fix16_n(fix16_t v, int decimals)
+int printfix16_n(fix16_t v, int decimals)
 {
     char buf[32];
     int n = fix16_to_str(buf, sizeof(buf), v, decimals);
@@ -154,7 +154,7 @@ int print_fix16_n(fix16_t v, int decimals)
     return n;
 }
 
-int print_fix16(fix16_t v)
+int printfix16(fix16_t v)
 {
-    return print_fix16_n(v, 4);
+    return printfix16_n(v, 4);
 }
