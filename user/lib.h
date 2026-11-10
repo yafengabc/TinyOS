@@ -65,6 +65,34 @@
         unsigned heap_bytes;                                                 \
     } tos_heap_note = { 7u, 4u, 2u, "TinyOS", (unsigned)(bytes) }
 
+/* How large a task window this program is allowed to need, when it must fit
+ * one board grain (msh asks for one window so it stays 16 KiB on the C3 and
+ * RP2040):
+ *
+ *     TOS_ONE_GRAIN();           -- at file scope, once per program
+ *
+ * The kernel ignores it; `tos build` computes image + stack + heap + guard
+ * and fails the build when that no longer fits one grain (or the byte count
+ * given to TOS_WINDOW), instead of letting the program quietly take a larger
+ * window at run time. */
+#define TOS_WINDOW(bytes)                                                    \
+    __attribute__((section(".note.tos"), used, aligned(4)))                  \
+    static const struct {                                                    \
+        unsigned namesz, descsz, type;                                       \
+        char     name[8];                                                    \
+        unsigned window_bytes;                                               \
+    } tos_window_note = { 7u, 4u, 3u, "TinyOS", (unsigned)(bytes) }
+
+/* The same note with 0, meaning "one board grain" (16 KiB on C3/RP2040,
+ * 64 KiB on the QEMU and PC targets). */
+#define TOS_ONE_GRAIN()                                                      \
+    __attribute__((section(".note.tos"), used, aligned(4)))                  \
+    static const struct {                                                    \
+        unsigned namesz, descsz, type;                                       \
+        char     name[8];                                                    \
+        unsigned window_bytes;                                               \
+    } tos_window_note = { 7u, 4u, 3u, "TinyOS", 0u }
+
 /* system calls */
 int  write(int fd, const void *buf, int len);
 

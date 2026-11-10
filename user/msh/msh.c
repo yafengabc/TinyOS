@@ -1,19 +1,20 @@
 /* msh - a shell that fits one 16 KiB task window.
  *
- * A window is image + stack + guard, and the last two have a floor of one
- * page each on every board with a protection unit, so the image budget is
- * 8 KiB: 16 - 4 - 4.  Measured, on C3 at -Oz: 5 792 B of image (2 494
- * text, 348 rodata, 2 656 bss) and `ps` reports wink 16 / stk 1.6-of-4
- * after a nested `source`.  The full shell needs 20 464 + 12 288 = 32 752,
- * i.e. a 32 KiB window with 16 bytes to spare.
+ * A window is image + stack + heap + guard, and the stack and guard have a
+ * floor of one page each on every board with a protection unit, so the image
+ * budget is 8 KiB: 16 - 4 - 4.  Measured at -Oz: C3 6,944 B (3,466 text,
+ * 744 rodata, 64 data, 2,656 bss), rp2040 7,744 B.  Both round to the 8 KiB
+ * span, so the window stays 16 KiB - rp2040 has 448 bytes left before the
+ * span would jump to 12 KiB and the window to 32 KiB.  TOS_ONE_GRAIN()
+ * makes `tos build` check that rather than leaving it to arithmetic in a
+ * comment.
  *
  * What it keeps: read a line, split it, name=value, $name, ${name}, $?,
  * comments, `&`, exec a program, source a file in-process (nests two
- * deep), exit, run, echo, true/false, history.
+ * deep), exit, run, echo, true/false, history, cd/pwd/rm/ps/sleep/prio/nice.
  * What it drops: if/while/else/fi/done/break, $(...), pipes, redirection,
- * incr, cd/pwd/rm/ps/prio/nice, the sleep builtin, the long help.
- * Those are the 8 KiB of text the full shell's script engine and builtins
- * account for.
+ * incr and the long help.  Those are the 8 KiB of text the full shell's
+ * script engine accounts for.
  *
  * history costs no storage here: the pool lives in the line discipline
  * (kernel/tty.c, 512 B of kernel .bss), which is also what makes the arrow
@@ -25,11 +26,10 @@
  * with 1 KiB the boot script still fits, a demo script does not.
  *
  * The "opt" file next to this source says -Oz, and that is what buys the
- * headroom: rp2040 (Thumb plus the aeabi division helpers) lands at
- * 6 656 B of the 8 192 budget instead of 7 968, where 224 bytes were all
- * that stood between msh and a 32 KiB window.  x86 goes 7 792 -> 6 640 and
- * rv32 6 272 -> 5 792.  A shell copies characters and forks programs; it
- * has no loop anyone can measure, so the size win costs nothing felt.
+ * headroom: without it rp2040 landed at 7 968 B of the 8 192 budget, only
+ * 224 bytes between msh and a 32 KiB window.  A shell copies characters and
+ * forks programs; it has no loop anyone can measure, so the size win costs
+ * nothing felt.
  *
  * Wired into init: the kernel starts bin/msh.  bin/sh is still in the image
  * and can be launched from it.  See docs/OPEN-ITEMS.md section 21.
@@ -40,6 +40,10 @@
  * default on the small boards is 8 KiB, and 4 448 + 8 192 + 4 096 = 16 736
  * rounds up to 32 KiB on a 16 KiB grain - 352 bytes short of one window. */
 TOS_STACK(4 * 1024);
+/* One board grain on every board that gives us one.  The build computes
+ * image + stack + heap + guard and fails when that stops fitting, so this is
+ * a promise, not a hope. */
+TOS_ONE_GRAIN();
 
 #define MAX_ARGS  8
 #define LINE_MAX  256
@@ -310,6 +314,116 @@ static int run_command(char *s)
     }
     if (!strcmp(args[0], "false")) {
         last_status = 1;
+        return -1;
+    }
+    if (!strcmp(args[0], "cd")) {
+        const char *dst = ac > 1 ? args[1] : "/";
+
+        if (chdir(dst) < 0) {
+            err("cd: no such directory: ");
+            err(dst);
+            err("\n");
+            last_status = 1;
+        } else {
+            last_status = 0;
+        }
+        return -1;
+    }
+    if (!strcmp(args[0], "pwd")) {
+        char cwd[64];
+
+        if (getcwd(cwd, sizeof(cwd)) > 0) {
+            puts(cwd);
+            putchar('\n');
+        }
+        last_status = 0;
+        return -1;
+    }
+    if (!strcmp(args[0], "rm")) {
+        if (ac < 2) {
+            err("usage: rm <file>...\n");
+            last_status = 1;
+        } else {
+            last_status = 0;
+            for (int i = 1; i < ac; i++)
+                if (unlink(args[i]) < 0) {
+                    err("rm: cannot remove ");
+                    err(args[i]);
+                    err("\n");
+                    last_status = 1;
+                }
+        }
+        return -1;
+    }
+    if (!strcmp(args[0], "ps")) {
+        /* Through /proc/ps, so the output could be redirected if msh ever
+         * grows redirection; the syscall path writes to the console only. */
+        int fd = open("/proc/ps");
+
+        if (fd < 0) {
+            err("ps: /proc/ps not available\n");
+            last_status = 1;
+        } else {
+            char buf[128];
+            int n;
+
+            while ((n = read(fd, buf, sizeof(buf))) > 0)
+                write_all(1, buf, n);
+            close(fd);
+            last_status = 0;
+        }
+        return -1;
+    }
+    if (!strcmp(args[0], "sleep") && !bg) {
+        int ms = ac > 1 ? atoi(args[1]) : 0;
+
+        if (ac < 2 || ms <= 0 || ms > 3600000) {
+            err("usage: sleep <ms>   (max 3600000)\n");
+            last_status = 1;
+        } else {
+            sleep(ms);
+            last_status = 0;
+        }
+        return -1;
+    }
+    if (!strcmp(args[0], "prio")) {
+        if (ac != 3) {
+            err("usage: prio <pid> <0-2>  (0 highest, 2 lowest)\n");
+            last_status = 1;
+        } else if (setprio(atoi(args[1]), atoi(args[2])) < 0) {
+            err("prio: no such task, or a level you cannot set\n");
+            last_status = 1;
+        } else {
+            last_status = 0;
+        }
+        return -1;
+    }
+    if (!strcmp(args[0], "nice")) {
+        int lvl = ac > 1 ? atoi(args[1]) : -1;
+
+        if (ac < 3 || lvl < 0 || lvl > 2) {
+            err("usage: nice <0-2> <program> [args...] [&]\n");
+            last_status = 1;
+        } else {
+            int pid = spawn(&args[2], ac - 2);
+
+            if (pid < 0) {
+                last_status = 127;
+            } else {
+                if (setprio(pid, lvl) < 0)
+                    err("nice: cannot move that task to that level\n");
+                if (bg) {
+                    puts("[");
+                    putint(pid);
+                    puts("]\n");
+                    last_status = 0;
+                } else {
+                    int rc = wait(pid);
+
+                    last_status = rc < 0 ? 127 : rc;
+                }
+            }
+        }
         return -1;
     }
 

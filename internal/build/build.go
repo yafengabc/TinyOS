@@ -1,7 +1,11 @@
 package build
 
 import (
+	"bytes"
+	"debug/elf"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +106,7 @@ var (
 	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv"}
 )
 
-var Targets = map[string]Target{	// The kernel heap has to hold one decompressed program image at a
+var Targets = map[string]Target{ // The kernel heap has to hold one decompressed program image at a
 	// time: exec() unpacks the program into a kernel buffer before it
 	// copies it into the task window.  The default 32 KiB is enough for
 	// the small tools, but not for the Python interpreter, whose image is
@@ -202,7 +206,112 @@ var Targets = map[string]Target{	// The kernel heap has to hold one decompressed
 	"rv32nc": {Name: "rv32nc", Arch: "rv32", Board: "qemu-virt", Triple: "riscv32-unknown-elf", March: "rv32im", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 256 * 1024},
 }
 
-// Builder compiles and links everything and writes build/tinyos.img.
+// WindowGeometry mirrors the board's layout.c: the task-window grain, the
+// default per-task stack when the program has no TOS_STACK note, and the
+// guard hole under the stack.
+func (t Target) WindowGeometry() (grain, stack, guard int) {
+	switch t.Board {
+	case "esp32c3", "rp2040", "rp2350", "rp2350rv":
+		return 16 << 10, 8 << 10, 4 << 10
+	}
+	return 64 << 10, 32 << 10, 16 << 10
+}
+
+// windowNotes is what windowNote() finds in a linked user ELF.
+type windowNotes struct {
+	span, stack, heap uint32 // image span (page rounded), stack, heap
+	window            uint32 // TOS_WINDOW bytes; 0 is TOS_ONE_GRAIN()
+	hasWindow         bool   // a TOS_WINDOW note was present
+}
+
+// windowNote reads the TOS_STACK/TOS_HEAP/TOS_WINDOW notes out of a linked
+// user ELF and computes the span mklfs will store: the PT_LOAD range rounded
+// up to the page size.
+func windowNote(data []byte) (windowNotes, bool) {
+	var w windowNotes
+
+	f, err := elf.NewFile(bytes.NewReader(data))
+	if err != nil {
+		return w, false
+	}
+	lo, hi := ^uint64(0), uint64(0)
+	for _, p := range f.Progs {
+		switch p.Type {
+		case elf.PT_LOAD:
+			if p.Memsz == 0 {
+				continue
+			}
+			if p.Vaddr < lo {
+				lo = p.Vaddr
+			}
+			if p.Vaddr+p.Memsz > hi {
+				hi = p.Vaddr + p.Memsz
+			}
+		case elf.PT_NOTE:
+			note, err := io.ReadAll(p.Open())
+			if err != nil {
+				continue
+			}
+			for off := 0; off+12 <= len(note); {
+				namesz := binary.LittleEndian.Uint32(note[off:])
+				descsz := binary.LittleEndian.Uint32(note[off+4:])
+				typ := binary.LittleEndian.Uint32(note[off+8:])
+				nameOff := off + 12
+				descOff := nameOff + int((namesz+3)&^3)
+				next := descOff + int((descsz+3)&^3)
+				if next > len(note) || next <= off {
+					break
+				}
+				if namesz >= 6 && string(note[nameOff:nameOff+6]) == "TinyOS" &&
+					descsz >= 4 {
+					v := binary.LittleEndian.Uint32(note[descOff:])
+					switch typ {
+					case 1:
+						w.stack = v
+					case 2:
+						w.heap = v
+					case 3:
+						w.window = v
+						w.hasWindow = true
+					}
+				}
+				off = next
+			}
+		}
+	}
+	if lo == ^uint64(0) || hi <= lo {
+		return w, false
+	}
+	w.span = uint32((hi - lo + 4095) &^ 4095)
+	return w, true
+}
+
+// checkWindow enforces a program's TOS_WINDOW promise before it is packed.
+// TOS_ONE_GRAIN() stores 0, meaning the program must fit one board grain.
+func (b *Builder) checkWindow(prog string, data []byte) error {
+	w, ok := windowNote(data)
+	if !ok || !w.hasWindow {
+		return nil
+	}
+	grain, defStack, guard := b.Target.WindowGeometry()
+	if w.stack == 0 {
+		w.stack = uint32(defStack)
+	}
+	limit := w.window
+	what := fmt.Sprintf("TOS_WINDOW(%d KiB)", w.window/1024)
+	if w.window == 0 {
+		limit = uint32(grain)
+		what = "TOS_ONE_GRAIN()"
+	}
+	need := w.span + w.stack + w.heap + uint32(guard)
+	if need <= limit {
+		return nil
+	}
+	rounded := (need + uint32(grain) - 1) / uint32(grain) * uint32(grain)
+	return fmt.Errorf("%s: %s no longer fits: image %d + stack %d + heap %d + guard %d = %d bytes, so it would take a %d KiB window",
+		prog, what, w.span, w.stack, w.heap, guard, need, rounded/1024)
+}
+
 type Builder struct {
 	Root     string
 	BuildDir string
@@ -211,16 +320,16 @@ type Builder struct {
 	Verbose  bool
 	Target   Target
 
-	Config       *Config
-	Features     map[string]bool
-	DriverDirs   []string
+	Config         *Config
+	Features       map[string]bool
+	DriverDirs     []string
 	driverDirsInit bool
-	UserExclude  map[string]bool
-	SourceExclude map[string]bool
-	WiFiLibDir   string
-	WiFiLDScript string
-	WiFiLDSymbol string
-	LDExtra      []string
+	UserExclude    map[string]bool
+	SourceExclude  map[string]bool
+	WiFiLibDir     string
+	WiFiLDScript   string
+	WiFiLDSymbol   string
+	LDExtra        []string
 	// Config overrides for the kernel; 0/"" keeps the target's default.
 	HeapBytes int
 	MaxProcs  int
@@ -1182,8 +1291,8 @@ func (b *Builder) buildUser() ([]string, error) {
 			continue
 		}
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
-		    name == "softfloat32.c" || name == "fix16.c" ||
-		    name == "floatprint.c" || name == "faeabi.c" {
+			name == "softfloat32.c" || name == "fix16.c" ||
+			name == "floatprint.c" || name == "faeabi.c" {
 			continue
 		}
 		progs = append(progs, prog)
@@ -1290,6 +1399,9 @@ func (b *Builder) buildFSImage(bins []string) error {
 	for _, prog := range bins {
 		data, err := os.ReadFile(filepath.Join(b.BuildDir, "user", "bin", prog))
 		if err != nil {
+			return err
+		}
+		if err := b.checkWindow("bin/"+prog, data); err != nil {
 			return err
 		}
 		files = append(files, RamFile{Name: "bin/" + prog, Data: data})
