@@ -30,16 +30,16 @@ exclude = ping,net,dhcp
 - `[build] target` picks an entry from `internal/build/build.go`'s `Targets`.
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
-- `[features] softfloat = true` links the IEEE binary32 runtime
-  (`user/softfloat32.c`), which `float` arithmetic and `printfloat` need.
-  It is off by default: numeric code then uses the always-linked `fix16_*`
-  API (`user/fix16.c`), the small/fast path (Q16.16, +/-32767.99998, step
-  1/65536).  There is no automatic float-on-fixed-point emulation, so neither
-  mode pays a per-operation conversion.
-- `[features] softfloat-min = true` goes one step further: the same runtime
-  compiled with `TOS_SOFTFLOAT_MIN`, which drops subnormals (flush to zero)
-  and NaN/Inf (inputs clamp to the largest finite value, overflow and x/0
-  saturate).  It saves another ~300 bytes; use plain `softfloat` when the
+- Both numeric runtimes are always linked: `user/fix16.c` provides the
+  explicit Q16.16 API (`fix16_*`, +/-32767.99998, step 1/65536, the small/fast
+  path) and `user/softfloat32.c` backs ordinary `float` syntax with IEEE
+  binary32.  Programs only pay for what they call: every function has its own
+  section and the linker drops the rest, so an image that uses neither grows
+  by nothing.
+- `[features] softfloat-min = true` compiles that runtime with
+  `TOS_SOFTFLOAT_MIN`: subnormals flush to zero and NaN/Inf are not
+  represented (inputs clamp to the largest finite value, overflow and x/0
+  saturate).  It saves another ~580 bytes; use plain soft float when the
   program depends on those IEEE corner cases.
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
@@ -57,8 +57,7 @@ Examples:
 | `tos.conf` | default target (x86) |
 | `configs/esp32c3.conf` | C3 kernel only, no WiFi/net commands |
 | `configs/esp32c3-wifi.conf` | C3 + WiFi + DHCP/ICMP, all commands |
-| `configs/esp32c3-wifi-soft.conf` | the same, plus the 32-bit soft-float runtime |
-| `configs/esp32c3-wifi-softmin.conf` | soft float without NaN/Inf/subnormals |
+| `configs/esp32c3-wifi-softmin.conf` | the same, with the saturating float runtime |
 | `configs/esp32c3-wifi-nonet.conf` | C3 + WiFi association only |
 | `configs/rp2040.conf` | RP2040, WiFi commands excluded |
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |

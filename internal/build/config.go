@@ -234,11 +234,6 @@ func (b *Builder) featureDefines() []string {
 		}
 		defs = append(defs, "-DTOS_"+n.String())
 	}
-	// softfloat-min is the same runtime with NaN/Inf/subnormals compiled out;
-	// programs key off TOS_SOFTFLOAT, so set it for both spellings.
-	if b.Features["softfloat-min"] {
-		defs = append(defs, "-DTOS_SOFTFLOAT")
-	}
 	sort.Strings(defs)
 	return defs
 }

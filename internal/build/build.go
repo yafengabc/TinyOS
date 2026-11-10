@@ -1099,18 +1099,14 @@ func (b *Builder) buildUser() ([]string, error) {
 	// has no hardware divide); on the M3, rv32 and i386 nothing references
 	// it and --gc-sections drops it.
 	//
-	// Numeric runtimes.  Q16.16 is always linked and is used explicitly
-	// through fix16_*; it is the small/fast path.  `float` needs the IEEE
-	// binary32 runtime, linked only when [features] softfloat = true - the
-	// build does not emulate float on top of fixed point, so there is no
-	// per-operation conversion either way.  floatprint.c and faeabi.c are
-	// the backend-independent parts and only pulled in by programs that use
-	// them.
+	// Numeric runtimes.  Both are always linked: `fix16_*` is the small/fast
+	// explicit API, and ordinary `float` syntax resolves to the IEEE runtime.
+	// A program that uses neither keeps neither: every function has its own
+	// section, so --gc-sections drops the unused ones and the image does not
+	// grow.  softfloat-min only changes which semantics softfloat32.c is
+	// compiled with (see TOS_SOFTFLOAT_MIN there).
 	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
-		"aeabi.c", "fix16.c", "floatprint.c", "faeabi.c"}
-	if b.feature("softfloat") || b.feature("softfloat-min") {
-		common = append(common, "softfloat32.c")
-	}
+		"aeabi.c", "fix16.c", "floatprint.c", "faeabi.c", "softfloat32.c"}
 
 	// The numeric runtimes are size-sensitive and not on any hot kernel path;
 	// -Oz saves ~20% over the tree default (-O2) without changing semantics.

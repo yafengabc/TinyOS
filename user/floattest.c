@@ -1,15 +1,12 @@
 #include "lib.h"
 #include "fix16.h"
-#if defined(TOS_SOFTFLOAT)
 #include "softfloat32.h"
-#endif
 
 /* Side-by-side demo of the two numeric runtimes.
  *
- * Q16.16 is always linked and is the default.  The float column exists only
- * when the build enables [features] softfloat = true, which adds the 32-bit
- * soft-float runtime to the image.  The table keeps both columns so the
- * comparison is still visible when it is on. */
+ * Both are always linked.  `float` values are IEEE binary32 (or the
+ * saturating softfloat-min variant, if the build selected it); the fix16
+ * column is the explicit Q16.16 API.  Neither path converts at run time. */
 
 struct pair {
     float f;
@@ -33,73 +30,53 @@ static const struct pair cases[] = {
 int main(void)
 {
     volatile fix16_t qa = FIX16_ONE;
-#if defined(TOS_SOFTFLOAT)
     volatile float fa = 1.0f;
-#endif
     int i, t0, t1;
 
-    puts("float backend: ");
+    puts("softfloat: ");
 #if defined(TOS_SOFTFLOAT_MIN)
-    puts("IEEE binary32 (min)\n");
-#elif defined(TOS_SOFTFLOAT)
-    puts("IEEE binary32\n");
+    puts("min (no NaN/Inf, flush to zero)\n");
 #else
-    puts("fix16 only\n");
+    puts("IEEE binary32\n");
 #endif
 
-    puts("value\tfix16");
-#if defined(TOS_SOFTFLOAT)
-    puts("\tfloat");
-#endif
-    puts("\n");
+    puts("value\tfix16\tfloat\n");
     for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
         puts(cases[i].name);
         puts("\t");
         printfix16(cases[i].q);
-#if defined(TOS_SOFTFLOAT)
         puts("\t");
         printfloat(cases[i].f);
-#endif
         puts("\n");
     }
 
     puts("\n0.1 added ten times\n");
     {
         fix16_t q = 0;
+        float f = 0.0f;
 
-        for (i = 0; i < 10; i++)
+        for (i = 0; i < 10; i++) {
             q = fix16_add(q, 6554);
+            f = f + 0.1f;
+        }
         puts("fix16 ");
         printfix16(q);
-#if defined(TOS_SOFTFLOAT)
-        {
-            float f = 0.0f;
-
-            for (i = 0; i < 10; i++)
-                f = f + 0.1f;
-            puts("   float ");
-            printfloat(f);
-        }
-#endif
+        puts("   float ");
+        printfloat(f);
         puts("\n");
     }
 
     puts("\n1/3 times three\n");
     {
         fix16_t q = fix16_div(FIX16_ONE, 3 * FIX16_ONE);
+        float f = 1.0f / 3.0f;
 
         q = fix16_mul(q, 3 * FIX16_ONE);
+        f = f * 3.0f;
         puts("fix16 ");
         printfix16(q);
-#if defined(TOS_SOFTFLOAT)
-        {
-            float f = __divsf3(1.0f, 3.0f);
-
-            f = f * 3.0f;
-            puts("   float ");
-            printfloat(f);
-        }
-#endif
+        puts("   float ");
+        printfloat(f);
         puts("\n");
     }
 
@@ -117,7 +94,6 @@ int main(void)
     printfix16(qa);
     puts("\n");
 
-#if defined(TOS_SOFTFLOAT)
     t0 = uptime();
     for (i = 0; i < N; i++)
         fa = fa * 1.0001f - 0.0001f;
@@ -127,6 +103,5 @@ int main(void)
     puts(" ms  result ");
     printfloat(fa);
     puts("\n");
-#endif
     return 0;
 }
