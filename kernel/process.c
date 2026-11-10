@@ -1740,7 +1740,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        the initial shell.  It is published as already RUNNING instead of
        READY, with `current` set, so a secondary CPU cannot take it in the
        window between the publish and the caller's own bookkeeping.  That
-       window is not theoretical - with core 1 up, `starting /bin/sh` is
+       window is not theoretical - with core 1 up, `starting /bin/msh` is
        followed by a boot that dies in the shell roughly one time in three,
        because both cores end up running it on different stacks. */
     spin_lock(&proc_lock);

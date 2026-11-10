@@ -10,13 +10,13 @@
 ```
 x86 : BIOS -> 自写 MBR 引导扇区 -> 32 位保护模式 -> 内核
        -> GDT/IDT/TSS（平坦模型，不启用分页）+ 定时器 + 键盘
-       -> 挂载 littlefs（ATA 分区），加载 /bin/sh (ELF32) -> 进入 ring 3
+       -> 挂载 littlefs（ATA 分区），加载 /bin/msh (ELF32) -> 进入 ring 3
 RV32: qemu-system-riscv32 -bios none -> 内核 @0x80000000（M 模式）
        -> trap 向量 + CLINT 定时器 + 16550 串口 + PMP 分段（每任务 code/data/stack）
-       -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/sh -> mret 到 U-mode
+       -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/msh -> mret 到 U-mode
 ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
        -> Thread/PSP 跑任务、Handler/MSP 跑内核 + SysTick + CMSDK UART0
-       -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/sh -> 异常返回进入用户任务
+       -> 挂载内嵌 littlefs 镜像（RAM 盘），加载 /bin/msh -> 异常返回进入用户任务
 ```
 
 三条链跑的是**同一套内核代码**（`kernel/`）和**同一批用户程序**：程序是 PIE，
@@ -113,7 +113,7 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 ```
 boot/stage1.S        512 字节引导扇区
 kernel/              架构无关内核（C）
-  main.c             启动、ramdisk 自检、cpu_init、拉起 /bin/sh
+  main.c             启动、ramdisk 自检、cpu_init、拉起 /bin/msh
   platform.h         HAL：各 arch/board 实现的平台接口（含时钟、CPU 拓扑、GPIO/ADC）
   cpu.c cpu.h        per-CPU 状态、二级 hart 起步、自旋锁
   periph.c periph.h  GPIO/ADC 的 weak 默认实现与分发，以及 /dev/gpioN 设备注册
@@ -454,7 +454,7 @@ qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.e
 ```
 
 `-bios none` 表示不用 OpenSBI：内核自己从 M 模式起步，配置自己的 trap 向量、
-16550 串口、CLINT 定时器和 PMP，然后 `mret` 到 U-mode 运行 `/bin/sh`。
+16550 串口、CLINT 定时器和 PMP，然后 `mret` 到 U-mode 运行 `/bin/msh`。
 
 已经跑通的东西（与 x86 完全相同的一批用户程序）：
 

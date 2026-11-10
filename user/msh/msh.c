@@ -31,8 +31,8 @@
  * rv32 6 272 -> 5 792.  A shell copies characters and forks programs; it
  * has no loop anyone can measure, so the size win costs nothing felt.
  *
- * Not wired into init: the kernel still starts bin/sh, and this is a
- * second program in the image.  See docs/OPEN-ITEMS.md section 21.
+ * Wired into init: the kernel starts bin/msh.  bin/sh is still in the image
+ * and can be launched from it.  See docs/OPEN-ITEMS.md section 21.
  */
 #include "lib.h"
 

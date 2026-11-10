@@ -111,7 +111,7 @@ void kmain(void)
     }
 #endif
 
-    kprintf("\nstarting /bin/sh ...\n\n");
-    process_start_shell("bin/sh");
+    kprintf("\nstarting /bin/msh ...\n\n");
+    process_start_shell("bin/msh");
     panic("shell returned");
 }
