@@ -7,7 +7,9 @@
  * linked (ABI mismatch).  Implementing them here keeps the kernel free of
  * any external runtime. */
 
-#if !defined(__i386__) && !defined(__x86_64__)
+/* Every port gets them: -O2 folds the kernel's 64-bit divisions into
+ * multiply/shift sequences, but -Oz emits calls to these even on x86, and
+ * --gc-sections drops whatever a build does not use. */
 
 uint32_t __mulsi3(uint32_t a, uint32_t b)
 {
@@ -152,8 +154,6 @@ uint64_t __ashrdi3(uint64_t v, int n)
     return d.u;
 }
 
-#endif
-
 #if defined(__arm__)
 
 /* ARM EABI helpers clang emits for Cortex-M.  The M3 has no hardware
@@ -190,6 +190,37 @@ void *__aeabi_memset(void *dst, size_t n, int c)
 void *__aeabi_memmove(void *dst, const void *src, size_t n)
 {
     return memmove(dst, src, n);
+}
+
+/* The zeroing and 4/8-aligned variants, plus the unaligned-access helpers.
+ * Clang emits them at -Oz even with -fno-builtin (aggregate zeroing and
+ * packed reads), so they have to exist even though -O2 never needed them. */
+void *__aeabi_memclr(void *dst, size_t n)  { return memset(dst, 0, n); }
+void *__aeabi_memclr4(void *dst, size_t n) { return memset(dst, 0, n); }
+void *__aeabi_memclr8(void *dst, size_t n) { return memset(dst, 0, n); }
+void *__aeabi_memset4(void *dst, size_t n, int c) { return memset(dst, c, n); }
+void *__aeabi_memset8(void *dst, size_t n, int c) { return memset(dst, c, n); }
+void *__aeabi_memmove4(void *dst, const void *src, size_t n) { return memmove(dst, src, n); }
+void *__aeabi_memmove8(void *dst, const void *src, size_t n) { return memmove(dst, src, n); }
+
+/* Cortex-M0+ has no unaligned load/store: byte accesses, volatile so the
+ * optimiser cannot merge them back into a word access. */
+uint32_t __aeabi_uread4(const void *addr)
+{
+    const volatile uint8_t *p = addr;
+
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+void __aeabi_uwrite4(void *addr, uint32_t v)
+{
+    volatile uint8_t *p = addr;
+
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
 }
 
 uint32_t __aeabi_uidiv(uint32_t n, uint32_t d)

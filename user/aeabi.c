@@ -107,4 +107,67 @@ uint32_t __clzsi2(uint32_t x)
     return n;
 }
 
+/* Clang emits these at -Oz for aggregate zeroing, aligned copies and packed
+ * reads, even with -fno-builtin.  lib.c supplies the byte loops. */
+void *memcpy(void *dst, const void *src, size_t n);
+void *memset(void *dst, int c, size_t n);
+void *memmove(void *dst, const void *src, size_t n);
+
+void *__aeabi_memcpy(void *dst, const void *src, size_t n)
+{
+    return memcpy(dst, src, n);
+}
+
+void *__aeabi_memcpy4(void *dst, const void *src, size_t n)
+{
+    return memcpy(dst, src, n);
+}
+
+void *__aeabi_memcpy8(void *dst, const void *src, size_t n)
+{
+    return memcpy(dst, src, n);
+}
+
+void *__aeabi_memmove(void *dst, const void *src, size_t n)
+{
+    return memmove(dst, src, n);
+}
+
+void *__aeabi_memmove4(void *dst, const void *src, size_t n)
+{
+    return memmove(dst, src, n);
+}
+
+void *__aeabi_memmove8(void *dst, const void *src, size_t n)
+{
+    return memmove(dst, src, n);
+}
+
+void *__aeabi_memclr(void *dst, size_t n)  { return memset(dst, 0, n); }
+void *__aeabi_memclr4(void *dst, size_t n) { return memset(dst, 0, n); }
+void *__aeabi_memclr8(void *dst, size_t n) { return memset(dst, 0, n); }
+void *__aeabi_memset(void *dst, size_t n, int c)  { return memset(dst, c, n); }
+void *__aeabi_memset4(void *dst, size_t n, int c) { return memset(dst, c, n); }
+void *__aeabi_memset8(void *dst, size_t n, int c) { return memset(dst, c, n); }
+
+/* Cortex-M0+ has no unaligned access; volatile byte loads keep LLVM from
+ * merging them back into one word access. */
+uint32_t __aeabi_uread4(const void *addr)
+{
+    const volatile uint8_t *p = addr;
+
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+void __aeabi_uwrite4(void *addr, uint32_t v)
+{
+    volatile uint8_t *p = addr;
+
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
 #endif /* __arm__ */
