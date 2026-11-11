@@ -41,6 +41,10 @@ exclude = ping,net,dhcp
   define) and `opt = -Oz` (compiler optimisation; `TOS_OPT` still wins).
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
+  A target can also declare default features: `rp2040` starts with
+  `pwm`, `uart1`, `spi` and `i2c` on, so `tos build -target rp2040` needs no
+  config; writing `pwm = false` (what menuconfig saves) compiles that driver
+  and its user command out.
 - Both numeric runtimes are always linked: `user/fix16.c` provides the
   explicit Q16.16 API (`fix16_*`, +/-32767.99998, step 1/65536, the small/fast
   path) and `user/softfloat32.c` backs ordinary `float` syntax with IEEE

@@ -35,6 +35,7 @@
 #include "hardware/structs/usb.h"
 #include "string.h"
 #include "console.h"
+#include "uart_dbg.h"
 
 /* The port header defines this pair; the bring-up path uses both to
  * re-assert the pull-up after the pads come up. */
@@ -66,12 +67,16 @@
 #define PLL_POSTDIV1      5u
 #define PLL_POSTDIV2      5u
 
-/* RP2040: CLK_USB_CTRL at 0x54 holds ENABLE + AUXSRC, CLK_USB_DIV at 0x58
- * holds INT at bits 19:16.  AUXSRC = 0 is clksrc_pll_usb. */
+/* RP2040: CLK_USB_CTRL at 0x54 holds ENABLE (bit 11) + AUXSRC (7:5).
+ * CLK_USB_DIV at 0x58 is a *2-bit* integer divider: INT is bits 9:8, with
+ * no fractional part, and the reset value 0x00000100 is already /1.
+ * (19:16 belongs to the RP2350 / is simply reserved here - writing 1<<16
+ * leaves INT at 0, which gates clk_usb off and keeps USBCTRL in reset
+ * forever: no CDC enumeration, and the ROM's USB BOOTSEL cannot start.) */
 #define CLOCKS_CLK_USB_CTRL (*(volatile uint32_t *)(0x40008000u + 0x54u))
 #define CLOCKS_CLK_USB_DIV  (*(volatile uint32_t *)(0x40008000u + 0x58u))
 #define CLK_USB_ENABLE      0x00000800u
-#define CLK_USB_DIV_INT_1   (1u << 16)
+#define CLK_USB_DIV_INT_1   0x00000100u
 #define CLK_USB_AUX_PLL_USB 0x00000000u
 
 /* ---- state -------------------------------------------------------------- */
@@ -81,6 +86,181 @@ static int g_init_stage;        /* 0 ok, 1 reset timeout, 2 PLL timeout   */
 static uint32_t g_pll_cs_boot;  /* PLL_CS as the ROM handed it over       */
 static uint32_t g_ss_pads;      /* SIE_STATUS right after the pad writes  */
 static uint32_t g_ss_retrig;    /* ... and after the pull-up retrigger    */
+
+/* Bring-up counters: they tell a frozen TinyUSB state machine (g_in_task
+ * stuck at 1) apart from a USB interrupt that is never taken. */
+static volatile uint32_t g_task_calls;      /* tud_task() from poll     */
+static volatile uint32_t g_task_isr_calls;  /* tud_task_ext() from IRQ   */
+static volatile int g_in_task;
+
+/* A tiny RAM trace of the first few USBCTRL interrupts.  Formatting inside
+ * the IRQ would cost ~87 us per character at 115200 and destroy exactly the
+ * enumeration timing we are measuring, so the ISR only snapshots registers
+ * and the tick (or Ctrl-T) prints them later. */
+#define USB_TRACE_N 8u
+struct usb_trace_ent {
+    uint32_t ints, raw, sie, buf;
+    uint32_t setup0, setup1;    /* DPRAM 0x100: the 8-byte SETUP packet   */
+    uint32_t ep0in, ep0out;     /* DPRAM 0x080/0x084: EP0 buffer control  */
+    uint32_t mnt;
+};
+static struct usb_trace_ent g_usb_trace[USB_TRACE_N];
+static volatile uint32_t g_usb_trace_n;
+
+/* TinyUSB's level-2 log has to be captured in RAM, not printed live: writing
+ * one character to UART0 costs 87 us at 115200, and the log is produced from
+ * inside the USB interrupt, so printing it would destroy the very timing we
+ * are trying to measure.  Keep the FIRST kilobyte (init, bus reset, SETUP,
+ * descriptor handling) and drop the rest. */
+#define USB_LOG_SIZE 1024u
+static char g_usb_log[USB_LOG_SIZE];
+static volatile unsigned g_usb_log_len;
+
+void usb_cdc_irq_enable(void);  /* defined below, needed during init      */
+
+/* ---- RP2040-E15 enumeration workaround ---------------------------------- */
+
+/* The chip reports "Chip Version B1".  pico-sdk carries a workaround for
+ * erratum RP2040-E15: coming out of reset the SIE wants 800 us of LS_J
+ * before it enters the connected state; on a hub that broadcasts traffic
+ * for other devices that never happens and the host's SETUP packets are
+ * ignored entirely - exactly the BUS_RESET + DEV_SUSPEND trace with zero
+ * SETUP_REQ this port produces.  TinyUSB would call the SDK fix from
+ * dcd_int_handler(), but the vendored port has TUD_OPT_..._FIX off and the
+ * shim header even says "the target is an RP2350".
+ *
+ * Default ON: this is a B1 part and the measured symptom matches the
+ * erratum verbatim.  Ctrl-W turns it off for the A/B, Ctrl-E back on. */
+static volatile int g_e15_fix = 1;
+static volatile int g_e15_req;
+static volatile int g_e15_busy;
+static volatile uint32_t g_e15_calls;
+static uint32_t g_usb_clk_hz = 12000000u;
+
+uint32_t usb_cdc_e15_calls(void)
+{
+    return g_e15_calls;
+}
+
+/* Called after a runtime clk_sys change so the E15 forced-J hold stays
+ * ~1 ms instead of shrinking with the faster CPU. */
+void usb_cdc_set_cpu_hz(uint32_t hz)
+{
+    g_usb_clk_hz = hz;
+}
+
+#define E15_GPIO15_CTRL  (*(volatile uint32_t *)(0x40014000u + 0x7cu))
+#define E15_GPIO15_PAD   (*(volatile uint32_t *)(0x4001c000u + 0x40u))
+#define E15_MUXING       (*(volatile uint32_t *)(USBCTRL_REGS_BASE + 0x074u))
+#define E15_PHY_DIRECT   (*(volatile uint32_t *)(USBCTRL_REGS_BASE + 0x07cu))
+#define E15_PHY_OVERRIDE (*(volatile uint32_t *)(USBCTRL_REGS_BASE + 0x080u))
+#define E15_SIE_STATUS   (*(volatile uint32_t *)(USBCTRL_REGS_BASE + 0x050u))
+
+#define E15_LINE_STATE_J    1u
+#define E15_SIE_CONNECTED   0x00010000u
+#define E15_MUX_DIGITAL     (0x4u | 0x8u)   /* TO_DIGITAL_PAD | SOFTCON   */
+#define E15_MUX_PHY         (0x1u | 0x8u)   /* TO_PHY          | SOFTCON   */
+
+void usb_cdc_set_e15(int on)
+{
+    g_e15_fix = on ? 1 : 0;
+}
+
+int usb_cdc_e15_pending(void)
+{
+    return g_e15_req || g_e15_busy;
+}
+
+/* Ask the poll path to run the erratum workaround; never blocks the USB
+ * interrupt.  The reset itself starts with 10-15 ms of SE0, so waiting for
+ * that inside the IRQ (the first version) stalled every USB event for the
+ * whole reset - exactly the window in which the host starts SETUP. */
+void usb_cdc_e15_request(void)
+{
+    g_e15_req = 1;
+}
+
+/* Busy-wait `ms` milliseconds at the current clk_sys.  The USB bring-up is
+ * the only caller and it runs before the 1 ms tick exists, so this cannot
+ * use plat_uptime_ms().  At 12 MHz the old hand-tuned 600000-iteration loop
+ * was ~200 ms; keeping the same spins-per-ms ratio makes the pull-up drop
+ * survive the move to 125 MHz (where the constant had shrunk to ~19 ms,
+ * too short for a host to tear the old device node down). */
+static void usb_delay_ms(uint32_t ms)
+{
+    /* At 12 MHz the original hand-tuned loop used 4000 iterations per ms
+     * (about 3 cycles each).  Keep that ratio instead of the 3000/ms value
+     * that made the E15 forced-J hold only ~0.75 ms - shorter than the
+     * 800 us the SIE requires, so it never reached CONNECTED and stayed
+     * muxed to GPIO while the host sent the next SETUP. */
+    uint32_t n = (g_usb_clk_hz / 3000u) * ms;
+
+    if (n < 4000u * ms)
+        n = 4000u * ms;
+    for (volatile uint32_t i = 0; i < n; i++)
+        ;
+}
+
+/* Service one pending BUS_RESET.  Called from usb_cdc_poll(), i.e. thread
+ * context during the early enumeration wait and from the 1 ms tick after
+ * boot - never from the USB IRQ.  Mirrors pico-sdk's alarm-driven
+ * rp2040_usb_device_enumeration.c: wait for SE0 to end, force LS_J through
+ * GPIO15 for 1 ms, wait for SIE_STATUS.CONNECTED, then restore the PHY. */
+void usb_cdc_e15_service(void)
+{
+    uint32_t ctrl_prev, pad_prev, spins;
+
+    if (!g_e15_req)
+        return;
+    g_e15_req = 0;
+    if (!g_e15_fix || !g_hw_ready)
+        return;
+    if (!(usb_hw->sie_ctrl & USB_SIE_CTRL_PULLUP_EN_BITS))
+        return;
+    g_e15_calls++;
+    g_e15_busy = 1;
+
+    /* 1. Wait for the host to stop asserting SE0, bounded at ~40 ms. */
+    spins = (g_usb_clk_hz / 3000u) * 40u;
+    if (spins < 40000u)
+        spins = 40000u;
+    for (uint32_t i = 0; i < spins; i++)
+        if (((E15_SIE_STATUS >> 2) & 3u) != 0u)
+            break;
+
+    /* 2. Force LS_J on the SIE input path via GPIO15's USB debug mux.
+     * DM stays 0 because GPIO16 is not funcsel'd to function 8. */
+    ctrl_prev = E15_GPIO15_CTRL;
+    pad_prev  = E15_GPIO15_PAD;
+
+    E15_GPIO15_PAD   |= (1u << 3) | (1u << 2);      /* PUE | PDE (bus keep) */
+    E15_GPIO15_CTRL   = (E15_GPIO15_CTRL & ~0x00003000u) | (2u << 12); /* OEOVER=LOW */
+    E15_GPIO15_CTRL   = (E15_GPIO15_CTRL & ~0x0000001fu) | 8u;         /* FUNCSEL=8  */
+    E15_GPIO15_CTRL   = (E15_GPIO15_CTRL & ~0x00030000u) | (3u << 16); /* INOVER=HIGH*/
+    E15_PHY_DIRECT   |= 0x2u;                       /* DP_PULLUP_EN         */
+    E15_PHY_OVERRIDE |= 0x4u;                       /* ..._OVERRIDE_EN      */
+    E15_MUXING        = E15_MUX_DIGITAL;
+
+    /* 3. Hold J for ~1 ms. */
+    usb_delay_ms(1);
+
+    /* 4. The SIE must now report CONNECTED before we hand the pins back,
+     * otherwise the whole exercise was invisible to it. */
+    spins = (g_usb_clk_hz / 3000u) * 10u;
+    if (spins < 10000u)
+        spins = 10000u;
+    for (uint32_t i = 0; i < spins; i++)
+        if (E15_SIE_STATUS & E15_SIE_CONNECTED)
+            break;
+
+    /* 5. Restore, in the SDK's order: PHY mux -> remove the pull-up
+     * override -> GPIO15 ctrl -> GPIO15 pad. */
+    E15_MUXING        = E15_MUX_PHY;
+    E15_PHY_OVERRIDE &= ~0x4u;
+    E15_GPIO15_CTRL   = ctrl_prev;
+    E15_GPIO15_PAD    = pad_prev;
+    g_e15_busy = 0;
+}
 
 /* ---- PHY pads ----------------------------------------------------------- */
 
@@ -110,6 +290,18 @@ static int usb_clock_init(void)
     m = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
     m &= ~(RESETS_USBCTRL | RESETS_PLL_USB);
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, m);
+
+    /* The PLL registers are ignored while PLL_USB is still coming out of
+     * reset.  Wait for its RESET_DONE bit before writing CS/FBDIV; USBCTRL
+     * is excluded because its done bit only rises after clk_usb runs. */
+    for (spins = 0; spins < 1000000u; spins++)
+        if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) &
+            RESETS_PLL_USB)
+            break;
+    if (spins == 1000000u) {
+        g_init_stage = 2;
+        return -1;
+    }
 
     /* PLL_USB follows pico-sdk's pll_init() literally.  The RP2040-style
      * one-shot "PWR = 0" is fatal here: it clears DSMPD (enabling the
@@ -205,17 +397,25 @@ void usb_cdc_init(void)
      * turned SIE_STATUS from 0x00000001 into 0x00010005 when it was tried by
      * hand after boot. */
     usb_hw_clear->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
-    for (volatile int i = 0; i < 20000; i++)
-        ;
+    /* The host has to SEE the disconnect.  200 ms is what a hub needs to
+     * tear down the previous device node; after a UF2 flash the ROM's MSC
+     * may have left D+ pulled up, so a host that never observes SE0 keeps
+     * talking to the old device and our CDC is never enumerated. */
+    usb_delay_ms(200);
     usb_hw_set->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
-    for (volatile int i = 0; i < 20000; i++)
-        ;
+    usb_delay_ms(5);
     g_ss_retrig = usb_hw->sie_status;
+
+    /* The NVIC gate must be open BEFORE usb_cdc_console_init() starts its
+     * bounded enumeration wait: at that point the 1 ms tick does not exist
+     * yet, so without the interrupt TinyUSB never receives a single event
+     * and tud_mounted() can never become true.  Gating this on "already
+     * configured" is a deadlock. */
+    usb_cdc_irq_enable();
 }
 
-/* Open the NVIC gate for IRQ 5.  Kept separate from init so the ordering is
- * explicit: controller configured and pull-up already up, interrupt delivery
- * second. */
+/* Open the NVIC gate for IRQ 5.  Also called by the board layer; harmless
+ * to repeat. */
 void usb_cdc_irq_enable(void)
 {
     if (!g_hw_ready)
@@ -244,8 +444,23 @@ static void usb_cdc_wait(uint32_t clk_hz)
 
 void usb_cdc_console_init(uint32_t clk_hz)
 {
+    uint32_t primask;
+
+    /* The E15 workaround holds LS_J for ~1 ms with a volatile loop; it
+     * needs the runtime clk_sys (which the Ctrl-Y / Ctrl-U A/B changes). */
+    g_usb_clk_hz = clk_hz;
     usb_cdc_init();
+    /* plat_early_init() still runs with PRIMASK=1, so the NVIC gate opened
+     * by usb_cdc_irq_enable() is useless during the enumeration wait: the
+     * host's SETUP packets are then serviced only by the polling fallback
+     * inside usb_cdc_wait(), and at 12 MHz the first descriptor is answered
+     * too late.  SysTick's TICKINT is not enabled until plat_irq_enable(),
+     * so USBCTRL_IRQ is the only interrupt that can fire here - safe to let
+     * through for the duration of the wait, then restore the exact state. */
+    __asm__ volatile("mrs %0, primask" : "=r"(primask));
+    __asm__ volatile("cpsie i" ::: "memory");
     usb_cdc_wait(clk_hz);
+    __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
 }
 
 /* ---- event pump --------------------------------------------------------- */
@@ -258,8 +473,6 @@ void usb_cdc_console_init(uint32_t clk_hz)
  * out of patience after the first descriptor and reset the port in a loop.
  * So the interrupt path runs both, with a guard against re-entering the task
  * when the interrupt lands inside the tick's own tud_task() call. */
-static volatile int g_in_task;
-
 static void usb_task_run(int from_isr)
 {
     uint32_t primask;
@@ -272,10 +485,13 @@ static void usb_task_run(int from_isr)
     g_in_task = 1;
     __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
 
-    if (from_isr)
+    if (from_isr) {
+        g_task_isr_calls++;
         tud_task_ext(0, true);
-    else
+    } else {
+        g_task_calls++;
         tud_task();
+    }
 
     g_in_task = 0;
 }
@@ -295,6 +511,8 @@ void usb_cdc_irq_task(void)
  * arrive while the interrupt is briefly masked still get processed. */
 void usb_cdc_poll(void)
 {
+    uint32_t ints;
+
     if (!g_hw_ready)
         return;
 
@@ -303,10 +521,38 @@ void usb_cdc_poll(void)
      * enabled and PRIMASK clear, yet no further handler entries.  Servicing
      * the controller from the tick keeps enumeration alive in that state
      * instead of hanging forever; when the interrupt works normally this
-     * reads zero and costs one register access per millisecond. */
-    if (usb_hw->ints)
-        dcd_int_handler(0);
+     * reads zero and costs one register access per millisecond.
+     *
+     * BUS_RESET is latched here too: this path used to call dcd_int_handler()
+     * directly, bypassing the trampoline, so any reset serviced by polling
+     * also skipped the E15 workaround and the device never reconnected. */
+    /* dcd_int_handler() is also entered by the USB ISR.  Mask interrupts
+     * around this fallback: two contexts advancing buf_status/endpoint
+     * state together can double-ack or lose an event, and this path only
+     * runs when the interrupt is already misbehaving. */
+    {
+        uint32_t primask;
 
+        __asm__ volatile("mrs %0, primask\n cpsid i"
+                         : "=r"(primask) :: "memory");
+        ints = usb_hw->ints;
+        if (ints) {
+            dcd_int_handler(0);
+            if (ints & 0x00001000u)      /* USB_INTS_BUS_RESET_BITS */
+                usb_cdc_e15_request();
+            /* Drop an NVIC pending bit left behind by servicing the
+             * controller here; otherwise the trampoline runs again with
+             * INTS==0. */
+            mmio_write32(ARM_SCS_BASE + 0x280u, 1u << USBCTRL_IRQ);
+        }
+        __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
+    }
+
+    /* E15 must run before tud_task() consumes the queued BUS_RESET event
+     * (pico-sdk's ordering), but it waits out 10-15 ms of SE0 and must not
+     * do that inside the USB interrupt.  This is thread context during the
+     * early enumeration wait and tick context after boot. */
+    usb_cdc_e15_service();
     usb_task_run(0);
     if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
         tud_cdc_write_flush();
@@ -371,6 +617,15 @@ int usb_cdc_hw_ready(void)
     return g_hw_ready;
 }
 
+/* Drop the D+ pull-up so the host observes a real disconnect.  Called before
+ * handing USB back to the ROM for BOOTSEL: a host that never saw SE0 keeps
+ * the stale device node and never enumerates the ROM's MSC volume. */
+void usb_cdc_disconnect(void)
+{
+    if (g_hw_ready)
+        usb_hw_clear->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
+}
+
 int usb_cdc_init_stage(void)
 {
     return g_init_stage;
@@ -425,8 +680,92 @@ uint32_t usb_cdc_dbg(uint32_t which)
     case 16: { extern volatile uint32_t g_usb_irq_count; return g_usb_irq_count; }
     case 17: { uint32_t v; __asm__ volatile("mrs %0, primask" : "=r"(v)); return v; }
     case 18: return mmio_read32(0xE000ED04u);   /* ICSR: VECTACTIVE/PENDING */
+    case 19: return usb_hw->inte;               /* USB interrupt enables     */
+    case 20: return usb_hw->buf_status;
+    case 21: return g_task_calls;               /* tud_task() from poll      */
+    case 22: return g_task_isr_calls;           /* tud_task_ext() from IRQ   */
+    case 23: return (uint32_t)g_in_task;        /* 1 forever = frozen task   */
+    case 24: return mmio_read32(USBCTRL_REGS_BASE + 0x8cu); /* raw INTR     */
+    case 25: return g_e15_calls;        /* E15 forced-J runs on BUS_RESET */
+    case 26: return (uint32_t)g_e15_fix;
     default: return 0;
     }
+}
+
+/* ---- IRQ trace / on-demand replug --------------------------------------- */
+
+void usb_cdc_trace_snap(void)
+{
+    struct usb_trace_ent *e;
+    uint32_t n = g_usb_trace_n++;
+
+    if (!g_hw_ready)
+        return;
+    e = &g_usb_trace[n & (USB_TRACE_N - 1u)];
+    e->ints   = usb_hw->ints;
+    /* INTR (0x8c) is the RAW status before the INTE mask.  TinyUSB only
+     * enables five sources, so CRC / bit-stuff / RX-timeout errors are
+     * invisible in the IRQ trace but show up here - exactly the signature of
+     * a marginal SIE/PHY clock. */
+    e->raw    = mmio_read32(USBCTRL_REGS_BASE + 0x8cu);
+    e->sie    = usb_hw->sie_status;
+    e->buf    = usb_hw->buf_status;
+    e->setup0 = mmio_read32(USBCTRL_DPRAM_BASE + 0x000u);
+    e->setup1 = mmio_read32(USBCTRL_DPRAM_BASE + 0x004u);
+    e->ep0in  = mmio_read32(USBCTRL_DPRAM_BASE + 0x080u);
+    e->ep0out = mmio_read32(USBCTRL_DPRAM_BASE + 0x084u);
+    e->mnt    = usb_cdc_dbg(3);
+}
+
+void usb_cdc_trace_dump(void)
+{
+    uint32_t n = g_usb_trace_n;
+    uint32_t start = (n > USB_TRACE_N) ? n - USB_TRACE_N : 0u;
+
+    dbg_uart_puts("[usbtr] n=");
+    dbg_uart_hex(n);
+    dbg_uart_puts("\n");
+    for (uint32_t i = start; i < n; i++) {
+        struct usb_trace_ent *e = &g_usb_trace[i & (USB_TRACE_N - 1u)];
+        dbg_uart_puts("[tr "); dbg_uart_hex(i);
+        dbg_uart_puts("] i=");   dbg_uart_hex(e->ints);
+        dbg_uart_puts(" r=");    dbg_uart_hex(e->raw);
+        dbg_uart_puts(" s=");    dbg_uart_hex(e->sie);
+        dbg_uart_puts(" b=");    dbg_uart_hex(e->buf);
+        dbg_uart_puts(" su=");   dbg_uart_hex(e->setup0);
+        dbg_uart_puts("/");      dbg_uart_hex(e->setup1);
+        dbg_uart_puts(" ep=");   dbg_uart_hex(e->ep0in);
+        dbg_uart_puts("/");      dbg_uart_hex(e->ep0out);
+        dbg_uart_puts(" m=");    dbg_uart_hex(e->mnt);
+        dbg_uart_puts("\n");
+    }
+    dbg_uart_puts("[usblog] n=");
+    dbg_uart_hex(g_usb_log_len);
+    dbg_uart_puts("\n");
+    {
+        unsigned n = g_usb_log_len;
+        for (unsigned i = 0; i < n; i++)
+            dbg_uart_putc(g_usb_log[i]);
+    }
+    dbg_uart_puts("\n[/usblog]\n");
+}
+
+/* Give the host a fresh, unambiguous SE0 -> J transition while the kernel is
+ * fully running (PRIMASK clear, tick alive, USB IRQ taken).  Ctrl-R on UART0
+ * triggers this from plat_timer_tick(), which lets one firmware image A/B the
+ * "enumerated too early during plat_early_init()" hypothesis. */
+void usb_cdc_replug_cycle(void)
+{
+    if (!g_hw_ready)
+        return;
+    /* Start both logs at the replug: the boot-time kilobyte is already full
+     * of the first (failed) attempt, and Ctrl-T must show the fresh one. */
+    g_usb_trace_n = 0;
+    g_usb_log_len = 0;
+    g_e15_req = 0;
+    usb_cdc_disconnect();
+    usb_delay_ms(200);
+    usb_hw_set->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
 }
 
 
@@ -515,16 +854,21 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
 /* ---- TinyUSB log sink ---------------------------------------------------- */
 
-/* CFG_TUSB_DEBUG_PRINTF (tusb_config.h) points here so TinyUSB's own log
- * comes out on UART0.  Formatting goes through the kernel's kvsnprintf rather
- * than a private implementation, and the output bypasses the CDC path on
- * purpose: a log message must not depend on the device having enumerated. */
+/* CFG_TUSB_DEBUG_PRINTF (tusb_config.h) points here.  TinyUSB calls it from
+ * both the USB interrupt and thread context, so format onto the caller's
+ * stack (no shared state) and append under a short PRIMASK window.  The log
+ * is dumped later by usb_cdc_trace_dump(); it never goes through the console
+ * or the CDC FIFO, so it cannot recurse or depend on enumeration. */
 int usb_dbg_printf(const char *fmt, ...)
 {
     char buf[160];
     __builtin_va_list ap;
+    uint32_t primask;
+    unsigned room, i;
     int n;
 
+    if (g_usb_log_len >= USB_LOG_SIZE)
+        return 0;                       /* full: do not even format */
     __builtin_va_start(ap, fmt);
     n = kvsnprintf(buf, sizeof(buf), fmt, ap);
     __builtin_va_end(ap);
@@ -532,7 +876,14 @@ int usb_dbg_printf(const char *fmt, ...)
         return n;
     if (n > (int)sizeof(buf) - 1)
         n = (int)sizeof(buf) - 1;
-    for (int i = 0; i < n; i++)
-        plat_console_putc(buf[i]);
+
+    __asm__ volatile("mrs %0, primask\n cpsid i" : "=r"(primask) :: "memory");
+    room = USB_LOG_SIZE - g_usb_log_len;
+    if (room > (unsigned)n)
+        room = (unsigned)n;
+    for (i = 0; i < room; i++)
+        g_usb_log[g_usb_log_len + i] = buf[i];
+    g_usb_log_len += room;
+    __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
     return n;
 }

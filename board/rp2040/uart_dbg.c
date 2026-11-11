@@ -20,7 +20,11 @@
 #define RESETS_BASE     0x4000c000u
 #define RESETS_RESET    (*(volatile uint32_t *)(RESETS_BASE + 0x00u))
 #define RESETS_DONE     (*(volatile uint32_t *)(RESETS_BASE + 0x08u))
-#define RST_IO_BANK0    (1u << 6)
+/* pico-sdk rp2040 resets.h: IO_BANK0 = bit 5 (bit 6 is IO_QSPI),
+ * PADS_BANK0 = bit 8, UART0 = bit 22.  Releasing bit 6 instead of bit 5
+ * leaves the pin-mux registers held in reset, so GPIO0 never becomes UART0
+ * TX and the console looks completely dead. */
+#define RST_IO_BANK0    (1u << 5)
 #define RST_PADS_BANK0  (1u << 8)
 #define RST_UART0       (1u << 22)
 
@@ -37,8 +41,6 @@
 
 void dbg_uart_init(uint32_t clk_hz)
 {
-    uint32_t baud = 115200u;
-
     /* The ROM bootloader only releases the blocks it uses (XIP, USB).  The
      * GPIO banks and UART0 are still held in reset when control reaches the
      * kernel, and writes to their registers are ignored until they are
@@ -70,18 +72,31 @@ void dbg_uart_init(uint32_t clk_hz)
     UART_CR = 0;
     UART_ICR = 0x7ffu;
 
-    /* PL011: baud = clk / (16 * (IBRD + FBRD/64)). */
-    uint32_t div16 = 16u * baud;
+    dbg_uart_set_peri_hz(clk_hz);
+
+    UART_LCR_H = (1u << 4) | (3u << 5);     /* FIFO enable, 8N1            */
+    UART_CR = (1u << 0) | (1u << 8) | (1u << 9); /* UARTEN | TXE | RXE     */
+}
+
+void dbg_uart_set_peri_hz(uint32_t clk_hz)
+{
+    /* PL011: baud = clk_peri / (16 * (IBRD + FBRD/64)).  clk_peri can be
+     * switched between clk_sys (12 MHz) and PLL_USB (48 MHz) at runtime to
+     * A/B whether the USB register interface needs a faster clock; the
+     * divisor has to follow or the console turns into garbage. */
+    uint32_t div16 = 16u * 115200u;
     uint32_t ibrd = clk_hz / div16;
     uint32_t rem  = clk_hz - ibrd * div16;
     uint32_t fbrd = (rem * 64u + div16 / 2u) / div16;
+
     if (ibrd == 0)
         ibrd = 1;
     UART_IBRD = ibrd;
     UART_FBRD = fbrd & 63u;
-
-    UART_LCR_H = (1u << 4) | (3u << 5);     /* FIFO enable, 8N1            */
-    UART_CR = (1u << 0) | (1u << 8) | (1u << 9); /* UARTEN | TXE | RXE     */
+    /* PL011 latches the divisor pair into the baud generator on an LCR_H
+     * write.  Re-assert the same 8N1 + FIFO value so a mid-run clock switch
+     * is not left using the previous divisor. */
+    UART_LCR_H = (1u << 4) | (3u << 5);
 }
 
 void dbg_uart_putc(char c)

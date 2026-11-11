@@ -386,6 +386,38 @@ func (a *app) driverPage() page {
 		help: "Adds drivers/wifi/esp32c3 and links the Espressif net80211/pp/phy/coexist blobs with the ROM linker script; the [wifi] paths are filled in on save.  The IPv4 stack has its own switch.",
 	})
 
+	/* RP2040 peripheral drivers live in board/rp2040 (not in a driver
+	 * directory), so they need feature switches rather than DriverExclude.
+	 * Each one is a real #ifdef around the driver; turning it off removes
+	 * the code and the matching user command. */
+	for _, pd := range []struct {
+		name, label, help string
+	}{
+		{"pwm", "PWM (8 slices / 16 channels)",
+			"RP2040 PWM driver, SYS_PWM and the pwm command.  Off removes the slice/channel code and the command."},
+		{"uart1", "UART1 (GP4 TX / GP5 RX)",
+			"Second PL011 serial port with a non-blocking read, SYS_UART_* and the uart command.  UART0 remains the console."},
+		{"spi", "SPI0/1 master",
+			"PL022 master driver, software chip select, SYS_SPI and the spi command.  Off also drops the spi user program."},
+		{"i2c", "I2C0/1 master",
+			"DW_apb_i2c master driver, SYS_I2C and the i2c command."},
+		{"dma", "DMA (12 channels)",
+			"RP2040 DMA memory-to-memory copy, SYS_DMA_MEMCPY and the dma command."},
+	} {
+		pd := pd
+		rows = append(rows, row{
+			label: pd.label, kind: kBool,
+			text: func() string { return onOff(a.st.Feature(pd.name)) },
+			act: func(int) {
+				a.st.SetFeature(pd.name, !a.st.Feature(pd.name))
+				a.dirty = true
+			},
+			live: func() bool { return a.st.DefaultFeature(pd.name) },
+			note: "rp2040 only",
+			help: pd.help,
+		})
+	}
+
 	dirs := a.st.DriverChoices()
 	for _, d := range dirs {
 		d := d

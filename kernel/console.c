@@ -199,7 +199,8 @@ static void ob_str(struct outbuf *o, const char *s)
         ob_putc(o, *s++);
 }
 
-static void ob_uint(struct outbuf *o, uint32_t v, uint32_t base, int width, char pad)
+static void ob_uint(struct outbuf *o, uint32_t v, uint32_t base, int width,
+                    char pad, int upper)
 {
     char tmp[16];
     int k = 0;
@@ -207,7 +208,8 @@ static void ob_uint(struct outbuf *o, uint32_t v, uint32_t base, int width, char
         tmp[k++] = '0';
     while (v) {
         uint32_t d = v % base;
-        tmp[k++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+        tmp[k++] = (char)(d < 10 ? '0' + d
+                                 : (upper ? 'A' : 'a') + d - 10);
         v /= base;
     }
     while (width-- > k)
@@ -225,7 +227,7 @@ static void ob_int(struct outbuf *o, int32_t v, int width, char pad)
     } else {
         u = (uint32_t)v;
     }
-    ob_uint(o, u, 10, width, pad);
+    ob_uint(o, u, 10, width, pad, 0);
 }
 
 int kvsnprintf(char *buf, size_t size, const char *fmt, __builtin_va_list ap)
@@ -248,16 +250,32 @@ int kvsnprintf(char *buf, size_t size, const char *fmt, __builtin_va_list ap)
         while (*fmt >= '0' && *fmt <= '9')
             width = width * 10 + (*fmt++ - '0');
 
+        /* The 'l' length modifier is a no-op on every target here (int and
+         * long are both 32-bit).  TinyUSB's debug logs use %lu/%lX, and
+         * silently not consuming the argument would misalign every following
+         * one. */
+        if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l')
+                fmt++;
+        }
+
         switch (*fmt) {
         case 'd':
         case 'i':
             ob_int(&o, __builtin_va_arg(ap, int), width, pad);
             break;
         case 'u':
-            ob_uint(&o, __builtin_va_arg(ap, unsigned int), 10, width, pad);
+            ob_uint(&o, __builtin_va_arg(ap, unsigned int), 10, width, pad, 0);
             break;
         case 'x':
-            ob_uint(&o, __builtin_va_arg(ap, unsigned int), 16, width, pad);
+            ob_uint(&o, __builtin_va_arg(ap, unsigned int), 16, width, pad, 0);
+            break;
+        case 'X':
+            ob_uint(&o, __builtin_va_arg(ap, unsigned int), 16, width, pad, 1);
+            break;
+        case 'p':
+            ob_uint(&o, __builtin_va_arg(ap, unsigned int), 16, 8, '0', 0);
             break;
         case 'c':
             ob_putc(&o, (char)__builtin_va_arg(ap, int));

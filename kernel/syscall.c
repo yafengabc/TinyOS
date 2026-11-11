@@ -339,6 +339,13 @@ static regs_t *dispatch(regs_t *r)
             plat_frame_set_ret(r, 0);
             return r;
         }
+        /* A zero-length buffer is a query, not a place to write the NUL.
+         * Without this the code below would validate zero bytes and then
+         * write ptr[-1] in privileged mode. */
+        if (len == 0) {
+            plat_frame_set_ret(r, 0);
+            return r;
+        }
         uint32_t copy = (uint32_t)n + 1;
         if (copy > len)
             copy = len;
@@ -556,6 +563,121 @@ static regs_t *dispatch(regs_t *r)
 
     case SYS_ADC:
         plat_frame_set_ret(r, (uint32_t)periph_adc((int)sc.a0, (int)sc.a1));
+        return r;
+
+    case SYS_PWM: {
+        int op = (int)sc.a0;
+
+        if (op == PWM_OP_SET) {
+            struct tos_pwm_req req;
+
+            if (!process_user_ok(sc.a1, sizeof(req))) {
+                plat_frame_set_ret(r, (uint32_t)-1);
+                return r;
+            }
+            memcpy(&req, (const void *)sc.a1, sizeof(req));
+            plat_frame_set_ret(r, (uint32_t)periph_pwm(
+                                      op, req.gpio, req.freq_hz,
+                                      req.duty_permille));
+        } else {
+            plat_frame_set_ret(r, (uint32_t)periph_pwm(op, (int)sc.a1, 0, 0));
+        }
+        return r;
+    }
+
+    case SYS_UART_WRITE:
+        if ((int)sc.a2 < 0 || !process_user_ok(sc.a1, sc.a2)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)periph_uart_write(
+                                  (int)sc.a0, (const void *)sc.a1,
+                                  (int)sc.a2));
+        return r;
+
+    case SYS_UART_READ:
+        if ((int)sc.a2 < 0 || !process_user_ok(sc.a1, sc.a2)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)periph_uart_read(
+                                  (int)sc.a0, (void *)sc.a1, (int)sc.a2));
+        return r;
+
+    case SYS_UART_COUNT:
+        plat_frame_set_ret(r, (uint32_t)periph_uart_count());
+        return r;
+
+    case SYS_SPI: {
+        int op = (int)sc.a0;
+
+        if (op == SPI_OP_COUNT) {
+            plat_frame_set_ret(r, (uint32_t)periph_spi_count());
+            return r;
+        }
+        if (op == SPI_OP_XFER) {
+            struct tos_spi_req req;
+
+            if (!process_user_ok(sc.a1, sizeof(req))) {
+                plat_frame_set_ret(r, (uint32_t)-1);
+                return r;
+            }
+            memcpy(&req, (const void *)sc.a1, sizeof(req));
+            if (req.len < 0 ||
+                (req.tx && !process_user_ok((uint32_t)req.tx, req.len)) ||
+                (req.rx && !process_user_ok((uint32_t)req.rx, req.len))) {
+                plat_frame_set_ret(r, (uint32_t)-1);
+                return r;
+            }
+            plat_frame_set_ret(r, (uint32_t)periph_spi_xfer(
+                                      req.bus, req.cs_gpio, req.freq_hz,
+                                      req.mode, req.tx, req.rx, req.len));
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)-1);
+        return r;
+    }
+
+    case SYS_I2C: {
+        int op = (int)sc.a0;
+
+        if (op == I2C_OP_COUNT) {
+            plat_frame_set_ret(r, (uint32_t)periph_i2c_count());
+            return r;
+        }
+        if (op == I2C_OP_XFER) {
+            struct tos_i2c_req req;
+
+            if (!process_user_ok(sc.a1, sizeof(req))) {
+                plat_frame_set_ret(r, (uint32_t)-1);
+                return r;
+            }
+            memcpy(&req, (const void *)sc.a1, sizeof(req));
+            if (req.txlen < 0 || req.rxlen < 0 ||
+                (req.tx && !process_user_ok((uint32_t)req.tx, req.txlen)) ||
+                (req.rx && !process_user_ok((uint32_t)req.rx, req.rxlen))) {
+                plat_frame_set_ret(r, (uint32_t)-1);
+                return r;
+            }
+            plat_frame_set_ret(r, (uint32_t)periph_i2c_xfer(
+                                      req.bus, req.addr, req.freq_hz,
+                                      req.tx, req.txlen, req.rx, req.rxlen));
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)-1);
+        return r;
+    }
+
+    case SYS_DMA_MEMCPY:
+        if ((int)sc.a2 < 0 ||
+            !process_user_ok(sc.a0, sc.a2) ||
+            !process_user_ok(sc.a1, sc.a2)) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)periph_dma_memcpy(
+                                  (void *)sc.a0, (const void *)sc.a1,
+                                  (int)sc.a2));
         return r;
 
     case SYS_SBRK:

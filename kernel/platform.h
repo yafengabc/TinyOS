@@ -241,6 +241,38 @@ int plat_adc_read(int chan);
 int plat_adc_vref_mv(void);
 int plat_adc_bits(void);
 
+/* PWM output.  The API is pin-based, not channel-based: a board says which
+ * GPIO can produce PWM and the driver picks the slice.  Frequency is shared
+ * by both channels of one slice on the RP2040; duty is per channel.  Boards
+ * without PWM leave the weak defaults in kernel/periph.c, which report -1. */
+int plat_pwm_count(void);                        /* 0 = no PWM on this board */
+int plat_pwm_set(int gpio, int freq_hz, int duty_permille);
+int plat_pwm_off(int gpio);
+
+/* Extra serial ports, separate from the console (port 0 is UART1 on the
+ * Pico, not UART0: UART0 already belongs to the console).  Reads are
+ * non-blocking and return the bytes available, 0 when the FIFO is empty. */
+int plat_uart_count(void);
+int plat_uart_write(int port, const void *buf, int len);
+int plat_uart_read(int port, void *buf, int len);
+
+/* SPI master.  The driver owns SCK/MOSI/MISO for the selected bus; CS is a
+ * plain GPIO because the PL022's hardware chip select is not wired on the
+ * Pico and sharing one bus between devices needs software control anyway. */
+int plat_spi_count(void);
+int plat_spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
+                  const void *tx, void *rx, int len);
+
+/* I2C master, 7-bit addresses.  tx is written first, then rx is read with
+ * a repeated START; a zero-length probe only checks the address. */
+int plat_i2c_count(void);
+int plat_i2c_xfer(int bus, int addr, int freq_hz,
+                  const void *tx, int txlen, void *rx, int rxlen);
+
+/* DMA memory-to-memory copy.  A board without DMA leaves the weak default
+ * in kernel/periph.c, which returns -1. */
+int plat_dma_memcpy(void *dst, const void *src, int len);
+
 /* ---- user mode ------------------------------------------------------- */
 
 /* There is no address-space abstraction: the unified model is a single flat

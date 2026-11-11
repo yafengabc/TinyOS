@@ -39,5 +39,25 @@ uint32_t usb_cdc_pll_boot(void); /* PLL_CS as the ROM handed it over      */
  * on=1 puts it back.  Recovery path for a port the host has parked. */
 void usb_cdc_replug(int on);
 
+/* One-way pull-up drop used before the ROM takes USB over for BOOTSEL. */
+void usb_cdc_disconnect(void);
+
+/* Bring-up diagnostics: snapshot the IRQ state into a RAM ring (called from
+ * the shim's USB trampoline), print it, and force a full replug cycle. */
+void usb_cdc_trace_snap(void);
+void usb_cdc_trace_dump(void);
+void usb_cdc_replug_cycle(void);
+
+/* RP2040-E15: GPIO15 forced-LS_J workaround.  The USB trampoline only
+ * *requests* it on BUS_RESET; usb_cdc_poll() runs the 10-15 ms SE0 wait in
+ * thread/tick context so the interrupt stays responsive.  ON by default
+ * (B1 silicon); Ctrl-W disables it for an A/B, Ctrl-E re-enables it. */
+void usb_cdc_set_e15(int on);
+void usb_cdc_e15_request(void);
+void usb_cdc_e15_service(void);
+int  usb_cdc_e15_pending(void);
+uint32_t usb_cdc_e15_calls(void);
+void usb_cdc_set_cpu_hz(uint32_t hz);
+
 /* Bring-up probe, see usb_cdc_dbg() in usb_cdc.c for the index list. */
 uint32_t usb_cdc_dbg(uint32_t which);

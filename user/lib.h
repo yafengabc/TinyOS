@@ -223,6 +223,33 @@ int adc_read(int chan);                /* raw counts, -1 on failure */
 int adc_vref_mv(void);
 int adc_bits(void);
 
+/* PWM, addressed by GPIO.  duty_permille is 0..1000.  Returns 0 or -1;
+ * boards without PWM report pwm_count() == 0. */
+int pwm_count(void);
+int pwm_set(int gpio, int freq_hz, int duty_permille);
+int pwm_off(int gpio);
+
+/* Extra serial ports (UART1 on the Pico).  Reads are non-blocking and
+ * return the bytes available, 0 when the FIFO is empty. */
+int uart_count(void);
+int uart_write(int port, const void *buf, int len);
+int uart_read(int port, void *buf, int len);
+
+/* SPI master.  Full duplex: tx may be NULL (send 0xFF), rx may be NULL
+ * (discard).  Returns bytes transferred or -1. */
+int spi_count(void);
+int spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
+             const void *tx, void *rx, int len);
+
+/* I2C master, 7-bit addresses.  A zero-length probe checks only the
+ * address and returns 0 when it was acknowledged. */
+int i2c_count(void);
+int i2c_xfer(int bus, int addr, int freq_hz,
+             const void *tx, int txlen, void *rx, int rxlen);
+
+/* DMA memory-to-memory copy.  Returns len or -1. */
+int dma_memcpy(void *dst, const void *src, int len);
+
 /* Inter-process channels.  pipe() gives back two descriptors - read end
  * first - which behave like any other fd: read() on an empty pipe with a
  * live writer blocks, and returns 0 (EOF) once every writer has closed. */

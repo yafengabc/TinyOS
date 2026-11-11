@@ -84,6 +84,11 @@ type Target struct {
 	// 1.6 KiB by not sizing the table for tasks it can never run.
 	MaxProcs int
 
+	// KStack is the per-CPU kernel stack in bytes; 0 keeps the arch default
+	// (16 KiB on ARM/RV32).  cpu.h and start.S both consume the same
+	// TOS_KSTACK_BYTES define, so this cannot drift between them.
+	KStack int
+
 	// CPUs is how many harts this target is built for.  0 and 1 mean the
 	// same thing - a uniprocessor, with no TOS_MAX_CPUS define at all, so
 	// none of the SMP code (second trap vector, second kernel stack, per-CPU
@@ -97,6 +102,16 @@ type Target struct {
 	// `tos build -target <board>` keeps working; a config's [drivers] adds
 	// to this list.
 	Drivers []string
+
+	// UserExclude lists user programs this board cannot run, so they are
+	// not built into its filesystem image even when no config file is
+	// passed.  A config's [user] exclude adds to this list.
+	UserExclude []string
+
+	// DefaultFeatures are turned on for this board even when no config
+	// file mentions them.  A config's [features] entry can still set one
+	// to false, which is how menuconfig trims a driver it defaults to on.
+	DefaultFeatures []string
 }
 
 var (
@@ -104,6 +119,22 @@ var (
 	rp2040Drivers   = []string{"drivers/gpio/rp2040", "drivers/usb/rp2040"}
 	rp2350Drivers   = []string{"drivers/gpio/rp2350", "drivers/spi/rp2350", "drivers/display/st7789/rp2350", "drivers/usb/rp2350"}
 	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv"}
+
+	// Neither RP2 board has WiFi hardware: the ESP32-C3 WiFi/net programs
+	// are built from the same user tree, so exclude them by default instead
+	// of relying on every caller to pass configs/rp2xxx.conf.
+	rpNoWifiUsers = []string{"wifiscan", "wificonn", "ping", "net", "dhcp", "host", "http"}
+
+	// The RP2040 Cortex-M0+ has no MPU (or PMP): prot's "write past the
+	// heap/stack" cases would scribble over real memory instead of faulting,
+	// so the program is not a usable protection example on that board.
+	rp2040Users = []string{"wifiscan", "wificonn", "ping", "net", "dhcp",
+		"host", "http", "prot"}
+
+	// RP2040 drivers that are on by default but can be trimmed in
+	// menuconfig.  The code behind each is a TOS_<NAME> define, so turning
+	// one off removes the driver, not just its /dev entry.
+	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma"}
 )
 
 var Targets = map[string]Target{ // The kernel heap has to hold one decompressed program image at a
@@ -142,8 +173,15 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// leaves 448 KiB (0x10000..0x80000) for kernel + WiFi code before the
 	// littlefs partition at 0x80000, instead of the old 256 KiB.
 	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 80 * 1024, MaxProcs: 8, XipFlashBase: 0x10000, Drivers: esp32c3Drivers},
-	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 600, HeapBytes: 128 * 1024},
-	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 600, Drivers: rp2040Drivers},
+	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 1200, HeapBytes: 128 * 1024},
+	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
+	// rp2040smp: both Cortex-M0+ cores.  Core 1 sits in the boot ROM's
+	// wait-for-FIFO loop, not at our reset vector, so the board's
+	// plat_start_cpu() pushes the pico-sdk handshake (VTOR/SP/entry) and
+	// start.S joins the scheduler from arm_core1_entry.  The second 16 KiB
+	// kernel stack comes out of .bss, which shrinks the task area; the
+	// kernel image and the 1.5 MiB littlefs partition are unchanged.
+	"rp2040smp": {Name: "rp2040smp", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", CPUs: 2, FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
 	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
 	// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
 	// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
@@ -157,7 +195,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// one.  The link places __app_base after whatever .bss turns out to be, so
 	// the panel's DMA row buffer (3.8 KiB in lcd_st7789.c) no longer has to fit
 	// a fixed 128 KiB line.
-	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024, Drivers: rp2350Drivers},
+	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers},
 
 	// rp2350rv: the same physical board with its Hazard3 RISC-V cores
 	// instead of the Cortex-M33 pair.  RP2350 boots either architecture,
@@ -173,7 +211,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	//
 	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
 	// spin lock will need later, and it costs nothing on this core.
-	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers},
+	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers},
 
 	// rp2350rvsmp: both Hazard3 cores.  Core 1 is parked in the boot ROM's
 	// SIO-FIFO launch loop, not at our reset vector, so the board pushes the
@@ -182,7 +220,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// core-local (pico-sdk riscv_platform_timer.h), so each hart gets its own
 	// tick.  The second 16 KiB kernel stack comes out of .bss; the heap arena
 	// drops to the same 32 KiB the single-core image uses.
-	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers},
+	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers},
 
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
 	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
@@ -191,7 +229,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// stack drops to 16 KiB (KSTACK_BYTES in kernel/cpu.h is per arch), so
 	// two cores still reserve the 32 KiB the single-core image did and the
 	// 60 KiB exec arena is untouched.
-	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers},
+	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers},
 
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what
@@ -253,17 +291,29 @@ func windowNote(data []byte) (windowNotes, bool) {
 				continue
 			}
 			for off := 0; off+12 <= len(note); {
-				namesz := binary.LittleEndian.Uint32(note[off:])
-				descsz := binary.LittleEndian.Uint32(note[off+4:])
+				namesz := uint64(binary.LittleEndian.Uint32(note[off:]))
+				descsz := uint64(binary.LittleEndian.Uint32(note[off+4:]))
 				typ := binary.LittleEndian.Uint32(note[off+8:])
 				nameOff := off + 12
-				descOff := nameOff + int((namesz+3)&^3)
-				next := descOff + int((descsz+3)&^3)
-				if next > len(note) || next <= off {
+
+				/* Check each field before converting the padded length
+				 * to int or slicing.  namesz+3 can wrap in uint32. */
+				if namesz > uint64(len(note)-nameOff) {
 					break
 				}
-				if namesz >= 6 && string(note[nameOff:nameOff+6]) == "TinyOS" &&
-					descsz >= 4 {
+				namePad := (namesz + 3) &^ 3
+				descOff := uint64(nameOff) + namePad
+				if descOff > uint64(len(note)) ||
+					descsz > uint64(len(note))-descOff {
+					break
+				}
+				descPad := (descsz + 3) &^ 3
+				next64 := descOff + descPad
+				if next64 > uint64(len(note)) || next64 <= uint64(off) {
+					break
+				}
+				if namesz >= 6 && descsz >= 4 &&
+					string(note[nameOff:nameOff+6]) == "TinyOS" {
 					v := binary.LittleEndian.Uint32(note[descOff:])
 					switch typ {
 					case 1:
@@ -275,7 +325,7 @@ func windowNote(data []byte) (windowNotes, bool) {
 						w.hasWindow = true
 					}
 				}
-				off = next
+				off = int(next64)
 			}
 		}
 	}
@@ -431,6 +481,12 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// specific bits behind this macro so the M3 build is unaffected.
 		if b.Target.Board == "rp2040" {
 			archFlags = append(archFlags, "-DTOS_ARM_M0P")
+			// M0+ has no LDREX/STREX.  The SMP build uses one of the
+			// SIO hardware spinlocks as the gate behind the software lock
+			// flag, exactly like the RP2350 port (see arch/arm/platform.c).
+			if b.Target.CPUs > 1 {
+				archFlags = append(archFlags, "-DTOS_ARM_SIO_SPIN")
+			}
 		}
 		// Cortex-M33 has an MPU, but it is ARMv8-M PMSAv8 (PRBAR/PRLAR plus
 		// MAIR), not the ARMv7-M one: same region model on top, different
@@ -472,10 +528,16 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	}
 
 	// Kernel stack per CPU.  cpu.h and the arch start.S must agree; both read
-	// the same define, so the config value cannot drift between them.
-	if b.KStack > 0 {
+	// the same define, so the config value cannot drift between them.  A
+	// target may lower it (rp2040: the M0+ kernel is shallow enough for 8 KiB
+	// and the SRAM saved goes straight to the task area).
+	kstack := b.KStack
+	if kstack == 0 {
+		kstack = b.Target.KStack
+	}
+	if kstack > 0 {
 		archFlags = append(archFlags,
-			fmt.Sprintf("-DTOS_KSTACK_BYTES=%d", b.KStack))
+			fmt.Sprintf("-DTOS_KSTACK_BYTES=%d", kstack))
 	}
 
 	// XIP: the boot stub needs the flash offset to map the IROM window to.
@@ -1353,6 +1415,30 @@ func (b *Builder) buildUser() ([]string, error) {
 		}
 		if name == "mailtest.c" && !b.Mailbox {
 			continue
+		}
+		/* A driver's command is useless without the driver, and leaving it
+		 * in would only print "this board has none". */
+		switch prog {
+		case "pwm":
+			if !b.feature("pwm") {
+				continue
+			}
+		case "uart":
+			if !b.feature("uart1") {
+				continue
+			}
+		case "spi":
+			if !b.feature("spi") {
+				continue
+			}
+		case "i2c":
+			if !b.feature("i2c") {
+				continue
+			}
+		case "dma":
+			if !b.feature("dma") {
+				continue
+			}
 		}
 		progs = append(progs, prog)
 	}

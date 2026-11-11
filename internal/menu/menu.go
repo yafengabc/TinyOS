@@ -105,20 +105,39 @@ func Load(c *build.Config, path string) *State {
 	return s
 }
 
-func (s *State) Feature(name string) bool { return s.Features[name] }
-
-func (s *State) SetFeature(name string, on bool) {
+// DefaultFeature reports whether the selected target turns a driver on when
+// the config says nothing.  RP2040's PWM/UART1/SPI/I2C use this so the board
+// keeps working without a config, while menuconfig can still turn one off.
+func (s *State) DefaultFeature(name string) bool {
 	name = strings.ToLower(name)
-	if on {
-		s.Features[name] = true
-	} else {
-		delete(s.Features, name)
+	if t, ok := build.Targets[s.Target]; ok {
+		for _, f := range t.DefaultFeatures {
+			if strings.EqualFold(f, name) {
+				return true
+			}
+		}
 	}
+	return false
 }
 
-func (s *State) WiFi() bool    { return s.Features["wifi"] }
-func (s *State) Net() bool     { return s.Features["net"] }
-func (s *State) SoftMin() bool { return s.Features["softfloat-min"] }
+func (s *State) Feature(name string) bool {
+	name = strings.ToLower(name)
+	if on, ok := s.Features[name]; ok {
+		return on
+	}
+	return s.DefaultFeature(name)
+}
+
+// SetFeature stores an explicit choice, including false.  Deleting the key
+// would mean "fall back to the target default", which is not what a user who
+// just turned a default-on driver off asked for.
+func (s *State) SetFeature(name string, on bool) {
+	s.Features[strings.ToLower(name)] = on
+}
+
+func (s *State) WiFi() bool    { return s.Feature("wifi") }
+func (s *State) Net() bool     { return s.Feature("net") }
+func (s *State) SoftMin() bool { return s.Feature("softfloat-min") }
 
 // DriverChoices lists the driver directories that apply to the current
 // target: its board defaults plus whatever the config added.  The WiFi driver
@@ -313,15 +332,19 @@ func (s *State) Render() string {
 
 	features := make([]string, 0, len(s.Features))
 	for k, on := range s.Features {
-		if on {
-			features = append(features, strings.ToLower(k))
+		/* A false value that equals the target default adds nothing; the
+		 * absence of the key already means "use the default". */
+		if !on && !s.DefaultFeature(k) {
+			continue
 		}
+		features = append(features, fmt.Sprintf("%s = %t",
+			strings.ToLower(k), on))
 	}
 	sort.Strings(features)
 	if len(features) > 0 {
 		b.WriteString("\n[features]\n")
 		for _, f := range features {
-			b.WriteString(f + " = true\n")
+			b.WriteString(f + "\n")
 		}
 	}
 

@@ -47,15 +47,48 @@ volatile uint32_t g_usb_irq_count;
 
 static void usb_irq_trampoline(void)
 {
+    uint32_t ints = mmio_read32(0x50110098u);   /* USBCTRL INTS, pre-handler */
+
+    /* reset_usb_boot() is spinning in wfi after writing scratch[4..7] and
+     * enabling the watchdog timer.  The tick never decrements that counter
+     * on this port, so use a live USB interrupt (SOF keeps arriving) to
+     * force WATCHDOG_CTRL.TRIGGER.  The bootrom then sees scratch[4] and
+     * jumps to its _usb_boot_reboot_wrapper instead of waiting forever. */
+    extern int plat_bootsel_force_check(void);
+    if (plat_bootsel_force_check()) {
+        mmio_write32(0x40058000u, 0x80000000u);  /* WATCHDOG_CTRL.TRIGGER */
+        for (;;)
+            ;
+    }
+
     g_usb_irq_count++;
-    /* Controller events only.  Running tud_task() here deadlocked the boot on
-     * the very first interrupt: the state machine needs the caller's stack and
-     * can format/enqueue much more than an ISR should, and arming it from the
-     * exception meant the main thread never got past plat_irq_enable().  The
-     * task now runs in thread context (console read path), which is where
-     * pico-sdk's own alarm-driven task effectively lives. */
+    usb_cdc_trace_snap();       /* raw registers, before anything clears them */
     if (s_usb_isr)
-        s_usb_isr();
+        s_usb_isr();            /* dcd_int_handler(): latch SIE events */
+    /* Erratum RP2040-E15 (B0/B1): the SIE needs 800 us of LS_J after a bus
+     * reset before it will accept packets.  The SDK fix is compiled out of
+     * the vendored TinyUSB port; request our equivalent here, but let the
+     * poll path run it: waiting out the reset's 10-15 ms of SE0 inside this
+     * interrupt blocked the very SETUP packet the host sends next. */
+    if (ints & 0x00001000u)     /* USB_INTS_BUS_RESET_BITS */
+        usb_cdc_e15_request();
+    /* While E15 is pending or holding J, the task must not consume the
+     * queued BUS_RESET event yet - pico-sdk runs the fix after
+     * dcd_event_bus_reset() is queued and before tud_task(), and so does
+     * usb_cdc_poll().  It is called from the tick (or from the tight early
+     * enumeration loop), so the delay is one millisecond at most. */
+    if (usb_cdc_e15_pending())
+        return;
+    /* The task has to run in this same interrupt.  usb_cdc.c owns the
+     * re-entrancy guard (g_in_task + a PRIMASK window), so this is safe even
+     * when the IRQ lands inside the tick's own tud_task() call.
+     *
+     * Without this call the RP2040 never enumerates: the only remaining
+     * tud_task() was the 1 ms tick, and every control-transfer stage was
+     * answered a full millisecond late, so the host gave up after the first
+     * descriptor and reset the port in a loop.  The RP2350 port gets away
+     * with the deferred task at 150 MHz; this one cannot. */
+    usb_cdc_irq_task();
 }
 
 void irq_add_shared_handler(uint num, void (*handler)(void), uint8_t order_priority)

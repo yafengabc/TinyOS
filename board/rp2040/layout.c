@@ -10,11 +10,11 @@
  * The RP2040 has no MMU and no MPU: a user task runs unprivileged (so a fault
  * cannot corrupt the kernel) but with the whole flat address space visible,
  * exactly like the x86 port.  A window is therefore just an allocation, and
- * PLAT_APP_GRAIN is the step it is rounded to: 32 KiB leaves 16 KiB for the
- * image and the heap once the 8 KiB stack and the 4 KiB guard are accounted
- * for, and the 136 KiB of app area holds eight of those.  (It used to say
- * 16 KiB guard and a 32 KiB stack here, which cannot fit at all - every exec
- * was refused, unnoticed because no Pico had a console yet.) */
+ * PLAT_APP_GRAIN is the step it is rounded to: 16 KiB leaves room for the
+ * image and heap once the 8 KiB stack and the 4 KiB guard are accounted
+ * for.  The current kernel end leaves about 200 KiB of task area, so twelve
+ * such windows fit.  (It used to say 16 KiB guard and a 32 KiB stack here,
+ * which could not fit at all - every exec was refused.) */
 
 const uint32_t PLAT_KERNEL_BASE = 0x20000000u;   /* SRAM reserved for the
                                                    kernel image + .bss      */
@@ -38,6 +38,11 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 const uint32_t PLAT_LFS_LBA = 0x80000u / 512u;   /* 1024 */
 const uint32_t PLAT_LFS_BLOCKS = 384;            /* 1.5 MiB */
 
-/* One CPU: these boards have a single core.  The SMP build sets 2 and
- * start.S brings the second hart up (see kernel/cpu.c). */
+/* One CPU by default; the rp2040smp target builds with TOS_MAX_CPUS=2 and
+ * start.S brings the second core up from the ROM's FIFO wait loop (the
+ * board's plat_start_cpu). */
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+const uint32_t PLAT_MAX_CPUS = TOS_MAX_CPUS;
+#else
 const uint32_t PLAT_MAX_CPUS = 1;
+#endif

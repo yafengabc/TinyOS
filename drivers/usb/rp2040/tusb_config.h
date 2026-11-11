@@ -20,7 +20,7 @@
 /* Level 2 = the usbd state machine's own log (SETUP / SET_CONFIGURATION /
  * enumeration failures).  Off by default; turn to 1 for a quieter run, and
  * remember every message costs UART time inside the USB interrupt. */
-#define CFG_TUSB_DEBUG              0
+#define CFG_TUSB_DEBUG              2
 #define CFG_TUSB_DEBUG_PRINTF       usb_dbg_printf
 
 /* 64-byte control endpoint: full speed allows 8/16/32/64, and 64 is what
