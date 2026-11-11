@@ -25,6 +25,7 @@ jobs:
         target:
           - esp32c3
           - rp2040
+          - rp2040smp
           - rp2350
           - rp2350smp
           - rp2350rv
