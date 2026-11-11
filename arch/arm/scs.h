@@ -38,7 +38,8 @@
  * priority is fixed at -1, so the configurable fault priorities are M3
  * and up.  SHPR1 packs UsageFault in [31:24], BusFault in [23:16] and
  * MemManage in [15:8]. */
-#define ARM_PRIO_SYSTICK 0x00u
+#define ARM_PRIO_SYSTICK 0x00u   /* above SVCall (0x40): a long console
+                                  * write must not swallow ticks */
 #define ARM_PRIO_SVC     0x40u
 #define ARM_PRIO_PENDSV  0xE0u
 #define ARM_PRIO_FAULT   0x40u

@@ -347,6 +347,32 @@ static uint32_t align_up(uint32_t v, uint32_t a)
     return (v + a - 1) & ~(a - 1);
 }
 
+/* Checked forms used on the exec path: every number below comes from an
+ * untrusted envelope, and an unchecked wrap here turns an undersized window
+ * into an out-of-bounds decompressor write. */
+static int add_u32_ok(uint32_t a, uint32_t b, uint32_t *out)
+{
+    if (a > 0xFFFFFFFFu - b)
+        return -1;
+    *out = a + b;
+    return 0;
+}
+
+static int align_up_ok(uint32_t v, uint32_t a, uint32_t *out)
+{
+    uint32_t rounded;
+
+    if (a == 0 || (a & (a - 1u)) != 0)
+        return -1;
+    if (v > 0xFFFFFFFFu - (a - 1u))
+        return -1;
+    rounded = (v + a - 1u) & ~(a - 1u);
+    if (rounded < v)
+        return -1;
+    *out = rounded;
+    return 0;
+}
+
 #if TOS_PMP_POW2_WINDOWS
 /* Smallest power of two >= v, never below one grain.  A window must be a
  * power of two so a single NAPOT PMP entry covers it and nothing else; see
@@ -1554,15 +1580,27 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        span wins, but a 64 KiB program on a small board is exactly the case
        where it might not. */
     uint32_t img = hint.span > raw_size ? hint.span : raw_size;
-    uint32_t win_need = img + stk + hint.heap_ask + HEAP_GUARD;
+    uint32_t win_need = img;
     uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
+    if (add_u32_ok(win_need, stk, &win_need) < 0 ||
+        add_u32_ok(win_need, hint.heap_ask, &win_need) < 0 ||
+        add_u32_ok(win_need, HEAP_GUARD, &win_need) < 0) {
+        kprintf("exec: '%s' window size overflows\n", path);
+        proc_retire(p);
+        return NULL;
+    }
     if (win_need > app_total) {
         kprintf("exec: '%s' needs %u KiB, the whole user area is %u KiB\n",
                 path, win_need / 1024u, app_total / 1024u);
         proc_retire(p);
         return NULL;
     }
-    uint32_t win = align_up(win_need, PLAT_APP_GRAIN);
+    uint32_t win;
+    if (align_up_ok(win_need, PLAT_APP_GRAIN, &win) < 0) {
+        kprintf("exec: '%s' window alignment overflows\n", path);
+        proc_retire(p);
+        return NULL;
+    }
     if (win < PLAT_APP_GRAIN)
         win = PLAT_APP_GRAIN;
 #if TOS_PMP_POW2_WINDOWS
@@ -1581,6 +1619,14 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
         return NULL;
     }
     uint32_t base = p->win_base;
+
+    /* The decompressor is given raw_size, so prove the destination really
+     * has that many bytes before letting it write. */
+    if (raw_size > win) {
+        kprintf("exec: '%s' image is larger than its window\n", path);
+        proc_retire(p);
+        return NULL;
+    }
 
     /* Decode the envelope straight into the reserved window. */
     if (stream_load(path, hdr, (uint8_t *)base, raw_size) != 0) {
@@ -1610,9 +1656,26 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
             return NULL;
         }
     }
-    uint32_t span = align_up(link_hi - link_lo, PLAT_PAGE_SIZE);
-    uint32_t win_elf = align_up(span + stk + asked_heap + HEAP_GUARD,
-                                PLAT_APP_GRAIN);
+    if (link_hi < link_lo) {
+        kprintf("exec: '%s' has an inverted memory span\n", path);
+        proc_retire(p);
+        return NULL;
+    }
+    uint32_t span, win_elf;
+    if (align_up_ok(link_hi - link_lo, PLAT_PAGE_SIZE, &span) < 0) {
+        kprintf("exec: '%s' span overflows\n", path);
+        proc_retire(p);
+        return NULL;
+    }
+    win_elf = span;
+    if (add_u32_ok(win_elf, stk, &win_elf) < 0 ||
+        add_u32_ok(win_elf, asked_heap, &win_elf) < 0 ||
+        add_u32_ok(win_elf, HEAP_GUARD, &win_elf) < 0 ||
+        align_up_ok(win_elf, PLAT_APP_GRAIN, &win_elf) < 0) {
+        kprintf("exec: '%s' ELF window overflows\n", path);
+        proc_retire(p);
+        return NULL;
+    }
     if (win_elf < PLAT_APP_GRAIN)
         win_elf = PLAT_APP_GRAIN;
     if (span != hint.span || asked_stack != hint.stack_ask ||

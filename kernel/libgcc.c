@@ -213,7 +213,7 @@ uint32_t __aeabi_uread4(const void *addr)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-void __aeabi_uwrite4(void *addr, uint32_t v)
+uint32_t __aeabi_uwrite4(uint32_t v, void *addr)
 {
     volatile uint8_t *p = addr;
 
@@ -221,6 +221,29 @@ void __aeabi_uwrite4(void *addr, uint32_t v)
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
+    return v;
+}
+
+uint64_t __aeabi_uread8(const void *addr)
+{
+    const volatile uint8_t *p = addr;
+    uint64_t v = 0;
+
+    for (int i = 7; i >= 0; i--)
+        v = (v << 8) | p[i];
+    return v;
+}
+
+uint64_t __aeabi_uwrite8(uint64_t v, void *addr)
+{
+    volatile uint8_t *p = addr;
+    uint64_t r = v;
+
+    for (int i = 0; i < 8; i++) {
+        p[i] = (uint8_t)v;
+        v >>= 8;
+    }
+    return r;
 }
 
 uint32_t __aeabi_uidiv(uint32_t n, uint32_t d)

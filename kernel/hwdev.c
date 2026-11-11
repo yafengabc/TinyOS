@@ -434,6 +434,16 @@ static const char *class_name(uint8_t cls)
     case TOS_DEV_FLASH:   return "flash";
     case TOS_DEV_GPIO:    return "gpio";
     case TOS_DEV_SENSOR:  return "sensor";
+    case TOS_DEV_SPI:     return "spi";
+    case TOS_DEV_I2C:     return "i2c";
+    case TOS_DEV_PWM:     return "pwm";
+    case TOS_DEV_PIO:     return "pio";
+    case TOS_DEV_DMA:     return "dma";
+    case TOS_DEV_PLL:     return "pll";
+    case TOS_DEV_DIV:     return "divider";
+    case TOS_DEV_INTERP:  return "interp";
+    case TOS_DEV_LDO:     return "ldo";
+    case TOS_DEV_SWD:     return "swd";
     default:              return "?";
     }
 }
@@ -453,6 +463,16 @@ static const char *class_short(uint8_t cls)
     case TOS_DEV_FLASH:   return "flash";
     case TOS_DEV_GPIO:    return "gpio";
     case TOS_DEV_SENSOR:  return "sensor";
+    case TOS_DEV_SPI:     return "spi";
+    case TOS_DEV_I2C:     return "i2c";
+    case TOS_DEV_PWM:     return "pwm";
+    case TOS_DEV_PIO:     return "pio";
+    case TOS_DEV_DMA:     return "dma";
+    case TOS_DEV_PLL:     return "pll";
+    case TOS_DEV_DIV:     return "div";
+    case TOS_DEV_INTERP:  return "intrp";
+    case TOS_DEV_LDO:     return "ldo";
+    case TOS_DEV_SWD:     return "swd";
     default:              return "?";
     }
 }
@@ -464,7 +484,7 @@ static int dev_list_read(void *priv, uint32_t off, void *buf, uint32_t len)
      * `cat` that stops in the middle of a line is worse than no file.  The
      * text fits in TABLE_BYTES; if a future board does not, it is cut at a
      * line boundary and the last line says so. */
-    enum { TABLE_BYTES = 1024 };
+    enum { TABLE_BYTES = 2048 };
     char out[TABLE_BYTES];
     char line[128];
     int n, count = 0;

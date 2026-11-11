@@ -239,6 +239,86 @@ int adc_bits(void)
     return tos_sys2(SYS_ADC, ADC_OP_BITS, 0);
 }
 
+int pwm_count(void)
+{
+    return tos_sys2(SYS_PWM, PWM_OP_COUNT, 0);
+}
+
+int pwm_set(int gpio, int freq_hz, int duty_permille)
+{
+    struct tos_pwm_req req;
+
+    req.gpio = gpio;
+    req.freq_hz = freq_hz;
+    req.duty_permille = duty_permille;
+    return tos_sys2(SYS_PWM, PWM_OP_SET, (int)&req);
+}
+
+int pwm_off(int gpio)
+{
+    return tos_sys2(SYS_PWM, PWM_OP_OFF, gpio);
+}
+
+int uart_count(void)
+{
+    return tos_sys1(SYS_UART_COUNT, 0);
+}
+
+int uart_write(int port, const void *buf, int len)
+{
+    return tos_sys3(SYS_UART_WRITE, port, (int)buf, len);
+}
+
+int uart_read(int port, void *buf, int len)
+{
+    return tos_sys3(SYS_UART_READ, port, (int)buf, len);
+}
+
+int spi_count(void)
+{
+    return tos_sys2(SYS_SPI, SPI_OP_COUNT, 0);
+}
+
+int spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
+             const void *tx, void *rx, int len)
+{
+    struct tos_spi_req req;
+
+    req.bus = bus;
+    req.cs_gpio = cs_gpio;
+    req.freq_hz = freq_hz;
+    req.mode = mode;
+    req.tx = (const unsigned char *)tx;
+    req.rx = (unsigned char *)rx;
+    req.len = len;
+    return tos_sys2(SYS_SPI, SPI_OP_XFER, (int)&req);
+}
+
+int i2c_count(void)
+{
+    return tos_sys2(SYS_I2C, I2C_OP_COUNT, 0);
+}
+
+int i2c_xfer(int bus, int addr, int freq_hz,
+             const void *tx, int txlen, void *rx, int rxlen)
+{
+    struct tos_i2c_req req;
+
+    req.bus = bus;
+    req.addr = addr;
+    req.freq_hz = freq_hz;
+    req.tx = (const unsigned char *)tx;
+    req.txlen = txlen;
+    req.rx = (unsigned char *)rx;
+    req.rxlen = rxlen;
+    return tos_sys2(SYS_I2C, I2C_OP_XFER, (int)&req);
+}
+
+int dma_memcpy(void *dst, const void *src, int len)
+{
+    return tos_sys3(SYS_DMA_MEMCPY, (int)dst, (int)src, len);
+}
+
 /* ---- pipes ------------------------------------------------------------ */
 
 int pipe(int fds[2])

@@ -184,11 +184,15 @@ static int header_ok(const uint8_t *data, uint32_t size, const Elf32_Ehdr **out)
         return -1;
     if (eh->e_phentsize != sizeof(Elf32_Phdr))
         return -1;
-    if (eh->e_phnum == 0)
+    if (eh->e_phnum == 0 || eh->e_phnum > ELF_MAX_PHDR)
         return -1;
 
-    uint32_t ph_end = eh->e_phoff + (uint32_t)eh->e_phnum * sizeof(Elf32_Phdr);
-    if (ph_end > size)
+    /* Subtraction/division, not phoff + phnum*size: the multiply and add
+     * both wrap for a hostile header, and the wrapped value passes a naive
+     * "ph_end > size" check. */
+    if (eh->e_phoff > size ||
+        (uint32_t)eh->e_phnum >
+            (size - eh->e_phoff) / sizeof(Elf32_Phdr))
         return -1;
 
     *out = eh;
@@ -275,6 +279,23 @@ static uint32_t le32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Advance over one note field (name or descriptor), padded to four bytes.
+ * The addition is checked against `limit` so a hostile namesz/descsz cannot
+ * wrap into a small next offset and make memcmp read outside the note. */
+static int note_step(uint32_t base, uint32_t len, uint32_t limit,
+                     uint32_t *out)
+{
+    uint32_t padded;
+
+    if (base > limit || len > 0xFFFFFFFCu)
+        return -1;
+    padded = (len + 3u) & ~3u;
+    if (padded > limit - base)
+        return -1;
+    *out = base + padded;
+    return 0;
+}
+
 int elf_tos_note(const uint8_t *data, uint32_t size,
                  uint32_t *stack_out, uint32_t *heap_out)
 {
@@ -307,10 +328,10 @@ int elf_tos_note(const uint8_t *data, uint32_t size,
             uint32_t descsz   = le32(data + off + 4);
             uint32_t type     = le32(data + off + 8);
             uint32_t name_off = off + 12;
-            uint32_t desc_off = name_off + ((namesz + 3u) & ~3u);
-            uint32_t next     = desc_off + ((descsz + 3u) & ~3u);
+            uint32_t desc_off, next;
 
-            if (next < desc_off || next > end)
+            if (note_step(name_off, namesz, end, &desc_off) < 0 ||
+                note_step(desc_off, descsz, end, &next) < 0)
                 break;      /* truncated, or a length that cannot be true */
             if (namesz >= 6 && descsz >= 4 &&
                 memcmp(data + name_off, "TinyOS", 6) == 0) {
@@ -346,9 +367,9 @@ static int view_read_header(const uint8_t *p, uint32_t size, elf_view_t *v)
         return -1;
     if (v->eh.e_phnum == 0 || v->eh.e_phnum > ELF_MAX_PHDR)
         return -1;
-    uint32_t ph_end = v->eh.e_phoff +
-                      (uint32_t)v->eh.e_phnum * sizeof(Elf32_Phdr);
-    if (ph_end > size)
+    if (v->eh.e_phoff > size ||
+        (uint32_t)v->eh.e_phnum >
+            (size - v->eh.e_phoff) / sizeof(Elf32_Phdr))
         return -1;
 
     v->phnum = v->eh.e_phnum;

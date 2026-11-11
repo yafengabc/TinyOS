@@ -430,8 +430,17 @@ void plat_irq_restore(uint32_t state)
                      : "memory");
 }
 
+__attribute__((weak)) void plat_flash_park_poll(void)
+{
+}
+
 void plat_cpu_idle(void)
 {
+    /* A secondary-core flash operation parks this core through its idle
+     * loop as well as its tick: while a CPU sits in sched_idle() it is
+     * already inside the SysTick exception, so no further tick can preempt
+     * it and the park flag would otherwise never be seen. */
+    plat_flash_park_poll();
     /* Idle as a poll, not a WFI.
      *
      * WFI is what an idle core should use and it works for the ordinary
@@ -469,10 +478,12 @@ void plat_wake_cpu(void)
  * next pass is also what clears a stale exclusive tag, so no CLREX is
  * needed on that path.
  *
- * The Cortex-M0+ has neither instruction (ARMv6-M), which is why the RP2040
- * port cannot be SMP at all and this compiles out; the weak no-op defaults
- * in kernel/cpu.c are what it links against. */
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1 && !defined(TOS_ARM_M0P)
+ * The Cortex-M0+ has neither instruction (ARMv6-M), so its SMP build takes
+ * the SIO hardware-spinlock path below instead (TOS_ARM_SIO_SPIN); the
+ * single-core build compiles this out and links the weak no-op defaults in
+ * kernel/cpu.c. */
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1 && \
+    (!defined(TOS_ARM_M0P) || defined(TOS_ARM_SIO_SPIN))
 
 #if !defined(TOS_ARM_SIO_SPIN)
 

@@ -51,6 +51,13 @@
  * blocking loop lives in user land (sleep 1 ms), exactly like poll(). */
 #define SYS_MSG_SEND 38  /* msg_send(pid, buf, len) -> 0 or -1        */
 #define SYS_MSG_RECV 39  /* msg_tryrecv(buf, len) -> bytes, -1, -2    */
+#define SYS_PWM      40  /* pwm(op, arg) -> depends on op              */
+#define SYS_UART_WRITE 41 /* uart_write(port, buf, len) -> bytes/-1    */
+#define SYS_UART_READ  42 /* uart_read(port, buf, len) -> bytes/-1     */
+#define SYS_UART_COUNT 43 /* uart_count() -> ports                     */
+#define SYS_SPI      44  /* spi(op, &req) -> depends on op             */
+#define SYS_I2C      45  /* i2c(op, &req) -> depends on op             */
+#define SYS_DMA_MEMCPY 47 /* dma_memcpy(dst, src, len) -> len/-1       */
 
 #define MSG_EAGAIN   (-2)
 #define TOS_MSG_MAX  256    /* bytes per pool slot (mailbox.h) */
@@ -111,6 +118,50 @@ struct tos_dirent_req {
 #define ADC_OP_VREF    2   /* ()     -> reference in millivolts          */
 #define ADC_OP_BITS    3   /* ()     -> resolution in bits               */
 
+/* PWM is addressed by GPIO, not by an abstract channel: on the RP2040 every
+ * pin 0..29 can be routed to one of the 16 slice outputs.  The frequency is
+ * a property of the slice, so two pins in the same slice share it. */
+#define PWM_OP_COUNT   0   /* ()     -> number of PWM channels           */
+#define PWM_OP_SET     1   /* (&req) -> 0, configure gpio/freq/duty      */
+#define PWM_OP_OFF     2   /* (gpio) -> 0, stop and release the pin      */
+
+struct tos_pwm_req {
+    int gpio;
+    int freq_hz;
+    int duty_permille;      /* 0..1000 */
+};
+
+/* SPI is a full-duplex byte transfer.  `tx` and `rx` may each be NULL; a
+ * missing tx sends 0xFF, a missing rx discards the received bytes.  `cs_gpio`
+ * is driven by software, so the caller can use any free pin; -1 means the
+ * caller owns the chip select. */
+#define SPI_OP_COUNT   0   /* ()     -> number of SPI buses             */
+#define SPI_OP_XFER    1   /* (&req) -> bytes transferred, -1            */
+struct tos_spi_req {
+    int bus;                    /* 0 = SPI0, 1 = SPI1                */
+    int cs_gpio;                /* -1 = no software chip select      */
+    int freq_hz;
+    int mode;                   /* 0..3: CPOL/CPHA                   */
+    const unsigned char *tx;
+    unsigned char *rx;
+    int len;
+};
+
+/* I2C master.  A zero-length transfer with no tx/rx is an address probe
+ * (used by `i2c scan`).  tx is written first, then rx is read, with a
+ * repeated START between the two when both are present. */
+#define I2C_OP_COUNT   0   /* ()     -> number of I2C buses             */
+#define I2C_OP_XFER    1   /* (&req) -> 0/-1 for probe, bytes otherwise */
+struct tos_i2c_req {
+    int bus;                    /* 0 = I2C0, 1 = I2C1                */
+    int addr;                   /* 7-bit address                     */
+    int freq_hz;
+    const unsigned char *tx;
+    int txlen;
+    unsigned char *rx;
+    int rxlen;
+};
+
 /* ---- on-board devices ------------------------------------------------
  *
  * A board is not just a CPU: it has a LED, a button, a panel, a card slot.
@@ -132,6 +183,16 @@ struct tos_dirent_req {
 #define TOS_DEV_FLASH     8   /* the boot flash part                    */
 #define TOS_DEV_GPIO      9   /* a pin broken out on a header           */
 #define TOS_DEV_SENSOR   10   /* anything else worth naming             */
+#define TOS_DEV_SPI      11   /* SPI controller / header bus            */
+#define TOS_DEV_I2C      12   /* I2C controller / header bus            */
+#define TOS_DEV_PWM      13   /* PWM slice bank                         */
+#define TOS_DEV_PIO      14   /* programmable I/O block                 */
+#define TOS_DEV_DMA      15   /* DMA controller                         */
+#define TOS_DEV_PLL      16   /* clock generator                        */
+#define TOS_DEV_DIV      17   /* integer divider                        */
+#define TOS_DEV_INTERP   18   /* interpolator                           */
+#define TOS_DEV_LDO      19   /* on-chip regulator                      */
+#define TOS_DEV_SWD      20   /* debug access port                      */
 
 /* Flags in a device-table entry. */
 #define TOS_DEV_ACTIVE_LOW (1u << 0)  /* asserting the pin means 0         */

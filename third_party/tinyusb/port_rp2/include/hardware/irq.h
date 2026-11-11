@@ -8,7 +8,11 @@
 
 #include "pico/types.h"
 
+#if defined(TOS_ARM_M0P)
+#define USBCTRL_IRQ 5
+#else
 #define USBCTRL_IRQ 14
+#endif
 
 /* Only USBCTRL has a wrapped stub in the shared vector table; other numbers
  * are accepted so the shim links, but enabling them does nothing. */

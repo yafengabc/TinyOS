@@ -87,26 +87,49 @@ func LoadConfig(path string) (*Config, error) {
 		Panel:         true,
 	}
 	if s := sections["build"]; s != nil {
+		bad := func(key string, err error) error {
+			return fmt.Errorf("%s: [build] %s: %w", path, key, err)
+		}
 		c.Target = strings.TrimSpace(s["target"])
-		c.HeapBytes = parseSize(s["heap"])
-		c.MaxProcs = parseSize(s["max_procs"])
-		c.KStack = parseSize(s["kstack"])
+		if c.HeapBytes, err = parseSize(s["heap"]); err != nil {
+			return nil, bad("heap", err)
+		}
+		if c.MaxProcs, err = parseSize(s["max_procs"]); err != nil {
+			return nil, bad("max_procs", err)
+		}
+		if c.KStack, err = parseSize(s["kstack"]); err != nil {
+			return nil, bad("kstack", err)
+		}
 		c.Opt = strings.TrimSpace(s["opt"])
-		c.Threads = parseOnOff(s["threads"])
+		if c.Threads, err = parseOnOff(s["threads"]); err != nil {
+			return nil, bad("threads", err)
+		}
 		if raw, ok := s["hist"]; ok {
-			c.HistBytes = parseSize(raw)
+			if c.HistBytes, err = parseSize(raw); err != nil {
+				return nil, bad("hist", err)
+			}
 		}
 		if raw, ok := s["proc_lite"]; ok {
-			c.ProcLite = parseOnOff(raw)
+			if c.ProcLite, err = parseOnOff(raw); err != nil {
+				return nil, bad("proc_lite", err)
+			}
 		}
 		if raw, ok := s["devnodes"]; ok {
-			c.DevNodes = parseOnOff(raw)
+			if c.DevNodes, err = parseOnOff(raw); err != nil {
+				return nil, bad("devnodes", err)
+			}
 		}
 		if raw, ok := s["panel"]; ok {
-			c.Panel = parseOnOff(raw)
+			if c.Panel, err = parseOnOff(raw); err != nil {
+				return nil, bad("panel", err)
+			}
 		}
-		c.FSReadOnly = parseOnOff(s["fs_ro"])
-		c.Mailbox = parseOnOff(s["mailbox"])
+		if c.FSReadOnly, err = parseOnOff(s["fs_ro"]); err != nil {
+			return nil, bad("fs_ro", err)
+		}
+		if c.Mailbox, err = parseOnOff(s["mailbox"]); err != nil {
+			return nil, bad("mailbox", err)
+		}
 		if raw := s["features"]; raw != "" {
 			for _, f := range splitList(raw) {
 				c.Features[strings.ToLower(f)] = true
@@ -114,7 +137,11 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 	for name, on := range sections["features"] {
-		c.Features[strings.ToLower(name)] = truthy(on)
+		on, err := truthy(on)
+		if err != nil {
+			return nil, fmt.Errorf("%s: [features] %s: %w", path, name, err)
+		}
+		c.Features[strings.ToLower(name)] = on
 	}
 	if s := sections["drivers"]; s != nil {
 		var names []string
@@ -201,30 +228,33 @@ func splitList(s string) []string {
 	return out
 }
 
-func truthy(s string) bool {
+func truthy(s string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "1", "true", "yes", "on", "y":
-		return true
+		return true, nil
+	case "0", "false", "no", "off", "n":
+		return false, nil
 	}
-	return false
+	return false, fmt.Errorf("invalid boolean %q", s)
 }
 
 // parseOnOff is the boolean form used by [build] keys such as threads.
-// Absent or unrecognised is off, which is the default for optional code.
-func parseOnOff(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "true", "yes", "on":
-		return true
+// An absent key is off; a present but unrecognised value is an error rather
+// than a silent "off", which used to hide a typo like devnodes = flase.
+func parseOnOff(s string) (bool, error) {
+	if strings.TrimSpace(s) == "" {
+		return false, nil
 	}
-	return false
+	return truthy(s)
 }
 
 // parseSize reads "81920", "80k" or "1m" as bytes (or a plain count for
-// max_procs).  Anything unparsable is 0, which means "use the default".
-func parseSize(s string) int {
+// max_procs).  An absent key is 0 ("use the default"); a malformed or
+// overflowing value is an error instead of silently selecting the default.
+func parseSize(s string) (int, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
-		return 0
+		return 0, nil
 	}
 	mul := 1
 	switch {
@@ -237,27 +267,51 @@ func parseSize(s string) int {
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || n < 0 {
-		return 0
+		return 0, fmt.Errorf("invalid size %q", s)
 	}
-	return n * mul
+	maxInt := int(^uint(0) >> 1)
+	if n > maxInt/mul {
+		return 0, fmt.Errorf("size %q overflows", s)
+	}
+	return n * mul, nil
 }
 
 // ApplyConfig copies the parsed values into the builder and resolves paths
 // against the tree root.  A target already chosen on the command line wins
 // over the config file.
 func (b *Builder) ApplyConfig(c *Config) error {
+	if c != nil {
+		b.Config = c
+		if b.Target.Name == "" && c.Target != "" {
+			t, ok := Targets[c.Target]
+			if !ok {
+				return fmt.Errorf("config %s: unknown target %q", c.Path, c.Target)
+			}
+			b.Target = t
+		}
+	}
+
+	/* Board defaults first: a target that cannot run WiFi programs must
+	 * not get them just because no config file was passed.  A config's
+	 * [user] exclude only adds to this set. */
+	b.UserExclude = map[string]bool{}
+	for _, n := range b.Target.UserExclude {
+		b.UserExclude[n] = true
+	}
+
+	/* Same idea for driver features: RP2040 PWM/UART1/SPI/I2C are on by
+	 * default, but the config can explicitly write "pwm = false" (which is
+	 * what menuconfig saves) and the code disappears. */
+	b.Features = map[string]bool{}
+	for _, f := range b.Target.DefaultFeatures {
+		b.Features[f] = true
+	}
 	if c == nil {
 		return nil
 	}
-	b.Config = c
-	if b.Target.Name == "" && c.Target != "" {
-		t, ok := Targets[c.Target]
-		if !ok {
-			return fmt.Errorf("config %s: unknown target %q", c.Path, c.Target)
-		}
-		b.Target = t
+	for name, on := range c.Features {
+		b.Features[name] = on
 	}
-	b.Features = c.Features
 	b.HeapBytes = c.HeapBytes
 	b.MaxProcs = c.MaxProcs
 	b.KStack = c.KStack
@@ -292,7 +346,9 @@ func (b *Builder) ApplyConfig(c *Config) error {
 		}
 		b.DriverDirs = kept
 	}
-	b.UserExclude = c.UserExclude
+	for n := range c.UserExclude {
+		b.UserExclude[n] = true
+	}
 	b.SourceExclude = map[string]bool{}
 	for s := range c.SourceExclude {
 		b.SourceExclude[filepath.ToSlash(b.abs(s))] = true

@@ -154,6 +154,20 @@ static int looks_like_elf(const uint8_t *d, size_t n)
    is written instead. */
 #define WINDOW_PAGE 4096u
 
+static int note_step(uint32_t base, uint32_t len, uint32_t limit,
+                     uint32_t *out)
+{
+    uint32_t padded;
+
+    if (base > limit || len > 0xFFFFFFFCu)
+        return -1;
+    padded = (len + 3u) & ~3u;
+    if (padded > limit - base)
+        return -1;
+    *out = base + padded;
+    return 0;
+}
+
 static int elf_window_hint(const uint8_t *d, size_t n,
                            uint32_t *span, uint32_t *stack, uint32_t *heap)
 {
@@ -176,6 +190,8 @@ static int elf_window_hint(const uint8_t *d, size_t n,
         uint32_t memsz  = get_u32(ph + 20);
 
         if (type == 1 && memsz != 0) {        /* PT_LOAD */
+            if (memsz > 0xFFFFFFFFu - va)
+                return -1;
             if (va < lo)
                 lo = va;
             if (va + memsz > hi)
@@ -189,9 +205,9 @@ static int elf_window_hint(const uint8_t *d, size_t n,
             uint32_t descsz   = get_u32(d + q + 4);
             uint32_t notetype = get_u32(d + q + 8);
             uint32_t name_off = q + 12;
-            uint32_t desc_off = name_off + ((namesz + 3u) & ~3u);
-            uint32_t next     = desc_off + ((descsz + 3u) & ~3u);
-            if (next < desc_off || next > end)
+            uint32_t desc_off, next;
+            if (note_step(name_off, namesz, end, &desc_off) < 0 ||
+                note_step(desc_off, descsz, end, &next) < 0)
                 break;
             if (namesz >= 6 && descsz >= 4 &&
                 memcmp(d + name_off, "TinyOS", 6) == 0) {

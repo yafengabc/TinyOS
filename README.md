@@ -118,6 +118,37 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
   堆与栈之间留一段无人认领的空洞；越界写当场 `store access fault`，只杀当前任务
   （x86 关分页后没有这个能力，只有 ring 3 的特权级隔离）
 
+## 内存保护现状
+
+各目标的能力边界不一样，`prot rodata|heap|stack|null` 的实测结果就是最直接的说明：
+
+| 目标 | 用户态机制 | 内存保护 |
+|---|---|---|
+| x86（PC/QEMU） | ring 3 + TSS | 仅特权级隔离；不启用分页，用户与内核共享 4 GiB 平坦地址空间 |
+| RV32（QEMU virt / ESP32-C3） | U-mode + `ecall` | PMP 分段：code(RX)、data+heap(RW)、stack(RW)；越界立即 fault |
+| ARM mps2（Cortex-M3） | Thread/PSP 非特权 | ARMv7-M MPU，按任务窗口切换区域 |
+| RP2350（Cortex-M33） | Thread/PSP 非特权 | PMSAv8 MPU（`arch/arm/platform.c` 的 `TOS_ARM_MPU_V8` 分支） |
+| **RP2040（Cortex-M0+）** | **Thread/PSP 非特权** | **没有 MPU、没有 MMU：只有特权级，没有地址空间隔离** |
+
+RP2040 的具体含义：
+
+- `plat_task_protect()` 在 `TOS_ARM_M0P` 分支里是空函数，`kernel/process.c` 的
+  `apply_protection()` 不会产生任何硬件效果。
+- 任务窗口（`exec` 分配的那段 SRAM）只是分配结果，不是硬件边界。一个任务写穿到
+  另一个任务或内核不会触发 fault；`prot heap/stack/rodata/null` 在 RP2040 上会打印
+  `survived: this machine cannot stop us`。因此 `rp2040` / `rp2040smp` 的默认
+  `UserExclude` 里包含 `prot`：它在这块板上不是保护测试，而是一次真的越界写，
+  默认镜像不把它放进 `/bin`。
+- 用户任务仍是非特权（`nPRIV=1`）：不能执行 `cpsid`、不能直接访问 NVIC/SCB 等系统
+  控制空间，只能通过 `svc` 进内核；但 SRAM 和所有外设寄存器仍然全部可读写。
+- **SMP 不改变这一点**：`rp2040smp` 的 SIO 自旋锁保护的是内核共享数据结构
+  （进程表、文件系统等），不是用户任务的内存。两个核上的任务仍然能互相看到整片
+  地址空间。
+- 栈守卫（`PLAT_HEAP_GUARD`）和爆栈自动翻倍都是软件约定，不是硬件保护。
+
+要真正的任务间 / 任务-内核隔离，需要带 MPU/MMU 的芯片：RP2350（PMSAv8）、
+Cortex-M3/M33/M7 或 RV32 的 PMP。RP2040 这颗 Cortex-M0+ 做不到。
+
 ## 目录
 
 ```
@@ -616,7 +647,7 @@ go run ./cmd/tos build -target rp2350
 | 基址 | UART0 `0x40034000`、IO `0x40014000`、PADS `0x4001c000`、RESETS `0x4000c000` | UART0 `0x40070000`、IO `0x40028000`、PADS `0x40038000`、RESETS `0x40020000`（位号也全变了） |
 | SIO | `GPIO_OUT_SET=+0x14`，步距 4 B | 64 位 GPIO 字，`GPIO_OUT_SET=+0x18`，步距 8 B |
 | SRAM | 264 KiB，8 个 16 KiB 任务窗口 | 520 KiB，头部 128 KiB 给内核，其后 384 KiB = **24 个窗口** |
-| MPU | 无（Cortex-M0+ 不带 MPU）——注意 RP2040 这个目标**至今没在真机上跑过**，只有编译产物 | 有，PMSAv8：区域是「基址+上限」、属性在 `MAIR`。已启用，每任务四个区域（代码 RO+X / 数据+堆到 `brk` RW / 栈 RW / 栈下护栏），`prot` 四条全部当场拦下 |
+| MPU | 无（Cortex-M0+ 不带 MPU） | 有，PMSAv8：区域是「基址+上限」、属性在 `MAIR`。已启用，每任务四个区域（代码 RO+X / 数据+堆到 `brk` RW / 栈 RW / 栈下护栏），`prot` 四条全部当场拦下 |
 
 `plat_block_erase/write` 放在 `.data.ramfunc`（`_start` 启动时拷进 SRAM）：ROM 执行
 flash 操作期间 XIP 会进入串行命令模式，调用者不能留在 flash 里取指。
@@ -639,6 +670,23 @@ echo hello > /dev/lcd0         # 屏就是终端：换行、滚动、40x16 字�
 屏幕是内核控制台的**镜像**（默认开启，`screen mirror off` 关闭），所以插着屏
 就能看到启动日志和 shell 提示符而不需要串口。实现细节、引脚表和踩过的坑见
 `docs/BOARD-ATK-DNRP2350AM.md`。
+
+`-target rp2040` 针对 **Raspberry Pi Pico**。TinyOS 没有 Linux 那种 DTS/FDT
+解析器，等价的设备树就是 `board/rp2040/board_devs.c` 里的 `board_dev_t` 表：
+30 个 GPIO（Pico 排针引出 26 个）、UART0/1、SPI0/1、I2C0/1、ADC0..3 加片内温度
+传感器 ADC4、16 通道 PWM、两个 PIO（8 个状态机）、12 通道 DMA、USB 1.1、2 MiB
+QSPI flash，以及 PLL、整数除法器、插值器、LDO 和 SWD。`cat /proc/dev` 看整张
+表，`/dev/led0` 控制 GP25 板载 LED。
+
+已接通的用户接口：
+
+```sh
+pwm 25 1000 50       # GP25：1 kHz、50% 占空比（板载 LED 变暗）
+pwm 25 off           # 停止 PWM，引脚交回 SIO 并拉低
+uart                 # 额外串口：UART1 TX=GP4 RX=GP5，115200 8N1
+uart send HELLO      # 从 GP4 发送
+uart recv 500         # 轮询 GP5 500 ms
+```
 
 ### 烧写与看日志
 

@@ -72,6 +72,74 @@ __attribute__((weak)) int plat_adc_bits(void)
     return 0;
 }
 
+__attribute__((weak)) int plat_pwm_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_pwm_set(int gpio, int freq_hz, int duty_permille)
+{
+    (void)gpio; (void)freq_hz; (void)duty_permille;
+    return -1;
+}
+
+__attribute__((weak)) int plat_pwm_off(int gpio)
+{
+    (void)gpio;
+    return -1;
+}
+
+__attribute__((weak)) int plat_uart_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_uart_write(int port, const void *buf, int len)
+{
+    (void)port; (void)buf; (void)len;
+    return -1;
+}
+
+__attribute__((weak)) int plat_uart_read(int port, void *buf, int len)
+{
+    (void)port; (void)buf; (void)len;
+    return -1;
+}
+
+__attribute__((weak)) int plat_spi_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_spi_xfer(int bus, int cs_gpio, int freq_hz,
+                                        int mode, const void *tx, void *rx,
+                                        int len)
+{
+    (void)bus; (void)cs_gpio; (void)freq_hz; (void)mode;
+    (void)tx; (void)rx; (void)len;
+    return -1;
+}
+
+__attribute__((weak)) int plat_i2c_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int plat_i2c_xfer(int bus, int addr, int freq_hz,
+                                        const void *tx, int txlen,
+                                        void *rx, int rxlen)
+{
+    (void)bus; (void)addr; (void)freq_hz;
+    (void)tx; (void)txlen; (void)rx; (void)rxlen;
+    return -1;
+}
+
+__attribute__((weak)) int plat_dma_memcpy(void *dst, const void *src, int len)
+{
+    (void)dst; (void)src; (void)len;
+    return -1;
+}
+
 /* ---- syscall surface ------------------------------------------------- */
 
 int periph_gpio(int op, int pin, int arg)
@@ -116,6 +184,88 @@ int periph_adc(int op, int chan)
     if (n <= 0 || chan < 0 || chan >= n)
         return -1;
     return plat_adc_read(chan);
+}
+
+int periph_pwm(int op, int gpio, int freq_hz, int duty_permille)
+{
+    int n = plat_gpio_count();
+
+    if (op == PWM_OP_COUNT)
+        return plat_pwm_count();
+    if (n <= 0 || gpio < 0 || gpio >= n)
+        return -1;
+    if (op == PWM_OP_OFF)
+        return plat_pwm_off(gpio);
+    if (op != PWM_OP_SET)
+        return -1;
+    if (freq_hz <= 0 || duty_permille < 0 || duty_permille > 1000)
+        return -1;
+    return plat_pwm_set(gpio, freq_hz, duty_permille);
+}
+
+int periph_uart_count(void)
+{
+    return plat_uart_count();
+}
+
+int periph_uart_write(int port, const void *buf, int len)
+{
+    if (port < 0 || port >= plat_uart_count())
+        return -1;
+    return plat_uart_write(port, buf, len);
+}
+
+int periph_uart_read(int port, void *buf, int len)
+{
+    if (port < 0 || port >= plat_uart_count())
+        return -1;
+    return plat_uart_read(port, buf, len);
+}
+
+int periph_spi_count(void)
+{
+    return plat_spi_count();
+}
+
+int periph_spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
+                    const void *tx, void *rx, int len)
+{
+    if (bus < 0 || bus >= plat_spi_count())
+        return -1;
+    if (freq_hz <= 0 || mode < 0 || mode > 7 || len < 0)
+        return -1;
+    if (cs_gpio < -1 || cs_gpio >= plat_gpio_count())
+        return -1;
+    if ((!tx && !rx) && len > 0)
+        return -1;
+    return plat_spi_xfer(bus, cs_gpio, freq_hz, mode, tx, rx, len);
+}
+
+int periph_i2c_count(void)
+{
+    return plat_i2c_count();
+}
+
+int periph_i2c_xfer(int bus, int addr, int freq_hz,
+                    const void *tx, int txlen, void *rx, int rxlen)
+{
+    if (bus < 0 || bus >= plat_i2c_count())
+        return -1;
+    if (addr < 0 || addr > 0x7f || freq_hz <= 0 ||
+        txlen < 0 || rxlen < 0)
+        return -1;
+    if ((!tx && txlen > 0) || (!rx && rxlen > 0))
+        return -1;
+    return plat_i2c_xfer(bus, addr, freq_hz, tx, txlen, rx, rxlen);
+}
+
+int periph_dma_memcpy(void *dst, const void *src, int len)
+{
+    if (len < 0 || (!dst && len > 0) || (!src && len > 0))
+        return -1;
+    if (len == 0)
+        return 0;
+    return plat_dma_memcpy(dst, src, len);
 }
 
 /* ---- device files: /dev/gpioN and /dev/adcN -------------------------- */
@@ -310,7 +460,7 @@ void periph_init_devs(void)
         devfs_register_template("dev/adc", na, adc_resolve);
 }
 
-#else  /* !TOS_PERIPH: no GPIO/ADC syscalls, no /dev/gpioN or /dev/adcN */
+#else  /* !TOS_PERIPH: no GPIO/ADC/PWM syscalls, no /dev nodes */
 
 int periph_gpio(int op, int pin, int arg)
 {
@@ -321,6 +471,61 @@ int periph_gpio(int op, int pin, int arg)
 int periph_adc(int op, int chan)
 {
     (void)op; (void)chan;
+    return -1;
+}
+
+int periph_pwm(int op, int gpio, int freq_hz, int duty_permille)
+{
+    (void)op; (void)gpio; (void)freq_hz; (void)duty_permille;
+    return -1;
+}
+
+int periph_uart_count(void)
+{
+    return 0;
+}
+
+int periph_uart_write(int port, const void *buf, int len)
+{
+    (void)port; (void)buf; (void)len;
+    return -1;
+}
+
+int periph_uart_read(int port, void *buf, int len)
+{
+    (void)port; (void)buf; (void)len;
+    return -1;
+}
+
+int periph_spi_count(void)
+{
+    return 0;
+}
+
+int periph_spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
+                    const void *tx, void *rx, int len)
+{
+    (void)bus; (void)cs_gpio; (void)freq_hz; (void)mode;
+    (void)tx; (void)rx; (void)len;
+    return -1;
+}
+
+int periph_i2c_count(void)
+{
+    return 0;
+}
+
+int periph_i2c_xfer(int bus, int addr, int freq_hz,
+                    const void *tx, int txlen, void *rx, int rxlen)
+{
+    (void)bus; (void)addr; (void)freq_hz;
+    (void)tx; (void)txlen; (void)rx; (void)rxlen;
+    return -1;
+}
+
+int periph_dma_memcpy(void *dst, const void *src, int len)
+{
+    (void)dst; (void)src; (void)len;
     return -1;
 }
 
