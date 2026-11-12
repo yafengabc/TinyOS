@@ -58,6 +58,13 @@
 #define SYS_SPI      44  /* spi(op, &req) -> depends on op             */
 #define SYS_I2C      45  /* i2c(op, &req) -> depends on op             */
 #define SYS_DMA_MEMCPY 47 /* dma_memcpy(dst, src, len) -> len/-1       */
+/* Kernel threads (TOS_KTHREADS): only built when the kthreads feature is on.
+ * A thread shares the caller's window; `sp` is the top of a stack the caller
+ * allocated inside it.  tid is a pid; join stores the exit code through the
+ * user pointer. */
+#define SYS_THREAD_CREATE 48 /* kthread_create(entry, arg, sp) -> tid  */
+#define SYS_THREAD_EXIT   49 /* kthread_exit(code) -> no return        */
+#define SYS_THREAD_JOIN   50 /* kthread_join(tid, &code) -> 0 or -1    */
 
 #define MSG_EAGAIN   (-2)
 #define TOS_MSG_MAX  256    /* bytes per pool slot (mailbox.h) */

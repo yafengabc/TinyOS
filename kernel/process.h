@@ -95,6 +95,17 @@ int      process_signal(int pid, int sig);
  * arrived while it was running.  Every port's trap exit must call it. */
 regs_t  *process_suspend(regs_t *r);
 
+#ifdef TOS_KTHREADS
+/* Kernel threads (experiment): a thread is a process-table slot that shares
+ * the caller's window and heap.  `ustack` is the top of a stack the caller
+ * allocated inside its own window; create returns the tid (a pid), join
+ * blocks until that thread exits and stores its code through `codeptr`
+ * (a user pointer, may be 0), and exit does not return. */
+int      process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack);
+regs_t  *process_thread_join(regs_t *r, int tid, uint32_t codeptr);
+regs_t  *process_thread_exit(regs_t *r, int code);
+#endif
+
 /* pid of the task blocked reading the console, or 0 when none is.  That is
  * the foreground task as far as the terminal is concerned. */
 int      process_console_reader(void);

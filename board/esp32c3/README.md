@@ -81,6 +81,30 @@ i2c write 0 0x3c 0x00 0xff   # 写寄存器 0x00 = 0xff
   （op_code/ack/byte_num）还没接，`i2c` 命令和 `plat_i2c_xfer()` 的语义与 RP2040 完全一致，
   以后换硬件控制器不影响用户程序。
 
+## 线程实验（kthreads）
+
+分支 `threads-preemptive` 在 C3 上做内核线程原型（评估材料见
+`docs/REAL-THREADS.md`）。构建与运行：
+
+```bash
+go run ./cmd/tos build -config configs/c3-kthreads.conf
+python scripts/esp-c3/flash.py
+```
+
+```sh
+tos> threadbench
+threadbench: thread 1 done (sum ...)
+threadbench: 3 threads, 300000 iters each: <ms>
+threadbench: same work inline:        <ms>
+threadbench: sleep() in main, sibling kept running
+```
+
+线程由内核调度：tick 可以抢占，一个线程 `read()/sleep()` 只挂起它自己；它们共享
+进程的窗口和堆（栈由 `kthread_create()` 用 `sbrk` 从堆里切）。C3 是单核，所以
+`threadbench` 的期望结果是**总时间与单线程串行相近**（ratio ≈ 100%），但三个线程
+都完成、`join` 正常回收、阻塞按线程生效——这三点才是"真线程"与协作线程的分界。
+目前线程只拿 console fd，文件/管道共享是下一步；`exec` 在线程里调用会失败。
+
 ## 移植进度
 
 | 功能 | 状态 | 说明 |

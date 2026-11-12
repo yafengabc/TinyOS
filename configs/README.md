@@ -80,3 +80,4 @@ Examples:
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |
 | `configs/rp2350rv.conf` | RP2350 Hazard3, WiFi commands excluded |
 | `configs/x86-threads.conf` | x86 with the cooperative thread library (`swcost`, `threadtest`) |
+| `configs/c3-kthreads.conf` | ESP32-C3 with the experimental kernel-thread API (`threadbench`) |

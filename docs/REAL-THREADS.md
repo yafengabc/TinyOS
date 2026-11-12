@@ -88,15 +88,44 @@ trap + `sched_switch` 路径。把这四个数填到下表，再和"每线程内
 | 目标 | getpid | yield（自） | yield（跨任务） | 协作线程 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | x86 (QEMU TCG) | 7.5 µs | 23 µs | ~20 µs | 32.5 µs | TCG 放大约一个数量级，只看相对值 |
-| x86 (真机) |  |  |  |  | |
-| rv32 (QEMU) |  |  |  |  | PMP 三条区域 |
-| esp32c3 |  |  |  |  | PMP + 160 MHz |
-| rp2040 |  |  |  |  | 无 MPU，125 MHz |
+| rv32 (QEMU TCG) | 512 µs | 796 µs |  | — | TCG 下绝对值无意义；比例 1.55 |
+| esp32c3 |  |  |  |  | 待上板（见 `threadbench`） |
+| rp2040 |  |  |  |  | 未接（本实验只做 RV32） |
 
 QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TCG 的解释开销），
-但比例有意义：**一次 `yield` 约是系统调用往返的 3 倍，协作线程切换约 4.3 倍**。
-换句话说，真线程切换的成本量级 = 现有的进程切换，不需要新的机制预算；真正的
-代价在每线程 856 B 的内存和组语义的复杂度上。
+但比例有意义：**一次 `yield` 约是系统调用往返的 1.5–3 倍**，量级与现有进程切换
+相同。真线程不需要新的机制预算；真正的代价在每线程一个 `proc_t`（856 B）和组语义
+的复杂度上。
+
+## 4.5 P1 実装（RV32/C3，已跑通）
+
+`TOS_KTHREADS`（`[features] kthreads = true`，RV32-only）：
+
+- **线程 = `proc_t` 槽 + `leader` 指针**。槽本身的 `win_size = 0`（不占窗口），
+  `apply_protection()` 沿 `PROC_GROUP()` 用组首的窗口编程 PMP，所以同组线程的
+  保护视图完全一致，切换时不需要重编程。
+- **栈**：用户库 `user/kthread.c` 用 `sbrk()` 从组堆里切一块，栈顶传给内核；
+  因为堆边界是共享的（`process_sbrk()` 改的是组首的 `brk`），所有线程的
+  PMP data 区域自动覆盖这些栈。
+- **入口**：用户侧 `kthread_trampoline(fn, arg)` 调完用户函数后 `kthread_exit(0)`；
+  内核只需要 `plat_prepare_user_frame(entry, sp)` + `a0 = arg`。
+- **退出/join**：线程退出把 code 推进组首的 lag 队列（和子进程退出码同一机制），
+  唤醒 `ST_WAIT_THREAD` 的 joiner 并回收槽；`join` 先查 lag，再阻塞。
+- **组退出**：组长退出时把同组线程槽一起回收（`exec` 也拒绝在线程里调用）。
+- **已知简化**：线程只拿到 console fd（文件/管道共享是 P2）；线程栈不参与
+  爆栈自动翻倍；`ps` 里线程是独立 pid，没有 tgid 列。
+
+QEMU rv32 实测（`threadbench`，3 线程 × 300k 次迭代）：
+
+```
+threadbench: 3 threads, 300000 iters each: 18783 ms
+threadbench: same work inline:        21736 ms
+threadbench: ratio 86%
+threadbench: sleep() in main, sibling kept running
+```
+
+单核上没有加速是预期的；三个线程都完成、`join` 正常回收、主线程 `sleep` 时兄弟
+线程继续跑，这三点正是"真线程"与协作线程的分界。C3 上板数据待补。
 
 判据（拍板用）：
 
@@ -105,13 +134,13 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
 
 ## 5. 阶段计划
 
-- **P0（本分支，本次）**：评估文档 + `swcost` 基线；不改内核。
-- **P1（x86）**：`SYS_THREAD_CREATE/EXIT/JOIN`，线程槽共享窗口但**先复制 fd 表**、
-  brk 仍各自独立（文档注明）；`user/threadbench.c` 用 N 个线程跑同一份 CPU 活，
-  比较 1 线程 vs N 线程墙钟（x86 单核只能验证抢占，不验证并行）。
-- **P2**：fd/cwd/brk 真正共享；组退出；`ps` 显示 tgid；信号按组。
-- **P3**：rv32/arm 上验证 `apply_protection()` 对同组窗口的处理；C3/RP2040 实测。
-- **P4**：决策——保留协作线程库（零内核成本，够用）还是用真线程替换 `thread_*` API。
+- **P0（已完成）**：评估文档 + `swcost` 基线。
+- **P1（已完成，RV32/C3 分支）**：`SYS_THREAD_CREATE/EXIT/JOIN`、线程槽共享窗口、
+  `threadbench`；QEMU rv32 上 3 线程全部完成、join 回收、阻塞按线程生效。
+- **P2**：fd 表真正共享（现在线程只拿 console）、cwd/brk 已共享但需要并发写保护、
+  `ps` 显示 tgid、信号按组、`exec` 按 POSIX 杀掉兄弟线程。
+- **P3**：C3 上板实测 `threadbench` + `swcost`；再决定是否/如何扩到 ARM。
+- **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 
 ## 6. 必须提前想清楚的坑
 

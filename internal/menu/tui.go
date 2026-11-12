@@ -403,6 +403,8 @@ func (a *app) driverPage() page {
 			"I2C master driver, SYS_I2C and the i2c command."},
 		{"dma", "DMA memory-to-memory copy",
 			"RP2040 DMA memcpy, SYS_DMA_MEMCPY and the dma command."},
+		{"kthreads", "Kernel threads (experimental)",
+			"Threads scheduled by the kernel: a thread is a table slot sharing the caller's window and heap, preempted by the tick, with per-thread blocking.  Adds SYS_THREAD_CREATE/EXIT/JOIN and a 16 B larger proc_t; threadbench evaluates it."},
 	} {
 		pd := pd
 		rows = append(rows, row{

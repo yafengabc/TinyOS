@@ -254,6 +254,20 @@ static regs_t *dispatch(regs_t *r)
     case SYS_EXIT:
         return process_exit(r, (int)sc.a0);
 
+#ifdef TOS_KTHREADS
+    case SYS_THREAD_CREATE: {
+        int tid = process_thread_create(sc.a0, sc.a1, sc.a2);
+        plat_frame_set_ret(r, (uint32_t)tid);
+        return r;
+    }
+
+    case SYS_THREAD_EXIT:
+        return process_thread_exit(r, (int)sc.a0);
+
+    case SYS_THREAD_JOIN:
+        return process_thread_join(r, (int)sc.a0, sc.a1);
+#endif
+
     case SYS_WRITE: {
         uint32_t fd = sc.a0, ptr = sc.a1, len = sc.a2;
         if (!process_user_ok(ptr, len)) {

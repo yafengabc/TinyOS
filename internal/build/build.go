@@ -1356,6 +1356,14 @@ func (b *Builder) buildUser() ([]string, error) {
 		common = append(common, "thread.c", "thread_switch.S")
 	}
 
+	// Kernel threads are an experimental kernel feature with a small
+	// user-space shim (kthread.c).  featureDefines() supplies TOS_KTHREADS
+	// to both the kernel and every program, so the API exists exactly when
+	// the kernel can honour it.
+	if b.feature("kthreads") {
+		common = append(common, "kthread.c")
+	}
+
 	// The numeric runtimes are size-sensitive and not on any hot kernel path;
 	// -Oz saves ~20% over the tree default (-O2) without changing semantics.
 	sizeOpt := map[string]bool{
@@ -1409,7 +1417,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
 			name == "softfloat32.c" || name == "fix16.c" ||
 			name == "floatprint.c" || name == "faeabi.c" ||
-			name == "thread.c" {
+			name == "thread.c" || name == "kthread.c" {
 			continue
 		}
 		/* The thread demo needs the feature it demonstrates; leaving it in
@@ -1419,6 +1427,9 @@ func (b *Builder) buildUser() ([]string, error) {
 			continue
 		}
 		if name == "mailtest.c" && !b.Mailbox {
+			continue
+		}
+		if name == "threadbench.c" && !b.feature("kthreads") {
 			continue
 		}
 		/* A driver's command is useless without the driver, and leaving it

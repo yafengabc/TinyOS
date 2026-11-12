@@ -112,6 +112,7 @@ enum {
     ST_WAIT_INPUT,
     ST_WAIT_SLEEP,
     ST_WAIT_PIPE,
+    ST_WAIT_THREAD, /* TOS_KTHREADS: a join() waiting for a sibling  */
     ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
      * exist as a state of its own: on SMP two exec()s can be building two
@@ -198,6 +199,14 @@ typedef struct proc {
 
     char     name[10];
     struct proc *parent;
+
+    /* Kernel threads (TOS_KTHREADS): a thread is a proc_t slot that points
+     * at its process leader and owns no window.  Code, data, heap, fds and
+     * cwd belong to the group; the slot carries only the thread's saved
+     * frame, its user stack and its scheduling state.  A leader has
+     * leader == NULL, which is also what makes it a window owner. */
+    struct proc *leader;
+    int      tgid;          /* thread group id: the leader's pid */
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
     int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
     int      kill_pending;  /* SIGKILL aimed at the task on the CPU: die at
@@ -482,7 +491,7 @@ static int proc_waiting(void)
     for (int i = 0; i < MAX_PROCS; i++) {
         int st = procs[i].state;
         if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP ||
-            st == ST_WAIT_PIPE || st == ST_KT_WAIT)
+            st == ST_WAIT_PIPE || st == ST_WAIT_THREAD || st == ST_KT_WAIT)
             return 1;
     }
     return 0;
@@ -542,11 +551,20 @@ static void sched_idle(void)
 
 /* Hand the hardware the current shape of a task's window.  Called on every
  * switch (protection belongs to whoever is on the CPU) and again when sbrk
- * moves the heap bound. */
+ * moves the heap bound.
+ *
+ * A thread shares its leader's window and has none of its own, so the group
+ * leader is what gets programmed.  Thread stacks live inside the group's
+ * heap/data range (they are allocated with sbrk by the thread library), so
+ * they are covered by the same data region and need no fourth PMP entry. */
+#define PROC_GROUP(p) ((p)->leader ? (p)->leader : (p))
+
 static void apply_protection(proc_t *p)
 {
-    plat_task_protect(p->win_base, p->win_base + p->win_size, p->wx_start,
-                      p->brk, p->stack_top - p->stack_size, p->stack_top);
+    proc_t *g = PROC_GROUP(p);
+
+    plat_task_protect(g->win_base, g->win_base + g->win_size, g->wx_start,
+                      g->brk, g->stack_top - g->stack_size, g->stack_top);
 }
 
 /* Save the outgoing frame and return the frame to resume.  Callers hold the
@@ -1050,11 +1068,13 @@ int process_user_ok(uint32_t addr, uint32_t len)
         return 0;
     if (len == 0)
         return 1;
-    if (addr < current->win_base)
+    /* A thread has no window of its own: its addresses are the group's. */
+    proc_t *g = PROC_GROUP(current);
+    if (addr < g->win_base)
         return 0;
     if (addr + len < addr)
         return 0;
-    return addr + len <= current->win_base + current->win_size;
+    return addr + len <= g->win_base + g->win_size;
 }
 
 /* ---- windows ---------------------------------------------------------
@@ -1199,6 +1219,8 @@ static void proc_retire_locked(proc_t *p)
     p->state = ST_FREE;
     p->pid = 0;
     p->parent = NULL;
+    p->leader = NULL;
+    p->tgid = 0;
     p->cpu = -1;
     p->win_base = 0;
     p->win_size = 0;
@@ -1841,6 +1863,13 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
     if (!current)
         return -1;
 
+    /* exec() replaces the address space, so it cannot be called by a thread
+     * that shares one with its siblings: the new image would pull the window
+     * out from under them.  POSIX solves this by killing the other threads;
+     * for now the call simply fails. */
+    if (current->leader)
+        return -1;
+
     proc_t *p = proc_create(path, argv, argc);
     if (!p)
         return -1;
@@ -1919,6 +1948,11 @@ uint32_t process_stack_peak(char *name, uint32_t cap)
  * else). */
 static void task_release(proc_t *p)
 {
+    /* A thread owns no window, no children and (for now) only console fds.
+     * The group leader does the real teardown. */
+    if (p->leader)
+        return;
+
     uint32_t used = stack_used(p);
 
     if (used > stack_peak.bytes) {
@@ -2013,6 +2047,13 @@ static void retire_and_reap(proc_t *p, int code)
     proc_t *woke;
 
     spin_lock(&proc_lock);
+#ifdef TOS_KTHREADS
+    /* A process leader takes its threads with it: they share the window that
+     * is about to disappear. */
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (procs[i].leader == p)
+            proc_retire_locked(&procs[i]);
+#endif
     woke = reap_into_parent_locked(p, code);
     proc_retire_locked(p);
     spin_unlock(&proc_lock);
@@ -2055,6 +2096,11 @@ regs_t *process_exit(regs_t *r, int code)
 
         spin_lock(&proc_lock);
         sys_down = 1;
+#ifdef TOS_KTHREADS
+        for (int i = 0; i < MAX_PROCS; i++)
+            if (procs[i].leader == p)
+                proc_retire_locked(&procs[i]);
+#endif
         woke = reap_into_parent_locked(p, code);
         proc_retire_locked(p);
         spin_unlock(&proc_lock);
@@ -2227,6 +2273,181 @@ regs_t *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len)
     return block(r, ST_WAIT_INPUT);
 }
 
+/* ---- kernel threads (TOS_KTHREADS) ---------------------------------- */
+
+#ifdef TOS_KTHREADS
+
+#if !defined(__riscv)
+#error "TOS_KTHREADS is implemented for RV32 only: the thread entry frame uses a0 and the RV32 syscall ABI.  See docs/REAL-THREADS.md."
+#endif
+
+/* User pointers are checked against the *group* window: a thread slot has no
+ * window of its own, so process_user_ok(current, ...) would reject every
+ * address the thread legitimately owns. */
+static int group_user_ok(proc_t *g, uint32_t addr, uint32_t len)
+{
+    uint32_t end;
+
+    if (len == 0)
+        return 1;
+    end = addr + len;
+    if (end < addr)
+        return 0;
+    return addr >= g->win_base && end <= g->win_base + g->win_size;
+}
+
+/* Called with proc_lock held.  Hands `code` to a sibling blocked in join()
+ * and makes it runnable; returns it so the caller can preempt outside the
+ * lock. */
+static proc_t *wake_joiner_locked(proc_t *tid_task, int code)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q->state != ST_WAIT_THREAD || q->wait_pid != tid_task->pid)
+            continue;
+        if (q->wbuf && group_user_ok(PROC_GROUP(q), q->wbuf, sizeof(int)))
+            *(int *)q->wbuf = code;
+        plat_frame_set_ret(&q->saved, 0);
+        q->state = ST_READY;
+        q->cpu = -1;
+        return q;
+    }
+    return NULL;
+}
+
+int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
+{
+    proc_t *leader = current ? PROC_GROUP(current) : NULL;
+    proc_t *p;
+    uint32_t irq;
+    int pid;
+
+    if (!leader || leader->is_ktask || leader->win_size == 0)
+        return -1;
+    if (entry == 0 || (ustack & 3u))
+        return -1;
+    if (ustack <= leader->win_base ||
+        ustack > leader->win_base + leader->win_size)
+        return -1;
+
+    p = proc_alloc();
+    if (!p)
+        return -1;
+
+    p->leader = leader;
+    p->tgid = leader->tgid;
+    p->prio = current->prio;
+    p->parent = leader;
+    p->stack_top = ustack;
+    p->stack_size = 0;              /* protection comes from the group */
+    p->heap_base = leader->heap_base;
+    p->heap_end = leader->heap_end;
+    p->brk = leader->brk;
+    memcpy(p->cwd, leader->cwd, sizeof(p->cwd));
+    p->start_ns = plat_now_ns();
+
+    /* The experiment's threads get the console and nothing else.  Copying a
+     * file/pipe descriptor would double-close the underlying handle when the
+     * thread exits; sharing the group fd table is the next step. */
+    for (int i = 0; i < MAX_FDS; i++)
+        if (leader->fds[i].type == FD_CONSOLE)
+            p->fds[i] = leader->fds[i];
+
+    plat_prepare_user_frame(&p->saved, entry, ustack);
+    p->saved.a0 = arg;
+
+    irq = plat_irq_save();
+    spin_lock(&proc_lock);
+    pid = next_pid++;
+    p->pid = pid;
+    p->name[0] = 't';
+    p->name[1] = 'h';
+    p->name[2] = 'r';
+    p->name[3] = (char)('0' + (pid % 10));
+    p->name[4] = '\0';
+    p->state = ST_READY;
+    p->cpu = -1;
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
+
+    return pid;
+}
+
+regs_t *process_thread_exit(regs_t *r, int code)
+{
+    proc_t *p = current;
+    proc_t *leader;
+    proc_t *woke = NULL;
+    uint32_t irq;
+
+    if (!p || !p->leader)
+        return process_exit(r, code);
+
+    leader = p->leader;
+    irq = plat_irq_save();
+    spin_lock(&proc_lock);
+    /* join(tid) may already have been called: the code has to survive the
+     * slot, so it goes into the group's lag list like a child's exit code. */
+    lag_push(leader, p->pid, code);
+    woke = wake_joiner_locked(p, code);
+    proc_retire_locked(p);
+    spin_unlock(&proc_lock);
+    plat_irq_restore(irq);
+
+    if (woke)
+        preempt_if_higher(woke);
+    return sched_switch(r);
+}
+
+regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
+{
+    proc_t *me = current;
+    proc_t *g = me ? PROC_GROUP(me) : NULL;
+    proc_t *t = NULL;
+    uint32_t irq;
+    int code;
+
+    if (!g)
+        return done(r, -1);
+
+    irq = plat_irq_save();
+    spin_lock(&proc_lock);
+
+    if (lag_take(g, tid, &code)) {
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        if (codeptr) {
+            if (!group_user_ok(g, codeptr, sizeof(int)))
+                return done(r, -1);
+            *(int *)codeptr = code;
+        }
+        return done(r, 0);
+    }
+
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (procs[i].state != ST_FREE && procs[i].pid == tid) {
+            t = &procs[i];
+            break;
+        }
+    if (!t || t->leader != g || t == me) {
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        return done(r, -1);
+    }
+    if (codeptr && !group_user_ok(g, codeptr, sizeof(int))) {
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        return done(r, -1);
+    }
+
+    me->wait_pid = tid;
+    me->wbuf = codeptr;
+    return block_locked(r, ST_WAIT_THREAD, irq);
+}
+
+#endif /* TOS_KTHREADS */
+
 /* ---- misc ------------------------------------------------------------ */
 
 uint32_t process_sbrk(uint32_t bytes)
@@ -2234,15 +2455,18 @@ uint32_t process_sbrk(uint32_t bytes)
     if (!current)
         return 0;
 
-    uint32_t old = current->brk;
+    uint32_t old = PROC_GROUP(current)->brk;
     if (bytes == 0)
         return old;
 
     uint32_t newbrk = old + bytes;
-    if (newbrk < current->heap_base || newbrk > current->heap_end)
+    if (newbrk < PROC_GROUP(current)->heap_base ||
+        newbrk > PROC_GROUP(current)->heap_end)
         return 0;
 
-    current->brk = newbrk;
+    /* Threads share the leader's heap: an allocation in one has to move the
+     * break for all of them, or two threads hand out the same bytes. */
+    PROC_GROUP(current)->brk = newbrk;
     /* The heap bound is part of the protection: without this the new pages
        would stay unreachable for the task that just asked for them. */
     apply_protection(current);

@@ -35,27 +35,33 @@ static void spinner(void *arg)
 }
 #endif
 
-int main(void)
+int main(int argc, char *argv[])
 {
     uint64_t t0, t1;
     volatile int pid = 0;
+    unsigned n = N;
+
+    /* A slow target (QEMU rv32 is ~2000x slower than the board) needs a
+     * smaller loop: `swcost 200`. */
+    if (argc > 1 && atoi(argv[1]) > 0)
+        n = (unsigned)atoi(argv[1]);
 
     t0 = clock_ns();
-    for (int i = 0; i < N; i++)
+    for (unsigned i = 0; i < n; i++)
         pid = getpid();
     t1 = clock_ns();
-    printf("swcost: getpid  %u ns/op (%d)\n", (unsigned)((t1 - t0) / N), pid);
+    printf("swcost: getpid  %u ns/op (%d)\n", (unsigned)((uint32_t)(t1 - t0) / n), pid);
 
     t0 = clock_ns();
-    for (int i = 0; i < N; i++)
+    for (unsigned i = 0; i < n; i++)
         yield();
     t1 = clock_ns();
-    printf("swcost: yield   %u ns/op\n", (unsigned)((t1 - t0) / N));
+    printf("swcost: yield   %u ns/op\n", (unsigned)((uint32_t)(t1 - t0) / n));
 
 #ifdef TOS_THREADS
     {
         int a, code;
-        uint32_t half = N / 2;
+        uint32_t half = n / 2;
 
         t_iters = half;
         a = thread_create(spinner, 0, 4096);
@@ -69,7 +75,7 @@ int main(void)
         thread_join(a, &code);
         t1 = clock_ns();
         printf("swcost: thread  %u ns/op\n",
-               (unsigned)((t1 - t0) / (2u * half)));
+               (unsigned)((uint32_t)(t1 - t0) / (2u * half)));
     }
 #else
     puts("swcost: threads off in this build (menuconfig: Kernel -> Threads)\n");
