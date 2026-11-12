@@ -311,23 +311,30 @@ static int emit_delay(int word, int side, int has_side, int delay)
     }
     {
         int dmax = (1 << (5 - n)) - 1;
-        int field;
+        int sbits = ss_opt ? n - 1 : n;
+        int ss;
 
         if (delay > dmax) {
             printf("pio: delay %d does not fit with side_set %d\n", delay, n);
             return -1;
         }
-        if (ss_opt) {
-            int half = 1 << (n - 1);
-            int sv = has_side ? (side & (half - 1)) : half;
-
-            field = (delay << n) | sv;
-        } else {
-            int sv = has_side ? (side & ((1 << n) - 1)) : 0;
-
-            field = (delay << n) | sv;
+        if (sbits < 1) {
+            printf("pio: .side_set %d opt needs at least 2 bits\n", n);
+            return -1;
         }
-        return word | (field << 8);
+        if (has_side && (side < 0 || side >= (1 << sbits))) {
+            printf("pio: side %d does not fit in %d bit(s)\n", side, sbits);
+            return -1;
+        }
+        /* The 5-bit delay/side-set field carries the side-set value in its most
+         * significant bits and the delay in the low (5 - n) bits.  With `opt`
+         * the top side-set bit means "drive the pins this cycle", so the value
+         * itself is one bit narrower. */
+        if (ss_opt)
+            ss = (has_side ? (1 << (n - 1)) : 0) | (side & ((1 << sbits) - 1));
+        else
+            ss = has_side ? (side & ((1 << n) - 1)) : 0;
+        return word | (((ss << (5 - n)) | delay) << 8);
     }
 }
 

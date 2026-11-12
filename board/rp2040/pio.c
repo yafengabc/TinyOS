@@ -186,7 +186,10 @@ static int pio_load(struct pio_req *q, int pid)
     }
 
     exec = (top << 12) | (bottom << 7);
-    if (q->flags & PIO_F_SIDE_OPT)
+    /* Optional side-set is an encoding detail: with `opt` the top side-set bit
+     * means "drive the pins this cycle".  EXECCTRL only needs to know that the
+     * delay field carries side-set bits at all, so the flag is not consulted. */
+    if (q->side_set > 0)
         exec |= EXEC_SIDE_EN;
     if (q->flags & PIO_F_SIDE_PINDIR)
         exec |= EXEC_SIDE_PINDIR;

@@ -29,7 +29,8 @@ pio rel 0 0                     # 停 SM 并把引脚交回 GPIO
 
 `loopback.pio` 用一个引脚同时做 OUT 和 IN（GP4），不需要跳线：`pio tx` 的 bit0
 被驱动到 GP4，`in pins,1` 再从 pad 读回来。`blink.pio` 用两层循环和 delay 让
-GP25 以约 2 Hz 翻转。
+GP25 以约 2 Hz 翻转。`ws2812.pio` 是一条 WS2812 数据线：side-set 打高/低脉冲，
+delay 定 800 kHz 的位宽，autopull 从 TX FIFO 逐位取数。
 
 ## 汇编语法
 
@@ -48,8 +49,10 @@ GP25 以约 2 Hz 翻转。
 | `set` | `set DEST, VALUE`，DEST: `pins` `x` `y` `pindirs`，VALUE 0..31 |
 | `nop` | `mov y, y` |
 
-任何指令都可以带 `side N` 和/或 `[DELAY]`，二者共享指令字的 delay/side-set
-字段（datasheet 3.4）。`COUNT` 为 32 时编码成 0。
+任何指令都可以带 `side N` 和/或 `[DELAY]`，二者共享指令字的 5 位 delay/side-set
+字段：side-set 值占高位，delay 占低 `5 - side_set 位数` 位；`.side_set N opt` 时
+side-set 字段的最高位是"本拍驱动引脚"的使能位，值本身少一位。`COUNT` 为 32 时
+编码成 0。
 
 指令：
 
@@ -113,5 +116,5 @@ struct pio_req {
 
 - `loopback.pio`：`pio asm`、`start`、`tx 1 0 1 1`、`rx 4`，读回应逐位一致；
 - `blink.pio`：GP25 约 2 Hz，示波器看；
-- WS2812 是下一步的好目标：它同时用到 side-set、delay、autopull 和 800 kHz
-  分频，能一次性验证编码与配置。
+- `ws2812.pio`：编码与 pico-sdk `pioasm` 生成的 `ws2812.pio.h` 逐字一致
+  （`6221 1123 1400 a442`）；实机接一条灯带，`pio tx` 写 `pixel_grb << 8` 看颜色。
