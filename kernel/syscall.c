@@ -269,7 +269,11 @@ static regs_t *dispatch(regs_t *r)
 #endif
 
     case SYS_SCHEDSTAT: {
+#ifdef TOS_KTHREADS
         int rc = process_schedstat(sc.a0);
+#else
+        int rc = -1;            /* the counters exist only with kthreads */
+#endif
         plat_frame_set_ret(r, (uint32_t)rc);
         return r;
     }

@@ -205,8 +205,10 @@ typedef struct proc {
      * cwd belong to the group; the slot carries only the thread's saved
      * frame, its user stack and its scheduling state.  A leader has
      * leader == NULL, which is also what makes it a window owner. */
+#ifdef TOS_KTHREADS
     struct proc *leader;
     int      tgid;          /* thread group id: the leader's pid */
+#endif
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
     int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
     int      kill_pending;  /* SIGKILL aimed at the task on the CPU: die at
@@ -557,15 +559,22 @@ static void sched_idle(void)
  * leader is what gets programmed.  Thread stacks live inside the group's
  * heap/data range (they are allocated with sbrk by the thread library), so
  * they are covered by the same data region and need no fourth PMP entry. */
+#ifdef TOS_KTHREADS
 #define PROC_GROUP(p) ((p)->leader ? (p)->leader : (p))
+#else
+#define PROC_GROUP(p) (p)
+#endif
 
 /* Scheduler accounting exposed by SYS_SCHEDSTAT, so a benchmark can ask
  * "how many switches did that phase actually cost" instead of assuming one
  * per tick.  Uniprocessor counters; on SMP they still add up, which is what
- * a whole-machine measurement wants. */
+ * a whole-machine measurement wants.  Compiled in with the thread feature
+ * so a build without it pays neither the counters nor the syscall. */
+#ifdef TOS_KTHREADS
 static volatile uint32_t sched_switches;  /* picked a different task */
 static volatile uint32_t sched_self;      /* scheduler ran, same task   */
 static volatile uint32_t sched_ticks;     /* timer ticks seen           */
+#endif
 
 static void apply_protection(proc_t *p)
 {
@@ -660,10 +669,12 @@ static regs_t *sched_switch(regs_t *r)
         next = sched_pick();
         waiting = proc_waiting() || other_cpu_busy();
         if (next) {
+#ifdef TOS_KTHREADS
             if (next == prev)
                 sched_self++;
             else
                 sched_switches++;
+#endif
             next->state = ST_RUNNING;
             next->cpu = cpu_id();
             current = next;
@@ -787,7 +798,9 @@ void process_tick(regs_t *r)
 {
     uint64_t now;
 
+#ifdef TOS_KTHREADS
     sched_ticks++;
+#endif
 
     /* Cheapest moment to notice a blown kernel stack: the tick runs no
        matter what the task is doing, and r points at the trap frame on
@@ -1233,8 +1246,10 @@ static void proc_retire_locked(proc_t *p)
     p->state = ST_FREE;
     p->pid = 0;
     p->parent = NULL;
+#ifdef TOS_KTHREADS
     p->leader = NULL;
     p->tgid = 0;
+#endif
     p->cpu = -1;
     p->win_base = 0;
     p->win_size = 0;
@@ -1877,12 +1892,14 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
     if (!current)
         return -1;
 
+#ifdef TOS_KTHREADS
     /* exec() replaces the address space, so it cannot be called by a thread
      * that shares one with its siblings: the new image would pull the window
      * out from under them.  POSIX solves this by killing the other threads;
      * for now the call simply fails. */
     if (current->leader)
         return -1;
+#endif
 
     proc_t *p = proc_create(path, argv, argc);
     if (!p)
@@ -1962,10 +1979,12 @@ uint32_t process_stack_peak(char *name, uint32_t cap)
  * else). */
 static void task_release(proc_t *p)
 {
+#ifdef TOS_KTHREADS
     /* A thread owns no window, no children and (for now) only console fds.
      * The group leader does the real teardown. */
     if (p->leader)
         return;
+#endif
 
     uint32_t used = stack_used(p);
 
@@ -2464,6 +2483,7 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
 
 /* ---- misc ------------------------------------------------------------ */
 
+#ifdef TOS_KTHREADS
 int process_schedstat(uint32_t ptr)
 {
     struct { uint32_t sw, self, ticks; } st;
@@ -2476,6 +2496,7 @@ int process_schedstat(uint32_t ptr)
     memcpy((void *)ptr, &st, sizeof(st));
     return 0;
 }
+#endif
 
 uint32_t process_sbrk(uint32_t bytes)
 {
