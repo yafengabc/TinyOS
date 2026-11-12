@@ -559,6 +559,14 @@ static void sched_idle(void)
  * they are covered by the same data region and need no fourth PMP entry. */
 #define PROC_GROUP(p) ((p)->leader ? (p)->leader : (p))
 
+/* Scheduler accounting exposed by SYS_SCHEDSTAT, so a benchmark can ask
+ * "how many switches did that phase actually cost" instead of assuming one
+ * per tick.  Uniprocessor counters; on SMP they still add up, which is what
+ * a whole-machine measurement wants. */
+static volatile uint32_t sched_switches;  /* picked a different task */
+static volatile uint32_t sched_self;      /* scheduler ran, same task   */
+static volatile uint32_t sched_ticks;     /* timer ticks seen           */
+
 static void apply_protection(proc_t *p)
 {
     proc_t *g = PROC_GROUP(p);
@@ -652,6 +660,10 @@ static regs_t *sched_switch(regs_t *r)
         next = sched_pick();
         waiting = proc_waiting() || other_cpu_busy();
         if (next) {
+            if (next == prev)
+                sched_self++;
+            else
+                sched_switches++;
             next->state = ST_RUNNING;
             next->cpu = cpu_id();
             current = next;
@@ -774,6 +786,8 @@ void process_console_kick(void)
 void process_tick(regs_t *r)
 {
     uint64_t now;
+
+    sched_ticks++;
 
     /* Cheapest moment to notice a blown kernel stack: the tick runs no
        matter what the task is doing, and r points at the trap frame on
@@ -2449,6 +2463,19 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
 #endif /* TOS_KTHREADS */
 
 /* ---- misc ------------------------------------------------------------ */
+
+int process_schedstat(uint32_t ptr)
+{
+    struct { uint32_t sw, self, ticks; } st;
+
+    if (!process_user_ok(ptr, sizeof(st)))
+        return -1;
+    st.sw = sched_switches;
+    st.self = sched_self;
+    st.ticks = sched_ticks;
+    memcpy((void *)ptr, &st, sizeof(st));
+    return 0;
+}
 
 uint32_t process_sbrk(uint32_t bytes)
 {

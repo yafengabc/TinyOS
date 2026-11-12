@@ -268,6 +268,12 @@ static regs_t *dispatch(regs_t *r)
         return process_thread_join(r, (int)sc.a0, sc.a1);
 #endif
 
+    case SYS_SCHEDSTAT: {
+        int rc = process_schedstat(sc.a0);
+        plat_frame_set_ret(r, (uint32_t)rc);
+        return r;
+    }
+
     case SYS_WRITE: {
         uint32_t fd = sc.a0, ptr = sc.a1, len = sc.a2;
         if (!process_user_ok(ptr, len)) {

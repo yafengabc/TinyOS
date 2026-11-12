@@ -65,6 +65,9 @@
 #define SYS_THREAD_CREATE 48 /* kthread_create(entry, arg, sp) -> tid  */
 #define SYS_THREAD_EXIT   49 /* kthread_exit(code) -> no return        */
 #define SYS_THREAD_JOIN   50 /* kthread_join(tid, &code) -> 0 or -1    */
+/* Scheduler counters, for benchmarks: schedstat(&st) fills three u32
+ * (switches to another task, scheduler runs that kept the same task, ticks). */
+#define SYS_SCHEDSTAT     51
 
 #define MSG_EAGAIN   (-2)
 #define TOS_MSG_MAX  256    /* bytes per pool slot (mailbox.h) */

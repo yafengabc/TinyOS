@@ -84,6 +84,11 @@ int      process_setprio(int pid, int prio);
 uint32_t process_sbrk(uint32_t bytes);
 int      process_dump(void);
 
+/* Scheduler counters: fills {switches, self, ticks} at the user pointer.
+ * Used by benchmarks (threadbench) to attribute a phase's wall time; returns
+ * -1 when the pointer is outside the caller's window. */
+int      process_schedstat(uint32_t ptr);
+
 /* Send `sig` to task `pid`.  SIGKILL terminates it, SIGSTOP parks it until
  * SIGCONT.  Returns 0, or -1 when there is no such task, the signal is not
  * one the kernel knows, or the task cannot act on it in its current state.

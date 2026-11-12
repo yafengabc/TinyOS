@@ -115,32 +115,28 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
 - **已知简化**：线程只拿到 console fd（文件/管道共享是 P2）；线程栈不参与
   爆栈自动翻倍；`ps` 里线程是独立 pid，没有 tgid 列。
 
-QEMU rv32 实测（`threadbench`，3 线程 × 300k 次迭代）：
+QEMU rv32 早期版本（3×300k）：19103 ms vs 21751 ms。C3 真机上先看到的是 171%，
+但那是**基准程序的编译器差异**，不是线程开销。把两个相位改成调用同一个 `noinline`
+的 `worker()`、循环上界都来自运行时值之后，C3 实测：
 
 ```
-threadbench: 1/1/1 threads completed
-threadbench: 3 threads, 300000 iters each: 19103 ms
-threadbench: same work inline:        21751 ms
-threadbench: ratio 88%
-```
-
-C3 真机（同一镜像，`configs/c3-kthreads.conf`）：
-
-```
-threadbench: 1/1/1 threads completed
-threadbench: 3 threads, 300000 iters each: 41 ms
-threadbench: same work inline:        24 ms
-threadbench: ratio 171%
+threadbench: 3 threads x 300000: 35 ms  sw=38 self=1  tick=35
+threadbench: 1 thread  x 900000: 34 ms  sw=2  self=34 tick=34
+threadbench: inline    x 900000: 35 ms  sw=0  self=35 tick=35
+threadbench: ratio 100% (100% = no overhead)
 threadbench: sleep() in main, sibling kept running
 ```
 
+- **线程开销 ≈ 0**：同样的 90 万次迭代，3 个线程 35 ms，单线程 34 ms，caller 里
+  顺序执行 35 ms。
+- 38 次真切换 × 12.6 µs ≈ 0.48 ms，占 35 ms 的 **1.4%**，与"QUANTUM=1、1 ms
+  tick、3 个可运行线程"的预期完全一致。
+- 之前的 171% 来自对比对象：旧 inline 循环用编译期常量上界，GCC 展开/优化到
+  25 ms；线程里的循环上界是 volatile 全局变量，保持简单循环，约 40 ms。测的是
+  编译器，不是内核。
+
 单核上没有加速是预期的；三个线程都完成、`join` 正常回收、主线程 `sleep` 时兄弟
 线程继续跑，这三点正是"真线程"与协作线程的分界。
-
-**C3 的 171% 需要单独解释**：一次切换按 `swcost` 是 12.6 µs，40 ms 里约 40 个
-tick 只值 0.5 ms，剩下的 ~16 ms 不在切换本身。下一步要用 `-d`/GPIO 打点确认
-tick 路径（TIMG + 控制台轮询）在"多任务可运行"时的实际成本；在此之前不要把
-171% 当成线程切换开销。
 
 判据（拍板用）：
 

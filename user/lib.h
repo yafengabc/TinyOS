@@ -314,6 +314,10 @@ void kthread_exit(int code) __attribute__((noreturn));
 int  wait(int pid);
 int  yield(void);
 int  ps(void);
+/* Scheduler counters, for benchmarks: one field each for "switched to
+ * another task", "scheduler ran but kept the same task", and timer ticks. */
+struct schedstat { unsigned switches, self, ticks; };
+int  schedstat(struct schedstat *st);
 /* 0 = highest, 2 = lowest; pid 0 means yourself.  A task cannot climb
  * above its own level, so a program cannot starve the shell. */
 int  setprio(int pid, int prio);
