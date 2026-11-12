@@ -81,6 +81,11 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 - 窗口按 16 KiB 粒度分配，默认栈 4 KiB、栈下护栏 4 KiB。`py` 的 128 KiB 窗口两边
   都放得下，但 WiFi 开后只剩 48 KiB 给别的任务同时跑。
 
+**内核堆可以降**：无 WiFi 时 `heap = 16384` 实测启动后峰值 768 B，跑完
+`py pytest.py`（54 项）加 320 KiB 的 `dd` 写读后峰值 1.5 KiB；任务区因此从
+240 KiB 增到 **304 KiB**（15 → 19 个窗口），内核 RAM 降到 57 KiB。可复现配置：
+`configs/esp32c3-16k.conf`。WiFi 构建不要照做。
+
 ## 外设与用户命令
 
 三个外设默认编译进镜像（menuconfig 里关掉任意一个，驱动和命令一起消失）：

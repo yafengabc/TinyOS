@@ -81,6 +81,7 @@ Examples:
 | `configs/rp2350rv.conf` | RP2350 Hazard3, WiFi commands excluded |
 | `configs/x86-threads.conf` | x86 with the cooperative thread library (`swcost`, `threadtest`) |
 | `configs/c3-kthreads.conf` | ESP32-C3 with the experimental kernel-thread API (`threadbench`) |
+| `configs/esp32c3-16k.conf` | ESP32-C3 without WiFi, 16 KiB kernel heap (measured peak 1.5 KiB) |
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
 | `configs/rp2350smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
 | `configs/rp2350rvsmp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |
