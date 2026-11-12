@@ -58,6 +58,29 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 
 `[user] exclude` 里的程序需要 `/dev/wifi` 或 `/dev/net`，非 WiFi 配置会把它们排除。
 
+## WiFi 开/关的资源对比
+
+同一块 C3 上 `configs/esp32c3.conf`（关）与 `configs/esp32c3-wifi.conf`（开）：
+
+| 指标 | WiFi 关 | WiFi 开 |
+| --- | ---: | ---: |
+| 内核 flash（`.text`+`.rodata`） | 75.6 KiB | 357.9 KiB |
+| 内核 RAM（`.data`+`.bss`） | 121.3 KiB | 187.2 KiB |
+| 其中内核堆 arena（`heap=`） | 80 KiB | 80 KiB |
+| 内核 RAM 结束地址 | `0x4039e520` | `0x403aece0` |
+| 任务区（16 KiB 对齐到 `0x403DC000`） | 240 KiB | 176 KiB |
+| 16 KiB 窗口数 | 15 | 11 |
+| 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 |
+| 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） |
+| `esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB |
+
+- **内核堆两边都是 80 KiB**（target 默认，`[build] heap=` 可覆盖）。WiFi 吃掉的是
+  它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。
+- flash 的大头是 WiFi blob（XIP 常驻）。WiFi 开后内核结束在 `0x7B6A8`，离 littlefs
+  的 `0x80000` 只剩约 21 KiB——再加驱动就要先腾空间。
+- 窗口按 16 KiB 粒度分配，默认栈 4 KiB、栈下护栏 4 KiB。`py` 的 128 KiB 窗口两边
+  都放得下，但 WiFi 开后只剩 48 KiB 给别的任务同时跑。
+
 ## 外设与用户命令
 
 三个外设默认编译进镜像（menuconfig 里关掉任意一个，驱动和命令一起消失）：
