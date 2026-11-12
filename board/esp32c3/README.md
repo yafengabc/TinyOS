@@ -99,12 +99,19 @@ threadbench: same work inline:        <ms>
 threadbench: sleep() in main, sibling kept running
 ```
 
-边界情况用 `kthreadtest`（12 项检查：槽耗尽、重复 join、僵尸槽、组长带活线程退出、
-阻塞重叠）：
+边界情况用 `kthreadtest`（17 项检查：槽耗尽、重复 join、僵尸槽、组长带活线程退出、
+阻塞重叠、fd 共享）：
 
 ```sh
 tos> kthreadtest
 tos> kthreadtest leave    # 之后 ps 不应再看到那个线程
+```
+
+阻塞并发的验收是 `prodcons`（一个线程读管道、主线程写，互相唤醒）：
+
+```sh
+tos> prodcons
+prodcons: 32768 bytes through a 512-byte pipe in 25 ms
 ```
 
 线程由内核调度：tick 可以抢占，一个线程 `read()/sleep()` 只挂起它自己；它们共享

@@ -115,6 +115,7 @@ enum {
 #ifdef TOS_KTHREADS
     ST_WAIT_THREAD, /* a join() waiting for a sibling                */
     ST_THREAD_ZOMBIE,/* exited, code kept until join                  */
+    ST_DYING,       /* leader exited; threads are still winding down */
 #endif
     ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
@@ -212,6 +213,8 @@ typedef struct proc {
     struct proc *leader;
     int      tgid;          /* thread group id: the leader's pid */
     int      exit_code;     /* ST_THREAD_ZOMBIE: value for join() */
+    int      live_threads;  /* threads that have not exited yet        */
+    spin_t   glock;         /* protects brk and the fd table below     */
 #endif
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
     int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
@@ -577,6 +580,22 @@ static void sched_idle(void)
  * sees the same open files and pipes, and a close() in one is a close() for
  * all of them (POSIX).  With the feature off, PROC_GROUP(p) is just p. */
 #define PFD(p) (PROC_GROUP(p)->fds)
+
+/* Serialises the group's mutable state: the heap break and the descriptor
+ * table.  On a uniprocessor spin_lock()/spin_unlock() compile to nothing, so
+ * this costs the single-core build exactly zero; on SMP it is what keeps two
+ * threads from handing out the same address or descriptor slot. */
+#ifdef TOS_KTHREADS
+static void group_lock(proc_t *p)   { spin_lock(&PROC_GROUP(p)->glock); }
+static void group_unlock(proc_t *p) { spin_unlock(&PROC_GROUP(p)->glock); }
+
+/* Defined with the thread code further down; process_exit() and task_kill()
+ * need it earlier. */
+static void begin_group_exit_locked(proc_t *leader, int code);
+#else
+#define group_lock(p)   ((void)0)
+#define group_unlock(p) ((void)0)
+#endif
 
 /* Scheduler accounting exposed by SYS_SCHEDSTAT, so a benchmark can ask
  * "how many switches did that phase actually cost" instead of assuming one
@@ -2114,6 +2133,23 @@ static void retire_and_reap(proc_t *p, int code)
  * cannot be retired this way (it is what shuts the machine down). */
 static void task_kill(proc_t *p, int code)
 {
+#ifdef TOS_KTHREADS
+    /* A thread dies at its own trap exit so the live_threads accounting and
+     * the group finalisation run in one place; a leader with live threads
+     * follows the same deferred path process_exit() uses. */
+    if (p->leader || p->live_threads > 0) {
+        uint32_t irq = plat_irq_save();
+
+        spin_lock(&proc_lock);
+        if (p->leader)
+            p->kill_pending = 1;
+        else
+            begin_group_exit_locked(p, code);
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+        return;
+    }
+#endif
     task_release(p);
     retire_and_reap(p, code);
 }
@@ -2123,6 +2159,29 @@ regs_t *process_exit(regs_t *r, int code)
     proc_t *p = current;
     if (!p)
         panic("no current process");
+
+#ifdef TOS_KTHREADS
+    /* exit() from a thread ends that thread, not the process: the window and
+     * the descriptors are shared with siblings that must keep running. */
+    if (p->leader)
+        return process_thread_exit(r, code);
+
+    /* A leader whose threads are still alive cannot close the fd table or
+     * free the window yet: mark the group dying and let the last thread
+     * finish the reap.  This is also the only safe order on SMP, where a
+     * sibling may be running on the other core at this instant. */
+    if (p->live_threads > 0) {
+        uint32_t irq = plat_irq_save();
+
+        spin_lock(&proc_lock);
+        begin_group_exit_locked(p, code);
+        spin_unlock(&proc_lock);
+        plat_irq_restore(irq);
+
+        mailbox_drop(p->pid);
+        return sched_switch(r);
+    }
+#endif
 
     task_release(p);
 
@@ -2336,10 +2395,6 @@ regs_t *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len)
 #error "TOS_KTHREADS is implemented for RV32 only: the thread entry frame uses a0 and the RV32 syscall ABI.  See docs/REAL-THREADS.md."
 #endif
 
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-#error "TOS_KTHREADS is uniprocessor-only for now: the shared heap and group state have no SMP locking.  Use a single-CPU target."
-#endif
-
 /* User pointers are checked against the *group* window: a thread slot has no
  * window of its own, so process_user_ok(current, ...) would reject every
  * address the thread legitimately owns. */
@@ -2423,21 +2478,74 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     p->name[4] = '\0';
     p->state = ST_READY;
     p->cpu = -1;
+    leader->live_threads++;
     spin_unlock(&proc_lock);
     plat_irq_restore(irq);
 
     return pid;
 }
 
+/* Called with proc_lock held.  Closes the group's descriptors (the threads
+ * are gone by now) and hands the leader's exit code to its parent. */
+static proc_t *finish_group_locked(proc_t *leader)
+{
+    proc_t *woke;
+
+    /* Zombie thread slots still point at this group and hold a pid; the group
+     * is going away, so they go with it (only the leader's window is real). */
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q != leader && q->leader == leader)
+            proc_retire_locked(q);
+    }
+
+    task_release(leader);
+    woke = reap_into_parent_locked(leader, leader->exit_code);
+    proc_retire_locked(leader);
+    return woke;
+}
+
+/* Called with proc_lock held.  The leader is leaving but threads share its
+ * window: mark it dying, forbid scheduling it, and make every sibling exit.
+ * A blocked sibling is woken with -1 so it reaches a trap exit; one running
+ * on another CPU is killed by kill_pending at its next trap (the tick
+ * guarantees that happens within a millisecond).  The last one to leave calls
+ * finish_group_locked(). */
+static void begin_group_exit_locked(proc_t *leader, int code)
+{
+    leader->exit_code = code;
+    leader->state = ST_DYING;
+    leader->cpu = -1;
+
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q->leader != leader || q->state == ST_FREE)
+            continue;
+        q->kill_pending = 1;
+        if (q->state == ST_WAIT_CHILD || q->state == ST_WAIT_INPUT ||
+            q->state == ST_WAIT_SLEEP || q->state == ST_WAIT_PIPE ||
+            q->state == ST_WAIT_THREAD) {
+            plat_frame_set_ret(&q->saved, (uint32_t)-1);
+            q->state = ST_READY;
+            q->cpu = -1;
+        }
+    }
+}
+
 regs_t *process_thread_exit(regs_t *r, int code)
 {
     proc_t *p = current;
+    proc_t *leader;
     proc_t *woke = NULL;
+    proc_t *woke_leader = NULL;
     uint32_t irq;
 
     if (!p || !p->leader)
         return process_exit(r, code);
 
+    leader = p->leader;
     irq = plat_irq_save();
     spin_lock(&proc_lock);
     p->exit_code = code;
@@ -2454,9 +2562,17 @@ regs_t *process_thread_exit(regs_t *r, int code)
         p->state = ST_THREAD_ZOMBIE;
         p->cpu = -1;
     }
+
+    if (leader->live_threads > 0)
+        leader->live_threads--;
+    if (leader->state == ST_DYING && leader->live_threads == 0)
+        woke_leader = finish_group_locked(leader);
+
     spin_unlock(&proc_lock);
     plat_irq_restore(irq);
 
+    if (woke_leader)
+        preempt_if_higher(woke_leader);
     if (woke)
         preempt_if_higher(woke);
     return sched_switch(r);
@@ -2624,6 +2740,11 @@ static const char *state_name(int st)
     case ST_WAIT_SLEEP: return "sleep";
     case ST_WAIT_PIPE:  return "pipe ";
     case ST_KT_WAIT:    return "ktwait";
+#ifdef TOS_KTHREADS
+    case ST_WAIT_THREAD:   return "join ";
+    case ST_THREAD_ZOMBIE: return "zombi";
+    case ST_DYING:         return "dying";
+#endif
     case ST_NEW:        return "new  ";
     default:            return "free ";
     }
@@ -2889,11 +3010,15 @@ int process_fd_open(const char *path)
     if (d) {
         void *priv = d->priv;
 
+        group_lock(current);
         fd = fd_alloc(current);
-        if (fd < 0)
+        if (fd < 0) {
+            group_unlock(current);
             return -1;
+        }
         if (d->ops->open && d->ops->open(d, &priv) < 0) {
             PFD(current)[fd].type = FD_NONE;
+            group_unlock(current);
             return -1;
         }
         f = &PFD(current)[fd];
@@ -2902,6 +3027,7 @@ int process_fd_open(const char *path)
         f->devpriv = priv;
         f->pos     = 0;
         f->size    = 0;
+        group_unlock(current);
         return fd;
     }
 
@@ -2909,8 +3035,10 @@ int process_fd_open(const char *path)
     if (h < 0)
         return -1;
 
+    group_lock(current);
     fd = fd_alloc(current);
     if (fd < 0) {
+        group_unlock(current);
         ramdisk_close(h);
         return -1;
     }
@@ -2920,6 +3048,7 @@ int process_fd_open(const char *path)
     f->size = ramdisk_size(h);
     f->pos  = 0;
     f->path = kstrdup(path);
+    group_unlock(current);
     return fd;
 }
 
@@ -2940,8 +3069,10 @@ int process_fd_create(const char *path)
     if (h < 0)
         return -1;
 
+    group_lock(current);
     fd = fd_alloc(current);
     if (fd < 0) {
+        group_unlock(current);
         ramdisk_close(h);
         return -1;
     }
@@ -2952,6 +3083,7 @@ int process_fd_create(const char *path)
     f->pos  = 0;
     f->path = kstrdup(path);
     f->writable = 1;            /* a child inheriting this must be able to write */
+    group_unlock(current);
     return fd;
 }
 
@@ -3283,7 +3415,9 @@ int process_fd_close(int fd)
         return -1;
     if (fd < 0 || fd >= MAX_FDS)
         return -1;
+    group_lock(current);
     fd_close_in(current, fd);
+    group_unlock(current);
     return 0;
 }
 
@@ -3316,8 +3450,10 @@ int process_pipe(int *fds)
     if (!p)
         return -1;
 
+    group_lock(me);
     r = fd_alloc(me);
     if (r < 0) {
+        group_unlock(me);
         kfree(p);
         return -1;
     }
@@ -3328,12 +3464,14 @@ int process_pipe(int *fds)
     w = fd_alloc(me);
     if (w < 0) {
         PFD(me)[r].type = FD_NONE;
+        group_unlock(me);
         kfree(p);
         return -1;
     }
     PFD(me)[w].type = FD_PIPE_W;
     PFD(me)[w].pipe = p;
     pipe_ref_writer(p);
+    group_unlock(me);
 
     fds[0] = r;
     fds[1] = w;
@@ -3347,22 +3485,31 @@ int process_dup2(int oldfd, int newfd)
 
     if (!me)
         return -1;
+
+    group_lock(me);
     o = fd_slot(me, oldfd);
     n = fd_slot(me, newfd);
-    if (!o || !n || o->type == FD_NONE)
+    if (!o || !n || o->type == FD_NONE) {
+        group_unlock(me);
         return -1;
-    if (oldfd == newfd)
+    }
+    if (oldfd == newfd) {
+        group_unlock(me);
         return newfd;
+    }
 
     /* Build the copy first: if it fails (no descriptors, no heap) the target
      * must be left alone rather than closed for nothing.  What "copy" means
      * per type is fd_clone()'s business - the same rules a child inherits
      * by. */
-    if (fd_clone(&tmp, o) < 0)
+    if (fd_clone(&tmp, o) < 0) {
+        group_unlock(me);
         return -1;
+    }
 
     fd_close_in(me, newfd);
     *n = tmp;
+    group_unlock(me);
     return newfd;
 }
 
@@ -3371,18 +3518,29 @@ int process_dup2(int oldfd, int newfd)
 int process_dup(int fd)
 {
     proc_t *me = current;
-    file_t *src = fd_slot(me, fd);
+    file_t *src;
     int nfd;
 
-    if (!src || src->type == FD_NONE)
+    if (!me)
         return -1;
+    group_lock(me);
+    src = fd_slot(me, fd);
+    if (!src || src->type == FD_NONE) {
+        group_unlock(me);
+        return -1;
+    }
     nfd = fd_alloc(me);
-    if (nfd < 0)
+    if (nfd < 0) {
+        group_unlock(me);
         return -1;
+    }
     /* fd_clone() zeroes the slot before it fills it and leaves it empty when
      * it fails, so a failure needs no cleanup here. */
-    if (fd_clone(&PFD(me)[nfd], src) < 0)
+    if (fd_clone(&PFD(me)[nfd], src) < 0) {
+        group_unlock(me);
         return -1;
+    }
+    group_unlock(me);
     return nfd;
 }
 

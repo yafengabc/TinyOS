@@ -925,14 +925,6 @@ func (b *Builder) buildBoot() error {
 }
 
 func (b *Builder) buildKernel() error {
-	// The kernel-thread experiment shares a heap and a group state without
-	// SMP locking; a second CPU would race it.  Fail here with a readable
-	// message instead of letting the compile-time backstop do it.
-	if b.feature("kthreads") && b.Target.CPUs > 1 {
-		return fmt.Errorf("kthreads is uniprocessor-only for now: target %s has %d CPUs (see docs/REAL-THREADS.md)",
-			b.Target.Name, b.Target.CPUs)
-	}
-
 	b.logf("kernel\n")
 	kdir := filepath.Join(b.Root, "kernel")
 	lfsDir := filepath.Join(b.Root, "third_party", "littlefs")
@@ -1441,6 +1433,9 @@ func (b *Builder) buildUser() ([]string, error) {
 			continue
 		}
 		if name == "kthreadtest.c" && !b.feature("kthreads") {
+			continue
+		}
+		if name == "prodcons.c" && !b.feature("kthreads") {
 			continue
 		}
 		/* A driver's command is useless without the driver, and leaving it

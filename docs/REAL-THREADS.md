@@ -118,8 +118,13 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
   `open/close/dup2` 的结果对全组可见（POSIX 语义），`kthreadtest` 有专项检查。
 - **信号按组**：`process_signal()` 把线程 tid 重定向到组长（调用者自己组除外，
   否则会把正在运行的槽回收掉），所以 `^C`/`kill <pid>` 作用于整个进程。
-- **SMP**：暂不支持。共享堆/组状态没有锁，`[features] kthreads` + 多核目标会在
-  构建期直接报错（`kthreads is uniprocessor-only for now`），C 侧还有 `#error` 兜底。
+- **SMP**：已支持（RV32 单核/双核都能构建）。`brk` 和 fd 表用每个组一把
+  `spin_t glock` 串行化；单核上 `spin_lock` 编译成空操作，所以单核零成本。
+  组长退出是**延迟**的：组长进 `ST_DYING`、记 `live_threads`，兄弟线程被
+  `kill_pending`（阻塞中的会被唤醒返回 -1），最后一个线程负责关 fd、回收组长。
+  还剩两个已知边界：`sbrk` 只重编程**当前核**的 PMP（所以在 spawn 线程前分配堆，
+  `kthread_create` 本身就是这样做的）；`close()` 撞上正在阻塞的 `read/write`
+  还没有引用计数保护（单核时代就存在的语义边界）。
 - **已知简化**：线程栈不参与爆栈自动翻倍（栈在堆里，没有窗口顶部那段护栏）；
   `ps` 里线程是独立 pid，但 `ppid` 就是组长，能看出分组；线程槽仍然带着一份自己
   用不到的 `fds[12]`（432 B）——进程表是静态数组，拆表只能省表项、省不了 .bss。
@@ -157,13 +162,13 @@ threadbench: sleep() in main, sibling kept running
 | 构建 | flash（.text+.rodata） | RAM（.data+.bss） |
 | --- | ---: | ---: |
 | 主线 | 77,448 B | 124,188 B |
-| 本分支，kthreads **关** | 77,436 B | 124,188 B |
-| 本分支，kthreads **开** | 80,448 B | 124,332 B |
+| 本分支，kthreads **关** | 77,420 B | 124,188 B |
+| 本分支，kthreads **开** | 82,160 B | 124,396 B |
 
-- 关掉时**零成本**：`proc_t` 的 `leader/tgid`、调度计数器、线程状态和全部线程代码
-  都在 `#ifdef TOS_KTHREADS` 里（相对主线 flash −12 B，属于对齐噪声；RAM 完全一致）。
-- 开启时：flash **+2,952 B**（相对关），RAM **+80 B**（8 槽 × 8 B + 12 B 计数器
-  对齐）。线程没有内核栈、没有额外 TCB，用户栈由程序自己的堆提供。
+- 关掉时**零成本**：`proc_t` 的 `leader/tgid/exit_code/live_threads/glock`、调度
+  计数器、线程状态和全部线程代码都在 `#ifdef TOS_KTHREADS` 里（相对主线 flash
+  −28 B，属于对齐噪声；RAM 完全一致）。
+- 开启时：flash **+4,712 B**，RAM **+208 B**（8 槽 × 8 B 的组状态 + 线程状态/对齐）。
 - 运行时占用的是**进程表槽位**：一个线程 = 一个 `proc_t`（864 B，主线 856 B）。
   C3 只有 8 槽，4 个线程后剩 4 个。
 - 用户侧：`kthread.c` 目标文件 1,496 B，只有调用它的程序才链接；`threadbench`
@@ -197,13 +202,29 @@ kthreadtest: all ok (0 failure(s))
 `kthreadtest leave` 在组长退出时留下一个活线程，之后 `ps` 只剩 `msh`，证明整组
 被回收、槽和窗口都没有泄漏。C3 的 6 槽 = 8 个进程槽 − shell − 被测程序。
 
+## 4.8 阻塞并发 demo（`prodcons`）
+
+`prodcons` 让一个线程从管道读、主线程写：管道满时 `write()` 睡、空时 `read()` 睡。
+用 512 B 的 `CHUNK` 过 32 KiB，C3 真机：
+
+```
+prodcons: 32768 bytes through a 512-byte pipe in 25 ms
+prodcons: sent sum 4177920, received sum 4177920, 32768 bytes
+prodcons: all bytes delivered, both threads blocked and woke
+```
+
+单核上这个数字不是吞吐纪录，而是**语义证明**：生产者和消费者互相唤醒、一个阻塞
+不影响另一个，校验和一致说明没有丢/重字节。`rv32smp`（QEMU，2 hart）上同一程序
+也能通过；`threadbench` 在 2 hart 上是 3 线程 4.9 s vs 单线程 36 s，但 QEMU 的
+TCG 单核基线本身受双 vCPU 影响，这个比例不可当真——真实并行数字等 `rp2350rvsmp`。
+
 ## 5. 阶段计划
 
 - **P0（已完成）**：评估文档 + `swcost` 基线。
 - **P1（已完成，RV32/C3 分支）**：`SYS_THREAD_CREATE/EXIT/JOIN`、线程槽共享窗口、
   `threadbench`；QEMU rv32 上 3 线程全部完成、join 回收、阻塞按线程生效。
-- **P2（进行中）**：fd 表已共享、信号已按组；剩下 `exec` 按 POSIX 杀掉兄弟线程、
-  可选的 `ps` tgid 列，以及 SMP 支持的锁（共享 `brk`/fd 表的并发保护）。
+- **P2（进行中）**：fd 表已共享、信号已按组、SMP 锁已加；剩下 `exec` 按 POSIX
+  杀掉兄弟线程、可选的 `ps` tgid 列，以及阻塞 I/O 与 `close()` 的引用计数。
 - **P3（已完成）**：C3 上板实测 `threadbench` + `swcost`；ARM 暂不扩。
 - **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 
