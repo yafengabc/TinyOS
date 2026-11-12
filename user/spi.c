@@ -1,16 +1,17 @@
 #include "lib.h"
 
-/* spi - drive one of the RP2040's two SPI masters.
+/* spi - drive the board's general-purpose SPI master.
  *
  *   spi                                      describe the buses
  *   spi loop <bus> <cs> [hz]                 external MOSI->MISO check
- *   spi loopback <bus> [hz]                  internal PL022 loopback check
+ *   spi loopback <bus> [hz]                  internal loopback check
  *   spi send <bus> <cs> <hz> <text...>       send text, print received bytes
  *
- * <cs> is a GPIO number, or -1 when the caller owns the chip select.
- * SPI0 is SCK=2 TX=3 RX=4, SPI1 is SCK=10 TX=11 RX=12.  For `spi loop`,
- * jumper the bus's TX pin to its RX pin; `spi loopback` uses the PL022's
- * internal loopback bit and needs no wiring.
+ * <cs> is a GPIO number, or -1 when the caller owns the chip select.  The
+ * pin map differs per board (RP2040 has SPI0/SPI1; the C3 has one SPI2) and
+ * is listed by `cat /proc/dev`.  For `spi loop`, jumper the bus's MOSI pin
+ * to its MISO pin; `spi loopback` needs a controller with an internal
+ * loopback bit (the RP2040's PL022 has one, the C3 does not).
  */
 
 static void usage(void)
@@ -42,7 +43,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc < 2) {
-        printf("spi: %d bus(es), SPI0 sck2 tx3 rx4, SPI1 sck10 tx11 rx12\n", n);
+        printf("spi: %d bus(es); 'cat /proc/dev' lists sck/mosi/miso\n", n);
         usage();
         return 0;
     }

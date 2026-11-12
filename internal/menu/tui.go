@@ -393,16 +393,16 @@ func (a *app) driverPage() page {
 	for _, pd := range []struct {
 		name, label, help string
 	}{
-		{"pwm", "PWM (8 slices / 16 channels)",
-			"RP2040 PWM driver, SYS_PWM and the pwm command.  Off removes the slice/channel code and the command."},
-		{"uart1", "UART1 (GP4 TX / GP5 RX)",
-			"Second PL011 serial port with a non-blocking read, SYS_UART_* and the uart command.  UART0 remains the console."},
-		{"spi", "SPI0/1 master",
-			"PL022 master driver, software chip select, SYS_SPI and the spi command.  Off also drops the spi user program."},
-		{"i2c", "I2C0/1 master",
-			"DW_apb_i2c master driver, SYS_I2C and the i2c command."},
-		{"dma", "DMA (12 channels)",
-			"RP2040 DMA memory-to-memory copy, SYS_DMA_MEMCPY and the dma command."},
+		{"pwm", "PWM output",
+			"Board PWM driver (RP2040 slices / C3 LEDC), SYS_PWM and the pwm command.  Off removes the driver code and the command."},
+		{"uart1", "UART1 (extra serial port)",
+			"Second serial port with a non-blocking read, SYS_UART_* and the uart command.  UART0 remains the console."},
+		{"spi", "SPI master",
+			"SPI master driver, software chip select, SYS_SPI and the spi command.  Off also drops the spi user program."},
+		{"i2c", "I2C master",
+			"I2C master driver, SYS_I2C and the i2c command."},
+		{"dma", "DMA memory-to-memory copy",
+			"RP2040 DMA memcpy, SYS_DMA_MEMCPY and the dma command."},
 	} {
 		pd := pd
 		rows = append(rows, row{

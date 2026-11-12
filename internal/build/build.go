@@ -135,6 +135,11 @@ var (
 	// menuconfig.  The code behind each is a TOS_<NAME> define, so turning
 	// one off removes the driver, not just its /dev entry.
 	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma"}
+
+	// ESP32-C3: LEDC PWM, the SPI2 master and the I2C master.  No DMA yet
+	// (the GDMA channel/link descriptors are a separate piece of work), and
+	// UART1 stays off until its register setup has been checked on hardware.
+	esp32c3Features = []string{"pwm", "spi", "i2c"}
 )
 
 var Targets = map[string]Target{ // The kernel heap has to hold one decompressed program image at a
@@ -172,7 +177,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// pages and the packer places 0x42000000 at this offset.  0x10000
 	// leaves 448 KiB (0x10000..0x80000) for kernel + WiFi code before the
 	// littlefs partition at 0x80000, instead of the old 256 KiB.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 80 * 1024, MaxProcs: 8, XipFlashBase: 0x10000, Drivers: esp32c3Drivers},
+	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 80 * 1024, MaxProcs: 8, XipFlashBase: 0x10000, Drivers: esp32c3Drivers, DefaultFeatures: esp32c3Features},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 1200, HeapBytes: 128 * 1024},
 	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
 	// rp2040smp: both Cortex-M0+ cores.  Core 1 sits in the boot ROM's

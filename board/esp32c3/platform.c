@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "board.h"
+#include "board_internal.h"
 #include "console.h"
 
 /* Board: ESP32-C3.
@@ -1016,4 +1017,11 @@ const char *plat_cpu_model(void)
 uint32_t plat_cpu_hz(void)
 {
     return cpu_hz;
+}
+
+/* Peripheral bus clock (see board_internal.h).  UART baud, the SPI divider
+ * and the I2C bit timing all come from here rather than from the CPU rate. */
+uint32_t c3_apb_hz(void)
+{
+    return apb_hz;
 }

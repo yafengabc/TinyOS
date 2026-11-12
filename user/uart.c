@@ -26,7 +26,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc < 2) {
-        printf("uart: %d port(s), UART1 TX=GP4 RX=GP5 115200 8N1\n", n);
+        printf("uart: %d port(s), 115200 8N1; 'cat /proc/dev' lists tx/rx\n", n);
         usage();
         return 0;
     }
