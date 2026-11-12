@@ -142,6 +142,15 @@ static void usb_pads_setup(void)
     mmio_write32(PADS_BANK0_BASE + 0xc0u, 0x156u);
 }
 
+/* Bring-up breadcrumbs.  The USB controller hangs the bus the moment a
+ * register is touched while clk_usb is stopped, so a failure here leaves no
+ * output at all; these markers are the only way to see how far it got. */
+static void u_mark(const char *s)
+{
+    while (*s)
+        plat_console_putc(*s++);
+}
+
 /* ---- clock and reset bring-up ------------------------------------------- */
 
 /* Returns 0 on success.  Every wait is bounded: an unresponsive block has to
@@ -220,6 +229,7 @@ void usb_cdc_init(void)
 {
     g_hw_ready = 0;
     g_init_stage = 0;
+    u_mark("[u0]\r\n");
 
     /* Order matters: PLL and clk_usb first (the controller's reset-done bit
      * depends on the clock), then the pads, then TinyUSB - whose dcd_init()
@@ -227,8 +237,10 @@ void usb_cdc_init(void)
      * done before it. */
     if (usb_clock_init() != 0)
         return;
+    u_mark("[u1] clk\r\n");
 
     usb_pads_setup();
+    u_mark("[u2] pads\r\n");
 
     /* Mark ready before TinyUSB can raise an interrupt: the handler bails
      * out on !g_hw_ready, and an interrupt that is never drained keeps
@@ -239,6 +251,7 @@ void usb_cdc_init(void)
         g_hw_ready = 0;
         return;
     }
+    u_mark("[u3] tud\r\n");
 
     /* And again, now that TinyUSB's dcd_init() has reset the controller and
      * cleared MAIN_CTRL.PHY_ISO.  The same writes issued *before* that reset
@@ -261,6 +274,7 @@ void usb_cdc_init(void)
     for (volatile int i = 0; i < 20000; i++)
         ;
     g_ss_retrig = usb_hw->sie_status;
+    u_mark("[u4] pullup\r\n");
 }
 
 /* Open the interrupt gate.  The RISC-V port polls the controller instead:
