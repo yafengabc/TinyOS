@@ -268,6 +268,25 @@ static regs_t *dispatch(regs_t *r)
         return process_thread_join(r, (int)sc.a0, sc.a1);
 #endif
 
+    case SYS_PIO: {
+        struct pio_req req;
+        const uint32_t up = sc.a1;
+        int rc = -1;
+
+        if (!process_user_ok(up, sizeof(req)))
+            break;
+        memcpy(&req, (const void *)up, sizeof(req));
+        if (req.buf) {
+            uint32_t bytes = (uint32_t)req.len;
+            bytes *= (req.op == PIO_LOAD) ? 2u : 4u;
+            if (req.len < 0 || !process_user_ok((uint32_t)req.buf, bytes))
+                break;
+        }
+        rc = plat_pio((int)sc.a0, &req, process_current_pid());
+        plat_frame_set_ret(r, (uint32_t)rc);
+        return r;
+    }
+
     case SYS_SCHEDSTAT: {
 #ifdef TOS_KTHREADS
         int rc = process_schedstat(sc.a0);

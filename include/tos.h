@@ -68,6 +68,37 @@
 /* Scheduler counters, for benchmarks: schedstat(&st) fills three u32
  * (switches to another task, scheduler runs that kept the same task, ticks). */
 #define SYS_SCHEDSTAT     51
+/* PIO (RP2040): pio(op, &req).  One request struct carries both the assembled
+ * program and the SM configuration; see struct pio_req below. */
+#define SYS_PIO           52
+
+#define PIO_LOAD     0   /* req.buf = u16 words, req.len = count          */
+#define PIO_START    1
+#define PIO_STOP     2
+#define PIO_TX       3   /* req.buf = u32 words, req.len = count          */
+#define PIO_RX       4
+#define PIO_RELEASE  5
+
+#define PIO_F_SIDE_OPT     0x01   /* .side_set N opt                    */
+#define PIO_F_SIDE_PINDIR  0x02   /* .side_set N pindirs                */
+
+struct pio_req {
+    int op;
+    int block;          /* 0 or 1                                       */
+    int sm;             /* 0..3                                         */
+    const void *buf;    /* u16 instruction words (LOAD) or u32 data     */
+    int len;            /* words: count for LOAD, TX and RX alike       */
+    int origin;         /* instruction-memory slot for word 0           */
+    int wrap_top;
+    int wrap_bottom;
+    int side_set;       /* side-set bit count, 0..5                     */
+    int flags;          /* PIO_F_*                                      */
+    int clkdiv_int;
+    int clkdiv_frac;
+    int pin_base;       /* first GPIO used, -1 = do not touch pins      */
+    int pin_count;
+    int shiftctrl;      /* extra SHIFTCTRL bits (autopull/autopush...)  */
+};
 
 #define MSG_EAGAIN   (-2)
 #define TOS_MSG_MAX  256    /* bytes per pool slot (mailbox.h) */

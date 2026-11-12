@@ -1,0 +1,23 @@
+.program blink
+; GP25, about 2 Hz with clkdiv 1000 at 125 MHz.
+;   inner: 32 * (1 + 31 delay) = 1024 cycles
+;   outer: 32 * 1025 = 32800 cycles per half period
+.pin 25 1
+.clkdiv 1000
+set pindirs, 1
+.wrap_target
+set pins, 1
+set x, 31
+outer_hi:
+set y, 31
+inner_hi:
+jmp y--, inner_hi [31]
+jmp x--, outer_hi
+set pins, 0
+set x, 31
+outer_lo:
+set y, 31
+inner_lo:
+jmp y--, inner_lo [31]
+jmp x--, outer_lo
+.wrap

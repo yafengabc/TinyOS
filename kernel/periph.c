@@ -134,6 +134,17 @@ __attribute__((weak)) int plat_i2c_xfer(int bus, int addr, int freq_hz,
     return -1;
 }
 
+__attribute__((weak)) int plat_pio(int op, struct pio_req *req, int pid)
+{
+    (void)op; (void)req; (void)pid;
+    return -1;
+}
+
+__attribute__((weak)) void plat_pio_release(int pid)
+{
+    (void)pid;
+}
+
 __attribute__((weak)) int plat_dma_memcpy(void *dst, const void *src, int len)
 {
     (void)dst; (void)src; (void)len;

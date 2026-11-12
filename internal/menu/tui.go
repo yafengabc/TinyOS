@@ -401,6 +401,8 @@ func (a *app) driverPage() page {
 			"SPI master driver, software chip select, SYS_SPI and the spi command.  Off also drops the spi user program."},
 		{"i2c", "I2C master",
 			"I2C master driver, SYS_I2C and the i2c command."},
+		{"pio", "PIO (2 blocks / 8 state machines)",
+			"RP2040 PIO loader, SYS_PIO and the user-space assembler (pio command).  Off removes the driver and the command."},
 		{"dma", "DMA memory-to-memory copy",
 			"RP2040 DMA memcpy, SYS_DMA_MEMCPY and the dma command."},
 		{"kthreads", "Kernel threads (experimental)",

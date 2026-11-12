@@ -85,7 +85,15 @@ uart               # UART1：TX=GP4、RX=GP5、115200
 uart send HELLO
 uart recv 500
 spi / i2c / dma    # SPI0/1、I2C0/1、DMA 的用户命令
+pio asm /pio/loopback.pio 0 0   # 汇编并在 PIO0 SM0 装入 PIO 程序
+pio start 0 0; pio tx 0 0 1 0 1 1; pio rx 0 0 4
+pio asm /pio/blink.pio 0 0; pio start 0 0   # GP25 约 2 Hz
 ```
+
+PIO 的汇编器在用户态（`user/pio.c`），指令存储只有 32 个 16 位字，所以可以
+在控制台里改一行 `.pio`、`pio asm`、看示波器，不用重烧。完整的语法、`SYS_PIO`
+ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失，需要重新装载）见
+`docs/PIO.md`。
 
 ## 移植进度
 
@@ -100,6 +108,7 @@ spi / i2c / dma    # SPI0/1、I2C0/1、DMA 的用户命令
 | littlefs @ flash 0x80000（ROM flash API） | ✅ 挂载 / ◐ 写 | shell 能启动说明根文件系统挂上了；写/擦路径要用 `dd` 再验 |
 | USB CDC（TinyUSB，IRQ 5） | ◐ 调试中 | 目前 trace 是 BUS_RESET + DEV_SUSPEND、没有 SETUP_REQ；已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B |
 | PWM / UART1 / SPI0-1 / I2C0-1 / DMA | ◐ | 驱动 + 用户命令已接，menuconfig 可裁；实机覆盖以自测为准 |
+| PIO（2 块 / 8 个 SM + 用户态汇编器） | ◐ | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel`；汇编器已在 x86 上核对编码，Pico 实机待测（见 `docs/PIO.md`） |
 | `rp2040smp`（core 1） | ◐ | 目标可构建，握手走 SIO FIFO；未做完整验收 |
 | BOOTSEL 回退（Ctrl-D） | ◐ | ROM 调用路径已实现，含看门狗 scratch 标记 |
 | 内存保护 | ☐ | 硬件没有，`prot` 在本板会真的写穿；默认不打包 |

@@ -2038,6 +2038,11 @@ static void task_release(proc_t *p)
     if (tty_is_raw())
         tty_set_raw(0);
     /* The window goes back with the table entry, in proc_retire(). */
+#ifdef TOS_PIO
+    /* A PIO state machine is system hardware: stop the ones this task owns
+     * and put the pins back, or the next task inherits a running SM. */
+    plat_pio_release(p->pid);
+#endif
 }
 
 /* Remember a child's exit code for a wait() that has not happened yet.

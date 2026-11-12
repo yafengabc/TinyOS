@@ -134,7 +134,7 @@ var (
 	// RP2040 drivers that are on by default but can be trimmed in
 	// menuconfig.  The code behind each is a TOS_<NAME> define, so turning
 	// one off removes the driver, not just its /dev entry.
-	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma"}
+	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma", "pio"}
 
 	// ESP32-C3: LEDC PWM, the SPI2 master and the I2C master.  No DMA yet
 	// (the GDMA channel/link descriptors are a separate piece of work), and
@@ -1461,6 +1461,10 @@ func (b *Builder) buildUser() ([]string, error) {
 			if !b.feature("dma") {
 				continue
 			}
+		case "pio":
+			if !b.feature("pio") {
+				continue
+			}
 		}
 		progs = append(progs, prog)
 	}
@@ -1577,6 +1581,18 @@ func (b *Builder) buildFSImage(bins []string) error {
 	extra, err := collectFiles(b.Root)
 	if err != nil {
 		return err
+	}
+	// The PIO examples are only useful (and only fit) on builds with the PIO
+	// feature; the x86 image is already near its 300 KiB ramdisk limit.
+	if !b.feature("pio") {
+		kept := extra[:0]
+		for _, f := range extra {
+			if strings.HasPrefix(f.Name, "pio/") {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		extra = kept
 	}
 	files = append(files, extra...)
 

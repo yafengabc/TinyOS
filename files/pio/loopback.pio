@@ -1,0 +1,16 @@
+.program loopback
+; GP4 is both OUT and IN: pull a word, drive its bit 0, read the pad back,
+; push it.  No jumper needed.  Try:
+;   pio asm /pio/loopback.pio 0 0
+;   pio start 0 0
+;   pio tx 0 0 1 0 1 1
+;   pio rx 0 0 4
+.pin 4 1
+.clkdiv 100
+set pindirs, 1
+.wrap_target
+pull block
+out pins, 1
+in pins, 1
+push block
+.wrap

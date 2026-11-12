@@ -256,6 +256,12 @@ int plat_uart_count(void);
 int plat_uart_write(int port, const void *buf, int len);
 int plat_uart_read(int port, void *buf, int len);
 
+/* PIO (RP2040).  `pid` is the calling task, used for ownership: a state
+ * machine loaded by one task is stopped and its pins released when that task
+ * exits.  Boards without PIO leave the weak default in kernel/periph.c. */
+int  plat_pio(int op, struct pio_req *req, int pid);
+void plat_pio_release(int pid);
+
 /* SPI master.  The driver owns SCK/MOSI/MISO for the selected bus; CS is a
  * plain GPIO because the PL022's hardware chip select is not wired on the
  * Pico and sharing one bus between devices needs software control anyway. */
