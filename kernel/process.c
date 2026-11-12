@@ -2391,8 +2391,8 @@ regs_t *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len)
 
 #ifdef TOS_KTHREADS
 
-#if !defined(__riscv)
-#error "TOS_KTHREADS is implemented for RV32 only: the thread entry frame uses a0 and the RV32 syscall ABI.  See docs/REAL-THREADS.md."
+#if !defined(__riscv) && !defined(__arm__)
+#error "TOS_KTHREADS is implemented for RV32 and ARM: it needs plat_frame_set_arg() and a preemptive trap frame.  See docs/REAL-THREADS.md."
 #endif
 
 /* User pointers are checked against the *group* window: a thread slot has no
@@ -2465,7 +2465,7 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
      * and a close() in any thread closes it for the whole group. */
 
     plat_prepare_user_frame(&p->saved, entry, ustack);
-    p->saved.a0 = arg;
+    plat_frame_set_arg(&p->saved, arg);
 
     irq = plat_irq_save();
     spin_lock(&proc_lock);

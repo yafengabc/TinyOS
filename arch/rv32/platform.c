@@ -309,6 +309,12 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
     __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg));
 }
 
+/* First argument of a user entry point: thread trampolines take one. */
+void plat_frame_set_arg(regs_t *frame, uint32_t arg)
+{
+    frame->a0 = arg;
+}
+
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
     memset(frame, 0, sizeof(*frame));

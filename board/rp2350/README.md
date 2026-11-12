@@ -59,6 +59,27 @@ screen
 echo hello > /dev/lcd0
 ```
 
+## 线程实验（kthreads）
+
+分支 `threads-preemptive` 的内核线程在 RP2350 的两个架构上都能构建：
+
+```bash
+go run ./cmd/tos build -config configs/rp2350smp-kthreads.conf    # Cortex-M33 x2
+go run ./cmd/tos build -config configs/rp2350rvsmp-kthreads.conf  # Hazard3 x2
+python scripts/rp2350/flash.py --uf2 build/rp2350smp.uf2 --smoke  # 或 ...rvsmp.uf2
+```
+
+```sh
+tos> threadbench     # 3 线程 vs 顺序；双核上 ratio 应明显低于 100%
+tos> kthreadtest     # 17 项边界检查（join、僵尸槽、槽耗尽、fd 共享、重叠睡眠）
+tos> prodcons        # 管道阻塞并发，校验和必须一致
+```
+
+线程共享窗口、堆和 fd 表；SMP 下 `brk` 和 fd 表有 per-group 自旋锁，组长退出是
+延迟回收（等所有线程离开才释放窗口）。设计与已知边界见 `docs/REAL-THREADS.md`。
+ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 sp 下方，所以线程的
+启动记录放在堆里，不能放栈顶。
+
 ## 移植进度
 
 | 功能 | 状态 | 说明 |

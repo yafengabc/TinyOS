@@ -983,6 +983,16 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
 
 #endif
 
+/* First argument of a user entry point.  On ARM the core pops r0 from the
+ * hardware frame, so the value has to land there as well as in the regs_t
+ * view that a syscall would later read. */
+void plat_frame_set_arg(regs_t *frame, uint32_t arg)
+{
+    frame->r0 = arg;
+    if (frame->hw)
+        ((uint32_t *)(uintptr_t)frame->hw)[ARM_HW_R0] = arg;
+}
+
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
     memset(frame, 0, sizeof(*frame));

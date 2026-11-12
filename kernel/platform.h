@@ -380,6 +380,10 @@ uint32_t plat_frame_get_ret(const regs_t *r);
 
 /* Prepare a trap frame that starts a user program at `entry` with stack
  * `sp`.  Owns all architecture specific segment/CSR setup. */
+/* First argument of a user entry point (the thread trampoline takes one).
+ * Called right after plat_prepare_user_frame(). */
+void     plat_frame_set_arg(regs_t *frame, uint32_t arg);
+
 void     plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp);
 
 /* Power the machine off (best effort). */

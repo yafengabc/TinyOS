@@ -125,6 +125,11 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
   还剩两个已知边界：`sbrk` 只重编程**当前核**的 PMP（所以在 spawn 线程前分配堆，
   `kthread_create` 本身就是这样做的）；`close()` 撞上正在阻塞的 `read/write`
   还没有引用计数保护（单核时代就存在的语义边界）。
+- **ARM**：Cortex-M 上入口同样走 `plat_prepare_user_frame()` + `plat_frame_set_arg()`
+  （先写 `regs_t.r0`，再写硬件异常帧 `hw[0]`）。M 核会把 32 B 硬件帧压在初始 sp
+  之下，所以线程的启动记录（fn/arg）放在**堆里**而不是栈顶——第一版放在栈顶，
+  正好覆盖 lr/pc/xpsr，线程一跳就 MemManage。QEMU mps2（Cortex-M3）17/17 通过；
+  `rp2350smp` / `rp2350rvsmp` 已构建，真机待测。
 - **已知简化**：线程栈不参与爆栈自动翻倍（栈在堆里，没有窗口顶部那段护栏）；
   `ps` 里线程是独立 pid，但 `ppid` 就是组长，能看出分组；线程槽仍然带着一份自己
   用不到的 `fds[12]`（432 B）——进程表是静态数组，拆表只能省表项、省不了 .bss。
@@ -163,7 +168,7 @@ threadbench: sleep() in main, sibling kept running
 | --- | ---: | ---: |
 | 主线 | 77,448 B | 124,188 B |
 | 本分支，kthreads **关** | 77,420 B | 124,188 B |
-| 本分支，kthreads **开** | 82,160 B | 124,396 B |
+| 本分支，kthreads **开** | 82,172 B | 124,396 B |
 
 - 关掉时**零成本**：`proc_t` 的 `leader/tgid/exit_code/live_threads/glock`、调度
   计数器、线程状态和全部线程代码都在 `#ifdef TOS_KTHREADS` 里（相对主线 flash
@@ -202,6 +207,9 @@ kthreadtest: all ok (0 failure(s))
 `kthreadtest leave` 在组长退出时留下一个活线程，之后 `ps` 只剩 `msh`，证明整组
 被回收、槽和窗口都没有泄漏。C3 的 6 槽 = 8 个进程槽 − shell − 被测程序。
 
+ARM（QEMU mps2-an385，Cortex-M3）同一套检查 17/17 通过，`prodcons` 53 ms；
+`rp2350smp` / `rp2350rvsmp` 已构建，等真机。
+
 ## 4.8 阻塞并发 demo（`prodcons`）
 
 `prodcons` 让一个线程从管道读、主线程写：管道满时 `write()` 睡、空时 `read()` 睡。
@@ -225,7 +233,8 @@ TCG 单核基线本身受双 vCPU 影响，这个比例不可当真——真实�
   `threadbench`；QEMU rv32 上 3 线程全部完成、join 回收、阻塞按线程生效。
 - **P2（进行中）**：fd 表已共享、信号已按组、SMP 锁已加；剩下 `exec` 按 POSIX
   杀掉兄弟线程、可选的 `ps` tgid 列，以及阻塞 I/O 与 `close()` 的引用计数。
-- **P3（已完成）**：C3 上板实测 `threadbench` + `swcost`；ARM 暂不扩。
+- **P3（已完成）**：C3 与 QEMU mps2（Cortex-M3）实测；RP2350 的两个双核目标
+  （`rp2350smp` Cortex-M33、`rp2350rvsmp` Hazard3）已构建，真机待测。
 - **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 
 ## 6. 必须提前想清楚的坑

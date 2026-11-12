@@ -43,12 +43,19 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
         stack_bytes = 512;
     bytes = (stack_bytes + 31u) & ~15u;
 
-    base = sbrk((int)(bytes + sizeof(struct kstart) + 16));
+    base = sbrk((int)bytes);
     if (!base)
         return -1;
 
+    /* The start record lives in the heap, not on the new stack: ARM pushes a
+     * 32-byte hardware exception frame just below the initial sp, so anything
+     * parked at the top of the stack would be overwritten before the first
+     * instruction runs. */
+    s = (struct kstart *)sbrk((int)sizeof(*s));
+    if (!s)
+        return -1;
+
     top = ((unsigned)base + bytes) & ~15u;
-    s = (struct kstart *)(top - 16);
     s->fn = fn;
     s->arg = arg;
 
