@@ -62,20 +62,24 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 
 同一块 C3 上 `configs/esp32c3.conf`（关）与 `configs/esp32c3-wifi.conf`（开）：
 
-| 指标 | WiFi 关 | WiFi 开 |
-| --- | ---: | ---: |
-| 内核 flash（`.text`+`.rodata`） | 75.6 KiB | 357.9 KiB |
-| 内核 RAM（`.data`+`.bss`） | 121.3 KiB | 187.2 KiB |
-| 其中内核堆 arena（`heap=`） | 80 KiB | 80 KiB |
-| 内核 RAM 结束地址 | `0x4039e520` | `0x403aece0` |
-| 任务区（16 KiB 对齐到 `0x403DC000`） | 240 KiB | 176 KiB |
-| 16 KiB 窗口数 | 15 | 11 |
-| 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 |
-| 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） |
-| `esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB |
+| 指标 | WiFi 关 | WiFi 开 | 无 WiFi + 16 KiB 堆（16 槽） |
+| --- | ---: | ---: | ---: |
+| 内核 flash（`.text`+`.rodata`） | 75.6 KiB | 357.9 KiB | 75.6 KiB |
+| 内核 RAM（`.data`+`.bss`） | 121.3 KiB | 187.2 KiB | 64.0 KiB |
+| 其中内核堆 arena（`heap=`） | 80 KiB | 80 KiB | **16 KiB** |
+| 内核 RAM 结束地址 | `0x4039e520` | `0x403aece0` | `0x4038ffe0` |
+| 任务区（16 KiB 对齐到 `0x403DC000`） | 240 KiB | 176 KiB | **304 KiB** |
+| 16 KiB 窗口数 | 15 | 11 | **19** |
+| 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 | 9 |
+| 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） | 2（余 48 KiB） |
+| 进程槽（`max_procs`） | 8 | 8 | **16** |
+| `esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
 
-- **内核堆两边都是 80 KiB**（target 默认，`[build] heap=` 可覆盖）。WiFi 吃掉的是
+- 前两列的内核堆都是 target 默认的 **80 KiB**（`[build] heap=` 可覆盖）；WiFi 吃掉的是
   它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。
+- 第三列是 `configs/esp32c3-16k.conf`：堆降到 16 KiB（实测峰值 1.5 KiB）并把进程槽
+  提到 16。任务区因此回到 304 KiB / 19 个窗口；代价是内核结束地址只剩 32 B 余量，
+  内核再长一点就会掉一个窗口。
 - flash 的大头是 WiFi blob（XIP 常驻）。WiFi 开后内核结束在 `0x7B6A8`，离 littlefs
   的 `0x80000` 只剩约 21 KiB——再加驱动就要先腾空间。
 - 窗口按 16 KiB 粒度分配，默认栈 4 KiB、栈下护栏 4 KiB。`py` 的 128 KiB 窗口两边
