@@ -48,6 +48,19 @@ static void slow(void *arg)
     kthread_exit(*(int *)arg);
 }
 
+static volatile int fd_read_result = -2;
+
+static void fduser(void *arg)
+{
+    int fd = *(int *)arg;
+    char b;
+
+    fd_read_result = read(fd, &b, 1);   /* 1 while the file is open */
+    sleep(60);                          /* the leader closes it now */
+    fd_read_result = read(fd, &b, 1);   /* must be -1: shared table */
+    kthread_exit(0);
+}
+
 static void forever(void *arg)
 {
     (void)arg;
@@ -126,6 +139,24 @@ int main(int argc, char *argv[])
         ok(woke == 1, "thread finished before join returned");
         t1 = clock_ms();
         printf("kthreadtest: overlapped sleep %u ms (wall clock)\n", t1 - t0);
+    }
+
+    /* Descriptors are group state: a file opened by the leader is readable
+     * in a thread, and close() in the leader closes it there too. */
+    {
+        int fd = open("/readme.txt");
+        int junk;
+
+        ok(fd >= 0, "open readme.txt in the leader");
+        fd_read_result = -2;
+        tid = kthread_create(fduser, &fd, 4096);
+        sleep(20);
+        ok(fd_read_result == 1, "thread read through the shared fd table");
+        close(fd);
+        code = -1;
+        ok(kthread_join(tid, &code) == 0, "join the fd thread");
+        ok(fd_read_result == -1, "leader close() closed it for the thread");
+        (void)junk;
     }
 
     printf("kthreadtest: %s (%d failure(s))\n",

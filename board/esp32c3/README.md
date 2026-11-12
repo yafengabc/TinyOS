@@ -111,7 +111,8 @@ tos> kthreadtest leave    # 之后 ps 不应再看到那个线程
 进程的窗口和堆（栈由 `kthread_create()` 用 `sbrk` 从堆里切）。C3 是单核，所以
 `threadbench` 的期望结果是**总时间与单线程串行相近**（ratio ≈ 100%），但三个线程
 都完成、`join` 正常回收、阻塞按线程生效——这三点才是"真线程"与协作线程的分界。
-目前线程只拿 console fd，文件/管道共享是下一步；`exec` 在线程里调用会失败。
+fd 表是进程级共享的（一个线程 `open/close` 对全组可见），信号/`^C` 也按组生效；
+`exec` 在线程里调用会失败。
 
 C3 实测（160 MHz）：`threadbench` 三段同样 90 万次迭代——3 线程 35 ms、单线程
 34 ms、caller 顺序 35 ms，ratio 100%；38 次真切换 × 12.6 µs ≈ 0.48 ms（1.4%）。

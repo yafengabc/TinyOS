@@ -112,8 +112,10 @@ enum {
     ST_WAIT_INPUT,
     ST_WAIT_SLEEP,
     ST_WAIT_PIPE,
-    ST_WAIT_THREAD, /* TOS_KTHREADS: a join() waiting for a sibling  */
-    ST_THREAD_ZOMBIE,/* TOS_KTHREADS: exited, code kept until join     */
+#ifdef TOS_KTHREADS
+    ST_WAIT_THREAD, /* a join() waiting for a sibling                */
+    ST_THREAD_ZOMBIE,/* exited, code kept until join                  */
+#endif
     ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
      * exist as a state of its own: on SMP two exec()s can be building two
@@ -495,7 +497,11 @@ static int proc_waiting(void)
     for (int i = 0; i < MAX_PROCS; i++) {
         int st = procs[i].state;
         if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP ||
-            st == ST_WAIT_PIPE || st == ST_WAIT_THREAD || st == ST_KT_WAIT)
+            st == ST_WAIT_PIPE
+#ifdef TOS_KTHREADS
+            || st == ST_WAIT_THREAD
+#endif
+            || st == ST_KT_WAIT)
             return 1;
     }
     return 0;
@@ -566,6 +572,11 @@ static void sched_idle(void)
 #else
 #define PROC_GROUP(p) (p)
 #endif
+
+/* Descriptors are process state, not thread state: every thread of a group
+ * sees the same open files and pipes, and a close() in one is a close() for
+ * all of them (POSIX).  With the feature off, PROC_GROUP(p) is just p. */
+#define PFD(p) (PROC_GROUP(p)->fds)
 
 /* Scheduler accounting exposed by SYS_SCHEDSTAT, so a benchmark can ask
  * "how many switches did that phase actually cost" instead of assuming one
@@ -1777,21 +1788,21 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
      * `echo hi > file` work - by the time the child starts, the shell's fd 1
      * is a file, and the child inherits it. */
     for (int i = 0; i < MAX_FDS; i++)
-        p->fds[i].type = FD_NONE;
+        PFD(p)[i].type = FD_NONE;
     if (current) {
         for (int i = 0; i < MAX_FDS; i++) {
             /* Console and pipes were always inherited; files and devices
              * joined them when redirection started crossing exec().  The
              * rules live in fd_clone() so dup2() cannot drift from this. */
-            if (current->fds[i].type == FD_NONE)
+            if (PFD(current)[i].type == FD_NONE)
                 continue;
-            if (fd_clone(&p->fds[i], &current->fds[i]) < 0)
-                p->fds[i].type = FD_NONE;
+            if (fd_clone(&PFD(p)[i], &PFD(current)[i]) < 0)
+                PFD(p)[i].type = FD_NONE;
         }
     }
     for (int i = 0; i < 3; i++)
-        if (p->fds[i].type == FD_NONE)
-            p->fds[i].type = FD_CONSOLE;
+        if (PFD(p)[i].type == FD_NONE)
+            PFD(p)[i].type = FD_CONSOLE;
 
     /* Children inherit: a task cannot spawn something more important than
        itself, which is what keeps a program from locking the console out.
@@ -2227,6 +2238,15 @@ int process_signal(int pid, int sig)
     if (!victim || victim == init_proc)
         return -1;
 
+#ifdef TOS_KTHREADS
+    /* A signal aimed at a thread acts on its group - that is what ^C and a
+     * shell `kill <pid>` mean for a multithreaded program.  The exception is
+     * the caller's own group: retiring the slot this CPU is running would
+     * leave the scheduler with a task that no longer exists. */
+    if (victim->leader && PROC_GROUP(current) != victim->leader)
+        victim = victim->leader;
+#endif
+
     /* "Same as current" only means "on this CPU" while it is actually
      * running.  sched_switch() idles without clearing `current`, so a task
      * asleep with the CPU parked beside it is still `current` - and taking
@@ -2386,12 +2406,8 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     memcpy(p->cwd, leader->cwd, sizeof(p->cwd));
     p->start_ns = plat_now_ns();
 
-    /* The experiment's threads get the console and nothing else.  Copying a
-     * file/pipe descriptor would double-close the underlying handle when the
-     * thread exits; sharing the group fd table is the next step. */
-    for (int i = 0; i < MAX_FDS; i++)
-        if (leader->fds[i].type == FD_CONSOLE)
-            p->fds[i] = leader->fds[i];
+    /* Descriptors are shared through PROC_GROUP(): the slot keeps no copy,
+     * and a close() in any thread closes it for the whole group. */
 
     plat_prepare_user_frame(&p->saved, entry, ustack);
     p->saved.a0 = arg;
@@ -2753,7 +2769,7 @@ static file_t *fd_slot(proc_t *p, int fd)
 {
     if (!p || fd < 0 || fd >= MAX_FDS)
         return NULL;
-    return &p->fds[fd];
+    return &PFD(p)[fd];
 }
 
 /* The descriptor number *is* the table index.  open() starts at 3: 0/1/2
@@ -2762,7 +2778,7 @@ static file_t *fd_slot(proc_t *p, int fd)
 static int fd_alloc(proc_t *p)
 {
     for (int i = 3; i < MAX_FDS; i++)
-        if (p->fds[i].type == FD_NONE)
+        if (PFD(p)[i].type == FD_NONE)
             return i;
     return -1;
 }
@@ -2877,10 +2893,10 @@ int process_fd_open(const char *path)
         if (fd < 0)
             return -1;
         if (d->ops->open && d->ops->open(d, &priv) < 0) {
-            current->fds[fd].type = FD_NONE;
+            PFD(current)[fd].type = FD_NONE;
             return -1;
         }
-        f = &current->fds[fd];
+        f = &PFD(current)[fd];
         f->type    = FD_CHRDEV;
         f->dev     = d;
         f->devpriv = priv;
@@ -2898,7 +2914,7 @@ int process_fd_open(const char *path)
         ramdisk_close(h);
         return -1;
     }
-    f = &current->fds[fd];
+    f = &PFD(current)[fd];
     f->type = FD_FILE;
     f->fh   = h;
     f->size = ramdisk_size(h);
@@ -2929,7 +2945,7 @@ int process_fd_create(const char *path)
         ramdisk_close(h);
         return -1;
     }
-    f = &current->fds[fd];
+    f = &PFD(current)[fd];
     f->type = FD_FILE;
     f->fh   = h;
     f->size = ramdisk_size(h);
@@ -3305,18 +3321,18 @@ int process_pipe(int *fds)
         kfree(p);
         return -1;
     }
-    me->fds[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
-    me->fds[r].pipe = p;
+    PFD(me)[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
+    PFD(me)[r].pipe = p;
     pipe_ref_reader(p);
 
     w = fd_alloc(me);
     if (w < 0) {
-        me->fds[r].type = FD_NONE;
+        PFD(me)[r].type = FD_NONE;
         kfree(p);
         return -1;
     }
-    me->fds[w].type = FD_PIPE_W;
-    me->fds[w].pipe = p;
+    PFD(me)[w].type = FD_PIPE_W;
+    PFD(me)[w].pipe = p;
     pipe_ref_writer(p);
 
     fds[0] = r;
@@ -3365,7 +3381,7 @@ int process_dup(int fd)
         return -1;
     /* fd_clone() zeroes the slot before it fills it and leaves it empty when
      * it fails, so a failure needs no cleanup here. */
-    if (fd_clone(&me->fds[nfd], src) < 0)
+    if (fd_clone(&PFD(me)[nfd], src) < 0)
         return -1;
     return nfd;
 }

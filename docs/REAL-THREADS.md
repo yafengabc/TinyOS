@@ -114,10 +114,15 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
   保留僵尸槽，等 `join` 来取。重复 join 返回 -1。没人 join 的线程会一直占一个槽
   （POSIX 里未被 wait 的子进程同样如此），组长退出时整组回收。
 - **组退出**：组长退出时把同组线程槽一起回收（`exec` 也拒绝在线程里调用）。
+- **fd 表共享**：`PFD(p)` 沿 `PROC_GROUP()` 取表，线程没有自己的副本；一个线程
+  `open/close/dup2` 的结果对全组可见（POSIX 语义），`kthreadtest` 有专项检查。
+- **信号按组**：`process_signal()` 把线程 tid 重定向到组长（调用者自己组除外，
+  否则会把正在运行的槽回收掉），所以 `^C`/`kill <pid>` 作用于整个进程。
 - **SMP**：暂不支持。共享堆/组状态没有锁，`[features] kthreads` + 多核目标会在
   构建期直接报错（`kthreads is uniprocessor-only for now`），C 侧还有 `#error` 兜底。
-- **已知简化**：线程只拿到 console fd（文件/管道共享是 P2）；线程栈不参与
-  爆栈自动翻倍；`ps` 里线程是独立 pid，没有 tgid 列。
+- **已知简化**：线程栈不参与爆栈自动翻倍（栈在堆里，没有窗口顶部那段护栏）；
+  `ps` 里线程是独立 pid，但 `ppid` 就是组长，能看出分组；线程槽仍然带着一份自己
+  用不到的 `fds[12]`（432 B）——进程表是静态数组，拆表只能省表项、省不了 .bss。
 
 QEMU rv32 早期版本（3×300k）：19103 ms vs 21751 ms。C3 真机上先看到的是 171%，
 但那是**基准程序的编译器差异**，不是线程开销。把两个相位改成调用同一个 `noinline`
@@ -152,12 +157,11 @@ threadbench: sleep() in main, sibling kept running
 | 构建 | flash（.text+.rodata） | RAM（.data+.bss） |
 | --- | ---: | ---: |
 | 主线 | 77,448 B | 124,188 B |
-| 本分支，kthreads **关** | 77,440 B | 124,188 B |
-| 本分支，kthreads **开** | 80,392 B | 124,268 B |
+| 本分支，kthreads **关** | 77,436 B | 124,188 B |
+| 本分支，kthreads **开** | 80,448 B | 124,332 B |
 
-- 关掉时**零成本**：`proc_t` 的 `leader/tgid`、调度计数器和全部线程代码都在
-  `#ifdef TOS_KTHREADS` 里（flash 差 −8 B，属于对齐噪声；RAM 完全一致）。开启后
-  的镜像是逐字节相同的。
+- 关掉时**零成本**：`proc_t` 的 `leader/tgid`、调度计数器、线程状态和全部线程代码
+  都在 `#ifdef TOS_KTHREADS` 里（相对主线 flash −12 B，属于对齐噪声；RAM 完全一致）。
 - 开启时：flash **+2,952 B**（相对关），RAM **+80 B**（8 槽 × 8 B + 12 B 计数器
   对齐）。线程没有内核栈、没有额外 TCB，用户栈由程序自己的堆提供。
 - 运行时占用的是**进程表槽位**：一个线程 = 一个 `proc_t`（864 B，主线 856 B）。
@@ -183,6 +187,10 @@ kthreadtest: ok   leader ran while the thread was still asleep
 kthreadtest: ok   join sleeping thread
 kthreadtest: ok   thread finished before join returned
 kthreadtest: overlapped sleep 200 ms (wall clock)
+kthreadtest: ok   open readme.txt in the leader
+kthreadtest: ok   thread read through the shared fd table
+kthreadtest: ok   join the fd thread
+kthreadtest: ok   leader close() closed it for the thread
 kthreadtest: all ok (0 failure(s))
 ```
 
@@ -194,8 +202,8 @@ kthreadtest: all ok (0 failure(s))
 - **P0（已完成）**：评估文档 + `swcost` 基线。
 - **P1（已完成，RV32/C3 分支）**：`SYS_THREAD_CREATE/EXIT/JOIN`、线程槽共享窗口、
   `threadbench`；QEMU rv32 上 3 线程全部完成、join 回收、阻塞按线程生效。
-- **P2**：fd 表真正共享（现在线程只拿 console）、cwd/brk 已共享但需要并发写保护、
-  `ps` 显示 tgid、信号按组、`exec` 按 POSIX 杀掉兄弟线程。SMP 支持的锁也在这一步。
+- **P2（进行中）**：fd 表已共享、信号已按组；剩下 `exec` 按 POSIX 杀掉兄弟线程、
+  可选的 `ps` tgid 列，以及 SMP 支持的锁（共享 `brk`/fd 表的并发保护）。
 - **P3（已完成）**：C3 上板实测 `threadbench` + `swcost`；ARM 暂不扩。
 - **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 
