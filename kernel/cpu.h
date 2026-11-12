@@ -122,6 +122,12 @@ int  spin_trylock(spin_t *s);
 void plat_spin_acquire(volatile int *v);
 void plat_spin_release(volatile int *v);
 
+/* Called from a core's idle loop and timer tick so that another core can park
+ * it out of XIP for a ROM flash operation (XIP is in direct mode then, and an
+ * instruction fetch from it is a bus fault).  Weak no-op by default; boards
+ * with flash programming override it. */
+void plat_flash_park_poll(void);
+
 /* Wake a CPU that is parked in plat_cpu_idle().  Weak no-op by default; a
  * port whose idle is wfi and whose wake-up is sev (ARM) overrides it. */
 void plat_wake_cpu(void);

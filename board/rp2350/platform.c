@@ -308,6 +308,14 @@ static uint32_t measure_clk_khz(void)
 
 static uint32_t g_clk_hz = ARM_SYSTICK_CLK;
 
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+/* Set by core 0 before it takes XIP away for a ROM flash call; the parking
+ * block next to plat_block_erase is what acts on it. */
+static volatile int g_flash_park;
+static volatile int g_flash_parked;
+static void rp_flash_park_loop(void);
+#endif
+
 static void uart_init(void)
 {
     uint32_t div;
@@ -545,6 +553,12 @@ uint64_t plat_now_ns(void)
 
 void plat_timer_tick(void)
 {
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    /* Core 0 is about to turn XIP off for a ROM flash call: park here, in
+     * RAM, before the next instruction fetch can touch flash. */
+    if (g_flash_park)
+        rp_flash_park_loop();
+#endif
     /* Only the boot core counts time.  Every core needs its own tick - it is
      * what preempts whatever that core is running - but the counter they
      * share is global: two cores incrementing it would run the clock at 2x
@@ -777,6 +791,58 @@ static RAMFUNC void flash_enable_xip_via_boot2(void)
     ((void (*)(void))(uintptr_t)((uintptr_t)boot2_copyout + 1u))();
 }
 
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+/* ---- parking the other core out of XIP ---------------------------------- */
+
+/* While the ROM has QMI in direct mode, any XIP access from the other core is
+ * a bus fault, so the secondary core has to be off flash before the first
+ * byte of the sequence.  Same scheme as the RP2040 port: a flag, a RAM-resident
+ * spin loop, a check in the tick (which preempts whatever core 1 is running)
+ * and a check in idle (a core already inside its tick cannot be preempted
+ * again, so the tick check alone would never see the flag). */
+static RAMFUNC void rp_flash_park_loop(void)
+{
+    g_flash_parked = 1;
+    __asm__ volatile("dsb" ::: "memory");
+    /* Busy-spin, not wfe: clearing the flag and signalling is not atomic with
+     * entering wfe, and a lost wakeup would park this core for good with
+     * interrupts masked.  One erase/program burst is short. */
+    for (volatile uint32_t spins = 0; spins < 200000000u; spins++) {
+        if (!g_flash_park)
+            break;
+    }
+    g_flash_parked = 0;
+}
+
+void plat_flash_park_poll(void)
+{
+    if (g_flash_park)
+        rp_flash_park_loop();
+}
+
+static int rp_flash_park_other(void)
+{
+    if (cpu_count <= 1)
+        return 0;
+    g_flash_parked = 0;
+    g_flash_park = 1;
+    __asm__ volatile("sev" ::: "memory");
+    for (uint32_t i = 0; i < 20000000u; i++) {
+        if (g_flash_parked)
+            return 0;
+    }
+    g_flash_park = 0;
+    __asm__ volatile("sev" ::: "memory");
+    return -1;              /* core 1 never parked: do not kill XIP under it */
+}
+
+static void rp_flash_unpark_other(void)
+{
+    g_flash_park = 0;
+    __asm__ volatile("sev" ::: "memory");
+}
+#endif
+
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t addr, end, was_enabled;
@@ -788,6 +854,10 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     end  = ((lba + count) * 512u + RP_FLASH_SECTOR - 1u)
            & ~(RP_FLASH_SECTOR - 1u);
 
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    if (rp_flash_park_other() != 0)
+        return -1;
+#endif
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
     flash_init_boot2_copyout();
@@ -798,6 +868,9 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     flash_enable_xip_via_boot2();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    rp_flash_unpark_other();
+#endif
     return 0;
 }
 
@@ -813,6 +886,10 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
      * ramdisk.c is in SRAM, so the ROM never reads its source from XIP. */
     addr = lba * 512u;
 
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    if (rp_flash_park_other() != 0)
+        return -1;
+#endif
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
     flash_init_boot2_copyout();
@@ -823,6 +900,9 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     flash_enable_xip_via_boot2();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    rp_flash_unpark_other();
+#endif
     return 0;
 }
 

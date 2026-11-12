@@ -251,8 +251,15 @@ void plat_irq_restore(uint32_t state)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
 }
 
+__attribute__((weak)) void plat_flash_park_poll(void)
+{
+}
+
 void plat_cpu_idle(void)
 {
+    /* A core parked in sched_idle() is already inside its timer trap, so the
+     * tick check can never see the park flag; poll here before sleeping. */
+    plat_flash_park_poll();
     __asm__ volatile("csrsi mstatus, 8; wfi");
 }
 
