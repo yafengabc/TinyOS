@@ -114,6 +114,9 @@ struct pio_req {
 
 ## 验证
 
+真机验收按 `docs/HW-ACCEPTANCE.md` 的关卡 B–D 走，结果回填到这里的"验证"和
+`board/rp2040/README.md` 的进度表。
+
 - `loopback.pio`：`pio asm`、`start`、`tx 1 0 1 1`、`rx 4`，读回应逐位一致；
 - `blink.pio`：GP25 约 2 Hz，示波器看；
 - `ws2812.pio`：编码与 pico-sdk `pioasm` 生成的 `ws2812.pio.h` 逐字一致
