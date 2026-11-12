@@ -60,6 +60,11 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
 
 ## 已知限制
 
+- **写 flash 期间 clk_sys 会临时退回 12 MHz**：ROM 的 `flash_exit_xip` /
+  `enter_cmd_xip` 回放它启动时记下的 flash 模式与 SCLK 分频，而 SCLK 由 clk_sys
+  分频而来。150 MHz 下回放出的速率超出 flash 能读的范围，症状是「刷完能启动、
+  复位后再写就死」；把 PLL 关掉全程 12 MHz 则正常。现在擦写期间切回 clk_ref，
+  结束再从 SRAM 切回 PLL。
 - 窗口内部不再细分 code/data/guard（要细分得让镜像的 `wx` 落在对齐边界上）；
   和 RP2040 的 flat 模型同一个粒度。
 - `rp2350rvsmp` 的第二 hart 从 ROM 的 SIO-FIFO 等待循环里拉起来，握手是

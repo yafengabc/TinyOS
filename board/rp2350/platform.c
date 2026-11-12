@@ -73,6 +73,12 @@ static rp_rom_erase_t   g_rom_erase;
 static rp_rom_program_t g_rom_program;
 static int              g_rom_ready;
 
+/* Set by pll_sys_init() once clk_sys really is on PLL_SYS.  The flash path
+ * has to know whether it may switch clk_sys back to the aux mux: if the PLL
+ * never locked, clk_sys is on the ROM's source and writing SRC=AUX would
+ * point it at a stopped PLL and stop the CPU. */
+static int              g_clk_on_pll;
+
 /* Bring-up convenience: a script on COM14 can send one Ctrl-D and have the
    ROM mount BOOTSEL again, instead of a human pressing BOOT + RST before
    every single reflash.  ROM_FUNC_REBOOT is 'R','B' = 0x4252; flags 0x102
@@ -266,8 +272,10 @@ static void pll_sys_init(void)
                  CLK_SYS_CTRL_SRC_AUX |
                  (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
     for (i = 0; i < 1000000u; i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1)) {
+            g_clk_on_pll = 1;
             break;
+        }
     }
 }
 
@@ -741,6 +749,44 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
  * script's .data section (AT > FLASH) is copied by _start before kmain. */
 #define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
 
+/* Run the ROM's flash sequence at the rate the ROM booted at.
+ *
+ * flash_exit_xip/flash_enter_cmd_xip replay the flash mode and SCLK divider
+ * the boot ROM recorded when it scanned the image.  QMI derives SCLK from
+ * clk_sys, so replaying that divider at 150 MHz puts SCLK past what the chip
+ * can read: the erase/program completes, and then the first instruction
+ * fetched after enter_cmd_xip comes back wrong and the core dies there.  The
+ * fitted symptom is a board that boots and runs for as long as nothing writes
+ * flash - `dd` kills it, on ARM and RISC-V alike, and only when clk_sys is on
+ * the PLL; with PLL_SYS left off the same image survives.
+ *
+ * Dropping to clk_ref (12 MHz) for the duration reproduces the configuration
+ * that has been verified end to end.  Both helpers run from SRAM, so PLL_SYS
+ * is back before any instruction is fetched from XIP. */
+static RAMFUNC void clk_sys_flash_slow(void)
+{
+    if (!g_clk_on_pll)
+        return;
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);   /* clk_sys = clk_ref */
+    for (uint32_t i = 0; i < 1000000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
+            break;
+    }
+}
+
+static RAMFUNC void clk_sys_flash_restore(void)
+{
+    if (!g_clk_on_pll)
+        return;
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
+                 CLK_SYS_CTRL_SRC_AUX |
+                 (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
+    for (uint32_t i = 0; i < 1000000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
+            break;
+    }
+}
+
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t addr, end, was_enabled;
@@ -754,11 +800,13 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
+    clk_sys_flash_slow();
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_erase(addr, end - addr, RP_FLASH_SECTOR, RP_SECTOR_ERASE_CMD);
     g_rom_flush();
     g_rom_enter_xip();
+    clk_sys_flash_restore();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return 0;
@@ -778,11 +826,13 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
+    clk_sys_flash_slow();
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_program(addr, (const uint8_t *)buf, count * 512u);
     g_rom_flush();
     g_rom_enter_xip();
+    clk_sys_flash_restore();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return 0;

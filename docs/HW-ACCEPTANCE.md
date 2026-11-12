@@ -281,7 +281,26 @@ prot rodata              # 期望被 MPU 当场拦下（"prot: caught" 一类输
 
 `prot` 在这块板上是**真保护**，跑完记得 `reboot` 复位。
 
-### 2.5 关于 PIO
+### 2.5 关卡 J：复位之后的 flash 写（回归，ARM 与 RISC-V 都要做）
+
+早于 `64a11ce` 的镜像这一步会把板子写死：写本身成功，死在写完之后。原因是
+`flash_enter_cmd_xip` 回放的 SCLK 分频是为 ROM 启动时的 clk_sys 算的，而内核
+已经跑到 150 MHz（见两块板 README 的"已知限制"）。**刷完机立刻测是测不出来的**，
+必须在复位之后测。
+
+```
+dd if=/bin/hello of=/x bs=512 count=8
+df
+reboot
+dd if=/bin/hello of=/y bs=512 count=8
+df
+ls /x /y
+```
+
+**PASS**：两次 `dd` 都成功，`reboot` 之后还能回到 `tos>`，`/x`、`/y` 都在。
+`rp2350`、`rp2350smp`、`rp2350rv`、`rp2350rvsmp` 四个镜像都要过。
+
+### 2.6 关于 PIO
 
 RP2350 上**没有**实现 PIO（`board/rp2350/` 没有 pio.c，RP2350 是每块 3 个 SM /
 共 12 个，寄存器和 RP2040 不完全相同）。在 RP2350 上敲 `pio` 得到
