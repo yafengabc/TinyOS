@@ -181,6 +181,7 @@ arch/rv32/           RV32 实现：start.S（入口 + trap 向量，含第二 ha
   regs.h usys.h      RV32 的 trap 帧布局（144 B）/ ecall 入口
 board/pc/            x86 板级内存布局（layout.c，含 littlefs 分区 LBA）
 board/qemu-virt/     QEMU virt (rv32) 板级布局（layout.c）；rv32 与 rv32smp 共用
+board/*/README.md     每块板子的使用说明与移植进度（构建、烧写、控制台、能力边界）
 docs/PLATFORM-DESIGN.md  无 MMU 平坦模型的设计与路线图
 docs/SHELL-GUIDE.md   shell 脚本与优先级的详细使用说明（示例均为实跑输出）
 docs/OPEN-ITEMS.md   已评估、还没拍板的事项（决策队列，含实测数字）
@@ -715,7 +716,8 @@ python scripts/rp2350/flash.py --list
 换号。`--smoke` 在看到 `tos> ` 之后依次跑 `echo / ls / free / uptime /
 cat /proc/uptime / gpio / reboot`；若打开串口时启动提示已打印完，会补一个空行让
 shell 重发提示符。启动两行分别打印 ROM 留下的 `clk=` 值（UART 与 USB 各一行），
-用来核对 115200 的分频。littlefs 镜像放在 flash 偏移 `0x100000`（1 MiB），内核在它之前。
+用来核对 115200 的分频。littlefs 镜像放在 flash 偏移 `0x80000`（512 KiB），内核在它之前，
+分区一直用到 flash 末尾；详见 `board/rp2350/README.md`。
 
 板级文件：`board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c,board_internal.h}`；
 驱动位于 `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、
