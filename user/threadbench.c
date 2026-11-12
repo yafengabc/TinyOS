@@ -35,8 +35,7 @@ static void worker(void *arg)
         x += (i ^ id);
 
     sums[id] = x;
-    done[id]++;
-    printf("threadbench: thread %u done (sum %u)\n", id, x);
+    done[id]++;         /* no console output in the timed section */
 }
 
 int main(void)
@@ -67,6 +66,9 @@ int main(void)
                done[0], done[1], done[2]);
         return 1;
     }
+
+    printf("threadbench: %u/%u/%u threads completed\n",
+           done[0], done[1], done[2]);
 
     t0 = clock_ms();
     for (unsigned id = 0; id < NTHR; id++) {

@@ -105,6 +105,11 @@ threadbench: sleep() in main, sibling kept running
 都完成、`join` 正常回收、阻塞按线程生效——这三点才是"真线程"与协作线程的分界。
 目前线程只拿 console fd，文件/管道共享是下一步；`exec` 在线程里调用会失败。
 
+C3 实测（160 MHz）：`threadbench` 3 线程 41 ms vs 串行 24 ms（171%），三个线程
+1/1/1 完成；`swcost`：`getpid` 3.3 µs、`yield` 12.6 µs。单核没有并行加速，
+171% 里的主要部分不是切换成本（40 个 tick ≈ 0.5 ms），tick/缓存开销仍在查，
+见 `docs/REAL-THREADS.md` §4.5。
+
 ## 移植进度
 
 | 功能 | 状态 | 说明 |

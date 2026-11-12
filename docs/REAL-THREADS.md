@@ -89,7 +89,7 @@ trap + `sched_switch` 路径。把这四个数填到下表，再和"每线程内
 | --- | --- | --- | --- | --- | --- |
 | x86 (QEMU TCG) | 7.5 µs | 23 µs | ~20 µs | 32.5 µs | TCG 放大约一个数量级，只看相对值 |
 | rv32 (QEMU TCG) | 512 µs | 796 µs |  | — | TCG 下绝对值无意义；比例 1.55 |
-| esp32c3 |  |  |  |  | 待上板（见 `threadbench`） |
+| **esp32c3（真机）** | **3.34 µs** | **12.62 µs** | ~12.6 µs | — | 160 MHz / 80 MHz APB，XIP 内核 |
 | rp2040 |  |  |  |  | 未接（本实验只做 RV32） |
 
 QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TCG 的解释开销），
@@ -118,14 +118,29 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
 QEMU rv32 实测（`threadbench`，3 线程 × 300k 次迭代）：
 
 ```
-threadbench: 3 threads, 300000 iters each: 18783 ms
-threadbench: same work inline:        21736 ms
-threadbench: ratio 86%
+threadbench: 1/1/1 threads completed
+threadbench: 3 threads, 300000 iters each: 19103 ms
+threadbench: same work inline:        21751 ms
+threadbench: ratio 88%
+```
+
+C3 真机（同一镜像，`configs/c3-kthreads.conf`）：
+
+```
+threadbench: 1/1/1 threads completed
+threadbench: 3 threads, 300000 iters each: 41 ms
+threadbench: same work inline:        24 ms
+threadbench: ratio 171%
 threadbench: sleep() in main, sibling kept running
 ```
 
 单核上没有加速是预期的；三个线程都完成、`join` 正常回收、主线程 `sleep` 时兄弟
-线程继续跑，这三点正是"真线程"与协作线程的分界。C3 上板数据待补。
+线程继续跑，这三点正是"真线程"与协作线程的分界。
+
+**C3 的 171% 需要单独解释**：一次切换按 `swcost` 是 12.6 µs，40 ms 里约 40 个
+tick 只值 0.5 ms，剩下的 ~16 ms 不在切换本身。下一步要用 `-d`/GPIO 打点确认
+tick 路径（TIMG + 控制台轮询）在"多任务可运行"时的实际成本；在此之前不要把
+171% 当成线程切换开销。
 
 判据（拍板用）：
 
@@ -139,7 +154,7 @@ threadbench: sleep() in main, sibling kept running
   `threadbench`；QEMU rv32 上 3 线程全部完成、join 回收、阻塞按线程生效。
 - **P2**：fd 表真正共享（现在线程只拿 console）、cwd/brk 已共享但需要并发写保护、
   `ps` 显示 tgid、信号按组、`exec` 按 POSIX 杀掉兄弟线程。
-- **P3**：C3 上板实测 `threadbench` + `swcost`；再决定是否/如何扩到 ARM。
+- **P3（已完成）**：C3 上板实测 `threadbench` + `swcost`；ARM 暂不扩。
 - **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 
 ## 6. 必须提前想清楚的坑
