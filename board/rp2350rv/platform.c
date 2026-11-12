@@ -513,6 +513,21 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
  * linker script copies .data.ramfunc to SRAM before kmain. */
 #define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
 
+/* The ROM replays the flash mode *and SCLK divider* it booted with on every
+ * flash_exit_xip/flash_enter_cmd_xip pair.  QMI derives SCLK from clk_sys, so
+ * once the kernel moves clk_sys to 150 MHz that replay hands back an SCLK the
+ * flash cannot read at: the erase/program itself completes (it is bit-banged
+ * by the ROM at its own pace), and then the first instruction fetched after
+ * enter_cmd_xip comes back wrong and the hart dies on the spot.  That is why
+ * the board runs for as long as nothing writes flash and dies at the first
+ * write - and why the boot right after a BOOTSEL session survives: the ROM is
+ * still carrying the conservative settings it used to program the image.
+ *
+ * Dropping the clk_sys divider for the duration makes SCLK follow it down.
+ * 37.5 MHz is inside the range of every mode the boot scan can have picked,
+ * and the restore below runs from SRAM, before the next fetch from flash. */
+#define CLK_SYS_DIV_SLOW (4u << 16)     /* 150 MHz / 4 = 37.5 MHz */
+
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t addr, end, was_enabled;
@@ -525,11 +540,13 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
            & ~(RP_FLASH_SECTOR - 1u);
 
     __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(was_enabled));
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_SYS_DIV_SLOW);
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_erase(addr, end - addr, RP_FLASH_SECTOR, RP_SECTOR_ERASE_CMD);
     g_rom_flush();
     g_rom_enter_xip();
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
     if (was_enabled & 8u)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return 0;
@@ -545,11 +562,13 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     addr = lba * 512u;
 
     __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(was_enabled));
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_SYS_DIV_SLOW);
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_program(addr, (const uint8_t *)buf, count * 512u);
     g_rom_flush();
     g_rom_enter_xip();
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
     if (was_enabled & 8u)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return 0;
