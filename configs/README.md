@@ -79,3 +79,4 @@ Examples:
 | `configs/rp2040.conf` | RP2040, WiFi commands excluded |
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |
 | `configs/rp2350rv.conf` | RP2350 Hazard3, WiFi commands excluded |
+| `configs/x86-threads.conf` | x86 with the cooperative thread library (`swcost`, `threadtest`) |
