@@ -73,12 +73,6 @@ static rp_rom_erase_t   g_rom_erase;
 static rp_rom_program_t g_rom_program;
 static int              g_rom_ready;
 
-/* Set by pll_sys_init() once clk_sys really is on PLL_SYS.  The flash path
- * has to know whether it may switch clk_sys back to the aux mux: if the PLL
- * never locked, clk_sys is on the ROM's source and writing SRC=AUX would
- * point it at a stopped PLL and stop the CPU. */
-static int              g_clk_on_pll;
-
 /* Bring-up convenience: a script on COM14 can send one Ctrl-D and have the
    ROM mount BOOTSEL again, instead of a human pressing BOOT + RST before
    every single reflash.  ROM_FUNC_REBOOT is 'R','B' = 0x4252; flags 0x102
@@ -272,10 +266,8 @@ static void pll_sys_init(void)
                  CLK_SYS_CTRL_SRC_AUX |
                  (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
     for (i = 0; i < 1000000u; i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1)) {
-            g_clk_on_pll = 1;
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
             break;
-        }
     }
 }
 
@@ -749,42 +741,40 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
  * script's .data section (AT > FLASH) is copied by _start before kmain. */
 #define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
 
-/* Run the ROM's flash sequence at the rate the ROM booted at.
+/* Restore XIP the way pico-sdk's flash_range_erase/program does.
  *
- * flash_exit_xip/flash_enter_cmd_xip replay the flash mode and SCLK divider
- * the boot ROM recorded when it scanned the image.  QMI derives SCLK from
- * clk_sys, so replaying that divider at 150 MHz puts SCLK past what the chip
- * can read: the erase/program completes, and then the first instruction
- * fetched after enter_cmd_xip comes back wrong and the core dies there.  The
- * fitted symptom is a board that boots and runs for as long as nothing writes
- * flash - `dd` kills it, on ARM and RISC-V alike, and only when clk_sys is on
- * the PLL; with PLL_SYS left off the same image survives.
+ * The boot ROM leaves a 256-byte XIP-setup routine in bootram: the one its
+ * flash scan used, i.e. the fast read mode and read delay it found for this
+ * chip.  The SDK copies it to RAM and calls it after flash_flush_cache();
+ * calling flash_enter_cmd_xip() instead installs the ROM's own basic mode
+ * (03h serial read, CLKDIV=12), whose read delay is counted in clk_sys cycles
+ * and is therefore 12.5x too short once clk_sys is at 150 MHz.  The first
+ * instruction fetched after the write is then sampled before the flash has
+ * driven it, and the core dies on the spot.  At 12 MHz the same mode still
+ * works, which is what made the failure look clock-dependent.
  *
- * Dropping to clk_ref (12 MHz) for the duration reproduces the configuration
- * that has been verified end to end.  Both helpers run from SRAM, so PLL_SYS
- * is back before any instruction is fetched from XIP. */
-static RAMFUNC void clk_sys_flash_slow(void)
+ * The +1 is the Thumb bit; pico-sdk notes it is harmless on RISC-V because
+ * JALR clears bit 0 of the target. */
+#define BOOTRAM_BASE     0x400e0000u
+#define BOOT2_SIZE_WORDS 64u
+
+static uint32_t boot2_copyout[BOOT2_SIZE_WORDS];
+static int      boot2_copyout_valid;
+
+static RAMFUNC void flash_init_boot2_copyout(void)
 {
-    if (!g_clk_on_pll)
+    const volatile uint32_t *src = (const volatile uint32_t *)BOOTRAM_BASE;
+
+    if (boot2_copyout_valid)
         return;
-    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);   /* clk_sys = clk_ref */
-    for (uint32_t i = 0; i < 1000000u; i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
-            break;
-    }
+    for (uint32_t i = 0; i < BOOT2_SIZE_WORDS; i++)
+        boot2_copyout[i] = src[i];
+    boot2_copyout_valid = 1;
 }
 
-static RAMFUNC void clk_sys_flash_restore(void)
+static RAMFUNC void flash_enable_xip_via_boot2(void)
 {
-    if (!g_clk_on_pll)
-        return;
-    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
-                 CLK_SYS_CTRL_SRC_AUX |
-                 (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
-    for (uint32_t i = 0; i < 1000000u; i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
-            break;
-    }
+    ((void (*)(void))(uintptr_t)((uintptr_t)boot2_copyout + 1u))();
 }
 
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
@@ -800,13 +790,12 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
-    clk_sys_flash_slow();
+    flash_init_boot2_copyout();
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_erase(addr, end - addr, RP_FLASH_SECTOR, RP_SECTOR_ERASE_CMD);
     g_rom_flush();
-    g_rom_enter_xip();
-    clk_sys_flash_restore();
+    flash_enable_xip_via_boot2();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return 0;
@@ -826,13 +815,12 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
-    clk_sys_flash_slow();
+    flash_init_boot2_copyout();
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_program(addr, (const uint8_t *)buf, count * 512u);
     g_rom_flush();
-    g_rom_enter_xip();
-    clk_sys_flash_restore();
+    flash_enable_xip_via_boot2();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return 0;

@@ -283,10 +283,10 @@ prot rodata              # 期望被 MPU 当场拦下（"prot: caught" 一类输
 
 ### 2.5 关卡 J：复位之后的 flash 写（回归，ARM 与 RISC-V 都要做）
 
-早于 `64a11ce` 的镜像这一步会把板子写死：写本身成功，死在写完之后。原因是
-`flash_enter_cmd_xip` 回放的 SCLK 分频是为 ROM 启动时的 clk_sys 算的，而内核
-已经跑到 150 MHz（见两块板 README 的"已知限制"）。**刷完机立刻测是测不出来的**，
-必须在复位之后测。
+早于 `b3764ac` 的镜像这一步会把板子写死：写本身成功，死在写完之后。原因是
+写完 flash 后没有走 bootram 里的 XIP 设置例程，`flash_enter_cmd_xip` 安装的
+03h 基本模式在 150 MHz 下读延迟不足（见两块板 README 的"已知限制"）。
+**刷完机立刻测是测不出来的**，必须在复位之后测。
 
 ```
 dd if=/bin/hello of=/x bs=512 count=8

@@ -97,12 +97,13 @@ ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 
 
 ## 已知限制
 
-- **写 flash 时 clk_sys 会临时退回 12 MHz**。ROM 的 `flash_exit_xip`/`enter_cmd_xip`
-  回放的是它启动时扫描到的 flash 模式与 SCLK 分频，而 QMI 的 SCLK 由 clk_sys 分频
-  得到；clk_sys 上到 150 MHz 后回放出来的速率超出 flash 能读的范围，表现就是
-  「能启动、一 `dd` 就死在写完之后」。现在 `plat_block_erase/write` 在 ROM 序列
-  期间把 clk_sys 切回 clk_ref，结束再从 SRAM 切回 PLL（`clk_sys_flash_slow/restore`）。
-  代价只是擦写命令阶段变慢；不写 flash 的路径仍然是 150 MHz。
+- **写完 flash 要走 bootram 里的 XIP 设置例程，不能调 `flash_enter_cmd_xip`**。
+  ROM 在 bootram（`0x400e0000`）留了 256 字节的 XIP 设置代码，就是它扫 flash 时
+  找到的快读模式；pico-sdk 的 `flash_range_*` 把它拷到 RAM、在 `flash_flush_cache`
+  之后调用。`flash_enter_cmd_xip` 装的是 ROM 自己的基本模式（03h 串读、CLKDIV=12），
+  读延迟按 clk_sys 周期计，150 MHz 时短了 12.5 倍——写完之后取的第一条指令在 flash
+  还没驱动数据时就被采样，核当场死；12 MHz 下同一模式仍工作，所以症状看起来像
+  「跟时钟有关」。`plat_block_erase/write` 现在走 `flash_enable_xip_via_boot2`。
 - 512 KiB 里 128 KiB 固定给内核；屏的 DMA 行缓冲（~3.8 KiB）也在内核 `.bss`。
 - littlefs 分区从 `0x80000` 到 flash 末尾，内核必须留在前 512 KiB。
 - `rp2350` / `rp2350smp` 的堆仍是 60 KiB（历史上按"exec 同时持有压缩+解压缓冲"定的），
