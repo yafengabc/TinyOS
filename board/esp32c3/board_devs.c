@@ -23,6 +23,12 @@
  *   ADC1      channels 0..4 on GPIO0..4; ADC2 channel 0 on GPIO5.  Only
  *             ADC1 is wired up below: ADC2 shares its blocks with Wi-Fi,
  *             and the C3 errata says its one-shot reads are unreliable.
+ *   SPI2      SCK=GPIO4, MOSI=GPIO5, MISO=GPIO2.  CS is a plain GPIO (10 by
+ *             convention) because one bus usually has several devices.
+ *   I2C0      SDA=GPIO8, SCL=GPIO9.  Bit-banged for now; note that GPIO9 is
+ *             also the BOOT strapping pin, so a device holding SCL low at
+ *             reset keeps the chip out of the flash boot path.
+ *   PWM       LEDC channels 0..5 can be routed to any of GPIO0..10.
  *   Flash     4 MiB inside the module (boot + littlefs), not a header pin.
  */
 
@@ -50,6 +56,11 @@ static const board_dev_t c3_devs[] = {
     { "adc2",  "GPIO2 / ADC1_2", TOS_DEV_ADC, 0, 2, 2, "12 bit, 3.3 V" },
     { "adc3",  "GPIO3 / ADC1_3", TOS_DEV_ADC, 0, 3, 3, "12 bit, 3.3 V" },
     { "adc4",  "GPIO4 / ADC1_4", TOS_DEV_ADC, 0, 4, 4, "12 bit, 3.3 V" },
+
+    { "spi0",  "SPI2 header",    TOS_DEV_SPI, 0, 4, 0, "sck4 mosi5 miso2" },
+    { "i2c0",  "I2C0 header",    TOS_DEV_I2C, 0, 8, 0, "sda8 scl9" },
+    { "pwm0",  "6 LEDC channels", TOS_DEV_PWM, 0, -1, 0, "gp0..gp10" },
+
     { "uart0", "CH340K USB-serial", TOS_DEV_UART, 0, 21, -1,
       "tx21 rx20 115200" },
     { "usb0",  "native USB-Serial/JTAG", TOS_DEV_USB, 0, -1, -1,

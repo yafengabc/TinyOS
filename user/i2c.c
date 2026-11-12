@@ -1,14 +1,14 @@
 #include "lib.h"
 
-/* i2c - scan or talk to a device on I2C0/I2C1.
+/* i2c - scan or talk to a device on the board's I2C bus(es).
  *
  *   i2c                                   describe the buses
  *   i2c scan <bus> [hz]                   probe 0x08..0x77
  *   i2c read <bus> <addr> <reg> <len>     write reg, then read len bytes
  *   i2c write <bus> <addr> <reg> <byte>... write reg followed by hex bytes
  *
- * I2C0 is SDA=GP4 SCL=GP5, I2C1 is SDA=GP6 SCL=GP7.  Scan reads one byte
- * from each address because the controller has no zero-length transaction;
+ * The pin map is board policy and `cat /proc/dev` lists it.  Scan reads one
+ * byte from each address because a zero-length transaction is not portable;
  * that is still a normal address-probe and an absent device aborts cleanly.
  */
 
@@ -64,7 +64,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc < 2) {
-        printf("i2c: %d bus(es), I2C0 sda4 scl5, I2C1 sda6 scl7\n", n);
+        printf("i2c: %d bus(es); 'cat /proc/dev' lists sda/scl\n", n);
         usage();
         return 0;
     }

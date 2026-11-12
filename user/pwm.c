@@ -6,9 +6,10 @@
  *   pwm <gpio> <hz> <pct>   configure a pin
  *   pwm <gpio> off          stop and release the pin
  *
- * The RP2040 has eight slices with two outputs each (16 channels), and any
- * GPIO 0..29 can be routed to one of them.  Both outputs of a slice share
- * the frequency, so the command prints which slice a pin landed on.
+ * Which pins can do PWM is board policy: the RP2040 maps GPIOs to slices
+ * (two outputs of a slice share a frequency), the ESP32-C3 routes six LEDC
+ * channels through the GPIO matrix.  `cat /proc/dev` lists what this board
+ * exposes; a pin the driver cannot use is rejected with an error.
  */
 
 static void usage(void)
@@ -19,8 +20,7 @@ static void usage(void)
 int main(int argc, char *argv[])
 {
     int n = pwm_count();
-    int gpio, slice, freq, pct, duty;
-    char ch;
+    int gpio, freq, pct, duty;
 
     if (n <= 0) {
         puts("pwm: this board has no PWM wired up for user space\n");
@@ -28,14 +28,15 @@ int main(int argc, char *argv[])
     }
 
     if (argc < 2) {
-        printf("pwm: %d channels, GPIO 0..29\n", n);
+        printf("pwm: %d channels; 'cat /proc/dev' lists the pins\n", n);
         usage();
         return 0;
     }
 
     gpio = atoi(argv[1]);
-    if (gpio < 0 || gpio >= 30) {
-        printf("pwm: GPIO %d does not exist (0..29)\n", gpio);
+    if (gpio < 0 || gpio >= gpio_count()) {
+        printf("pwm: GPIO %d does not exist (0..%d)\n", gpio,
+               gpio_count() - 1);
         return 1;
     }
 
@@ -66,9 +67,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    slice = (gpio >> 1) & 7;
-    ch = (gpio & 1) ? 'B' : 'A';
-    printf("pwm: GP%d -> slice %d%c, %d Hz, %d%%\n",
-           gpio, slice, ch, freq, pct);
+    printf("pwm: GP%d = %d Hz, %d%%\n", gpio, freq, pct);
     return 0;
 }
