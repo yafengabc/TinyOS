@@ -99,6 +99,14 @@ threadbench: same work inline:        <ms>
 threadbench: sleep() in main, sibling kept running
 ```
 
+边界情况用 `kthreadtest`（12 项检查：槽耗尽、重复 join、僵尸槽、组长带活线程退出、
+阻塞重叠）：
+
+```sh
+tos> kthreadtest
+tos> kthreadtest leave    # 之后 ps 不应再看到那个线程
+```
+
 线程由内核调度：tick 可以抢占，一个线程 `read()/sleep()` 只挂起它自己；它们共享
 进程的窗口和堆（栈由 `kthread_create()` 用 `sbrk` 从堆里切）。C3 是单核，所以
 `threadbench` 的期望结果是**总时间与单线程串行相近**（ratio ≈ 100%），但三个线程

@@ -109,9 +109,13 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
   PMP data 区域自动覆盖这些栈。
 - **入口**：用户侧 `kthread_trampoline(fn, arg)` 调完用户函数后 `kthread_exit(0)`；
   内核只需要 `plat_prepare_user_frame(entry, sp)` + `a0 = arg`。
-- **退出/join**：线程退出把 code 推进组首的 lag 队列（和子进程退出码同一机制），
-  唤醒 `ST_WAIT_THREAD` 的 joiner 并回收槽；`join` 先查 lag，再阻塞。
+- **退出/join**：线程退出时把自己的 code 记在槽里（`ST_THREAD_ZOMBIE`）。有 joiner
+  在 `ST_WAIT_THREAD` 等就当场把 code 写进它的帧和用户指针，然后回收槽；没人等就
+  保留僵尸槽，等 `join` 来取。重复 join 返回 -1。没人 join 的线程会一直占一个槽
+  （POSIX 里未被 wait 的子进程同样如此），组长退出时整组回收。
 - **组退出**：组长退出时把同组线程槽一起回收（`exec` 也拒绝在线程里调用）。
+- **SMP**：暂不支持。共享堆/组状态没有锁，`[features] kthreads` + 多核目标会在
+  构建期直接报错（`kthreads is uniprocessor-only for now`），C 侧还有 `#error` 兜底。
 - **已知简化**：线程只拿到 console fd（文件/管道共享是 P2）；线程栈不参与
   爆栈自动翻倍；`ps` 里线程是独立 pid，没有 tgid 列。
 
@@ -161,13 +165,37 @@ threadbench: sleep() in main, sibling kept running
 - 用户侧：`kthread.c` 目标文件 1,496 B，只有调用它的程序才链接；`threadbench`
   2,822 B，只出现在开 kthreads 的构建里。
 
+## 4.7 边界测试（`kthreadtest`）
+
+`user/kthreadtest.c` 覆盖 threadbench 不碰的情况，C3 真机全部通过：
+
+```
+kthreadtest: ok   create
+kthreadtest: ok   join returns the exit code
+kthreadtest: ok   second join fails
+kthreadtest: ok   join after exit (zombie slot)
+kthreadtest: ok   join unknown tid fails
+kthreadtest: 6 thread slot(s) usable beside shell+self
+kthreadtest: ok   slot exhaustion returns -1
+kthreadtest: ok   create works again after joining everything
+kthreadtest: ok   churn join code
+kthreadtest: ok   leader ran while the thread was still asleep
+kthreadtest: ok   join sleeping thread
+kthreadtest: ok   thread finished before join returned
+kthreadtest: overlapped sleep 200 ms (wall clock)
+kthreadtest: all ok (0 failure(s))
+```
+
+`kthreadtest leave` 在组长退出时留下一个活线程，之后 `ps` 只剩 `msh`，证明整组
+被回收、槽和窗口都没有泄漏。C3 的 6 槽 = 8 个进程槽 − shell − 被测程序。
+
 ## 5. 阶段计划
 
 - **P0（已完成）**：评估文档 + `swcost` 基线。
 - **P1（已完成，RV32/C3 分支）**：`SYS_THREAD_CREATE/EXIT/JOIN`、线程槽共享窗口、
   `threadbench`；QEMU rv32 上 3 线程全部完成、join 回收、阻塞按线程生效。
 - **P2**：fd 表真正共享（现在线程只拿 console）、cwd/brk 已共享但需要并发写保护、
-  `ps` 显示 tgid、信号按组、`exec` 按 POSIX 杀掉兄弟线程。
+  `ps` 显示 tgid、信号按组、`exec` 按 POSIX 杀掉兄弟线程。SMP 支持的锁也在这一步。
 - **P3（已完成）**：C3 上板实测 `threadbench` + `swcost`；ARM 暂不扩。
 - **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 

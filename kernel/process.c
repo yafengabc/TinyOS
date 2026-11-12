@@ -113,6 +113,7 @@ enum {
     ST_WAIT_SLEEP,
     ST_WAIT_PIPE,
     ST_WAIT_THREAD, /* TOS_KTHREADS: a join() waiting for a sibling  */
+    ST_THREAD_ZOMBIE,/* TOS_KTHREADS: exited, code kept until join     */
     ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
      * exist as a state of its own: on SMP two exec()s can be building two
@@ -208,6 +209,7 @@ typedef struct proc {
 #ifdef TOS_KTHREADS
     struct proc *leader;
     int      tgid;          /* thread group id: the leader's pid */
+    int      exit_code;     /* ST_THREAD_ZOMBIE: value for join() */
 #endif
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
     int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
@@ -2314,6 +2316,10 @@ regs_t *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len)
 #error "TOS_KTHREADS is implemented for RV32 only: the thread entry frame uses a0 and the RV32 syscall ABI.  See docs/REAL-THREADS.md."
 #endif
 
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+#error "TOS_KTHREADS is uniprocessor-only for now: the shared heap and group state have no SMP locking.  Use a single-CPU target."
+#endif
+
 /* User pointers are checked against the *group* window: a thread slot has no
  * window of its own, so process_user_ok(current, ...) would reject every
  * address the thread legitimately owns. */
@@ -2410,21 +2416,28 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
 regs_t *process_thread_exit(regs_t *r, int code)
 {
     proc_t *p = current;
-    proc_t *leader;
     proc_t *woke = NULL;
     uint32_t irq;
 
     if (!p || !p->leader)
         return process_exit(r, code);
 
-    leader = p->leader;
     irq = plat_irq_save();
     spin_lock(&proc_lock);
-    /* join(tid) may already have been called: the code has to survive the
-     * slot, so it goes into the group's lag list like a child's exit code. */
-    lag_push(leader, p->pid, code);
+    p->exit_code = code;
     woke = wake_joiner_locked(p, code);
-    proc_retire_locked(p);
+    if (woke) {
+        /* The waiter has the code in its frame and its user buffer, so the
+         * slot can go right away. */
+        proc_retire_locked(p);
+    } else {
+        /* No joiner yet: keep the slot (and the code) until join() takes it,
+         * or until the leader exits and retires the whole group.  A thread
+         * nobody ever joins therefore holds one table slot - the same cost a
+         * zombie child has in POSIX until wait(). */
+        p->state = ST_THREAD_ZOMBIE;
+        p->cpu = -1;
+    }
     spin_unlock(&proc_lock);
     plat_irq_restore(irq);
 
@@ -2441,22 +2454,11 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
     uint32_t irq;
     int code;
 
-    if (!g)
+    if (!g || (codeptr && !group_user_ok(g, codeptr, sizeof(int))))
         return done(r, -1);
 
     irq = plat_irq_save();
     spin_lock(&proc_lock);
-
-    if (lag_take(g, tid, &code)) {
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
-        if (codeptr) {
-            if (!group_user_ok(g, codeptr, sizeof(int)))
-                return done(r, -1);
-            *(int *)codeptr = code;
-        }
-        return done(r, 0);
-    }
 
     for (int i = 0; i < MAX_PROCS; i++)
         if (procs[i].state != ST_FREE && procs[i].pid == tid) {
@@ -2468,10 +2470,15 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
         plat_irq_restore(irq);
         return done(r, -1);
     }
-    if (codeptr && !group_user_ok(g, codeptr, sizeof(int))) {
+
+    if (t->state == ST_THREAD_ZOMBIE) {
+        code = t->exit_code;
+        proc_retire_locked(t);
         spin_unlock(&proc_lock);
         plat_irq_restore(irq);
-        return done(r, -1);
+        if (codeptr)
+            *(int *)codeptr = code;
+        return done(r, 0);
     }
 
     me->wait_pid = tid;
