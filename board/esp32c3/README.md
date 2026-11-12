@@ -83,8 +83,14 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 
 **内核堆可以降**：无 WiFi 时 `heap = 16384` 实测启动后峰值 768 B，跑完
 `py pytest.py`（54 项）加 320 KiB 的 `dd` 写读后峰值 1.5 KiB；任务区因此从
-240 KiB 增到 **304 KiB**（15 → 19 个窗口），内核 RAM 降到 57 KiB。可复现配置：
-`configs/esp32c3-16k.conf`。WiFi 构建不要照做。
+240 KiB 增到 **304 KiB**（15 → 19 个窗口），内核 RAM 降到 57 KiB。
+
+同时能跑多少任务受 `max_procs` 限制，不是窗口数：C3 默认 8 槽，即使有 19 个窗口
+也只能同时存在 8 个任务。`configs/esp32c3-16k.conf` 里把它提到 16（多 6.8 KiB
+`.bss`），实测 **12 个后台 `sleep` 任务 + shell** 同时在线；任务区仍是 304 KiB，
+但内核结束地址刚好落在 16 KiB 边界下方 32 B——内核再长一点就会少一个窗口。
+
+WiFi 构建不要照做。
 
 ## 外设与用户命令
 
