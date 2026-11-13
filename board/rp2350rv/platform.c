@@ -286,26 +286,41 @@ static void clocks_init(void)
                 break;
         }
     }
-    /* The 64-bit TIMER (TIMERAWL, and the RV32 mtime it feeds) only counts
-     * while the TICKS block is emitting its 1 MHz tick: TIMER0_CTRL.ENABLE
-     * plus TIMER0_CYCLES = clk_ref/clk_tick - 1.  The ROM sets this up for
-     * the clock it booted with; changing clk_ref without touching it leaves
-     * the counter stopped, which the panel driver sees as "every delay takes
-     * its full safety bound" (~13 s per delay) and the scheduler as "no
-     * ticks, no console drain".  Program it here, after clk_ref is final. */
-    if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2)) {
-        /* clk_ref = XOSC 12 MHz -> 12 cycles per microsecond */
-        mmio_write32(TICKS_BASE + TICKS_TIMER0_CYCLES_OFFSET, 11u);
-        mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 1u);
-    } else {
-        mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 0u);
-    }
+    /* TIMER0 is programmed by ticks_init() once it is out of reset. */
 
     /* clk_peri = clk_sys, undivided.  AUXSRC 0 is clk_sys on the RP2350. */
     mmio_write32(CLOCKS_BASE + CLK_PERI_DIV_OFFSET, CLK_DIV_1);
     mmio_write32(CLOCKS_BASE + CLK_PERI_CTRL_OFFSET,
                  CLK_PERI_CTRL_ENABLE |
                  (CLK_PERI_CTRL_AUXSRC_CLK_SYS << 5));
+}
+
+/* The 64-bit TIMER (TIMERAWL, and the RV32 mtime it feeds) only counts while
+ * the TICKS block emits its 1 MHz tick: TIMER0_CTRL.ENABLE plus TIMER0_CYCLES
+ * = clk_ref/clk_tick - 1.  The ROM sets this up for the clock it booted with,
+ * and only its flash boot releases TIMER0 from reset at all, so after a RUN
+ * reset the counter is stopped: the scheduler never ticks, the console ring is
+ * never drained and every driver delay spins its safety bound.
+ *
+ * This has to run *after* TIMER0 is out of reset (plat_board_early() does that)
+ * and after clk_ref is final.  Programming it while the block is still held in
+ * reset is a write into a block that may drop it.
+ *
+ * A slightly wrong tick rate beats a stopped counter: with no fallback the
+ * board behaves exactly like the bug this fixes, so ROSC (no crystal, or a
+ * crystal that failed to start) still gets a divisor, from the datasheet's
+ * nominal rate, instead of having the timer switched off. */
+static void ticks_init(void)
+{
+    uint32_t khz;
+
+    if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
+        khz = 12000u;           /* clk_ref = XOSC 12 MHz                  */
+    else
+        khz = 6500u;            /* clk_ref = ROSC: nominal, drifts, counts */
+
+    mmio_write32(TICKS_BASE + TICKS_TIMER0_CYCLES_OFFSET, khz / 1000u - 1u);
+    mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 1u);
 }
 
 /* PLL_SYS at 150 MHz.  Failure is benign: the boot continues on clk_ref
@@ -871,6 +886,10 @@ void plat_board_early(void)
      * console ring is never drained - the boot then hangs after the banner. */
     unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0 |
             RESET_TIMER0 | RESET_TIMER1);
+
+    /* Only now is the tick generator writable and its clock final. */
+    ticks_init();
+
     led_init();
 
     uart_init();
