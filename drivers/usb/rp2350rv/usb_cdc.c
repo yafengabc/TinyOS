@@ -180,6 +180,63 @@ void tud_cdc_tx_complete_cb(uint8_t itf)
     g_tx_done_ms = (uint32_t)plat_uptime_ms();
 }
 
+/* Real definitions for TinyUSB callbacks this port never overrides.
+ *
+ * On Cortex-M an undefined weak symbol links to 0 and the stack's own
+ * `if (cb)` guards skip the call.  Hazard3 has no relocations the ARM tool
+ * chain shares: under RV32 medany GNU ld resolves an undefined weak call to
+ * a thunk that jumps *to itself* (auipc x1,0; jalr x1,0(x1) with x1 set to
+ * the thunk), so the null check reads a non-zero garbage address and the
+ * call hangs CPU 0 forever - ticks keep firing and echoing keystrokes, but
+ * no process is ever scheduled again.  This was observed live: a physical
+ * RESET with VBUS held up makes Windows replay SET_CONTROL_LINE_STATE while
+ * re-enumerating, whose ACK stage calls tud_cdc_line_state_cb, and the
+ * shell then stopped responding to every keystroke.  Same root cause as
+ * usbd_app_driver_get_cb before it; every callback the stack can reach must
+ * therefore have a real definition. */
+void tud_cdc_rx_cb(uint8_t itf)
+{
+    (void)itf;
+}
+
+void tud_cdc_rx_wanted_cb(uint8_t itf, char wanted_char)
+{
+    (void)itf;
+    (void)wanted_char;
+}
+
+void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *p_line_coding)
+{
+    (void)itf;
+    (void)p_line_coding;
+}
+
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)itf;
+    (void)dtr;
+    (void)rts;
+}
+
+void tud_cdc_send_break_cb(uint8_t itf, uint16_t duration_ms)
+{
+    (void)itf;
+    (void)duration_ms;
+}
+
+/* dcd.h declares this weak and usbd.c calls it for ISO endpoints.  This
+ * port has no ISO endpoints and no implementation; return failure so the
+ * caller just marks the endpoint idle instead of jumping into a thunk. */
+bool dcd_edpt_xfer_fifo(uint8_t rhport, uint8_t ep_addr, tu_fifo_t *ff,
+                        uint16_t total_bytes)
+{
+    (void)rhport;
+    (void)ep_addr;
+    (void)ff;
+    (void)total_bytes;
+    return false;
+}
+
 /* ---- GPIO46/47 -> USB PHY ----------------------------------------------- */
 
 /* Two things have to happen, and only the muxing one is obvious:
@@ -437,6 +494,17 @@ void usb_cdc_irq_task(void)
 {
     if (!g_hw_ready)
         return;
+
+    /* Service the controller itself in the interrupt, not only its event
+     * queue: dcd_rp2040_irq() clears INTR/SIE_STATUS and queues the event.
+     * Running only the task here would leave SETUP_REQ|BUFF_STATUS asserted
+     * (a physical RESET with VBUS up keeps the host re-enumerating), the
+     * external line latched, and the trap re-entering forever.  This mirrors
+     * exactly what the ARM port's IRQ trampoline does before its own task
+     * run. */
+    if (usb_hw->ints)
+        dcd_int_handler(0);
+
     usb_task_run(1);
 }
 

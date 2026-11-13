@@ -565,6 +565,16 @@ int plat_irq_foreign(uint32_t line)
     usb_cdc_irq_task();
     return 1;
 }
+#else
+/* With TOS_RV_USB_IRQ off, arch/rv32's `extern ... __attribute__((weak))`
+ * reference has no definition - and under RV32 medany that does not link
+ * to 0 as on ARM, but to a jump-to-self thunk, defeating its own `if (cb)`
+ * null check the first time a non-tick line shows up.  Define it for real. */
+int plat_irq_foreign(uint32_t line)
+{
+    (void)line;
+    return 0;
+}
 #endif
 
 void plat_irq_service(uint32_t line)

@@ -38,6 +38,16 @@
 //--------------------------------------------------------------------+
 // USBD Configuration
 //--------------------------------------------------------------------+
+/* TinyOS: bound the number of events a single tud_task() call may consume.
+ * Upstream loops until the event queue is empty; anything that keeps that
+ * queue refilled forever would trap CPU 0 - which runs tud_task() from the
+ * scheduler's idle hook on this port - with ticks still firing but no
+ * process ever scheduled again.  32 is far above normal per-call traffic;
+ * anything left over is picked up by the next poll or IRQ. */
+#ifndef TUD_TASK_EVENT_BUDGET
+  #define TUD_TASK_EVENT_BUDGET 32
+#endif
+
 #ifndef CFG_TUD_TASK_QUEUE_SZ
   #define CFG_TUD_TASK_QUEUE_SZ   16
 #endif
@@ -586,7 +596,10 @@ void tud_task_ext(uint32_t timeout_ms, bool in_isr) {
   // Skip if stack is not initialized
   if (!tud_inited()) return;
 
-  // Loop until there is no more events in the queue
+  // Loop until there is no more events in the queue, or the TinyOS event
+  // budget is spent (see TUD_TASK_EVENT_BUDGET above).
+  uint32_t event_budget = TUD_TASK_EVENT_BUDGET;
+
   while (1) {
     dcd_event_t event;
     if (!osal_queue_receive(_usbd_q, &event, timeout_ms)) return;
@@ -702,6 +715,10 @@ void tud_task_ext(uint32_t timeout_ms, bool in_isr) {
 #if CFG_TUSB_OS != OPT_OS_NONE && CFG_TUSB_OS != OPT_OS_PICO
     // return if there is no more events, for application to run other background
     if (osal_queue_empty(_usbd_q)) return;
+#endif
+
+#if TUD_TASK_EVENT_BUDGET > 0
+    if (--event_budget == 0u) return;
 #endif
   }
 }
