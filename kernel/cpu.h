@@ -2,6 +2,7 @@
 #define TINYOS_CPU_H
 
 #include "types.h"
+#include "diag.h"
 
 /* Per-CPU state and the locks that make sharing it safe.
  *

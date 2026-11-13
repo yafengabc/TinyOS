@@ -28,6 +28,13 @@ void usb_cdc_putc(char c);
  * but knowing the room lets echo pace itself instead of losing characters. */
 int  usb_cdc_tx_room(void);
 void usb_cdc_flush(void);
+
+/* Cross-core USB critical section (SIO hardware spinlock 30 + PRIMASK).
+ * Everything that touches TinyUSB state must hold it; the shim's IRQ
+ * trampoline wraps the controller handler with it too.  The returned word
+ * is the saved PRIMASK and must be given back to usb_cdc_unlock(). */
+uint32_t usb_cdc_lock(void);
+void usb_cdc_unlock(uint32_t primask);
 int  usb_cdc_getchar(void);
 
 int  usb_cdc_configured(void);   /* 1 once the host has SET_CONFIGURATION */

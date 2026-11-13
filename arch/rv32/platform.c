@@ -421,6 +421,27 @@ void plat_spin_acquire(volatile int *v)
     } while (got != 0);
 }
 
+/* Non-blocking variant, and the one spin_lock() actually calls: it retries
+ * around plat_flash_park_poll() and the stuck-lock panic, so a lock wait can
+ * answer a flash park request.  It was missing here and the weak default in
+ * kernel/cpu.c - "one CPU, the lock is never contended, return 1" - was what
+ * every RV32 build linked.  On rp2350rvsmp that made proc_lock a no-op: both
+ * harts picked the same ST_READY process (the shell banner printed twice, and
+ * `[sched] cpu 0 idle: c0=1/1 c1=1/1` in the "no runnable process" panic),
+ * and the flash-park handshake raced against itself.  amoswap stores 1
+ * unconditionally, so a failed attempt leaves the lock exactly as it found it
+ * and only the returned value says whether this hart owns it now. */
+int plat_spin_try_acquire(volatile int *v)
+{
+    uint32_t got;
+
+    __asm__ volatile("amoswap.w.aq %0, %1, (%2)"
+                     : "=r"(got)
+                     : "r"(1), "r"(v)
+                     : "memory");
+    return got == 0;
+}
+
 void plat_spin_release(volatile int *v)
 {
     /* A release store is what orders the critical section's writes before

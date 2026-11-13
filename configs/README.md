@@ -56,6 +56,13 @@ exclude = ping,net,dhcp
   represented (inputs clamp to the largest finite value, overflow and x/0
   saturate).  It saves another ~580 bytes; use plain soft float when the
   program depends on those IEEE corner cases.
+- `[features] diag = true` compiles the crash/liveness record in
+  (`kernel/diag.h`): per-core tick heartbeat, "inside a masked section / a
+  spin lock / a flash park right now", the last masked-section site and
+  caller, and a `[PREV]` line printed on the next boot from `.noinit` state
+  that survived the reset.  Off by default and costing nothing when off.
+  Use it when a board wedges silently; `addr2line -e build/kernel-<target>.elf`
+  resolves the printed return addresses.
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
   target's board-default drivers (`Targets[..].Drivers`).  A special key

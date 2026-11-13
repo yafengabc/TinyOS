@@ -58,6 +58,20 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
+    /* Survives a reset: _start clears [__bss_start, __bss_end), and this
+     * sits above that range.  The watchdog-reset case is otherwise invisible
+     * - a fresh boot would find every diagnostic zeroed and the evidence
+     * (which core wedged, in which masked section) gone with it.  Nothing
+     * here is initialised at load time, so only placed-by-hand state lives
+     * in it. */
+    .noinit (NOLOAD) : {
+        __noinit_start = .;
+        KEEP(*(.noinit))
+        KEEP(*(.noinit*))
+        . = ALIGN(8);
+        __noinit_end = .;
+    } > RAM
+
     __kernel_end = .;
 
     ASSERT(__image_def_end - ORIGIN(FLASH) <= 4096,

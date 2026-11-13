@@ -101,8 +101,12 @@ static void rom_reboot(uint32_t flags)
     reboot(flags, 10u, 0u, 0u);
 }
 
+static void rom_stop_other_core(void);   /* defined with the flash helpers */
+static void wdt_feed(void);               /* defined with the flash helpers */
+
 static void rom_enter_bootsel(void)
 {
+    rom_stop_other_core();
     rom_reboot(0x102u);           /* BOOTSEL | NO_RETURN_ON_SUCCESS */
     for (;;)
         ;
@@ -308,11 +312,49 @@ static uint32_t measure_clk_khz(void)
 
 static uint32_t g_clk_hz = ARM_SYSTICK_CLK;
 
+#if TOS_DIAG
+/* What the polling core sees when it looks for a park request.  If the flag
+ * is set, the id differs from the owner and the loop still did not run, the
+ * problem is inside the loop; if the flag reads as 0, the two cores are not
+ * looking at the same variable. */
+TOS_NOINIT volatile uint32_t g_park_poll_n;
+TOS_NOINIT volatile uint32_t g_park_poll_flag;
+TOS_NOINIT volatile uint32_t g_park_poll_id;
+TOS_NOINIT volatile uint32_t g_park_poll_owner;
+
+/* 0 idle, 1 initiator waits for the other core, 2 the other core is parked,
+ * 3 inside the ROM call, 4 XIP back, 5 unparked. */
+TOS_NOINIT volatile uint32_t g_park_phase;
+
+/* Is the other core still alive while the initiator waits for it?  Its SysTick
+ * count answers "still scheduling" versus "stopped" - the one thing the
+ * initiator cannot tell from its own side. */
+volatile uint32_t g_c1_ticks;
+#endif
+
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
 /* Set by core 0 before it takes XIP away for a ROM flash call; the parking
  * block next to plat_block_erase is what acts on it. */
 static volatile int g_flash_park;
 static volatile int g_flash_parked;
+/* The ack is a generation, not a flag.  With a boolean a stale "already
+ * parked" left over from a timed-out handshake makes the next writer believe
+ * the other core is off XIP when it is not, and the ROM then reads flash
+ * under a core that is still fetching from it - a corrupt fetch, dead board,
+ * no output. */
+static volatile uint32_t g_park_req;
+static volatile uint32_t g_park_ack;
+/* PARK-FIX: which core called rp_flash_park_other().  The tick and idle
+ * checks must never park the initiator: it sits in a thread-context wait
+ * loop that is the ONLY code which will ever clear the flag, and once its
+ * SysTick catches the flag both cores spin in the RAM loop forever - the
+ * first dd on rp2350smp froze the machine exactly that way. */
+static volatile int g_flash_park_owner = -1;
+/* Set before the ROM bootloader takes the chip: the secondary core has to
+ * stop for good.  The ROM does not reset it, so it would still be running
+ * the old kernel when the new image starts - two kernels sharing one .bss,
+ * and the board dies during the next flash write. */
+static volatile int g_core1_stopped;
 static void rp_flash_park_loop(void);
 #endif
 
@@ -346,6 +388,357 @@ static void uart_init(void)
                              RP_UART_CR_TXE | RP_UART_CR_RXE);
 }
 
+#if TOS_DIAG
+/* One line of liveness, printed straight to the PL011 (the console ring needs
+ * the tick, and the tick is exactly what stops when the machine wedges).
+ * Called from the kernel's spin-wait loop, so the last line before the freeze
+ * says what each core was doing. */
+static void diag_char(char c);        /* defined below */
+static void diag_str(const char *s);
+TOS_NOINIT static uint32_t g_diag_poll_n;
+
+void plat_diag_poll(void)
+{
+    char b[12];
+    int n;
+    uint32_t v;
+
+    /* Only report a wait that is actually stuck.  proc_lock is taken and
+     * released hundreds of thousands of times a second by the idle console
+     * path, so an unconditional periodic dump floods the wire with noise and
+     * buries the one line that matters.  A healthy lock costs a handful of
+     * retries; a deadlock runs to millions. */
+    if (g_spin_count[0] < 200000u && g_spin_count[1] < 200000u)
+        return;
+    if ((++g_diag_poll_n & 0xfffffu) != 0u)
+        return;
+
+#define DIAG_PUT(s) do { const char *p_ = (s); while (*p_) diag_char(*p_++); } while (0)
+#define DIAG_NUM(x) do { uint32_t v_ = (x); if (!v_) { diag_char('0'); } else {         n = 0; while (v_) { b[n++] = (char)('0' + v_ % 10u); v_ /= 10u; }         while (n) diag_char(b[--n]); } } while (0)
+#define DIAG_HEX(x) do { uint32_t v_ = (x); diag_str("0x"); for (int i_ = 28; i_ >= 0; i_ -= 4) diag_char("0123456789ABCDEF"[(v_ >> i_) & 0xFu]); } while (0)
+
+    DIAG_PUT("[H] c0="); DIAG_NUM(g_spin_wait[0]);
+    DIAG_PUT(" c1="); DIAG_NUM(g_spin_wait[1]);
+    DIAG_PUT(" lk0="); DIAG_HEX(g_spin_lock_addr[0]);
+    DIAG_PUT(" lk1="); DIAG_HEX(g_spin_lock_addr[1]);
+    DIAG_PUT(" sc0="); DIAG_HEX(g_spin_caller[0]);
+    DIAG_PUT(" sc1="); DIAG_HEX(g_spin_caller[1]);
+    DIAG_PUT(" n0="); DIAG_NUM(g_spin_count[0]);
+    DIAG_PUT(" n1="); DIAG_NUM(g_spin_count[1]);
+    DIAG_PUT(" isite="); DIAG_NUM(g_idle_site);
+    DIAG_PUT(" us0="); DIAG_NUM(g_usb_site[0]);
+    DIAG_PUT(" us1="); DIAG_NUM(g_usb_site[1]);
+    DIAG_PUT(" mseq="); DIAG_NUM(g_mask_seq[0]);
+    DIAG_PUT("/"); DIAG_NUM(g_mask_seq[1]);
+    DIAG_PUT(" msite="); DIAG_NUM(g_mask_site[0]);
+    DIAG_PUT("/"); DIAG_NUM(g_mask_site[1]);
+    DIAG_PUT(" pc0="); DIAG_HEX(g_tick_pc[0]);
+    DIAG_PUT(" pc1="); DIAG_HEX(g_tick_pc[1]);
+    DIAG_PUT(" pk="); DIAG_NUM(g_park_phase);
+    DIAG_PUT(" own="); DIAG_NUM(g_park_poll_owner);
+    DIAG_PUT("\r\n");
+    v = 0; (void)v;
+#undef DIAG_PUT
+#undef DIAG_NUM
+}
+#endif /* TOS_DIAG */
+
+/* ---- watchdog ----------------------------------------------------------
+ * A wedge in this kernel is silent: both cores sit in a spin loop, no tick
+ * runs, and only a physical reset brings the board back - the ROM's UART
+ * bootloader cannot even be entered because the CPU no longer reacts to
+ * Ctrl-D.  The watchdog turns that into an automatic restart: the tick feeds
+ * it while the system is alive, so a frozen tick stops feeding and the
+ * board resets itself.
+ *
+ * RP2350 puts the watchdog at 0x400d8000.  The RP2040 address (0x40058000)
+ * is PLL_USB on this chip, so the constant must not be copied over. */
+#define WATCHDOG_BASE     0x400d8000u
+#define WATCHDOG_CTRL_OFF 0x00u
+#define WATCHDOG_LOAD_OFF 0x04u
+#define WATCHDOG_CTRL_ENABLE  (1u << 30)
+#define WATCHDOG_CTRL_TRIGGER (1u << 31)
+/* ~2 s at the reset-default 1 us tick.  Small enough that a wedge anywhere -
+ * including inside the ROM flash call, where the old code disarmed the
+ * watchdog entirely and a hang became permanent - turns into a reset instead
+ * of a dead board, large enough for one erase+program burst (~50-200 ms). */
+#define WATCHDOG_RELOAD   0x001fffffu
+
+static void wdt_feed(void)
+{
+    mmio_write32(WATCHDOG_BASE + WATCHDOG_LOAD_OFF, WATCHDOG_RELOAD);
+}
+
+static void wdt_enable(void)
+{
+    uint32_t ctrl = mmio_read32(WATCHDOG_BASE + WATCHDOG_CTRL_OFF);
+
+    mmio_write32(WATCHDOG_BASE + WATCHDOG_CTRL_OFF, ctrl | WATCHDOG_CTRL_ENABLE);
+    wdt_feed();
+}
+
+#if TOS_DIAG
+/* Straight to the PL011, bypassing the console ring. */
+static void diag_char(char c)
+{
+    uint32_t spins;
+
+    for (spins = 0; spins < 20000u; spins++)
+        if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF))
+            break;
+    mmio_write32(RP_UART_DR, (uint8_t)c);
+}
+
+static void diag_str(const char *s)
+{
+    while (*s)
+        diag_char(*s++);
+}
+
+static void diag_u32(uint32_t v)
+{
+    char b[12];
+    int n = 0;
+
+    if (!v) {
+        diag_char('0');
+        return;
+    }
+    while (v) {
+        b[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    }
+    while (n)
+        diag_char(b[--n]);
+}
+
+/* Bring-up marker for drivers: raw PL011, no console ring, no locks, so it can
+ * be printed from inside a USB critical section without re-entering it. */
+void plat_boot_mark(const char *s)
+{
+    diag_str(s);
+}
+
+void plat_boot_mark_u32(uint32_t v)
+{
+    diag_char('=');
+    diag_u32(v);
+}
+
+void plat_boot_mark_hex(uint32_t v)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    diag_char('=');
+    for (int i = 28; i >= 0; i -= 4)
+        diag_char(hex[(v >> i) & 0xfu]);
+}
+
+/* ---- previous-boot evidence -------------------------------------------- */
+
+/* A watchdog reset does not clear SRAM, and every diagnostic variable above
+ * lives in .noinit, so the state that wedged the last boot is still on hand
+ * when the next one starts.  Two constants guard against reporting random
+ * power-on SRAM as evidence. */
+#define DIAG_MAGIC0 0x544f5344u        /* "TOSD" */
+#define DIAG_MAGIC1 0x31414744u        /* "1AGD" */
+
+TOS_NOINIT static uint32_t g_diag_magic[2];
+
+/* Live-stall detector state (see live_stall_check). */
+TOS_NOINIT static uint32_t g_stall_ctr[2];
+TOS_NOINIT static uint32_t g_stall_at[2];
+TOS_NOINIT static uint32_t g_stall_said;
+
+static void diag_hex(uint32_t v)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    for (int i = 28; i >= 0; i -= 4)
+        diag_char(hex[(v >> i) & 0xfu]);
+}
+
+static void diag_kv(const char *k, uint32_t v)
+{
+    diag_str(k);
+    diag_u32(v);
+}
+
+static void diag_kx(const char *k, uint32_t v)
+{
+    diag_str(k);
+    diag_hex(v);
+}
+
+/* Print what the previous boot died doing, then start this one from a clean
+ * slate.  Every field answers one question: maskN says which masked section
+ * the core was inside when it stopped ticking (site id plus the caller's
+ * return address - resolve it with addr2line), seqN frozen versus advancing
+ * says wedged versus merely cycling, tickNpc is where the last tick caught
+ * the other core, spinN is the lock address it was waiting on and n0/n1 how
+ * many retries that wait had made. */
+static void diag_prev_report(void)
+{
+    int have = (g_diag_magic[0] == DIAG_MAGIC0 &&
+                g_diag_magic[1] == DIAG_MAGIC1);
+
+    if (have) {
+        diag_str("\r\n[PREV]");
+        diag_kv(" m0s=", g_mask_site[0]);
+        diag_kx(" m0lr=", g_mask_lr[0]);
+        diag_kv(" m0n=", g_mask_seq[0]);
+        diag_kv(" m1s=", g_mask_site[1]);
+        diag_kx(" m1lr=", g_mask_lr[1]);
+        diag_kv(" m1n=", g_mask_seq[1]);
+        diag_kx(" pc0=", g_tick_pc[0]);
+        diag_kx(" pc1=", g_tick_pc[1]);
+        diag_kx(" sp0=", g_spin_lock_addr[0]);
+        diag_kx(" sc0=", g_spin_caller[0]);
+        diag_kv(" n0=", g_spin_count[0]);
+        diag_kx(" sp1=", g_spin_lock_addr[1]);
+        diag_kv(" n1=", g_spin_count[1]);
+        diag_kv(" is=", g_idle_site);
+        diag_kv(" pk=", g_park_phase);
+        diag_kv(" pn=", g_park_poll_n);
+        diag_kv(" pf=", g_park_poll_flag);
+        diag_kv(" po=", g_park_poll_owner);
+        diag_kv(" u0=", g_usb_site[0]);
+        diag_kv(" u1=", g_usb_site[1]);
+        diag_kv(" tc0=", g_tick_ctr[0]);
+        diag_kv(" tc1=", g_tick_ctr[1]);
+        diag_kv(" mi0=", g_mask_in[0]);
+        diag_kv(" mi1=", g_mask_in[1]);
+        diag_kv(" si0=", g_spin_in[0]);
+        diag_kv(" si1=", g_spin_in[1]);
+        diag_kv(" ki0=", g_park_in[0]);
+        diag_kv(" ki1=", g_park_in[1]);
+        diag_str("\r\n");
+    }
+
+    /* Fresh start for everything the report just consumed. */
+    for (int i = 0; i < 2; i++) {
+        g_mask_site[i] = 0;
+        g_mask_lr[i] = 0;
+        g_mask_seq[i] = 0;
+        g_tick_pc[i] = 0;
+        g_tick_lr[i] = 0;
+        g_spin_lock_addr[i] = 0;
+        g_spin_caller[i] = 0;
+        g_spin_count[i] = 0;
+        g_spin_wait[i] = 0;
+        g_cpu_idle[i] = 0;
+        g_usb_site[i] = 0;
+    }
+    g_idle_site = 0;
+    g_park_phase = 0;
+    g_park_poll_n = 0;
+    g_park_poll_flag = 0;
+    g_park_poll_id = 0;
+    g_park_poll_owner = 0;
+    g_diag_poll_n = 0;
+
+    for (int i = 0; i < 2; i++) {
+        g_tick_ctr[i] = 0;
+        g_mask_in[i] = 0;
+        g_spin_in[i] = 0;
+        g_park_in[i] = 0;
+        g_stall_ctr[i] = 0;
+        g_stall_at[i] = 0;
+    }
+    g_stall_said = 0;
+
+    /* Armed from here on: a watchdog reset during this boot leaves the
+     * evidence below, and the next boot prints it. */
+    g_diag_magic[0] = DIAG_MAGIC0;
+    g_diag_magic[1] = DIAG_MAGIC1;
+}
+
+/* One core notices when the other stops taking ticks, and says what the other
+ * was inside at that moment.
+ *
+ * This is the piece the earlier probes could not provide.  A snapshot taken
+ * after the fact only says what a core did *last* - it cannot tell a core
+ * wedged inside a critical section from one that left it safely, because
+ * every counter looks the same from outside.  A per-core tick heartbeat plus
+ * "is it inside a masked section / a spin / a park right now" answers the
+ * question while the answer still exists, and the report comes from the
+ * *healthy* core over the raw PL011, so it survives a console ring that
+ * nothing is draining.
+ *
+ * The window is 1.2 s: below the watchdog's ~2.1 s so the report lands
+ * before the reset, and far above any legitimate gap between ticks (1 ms,
+ * with at most a few hundred ms lost to a flash write). */
+static void live_stall_check(int id)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    int o = id ^ 1;
+    uint32_t now = g_tick_ctr[id];
+
+    if (cpu_count <= 1 || g_tick_ctr[o] == 0u)
+        return;                             /* other core not started yet */
+
+    if (g_tick_ctr[o] != g_stall_ctr[o]) {
+        g_stall_ctr[o] = g_tick_ctr[o];
+        g_stall_at[o]  = now;
+        return;
+    }
+    if (g_stall_said || (uint32_t)(now - g_stall_at[o]) < 1200u)
+        return;
+    g_stall_said = 1;
+
+    diag_str("\r\n[STALL] live=");
+    diag_u32((uint32_t)id);
+    diag_kv(" dead=", (uint32_t)o);
+    diag_kv(" t=", now);
+    diag_kv(" mask=", g_mask_in[o]);
+    diag_kv(" site=", g_mask_site[o]);
+    diag_kx(" lr=", g_mask_lr[o]);
+    diag_kv(" seq=", g_mask_seq[o]);
+    diag_kv(" spin=", g_spin_in[o]);
+    diag_kx(" lk=", g_spin_lock_addr[o]);
+    diag_kx(" from=", g_spin_caller[o]);
+    diag_kv(" n=", g_spin_count[o]);
+    diag_kv(" park=", g_park_in[o]);
+    diag_kv(" ph=", g_park_phase);
+    diag_kv(" idle=", g_idle_site);
+    diag_kv(" usb=", g_usb_site[o]);
+    diag_kx(" pc=", g_tick_pc[o]);
+    diag_str("\r\n");
+#else
+    (void)id;
+#endif
+}
+#endif /* TOS_DIAG */
+
+/* Park the secondary core and leave it there.  The ROM bootloader runs on
+ * core 0 only and does not reset the chip when it is done, so without this
+ * the secondary would still be running the old kernel when the new image
+ * starts up - two kernels on one set of globals, which shows up as a board
+ * that dies during its first flash write. */
+static void rom_stop_other_core(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    if (cpu_count <= 1)
+        return;
+
+    g_core1_stopped = 1;
+    g_flash_parked = 0;
+    g_flash_park_owner = (int)plat_cpu_id();
+    uint32_t myreq = ++g_park_req;
+    __asm__ volatile("dmb" ::: "memory");
+    g_flash_park = 1;
+    __asm__ volatile("sev" ::: "memory");
+
+    for (uint32_t i = 0; i < 20000000u; i++) {
+        if (g_park_ack == myreq)
+            break;
+        wdt_feed();
+    }
+#else
+    (void)0;
+#endif
+}
+
 static void early_puts(const char *s)
 {
     while (*s)
@@ -362,6 +755,12 @@ static void early_put_hex(uint32_t v)
 void plat_console_init(void)
 {
     uart_init();
+#if TOS_DIAG
+    /* First thing on the wire: what the previous boot died doing, if it died
+     * by watchdog.  Nothing has touched SRAM since the reset, so this is the
+     * only moment the evidence exists. */
+    diag_prev_report();
+#endif
     early_puts("[P1] uart ready, usb init ...\r\n");
     usb_cdc_console_init(g_clk_hz);
     early_puts("[P2] usb init returned\r\n");
@@ -555,8 +954,10 @@ void plat_timer_tick(void)
 {
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
     /* Core 0 is about to turn XIP off for a ROM flash call: park here, in
-     * RAM, before the next instruction fetch can touch flash. */
-    if (g_flash_park)
+     * RAM, before the next instruction fetch can touch flash.  Never park
+     * the core that *initiated* the flash call - it is inside the thread
+     * wait that is the only code which will ever clear the flag. */
+    if (g_flash_park && (int)plat_cpu_id() != g_flash_park_owner)
         rp_flash_park_loop();
 #endif
     /* Only the boot core counts time.  Every core needs its own tick - it is
@@ -567,8 +968,24 @@ void plat_timer_tick(void)
      * (Same rule as board/qemu-virt.) */
     int id = plat_cpu_id();
 
-    if (id == 0)
+#if TOS_DIAG
+    /* Before anything else in the tick: if the other core has stopped
+     * ticking, say so now, while what killed it is still in memory. */
+    live_stall_check(id);
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    if (id == 1)
+        g_c1_ticks++;
+#endif
+#endif
+
+    if (id == 0) {
         g_ticks++;              /* SysTick reloads itself */
+        /* Feed the watchdog often enough that a busy tick cannot starve it,
+         * but rarely enough not to sit on the bus: 50 ms is far below the
+         * count-down and well above the worst-case gap between ticks. */
+        if ((g_ticks % 50u) == 0u)
+            wdt_feed();
+    }
 
     if (id != 0)
         return;                 /* the rest of this is core-0 only: USB,
@@ -802,43 +1219,185 @@ static RAMFUNC void flash_enable_xip_via_boot2(void)
  * again, so the tick check alone would never see the flag). */
 static RAMFUNC void rp_flash_park_loop(void)
 {
+#if TOS_DIAG
+    g_park_phase = 2;                       /* the other core parked */
+    g_park_in[plat_cpu_id() & 1u] = 1;
+#endif
     g_flash_parked = 1;
     __asm__ volatile("dsb" ::: "memory");
     /* Busy-spin, not wfe: clearing the flag and signalling is not atomic with
      * entering wfe, and a lost wakeup would park this core for good with
-     * interrupts masked.  One erase/program burst is short. */
+     * interrupts masked.  One erase/program burst is short.
+     *
+     * The acknowledgement is re-published for each generation, not once on
+     * entry.  A core that is still inside this loop when the next request is
+     * raised never re-enters it, so a publish-once ack makes that request wait
+     * for an acknowledgement the previous one already consumed, and the write
+     * then fails after the spin budget - the same defect that produced
+     * "dd: write error at block 0 (-1)" on rp2350rvsmp.  Publishing while the
+     * flag is still up is safe: the flag is cleared only after XIP is back, so
+     * "flag clear" means "you may return to flash". */
     for (volatile uint32_t spins = 0; spins < 200000000u; spins++) {
         if (!g_flash_park)
             break;
+        __asm__ volatile("dmb" ::: "memory");
+        if (g_park_ack != g_park_req) {
+            g_park_ack = g_park_req;        /* published from RAM */
+            __asm__ volatile("dmb" ::: "memory");
+        }
+        /* Parked with interrupts masked, so the tick cannot feed the watchdog
+         * either.  A writer that never clears the flag (it timed out and
+         * returned) must not turn a recoverable error into a silent reset. */
+        if ((spins & 0xfffffu) == 0xfffffu)
+            wdt_feed();
+    }
+#if TOS_DIAG
+    g_park_in[plat_cpu_id() & 1u] = 0;
+#endif
+    if (g_core1_stopped) {
+        /* The ROM bootloader is about to run on core 0 and the chip is not
+         * reset afterwards, so this core must not come back: the new image
+         * would race it for the shared memory.  Stay here, in RAM. */
+        for (;;)
+            wdt_feed();
     }
     g_flash_parked = 0;
 }
 
+
 void plat_flash_park_poll(void)
 {
-    if (g_flash_park)
+#if TOS_DIAG
+    g_park_poll_n++;
+    g_park_poll_flag = (uint32_t)g_flash_park;
+    g_park_poll_id = (uint32_t)plat_cpu_id();
+    g_park_poll_owner = (uint32_t)g_flash_park_owner;
+#endif
+
+    if (g_flash_park && (int)plat_cpu_id() != g_flash_park_owner) {
+        /* Mask interrupts BEFORE publishing the acknowledgement.  The park
+         * loop starts by telling the writer "I am in RAM now"; if anything
+         * can preempt this core after that point, the pre-emption returns to
+         * flash - the USB interrupt is priority 0 and its handler lives in
+         * XIP - and the writer has already put QMI into serial command mode.
+         * The fetch then bus-faults inside an exception whose own handler is
+         * also in flash: silent dead core, no ticks, no output, watchdog
+         * reset two seconds later.  That is the rp2350smp dd wedge.
+         *
+         * The tick path already ran masked, which is why only the idle and
+         * spin-wait callers ever hit this. */
+        uint32_t pm = plat_irq_save();
+
         rp_flash_park_loop();
+        plat_irq_restore(pm);
+    }
 }
 
 static int rp_flash_park_other(void)
 {
+    uint32_t primask;
+    uint32_t myreq;
+
     if (cpu_count <= 1)
         return 0;
+
+    /* Mask interrupts for the whole handshake.  With them on, the tick can
+     * land in this wait loop: process_tick() may reschedule, the process can
+     * migrate to the other core, and the core that started the flash call is
+     * no longer the one that will unpark it - the other core then parks as
+     * well and nothing ever clears the flag again.  On rp2350smp that froze
+     * the machine on an intermittent dd, with no output at all. */
+    __asm__ volatile("mrs %0, primask" : "=r"(primask));
+    __asm__ volatile("cpsid i" ::: "memory");
+#if TOS_DIAG
+    {
+        uint32_t id = plat_cpu_id() & 1u;
+
+        g_mask_lr[id]   = (uint32_t)__builtin_return_address(0);
+        g_mask_site[id] = TOS_MASKSITE_FLASH_PARK;
+        g_mask_seq[id]++;
+        g_mask_in[id]   = 1;
+    }
+#endif
     g_flash_parked = 0;
+    g_flash_park_owner = (int)plat_cpu_id();
+#if TOS_DIAG
+    g_park_phase = 1;                       /* request raised */
+#endif
+    myreq = ++g_park_req;
+    __asm__ volatile("dmb" ::: "memory");
     g_flash_park = 1;
     __asm__ volatile("sev" ::: "memory");
     for (uint32_t i = 0; i < 20000000u; i++) {
-        if (g_flash_parked)
+        /* Only this request's acknowledgement counts.  An ack left over from
+         * an earlier, timed-out handshake must not be read as "the other core
+         * is parked now". */
+        if (g_park_ack == myreq) {
+            /* Stay masked: the caller restores the interrupt state once it
+             * has put XIP back and unparked the other core. */
             return 0;
+        }
+        if ((i & 0xfffffu) == 0xfffffu) {
+            /* The watchdog is fed from the tick, and this loop runs with
+             * interrupts masked - so without this the board would reset
+             * itself while waiting for a core that never answers. */
+            wdt_feed();
+#if TOS_DIAG
+            /* The other core is not answering.  Is it still taking ticks?  Is
+             * it in the idle poll that also looks for the park flag? */
+            diag_char('?');
+            diag_str(" c1t=");
+            diag_u32(g_c1_ticks);
+            diag_str(" idle=");
+            diag_u32(g_cpu_idle[1]);
+            diag_str(" pk=");
+            diag_u32(g_park_phase);
+            diag_str(" pn=");
+            diag_u32(g_park_poll_n);
+            diag_str(" pf=");
+            diag_u32(g_park_poll_flag);
+            diag_str(" pi=");
+            diag_u32(g_park_poll_id);
+            diag_str(" po=");
+            diag_u32(g_park_poll_owner);
+            diag_str(" myid=");
+            diag_u32((uint32_t)plat_cpu_id());
+            diag_str(" myown=");
+            diag_u32(g_park_poll_owner);
+            diag_str(" c0pc=");
+            diag_u32(g_tick_pc[0]);
+            diag_str(" c0lr=");
+            diag_u32(g_tick_lr[0]);
+            diag_str(" c1pc=");
+            diag_u32(g_tick_pc[1]);
+            diag_str(" mseq0=");
+            diag_u32(g_mask_seq[0]);
+            diag_str(" mlr0=");
+            diag_u32(g_mask_lr[0]);
+            diag_str(" msite0=");
+            diag_u32(g_mask_site[0]);
+            diag_str(" isite=");
+            diag_u32(g_idle_site);
+            diag_str(" us0=");
+            diag_u32(g_usb_site[0]);
+            diag_str(" us1=");
+            diag_u32(g_usb_site[1]);
+            diag_str("\r\n");
+#endif
+        }
     }
     g_flash_park = 0;
+    g_flash_park_owner = -1;
     __asm__ volatile("sev" ::: "memory");
+    if (!(primask & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
     return -1;              /* core 1 never parked: do not kill XIP under it */
 }
 
 static void rp_flash_unpark_other(void)
 {
     g_flash_park = 0;
+    g_flash_park_owner = -1;
     __asm__ volatile("sev" ::: "memory");
 }
 #endif
@@ -854,23 +1413,37 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     end  = ((lba + count) * 512u + RP_FLASH_SECTOR - 1u)
            & ~(RP_FLASH_SECTOR - 1u);
 
+    __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
     if (rp_flash_park_other() != 0)
         return -1;
 #endif
-    __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
+    /* Keep the watchdog armed: it used to be disabled around the ROM call,
+     * so a wedge inside the sequence was silent and permanent.  Feed instead -
+     * one erase burst is ~50 ms, well inside the reload. */
+    wdt_feed();
+#if TOS_DIAG
+    g_park_phase = 3;                       /* inside the ROM call */
+#endif
     flash_init_boot2_copyout();
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_erase(addr, end - addr, RP_FLASH_SECTOR, RP_SECTOR_ERASE_CMD);
     g_rom_flush();
+    wdt_feed();
+#if TOS_DIAG
+    g_park_phase = 4;                       /* XIP is back */
+#endif
     flash_enable_xip_via_boot2();
-    if (!(was_enabled & 1u))
-        __asm__ volatile("cpsie i" ::: "memory");
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
     rp_flash_unpark_other();
 #endif
+#if TOS_DIAG
+    g_park_phase = 5;                       /* unparked */
+#endif
+    if (!(was_enabled & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
     return 0;
 }
 
@@ -886,23 +1459,34 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
      * ramdisk.c is in SRAM, so the ROM never reads its source from XIP. */
     addr = lba * 512u;
 
+    __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
     if (rp_flash_park_other() != 0)
         return -1;
 #endif
-    __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
+    wdt_feed();                            /* stay armed; see plat_block_erase */
+#if TOS_DIAG
+    g_park_phase = 3;                       /* inside the ROM call */
+#endif
     flash_init_boot2_copyout();
     g_rom_connect();
     g_rom_exit_xip();
     g_rom_program(addr, (const uint8_t *)buf, count * 512u);
     g_rom_flush();
+    wdt_feed();
+#if TOS_DIAG
+    g_park_phase = 4;                       /* XIP is back */
+#endif
     flash_enable_xip_via_boot2();
-    if (!(was_enabled & 1u))
-        __asm__ volatile("cpsie i" ::: "memory");
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
     rp_flash_unpark_other();
 #endif
+#if TOS_DIAG
+    g_park_phase = 5;                       /* unparked */
+#endif
+    if (!(was_enabled & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
     return 0;
 }
 
@@ -934,6 +1518,10 @@ void plat_board_early(void)
     g_clk_hz = 12000000u;       /* conservative guess until FC0 measures */
     clocks_init();
     pll_sys_init();             /* 150 MHz, or a no-op if the PLL refuses */
+
+    /* Arm the watchdog now that the clock is final: a kernel that wedges
+     * later resets itself instead of waiting for a human with a button. */
+    wdt_enable();
 
     /* RP2350 also leaves most peripherals held in reset.  Same stall rule:
      * release before any GPIO, pad or UART access.  The RP2040 port could

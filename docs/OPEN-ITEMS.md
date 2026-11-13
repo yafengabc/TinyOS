@@ -2217,6 +2217,80 @@ tick Hz         : 1000
 | `x86` (QEMU) | i686 (PC) | i686 | unknown | PC (i686) |
 
 
+## 28. RV32 双核 SMP：四个真 bug 与一套开关式诊断（2026-11-14，已真机验收）
+
+起点是 `rp2350rvsmp`（Hazard3 ×2，150 MHz）跑 `dd` 写 flash 间歇报
+`dd: write error at block 0 (-1)`，偶尔连 shell 都起两份。四个独立的 bug，
+每一个单独存在时都能装成"偶发"：
+
+1. **RV32 缺 `plat_spin_try_acquire()`**（`arch/rv32/platform.c`）。只有 ARM 实现了
+   它，`kernel/cpu.c` 的弱默认是"单核，锁不会争用，直接返回 1"，于是
+   `spin_trylock()` 在 RV32 SMP 上恒成功、`proc_lock` 形同虚设。指纹很清楚：
+   shell 横幅打两次、`PANIC no runnable process` 前 `[sched] cpu 0 idle:
+   c0=1/1 c1=1/1`、`smpbench` 1.00x、`smp` 的 worker 全报 cpu 0。实现用
+   `amoswap.w.aq`：它无条件写入 1，失败时锁原样不动，只有返回值说明归属。
+2. **park 握手只发布一次 ack**（rp2350 / rp2040 / rp2350rv 三端口同一个错）。
+   驻留核在 `rp_flash_park_loop()` 里写 `g_flash_parked = 1` 然后等 flag 落下；
+   写者清掉它再等下一次 ack。littlefs 背靠背两次块操作时，驻留核还在循环里、
+   不会重新进入，第二个请求等不到 ack，20M 圈后返回 -1 → `dd` 报错。
+   改成**代际计数**：`myreq = ++g_park_req`，判据 `g_park_ack == myreq`，
+   驻留循环每轮都重新发布 ack（flag 只在 XIP 恢复后才清，所以语义安全）。
+3. **`console_write()` 抢不到锁就整体丢弃**（`kernel/console.c`）。
+   双核上通常是对面核在 1 ms tick 里排空回显，此时整块写被丢掉：命令行 ≥16 字节
+   就没输出、连提示符一起消失（16 字节的回显刚好在程序启动前排完，17 字节排不完）。
+   改成记录持锁 CPU：**别的核持锁 → 等，自己持锁（中断重入）→ 丢**。
+   `kprintf()` 保留 trylock，诊断行宁可丢也不能把卡死的板子卡得更死。
+4. **双调度窗口**（`kernel/process.c`）。`block_locked()` 清 `cpu` 与
+   `sched_switch()` 之间，唤醒落在窗口内会把任务重新置 READY 且 `cpu < 0`，
+   两个核可能同时选中它 —— 同一个 shell 跑在两套内核栈上，输的那份拿走了
+   控制台。`sched_switch()` 现在用 `requeued` 标记识别这种情况，就地恢复自身
+   并返回被唤醒者补好的帧，不再走 `sched_pick()`。
+
+顺带修掉的两个"看起来像原因"的问题：
+
+- **SIO 门锁的判定**（`arch/arm/platform.c`）：RP2350 对 `SIO_SPINLOCK0 + 4n` 的
+  读返回 one-hot（lock 31 给 `0x80000000`，lock 30 给 `0x40000000`），
+  `>> 31` 只在 lock 31 上成立。判"非零"两个芯片都对。
+- **写 flash 期间不能关看门狗**。旧代码在 ROM 调用前 `wdt_disable()`，
+  一次 wedge 就从"可恢复的错误"变成"永远静止的板子"。现在全程武装只喂不关
+  （2 s 重装，一次擦写 ~50 ms），并给 `rom_enter_bootsel()` 加了
+  `rom_stop_other_core()`：ROM 引导器只跑 core 0 且事后不复位芯片，
+  另一核必须停死，否则新镜像和旧内核共享一套 `.bss`。
+
+### 诊断开关 `TOS_DIAG`
+
+这轮排查靠的是"板子自己留证据"，不是探针。`[features] diag = true`
+（`configs/README.md` 有说明，默认关、关掉零成本）打开后：
+
+- 每核 tick 心跳 + 三个"现在在不在里面"的标志（屏蔽区 / 自旋 / park），
+  健康核能判断对面是**卡在屏蔽段里**还是**还在周期性地进临界区**；
+- 屏蔽点记 site id + 调用者 LR（`TOS_MASKSITE_*`），
+  `addr2line -e build/kernel-<target>.elf <lr>` 直接落到源码行；
+- 全部放 `.noinit`（链接脚本在 `.bss` 之后），看门狗复位不清 SRAM，
+  下次启动第一行打 `[PREV] ...`；RP2350 另有 `WATCHDOG_SCRATCH0..7`
+  记 flash 序列走到了哪一步（只有上电才清）。
+
+两条方法学上的教训，写在这里免得下次再踩：**抓冷启动必须先挂好读线程再按
+RESET**（CH343 不随 MCU 复位掉线，第一个字节抓得到）；**压力测试走 CDC 不走
+CH343**（约 18 轮 dd 之后 UART 的 host→MCU 方向会单向死掉，探针显示
+`cr`/`pad`/`funcsel` 全正常而 RX FIFO 恒空）。另外 `-DTOS_DIAG` 本身会改变
+时序，A/B 结论要在同一个固件里用运行期开关复核。
+
+### 验收（`rp2350rvsmp` 真机，ATK-DNRP2350AM）
+
+| 项目 | 结果 |
+|---|---|
+| `dd of=/big.bin bs=4096 count=1` × 12 轮（写 + 读校验，CDC） | 0 失败 0 重启 |
+| 单扇区写累计 200+60+30+40+20 轮（诊断版固件，同一天） | 0 失败 0 重启 |
+| `smpbench`（关闭诊断的提交版） | **1.97x**：single 206 ms，dual 205 + 209 ms |
+| `smp -s 2 300` | worker 0 → cpu 0，worker 1 → cpu 1，各 5197 / 5243 blocks |
+| 16 字符命令行 ×18 次 | 0 丢（修前 10 次丢 9 次） |
+| 11 个目标构建 | 全 OK；`diag = true` 的 rp2350 / rp2350smp / rp2350rvsmp 也能编译 |
+
+未验证：`rp2040smp` 只过构建（本机没有 rp2040 板），它的 park 握手是同一份修复。
+`threadbench` 的 ratio 与 SMP 性能数字在 QEMU 里没有意义，别用它们下结论。
+
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。

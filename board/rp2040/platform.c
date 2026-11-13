@@ -71,6 +71,19 @@ static uint32_t g_boot2_copy[64];
  * in a RAM loop from its SysTick handler for the duration. */
 static volatile int g_flash_park;
 static volatile int g_flash_parked;
+/* PARK-FIX: which core called rp_flash_park_other().  Never park the
+ * initiator: it is inside the thread wait that is the only code which will
+ * ever clear the flag, and once its SysTick catches the flag both cores
+ * spin in the RAM loop forever. */
+static volatile int g_flash_park_owner = -1;
+/* Generation counters.  The boolean only says "a request is pending"; these
+ * say which one, so an ack left over from the previous request is never read
+ * as this one, and a core still parked can acknowledge a new request without
+ * leaving the RAM loop it is already in.  Without this, two littlefs block
+ * operations back to back make the second wait for an acknowledgement the
+ * first already consumed, and the write fails after the spin budget. */
+static volatile uint32_t g_park_req;
+static volatile uint32_t g_park_ack;
 
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
 static void rp_flash_park_loop(void);   /* defined with the flash RAM code */
@@ -695,8 +708,9 @@ void plat_timer_tick(void)
 {
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
     /* Core 0 is about to disable XIP for a ROM flash call.  Park here, in a
-     * RAM loop, before any instruction fetch can touch flash. */
-    if (g_flash_park)
+     * RAM loop, before any instruction fetch can touch flash.  Never park
+     * the core that initiated the flash call. */
+    if (g_flash_park && (int)plat_cpu_id() != g_flash_park_owner)
         rp_flash_park_loop();
 #endif
     /* Every core has its own SysTick - that is what preempts whatever that
@@ -871,10 +885,19 @@ rp_flash_park_loop(void)
     /* Busy-spin, not wfe: clearing g_flash_park and issuing sev is not
      * atomic with entering wfe, and a lost wakeup leaves this core asleep
      * inside the SysTick handler (interrupts masked) forever.  The flash
-     * call is one erase/program, so the burn is short. */
+     * call is one erase/program, so the burn is short.
+     *
+     * Publish the acknowledgement for every generation: a request raised
+     * while this core is still inside the loop never re-enters it, so an ack
+     * written only on entry would be consumed by the earlier request. */
     for (volatile uint32_t spins = 0; spins < 200000000u; spins++) {
         if (!g_flash_park)
             break;
+        __asm__ volatile("dmb" ::: "memory");
+        if (g_park_ack != g_park_req) {
+            g_park_ack = g_park_req;
+            __asm__ volatile("dmb" ::: "memory");
+        }
     }
     g_flash_parked = 0;
 }
@@ -885,29 +908,60 @@ rp_flash_park_loop(void)
  * can never see g_flash_park on an idle core. */
 void plat_flash_park_poll(void)
 {
-    if (g_flash_park)
+    if (g_flash_park && (int)plat_cpu_id() != g_flash_park_owner) {
+        /* Mask interrupts BEFORE publishing the acknowledgement.  The park
+         * loop tells the writer "I am in RAM now"; if anything preempts this
+         * core after that point, the pre-emption resumes in flash while the
+         * writer has QMI in serial command mode - a fetch that bus-faults
+         * inside an exception whose handler is also in flash, i.e. a silent
+         * dead core.  The tick path is already masked; only the idle and
+         * spin-wait callers reach here with interrupts on. */
+        uint32_t pm = plat_irq_save();
+
         rp_flash_park_loop();
+        plat_irq_restore(pm);
+    }
 }
 
 static int rp_flash_park_other(void)
 {
+    uint32_t primask, myreq;
+
     if (cpu_count <= 1)
         return 0;
+
+    /* Mask interrupts for the handshake.  With them on, the tick can land
+     * in this wait loop and reschedule the caller onto the other core, which
+     * then is no longer the core that will unpark - both cores park and
+     * nothing clears the flag again. */
+    __asm__ volatile("mrs %0, primask" : "=r"(primask));
+    __asm__ volatile("cpsid i" ::: "memory");
+
+    myreq = ++g_park_req;
     g_flash_parked = 0;
+    g_flash_park_owner = (int)plat_cpu_id();
+    __asm__ volatile("dmb" ::: "memory");
     g_flash_park = 1;
     __asm__ volatile("sev" ::: "memory");
     for (uint32_t i = 0; i < 20000000u; i++)
-        if (g_flash_parked)
+        if (g_park_ack == myreq) {
+            /* Stay masked: the caller restores the interrupt state after the
+             * ROM call and the unpark. */
             return 0;
+        }
     g_flash_park = 0;
+    g_flash_park_owner = -1;
     __asm__ volatile("sev" ::: "memory");
     dbg_uart_puts("[flash] park timeout\n");
+    if (!(primask & 1u))
+        __asm__ volatile("cpsie i" ::: "memory");
     return -1;                  /* core 1 never parked: do not kill XIP */
 }
 
 static void rp_flash_unpark_other(void)
 {
     g_flash_park = 0;
+    g_flash_park_owner = -1;
     __asm__ volatile("sev" ::: "memory");
 }
 #endif

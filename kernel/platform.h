@@ -126,6 +126,15 @@ void plat_irq_service(uint32_t line);
 #define TOS_MAX_CPUS 1
 #endif
 
+/* Compile-time diagnostics.  `diag = true` in a config's [features] section
+ * is what turns them on; every other build has them compiled out, with no
+ * code and no .bss.  What they add is the ability to answer "which core
+ * wedged, inside what, and what was the other one doing" from a serial
+ * capture instead of from a debugger (see kernel/diag.h for the record). */
+#ifndef TOS_DIAG
+#define TOS_DIAG 0
+#endif
+
 /* How many CPUs the kernel was built for.  Every board but one is a
  * uniprocessor and sets 1; the SMP build (rv32smp) sets 2 and boots the
  * secondaries from start.S.  This is a compile-time constant, not a runtime

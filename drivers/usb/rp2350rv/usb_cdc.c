@@ -52,6 +52,42 @@
 #include "console.h"
 #include "cpu.h"
 
+/* SIO hardware spinlock 30 (0xD0000000 + 0x100 + 4*30).  31 is reserved for
+ * the kernel's ARM spin gate; on the RV port the kernel uses LR/SC, so 30 is
+ * free either way.  The SIO block is shared between the two harts whatever
+ * the ISA, so this is the natural cross-core mutex.  Defined at the top
+ * because usb_cdc_init() force-releases it before anything else can take
+ * it - the SIO block survives a warm reboot and a previous run may have
+ * died holding the lock. */
+#define USB_SIO_SPINLOCK (*(volatile uint32_t *)(0xD0000000u + 0x100u + 4u * 30u))
+
+/* Cross-core USB critical section.  TinyUSB state was guarded only by
+ * per-hart interrupt masking (plat_irq_save), which stops re-entrancy on
+ * ONE hart; the other hart's producer (usb_cdc_putc feeds the ring, its
+ * tick drains it) raced this hart's tud_task()/write_flush across cores
+ * and could corrupt tu_fifo bookkeeping - the same failure that wedged
+ * rp2350smp's idle core forever inside tty_poll.  Hold times are bounded:
+ * tud_task() drains the event queue and returns; nothing inside waits on
+ * the other hart. */
+static uint32_t usb_critical_enter(void)
+{
+    uint32_t irq = plat_irq_save();
+
+    /* Non-zero = acquired.  RP2350 answers one-hot (bit 30 for lock 30); a
+     * bit-31 test reads that as "still held" and hangs the console path. */
+    while (USB_SIO_SPINLOCK == 0u)
+        ;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    return irq;
+}
+
+static void usb_critical_exit(uint32_t irq)
+{
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    USB_SIO_SPINLOCK = 0;
+    plat_irq_restore(irq);
+}
+
 /* TinyUSB declares this weak and only calls it when the symbol is non-NULL.
  * An *undefined* weak symbol is not 0 everywhere: on RV32 with the medany
  * code model the reference is PC-relative, lld hands back a non-zero address,
@@ -369,6 +405,11 @@ void usb_cdc_init(void)
     g_init_stage = 0;
     u_mark("[u0]\r\n");
 
+    /* A warm boot can land with the cross-core USB spinlock still held by
+     * the previous run - the SIO block survives a hart reset.  This is the
+     * first touch, before either hart can take the lock again. */
+    USB_SIO_SPINLOCK = 0;
+
     /* Order matters: PLL and clk_usb first (the controller's reset-done bit
      * depends on the clock), then the pads, then TinyUSB - whose dcd_init()
      * resets the controller itself and would undo any register-level setup
@@ -469,14 +510,13 @@ static volatile int g_in_task;
 
 static void usb_task_run(int from_isr)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = usb_critical_enter();
 
     if (g_in_task) {
-        plat_irq_restore(irq);
+        usb_critical_exit(irq);
         return;                     /* the outer call will drain the queue */
     }
     g_in_task = 1;
-    plat_irq_restore(irq);
 
     if (from_isr)
         tud_task_ext(0, true);
@@ -484,6 +524,7 @@ static void usb_task_run(int from_isr)
         tud_task();
 
     g_in_task = 0;
+    usb_critical_exit(irq);
 }
 
 /* IRQ 14, called from the shared vector table through g_usb_irq_handler.
@@ -502,8 +543,12 @@ void usb_cdc_irq_task(void)
      * external line latched, and the trap re-entering forever.  This mirrors
      * exactly what the ARM port's IRQ trampoline does before its own task
      * run. */
-    if (usb_hw->ints)
+    if (usb_hw->ints) {
+        uint32_t irq = usb_critical_enter();
+
         dcd_int_handler(0);
+        usb_critical_exit(irq);
+    }
 
     usb_task_run(1);
 }
@@ -517,12 +562,20 @@ static volatile int g_in_poll;
 static void usb_tx_drain(void)
 {
     uint32_t irq = plat_irq_save();
+    uint32_t usbpm;
 
     plat_spin_acquire(&g_tx_lock);
+    /* The ring bookkeeping is g_tx_lock's business; the CDC FIFO the loop
+     * feeds is TinyUSB state and races the other hart's tud_task() - so the
+     * fifo access sits inside the cross-core USB critical section.  Order
+     * is always g_tx_lock then the USB lock, and no g_tx_lock holder ever
+     * waits for the USB lock except this drain, so the two cannot cycle. */
+    usbpm = usb_critical_enter();
     while (g_tx_tail != g_tx_head && tud_cdc_write_available() != 0) {
         tud_cdc_write_char(g_tx_ring[g_tx_tail % USB_TX_RING]);
         g_tx_tail++;
     }
+    usb_critical_exit(usbpm);
     plat_spin_release(&g_tx_lock);
     plat_irq_restore(irq);
 }
@@ -559,13 +612,22 @@ void usb_cdc_poll(void)
 
     /* Polled controller: any pending SIE event is serviced here instead of
      * in an IRQ 14 handler (Hazard3 external lines need its CSR window). */
-    if (usb_hw->ints)
+    if (usb_hw->ints) {
+        uint32_t usbpm = usb_critical_enter();
+
         dcd_int_handler(0);
+        usb_critical_exit(usbpm);
+    }
 
     usb_task_run(0);
     usb_tx_drain();
-    if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
-        tud_cdc_write_flush();
+    {
+        uint32_t usbpm = usb_critical_enter();
+
+        if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
+            tud_cdc_write_flush();
+        usb_critical_exit(usbpm);
+    }
 
     g_in_poll = 0;
 }
@@ -644,21 +706,30 @@ int usb_cdc_tx_room(void)
 
 void usb_cdc_flush(void)
 {
+    uint32_t usbpm;
+
     if (!g_hw_ready)
         return;
     /* Only CPU 0 owns the controller; a flush on the other hart just leaves
      * the bytes for the next poll. */
     if (plat_cpu_id() != 0)
         return;
+    usbpm = usb_critical_enter();
     usb_tx_drain();
     tud_cdc_write_flush();
+    usb_critical_exit(usbpm);
 }
 
 int usb_cdc_getchar(void)
 {
+    uint32_t usbpm;
+    int32_t c;
+
     if (!g_hw_ready)
         return -1;
-    int32_t c = tud_cdc_read_char();
+    usbpm = usb_critical_enter();
+    c = tud_cdc_read_char();
+    usb_critical_exit(usbpm);
     return (c < 0) ? -1 : (int)c;
 }
 

@@ -38,8 +38,44 @@
 
 #include "device/dcd.h"
 #include "hardware/structs/usb.h"
+
+/* SIO hardware spinlocks (0xD0000000 + 0x100 + 4*n).  31 is the kernel's spin
+ * gate, so the USB section picks from below that.  Defined at the top because
+ * usb_cdc_init() force-releases the candidates before probing them. */
+#define SIO_LK(n) ((volatile uint32_t *)(0xD0000000u + 0x100u + 4u * (n)))
+
+/* Return token bits.  PRIMASK is a single bit, so the upper bits are free to
+ * carry state:
+ *   bit31 - this call only bumped a depth counter, the outer section locks
+ *   bit30 - the section ran with no lock at all (degraded, reported once) */
+#define USB_LK_NESTED 0x80000000u
+#define USB_LK_NONE   0x40000000u
+/* ~20 ms at 150 MHz: long enough that a normal cross-core hold never trips
+ * it, short enough that a real deadlock does not look like a dead board. */
+#define USB_LK_SPINS  300000u
+
+static void usb_lk_select(void);
+
 #include "string.h"
 #include "console.h"
+#include "diag.h"
+
+#if TOS_DIAG
+/* Bring-up markers straight to the PL011 (board/rp2350/platform.c).  They
+ * must not go through the console: this file can be called from inside a USB
+ * critical section, and a re-entrant console write there is exactly the kind
+ * of hang these markers exist to find. */
+extern void plat_boot_mark(const char *s);
+extern void plat_boot_mark_u32(uint32_t v);
+extern void plat_boot_mark_hex(uint32_t v);
+#define BM(s) plat_boot_mark(s)
+/* Names the USB step this core is inside, so a core that wedges with
+ * interrupts masked can be located from the other core. */
+#define US(code) (g_usb_site[plat_cpu_id() & 1] = (code))
+#else
+#define BM(s) do { } while (0)
+#define US(code) do { } while (0)
+#endif
 
 /* TinyUSB declares this weak and calls it only when the symbol is non-NULL:
  *
@@ -227,12 +263,23 @@ void usb_cdc_init(void)
     g_hw_ready = 0;
     g_init_stage = 0;
 
+    /* A warm boot (panic path, soft reboot) can land with a cross-core USB
+     * spinlock still held by the previous run - the SIO block survives a core
+     * reset.  Any write releases, so clear the candidates before probing
+     * which one this board actually grants. */
+    *SIO_LK(30) = 0;
+    *SIO_LK(29) = 0;
+    *SIO_LK(28) = 0;
+    usb_lk_select();
+
     /* Order matters: PLL and clk_usb first (the controller's reset-done bit
      * depends on the clock), then the pads, then TinyUSB - whose dcd_init()
      * resets the controller itself and would undo any register-level setup
      * done before it. */
-    if (usb_clock_init() != 0)
+    if (usb_clock_init() != 0) {
+        BM("[u2x]");
         return;
+    }
 
     usb_pads_setup();
 
@@ -243,6 +290,7 @@ void usb_cdc_init(void)
 
     if (!tud_init(0)) {
         g_hw_ready = 0;
+        BM("[u4x]");
         return;
     }
 
@@ -296,12 +344,147 @@ static void usb_cdc_wait(uint32_t clk_hz)
         for (volatile int j = 0; j < 40; j++)
             ;
     }
+    if (!tud_mounted())
+        BM("[uN]");                     /* host never finished SET_CONFIGURATION */
 }
 
 void usb_cdc_console_init(uint32_t clk_hz)
 {
     usb_cdc_init();
     usb_cdc_wait(clk_hz);
+}
+
+/* ---- cross-core USB exclusion ------------------------------------------- */
+
+static volatile uint32_t *usb_lk_reg;      /* chosen hardware spinlock, 0 = none */
+static uint32_t           usb_lk_bit;      /* its bit in the status word */
+static volatile uint32_t  usb_depth[2];
+volatile uint32_t         g_usb_lock_fail;
+
+/* A read of a SIO spinlock register *is* an acquire attempt.  Measured on an
+ * RP2350: the answer is not "1 = mine" as the RP2040 datasheet's wording
+ * suggests, it is one-hot - lock N answers with bit N set (read 31 and you get
+ * 0x80000000, read 30 and you get 0x40000000).  A `>> 31` test therefore
+ * declares every lock except 31 broken, which is exactly how an earlier build
+ * "proved" the spinlocks unusable and booted the console unlocked.  Anything
+ * non-zero means the caller now owns it, and it must be written back to 0
+ * before the same core can take it again - a probe that forgets that leaves
+ * the lock held for the rest of the boot. */
+static uint32_t usb_lk_probe(uint32_t idx)
+{
+    volatile uint32_t *r = SIO_LK(idx);
+    uint32_t v = *r;
+
+    if (v)
+        *r = 0;                             /* acquired by the probe: release */
+    return v;
+}
+
+static void usb_lk_select(void)
+{
+    static const uint32_t cand[3] = { 30u, 29u, 28u };
+    uint32_t i;
+
+    /* 31 is the kernel's own gate.  Read it only to learn whether the SIO
+     * lock window answers at all on this boot; released immediately. */
+    (void)usb_lk_probe(31u);
+
+    for (i = 0; i < 3u; i++) {
+        uint32_t v = usb_lk_probe(cand[i]);
+
+        if (v) {
+            usb_lk_reg = SIO_LK(cand[i]);
+            usb_lk_bit = v;             /* one-hot bit that means "mine" */
+            return;
+        }
+    }
+    usb_lk_reg = 0;
+    BM("[lk-none]");
+}
+
+/* TinyUSB state (CDC fifos, endpoint state, the device task) used to be
+ * guarded by PRIMASK only - which is per core.  On an SMP build the console
+ * writer on core 1 raced core 0's task-driven state machine: two cores
+ * inside tu_fifo / tud at once corrupt the ring bookkeeping, and core 0
+ * then wedged forever inside the state machine.  With interrupts masked
+ * from sched_idle's console poll it stopped ticking, stopped answering the
+ * flash park handshake, and every flash write from core 1 timed out with
+ * -1.  Measured on rp2350smp: the mask probe pinned core 0 to the masked
+ * section entered right before tty_poll (site 2, LR in sched_idle), frozen
+ * for good.
+ *
+ * The SIO hardware spinlock is cross-core by construction.  Lock 30: 31 is
+ * the kernel's spin gate.  PRIMASK around the lock keeps core 0's own USB
+ * interrupt (priority 0, above SysTick) from pre-empting the core that
+ * holds the lock - an ISR that spins on a lock held by the thread it just
+ * pre-empted would never make progress.  Hold times are bounded: tud_task()
+ * returns once the event queue is drained, and nothing inside these
+ * sections waits on the other core. */
+uint32_t usb_cdc_lock(void)
+{
+    uint32_t id  = (uint32_t)plat_cpu_id() & 1u;
+    uint32_t pm;
+    uint32_t n;
+
+    /* Nested section on the SAME core: the hardware lock is not recursive and
+     * the outer section already masked interrupts, so just bump a depth
+     * counter.  Without this, any path that reaches the console from inside
+     * tud_task()/dcd_int_handler() (panic, debug print, a CDC callback on
+     * another port) spins on a lock this very core is holding - a permanent
+     * hang with interrupts masked, which is indistinguishable from a dead
+     * board. */
+    if (usb_depth[id]) {
+        usb_depth[id]++;
+        return USB_LK_NESTED;
+    }
+
+    __asm__ volatile("mrs %0, primask\n cpsid i" : "=r"(pm) :: "memory");
+
+    /* Boot found no spinlock this board would hand out: run without one. */
+    if (!usb_lk_reg)
+        return pm | USB_LK_NONE;
+
+    /* Bounded: a lock that never comes free is a bug elsewhere, and turning
+     * that into "boot stops for ever with no output" costs a flash cycle per
+     * guess.  Report it once, then stop paying the timeout on every call. */
+    US(8);
+    for (n = 0; ; n++) {
+        if (*usb_lk_reg & usb_lk_bit) {
+            __asm__ volatile("dmb" ::: "memory");
+            usb_depth[id] = 1;
+            US(9);
+            return pm;
+        }
+        if (n >= USB_LK_SPINS) {
+#if TOS_DIAG
+            BM("[ULK!]");
+            plat_boot_mark_u32(id);
+#endif
+            g_usb_lock_fail++;
+            usb_lk_reg = 0;
+            return pm | USB_LK_NONE;
+        }
+    }
+}
+
+void usb_cdc_unlock(uint32_t tok)
+{
+    uint32_t id = (uint32_t)plat_cpu_id() & 1u;
+
+    if (tok & USB_LK_NESTED) {
+        if (usb_depth[id])
+            usb_depth[id]--;
+        return;                         /* outer section still owns it */
+    }
+    if (tok & USB_LK_NONE) {
+        __asm__ volatile("msr primask, %0" :: "r"(tok & 1u) : "memory");
+        return;
+    }
+    usb_depth[id] = 0;
+    __asm__ volatile("dmb" ::: "memory");
+    if (usb_lk_reg)
+        *usb_lk_reg = 0;
+    __asm__ volatile("msr primask, %0" :: "r"(tok & 1u) : "memory");
 }
 
 /* ---- event pump --------------------------------------------------------- */
@@ -318,22 +501,23 @@ static volatile int g_in_task;
 
 static void usb_task_run(int from_isr)
 {
-    uint32_t primask;
+    uint32_t primask = usb_cdc_lock();
 
-    __asm__ volatile("mrs %0, primask\n cpsid i" : "=r"(primask) :: "memory");
     if (g_in_task) {
-        __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
+        usb_cdc_unlock(primask);
         return;                     /* the outer call will drain the queue */
     }
     g_in_task = 1;
-    __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
 
+    US(5);
     if (from_isr)
         tud_task_ext(0, true);
     else
         tud_task();
+    US(6);
 
     g_in_task = 0;
+    usb_cdc_unlock(primask);
 }
 
 /* IRQ 14, called from the shared vector table through g_usb_irq_handler.
@@ -351,6 +535,8 @@ void usb_cdc_irq_task(void)
  * arrive while the interrupt is briefly masked still get processed. */
 void usb_cdc_poll(void)
 {
+    uint32_t primask;
+
     if (!g_hw_ready)
         return;
 
@@ -360,12 +546,23 @@ void usb_cdc_poll(void)
      * the controller from the tick keeps enumeration alive in that state
      * instead of hanging forever; when the interrupt works normally this
      * reads zero and costs one register access per millisecond. */
+    US(1);
+    primask = usb_cdc_lock();
+    US(2);
     if (usb_hw->ints)
         dcd_int_handler(0);
+    US(3);
+    usb_cdc_unlock(primask);
 
+    US(4);
     usb_task_run(0);
+
+    US(7);
+    primask = usb_cdc_lock();
     if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
         tud_cdc_write_flush();
+    usb_cdc_unlock(primask);
+    US(0);
 }
 
 /* ---- console API -------------------------------------------------------- */
@@ -384,15 +581,18 @@ void usb_cdc_putc(char c)
      * The old guard ("skip in exception context" via IPSR) was wrong: the
      * shell writes through the SVC syscall handler, which IS an exception,
      * so every byte the shell ever printed was silently dropped and the
-     * CDC port never said a word after the boot banner.  The real hazard -
-     * re-entrant FIFO access while tud_task() runs elsewhere - is covered
-     * by this PRIMASK window instead: tu_fifo's write path is a handful of
-     * instructions, and blocking everything for those beats an ipsr check
-     * that cannot tell SVC from SysTick. */
-    __asm__ volatile("mrs %0, primask\n cpsid i" : "=r"(primask) :: "memory");
+     * CDC port never said a word after the boot banner.
+     *
+     * The PRIMASK window that replaced it only ever stopped re-entrancy on
+     * the SAME core.  Core 1 writing this fifo raced core 0's tud_task()
+     * and write_flush across cores, which is what corrupted the state the
+     * idle core then spun on forever (see usb_cdc_lock above).  The window
+     * is now the SIO-spinlock critical section: same shape, cross core. */
+    US(10);
+    primask = usb_cdc_lock();
     if (tud_cdc_write_available() != 0)
         tud_cdc_write_char(c);
-    __asm__ volatile("msr primask, %0" :: "r"(primask) : "memory");
+    usb_cdc_unlock(primask);
 }
 
 int usb_cdc_tx_room(void)
@@ -404,16 +604,26 @@ int usb_cdc_tx_room(void)
 
 void usb_cdc_flush(void)
 {
+    uint32_t primask;
+
     if (!g_hw_ready)
         return;
+    US(11);
+    primask = usb_cdc_lock();
     tud_cdc_write_flush();
+    usb_cdc_unlock(primask);
 }
 
 int usb_cdc_getchar(void)
 {
+    uint32_t primask;
+    int32_t c;
+
     if (!g_hw_ready)
         return -1;
-    int32_t c = tud_cdc_read_char();
+    primask = usb_cdc_lock();
+    c = tud_cdc_read_char();
+    usb_cdc_unlock(primask);
     return (c < 0) ? -1 : (int)c;
 }
 
@@ -443,12 +653,16 @@ uint32_t usb_cdc_pll_boot(void)
  * a reset, so nothing calls this on the happy path. */
 void usb_cdc_replug(int on)
 {
+    uint32_t primask;
+
     if (!g_hw_ready)
         return;
+    primask = usb_cdc_lock();
     if (on)
         dcd_connect(0);
     else
         dcd_disconnect(0);
+    usb_cdc_unlock(primask);
 }
 
 /* Bring-up probe: one register per index so the platform's boot trace can

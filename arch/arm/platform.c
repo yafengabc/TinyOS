@@ -248,10 +248,51 @@ regs_t *arm_handle_fault(regs_t *f)
     return f;
 }
 
+#if TOS_DIAG
+/* Where each core is when a tick interrupts it.  The initiator of a flash
+ * write masks interrupts, so only the free core gets sampled - which is
+ * exactly the core whose whereabouts are unknown. */
+TOS_NOINIT volatile uint32_t g_tick_pc[2];
+TOS_NOINIT volatile uint32_t g_tick_lr[2];
+
+/* Every place that masks interrupts records which site it is, the caller's
+ * return address and a monotonically increasing sequence number, per core.
+ * When a core goes silent during a flash-park handshake the other core can
+ * then tell the difference between "wedged inside a masked section" (sequence
+ * frozen, site/LR pinned) and "still cycling through critical sections"
+ * (sequence advancing).  This is the question the tick sampler cannot answer:
+ * a masked core gets no ticks. */
+TOS_NOINIT volatile uint32_t g_mask_seq[2];
+TOS_NOINIT volatile uint32_t g_mask_lr[2];
+TOS_NOINIT volatile uint32_t g_mask_site[2];
+
+static void arm_mask_probe(uint32_t site, void *ra)
+{
+    uint32_t id = plat_cpu_id() & 1u;
+
+    g_mask_lr[id]   = (uint32_t)ra;
+    g_mask_site[id] = site;
+    g_mask_seq[id]++;
+    g_mask_in[id]   = 1;
+}
+#else
+#define arm_mask_probe(site, ra) do { } while (0)
+#endif
+
 /* Called from the SysTick stub. */
 regs_t *arm_handle_tick(regs_t *f)
 {
     int from_user = frame_is_user(f);
+
+#if TOS_DIAG
+    {
+        uint32_t id = plat_cpu_id() & 1u;
+
+        g_tick_pc[id] = f->pc;
+        g_tick_lr[id] = f->lr;
+        g_tick_ctr[id]++;                  /* heartbeat: freezing is the symptom */
+    }
+#endif
 
 #ifdef TOS_SYSCALL_TRACE
     sys_trace_note(from_user ? 0x54u : 0x48u);
@@ -397,10 +438,14 @@ void plat_irq_enable(void)
         plat_timer_irq_unmask();
     }
     __asm__ volatile("cpsie i" ::: "memory");
+#if TOS_DIAG
+    g_mask_in[id] = 0;
+#endif
 }
 
 void plat_irq_disable(void)
 {
+    arm_mask_probe(TOS_MASKSITE_IRQ_DISABLE, __builtin_return_address(0));
     __asm__ volatile("cpsid i" ::: "memory");
 }
 
@@ -411,6 +456,7 @@ uint32_t plat_irq_save(void)
 {
     uint32_t pm;
 
+    arm_mask_probe(TOS_MASKSITE_IRQ_SAVE, __builtin_return_address(0));
     __asm__ volatile("mrs %0, primask\n\t"
                      "cpsid i"
                      : "=r"(pm)
@@ -428,6 +474,16 @@ void plat_irq_restore(uint32_t state)
                      :
                      : "r"(state)
                      : "memory");
+#if TOS_DIAG
+    /* PRIMASK is one bit, so the previous value *is* the nesting state:
+     * restoring 1 means the caller is still inside an outer section. */
+    {
+        uint32_t id = plat_cpu_id() & 1u;
+
+        g_mask_seq[id]++;       /* the section ended */
+        g_mask_in[id] = state & 1u;
+    }
+#endif
 }
 
 __attribute__((weak)) void plat_flash_park_poll(void)
@@ -436,6 +492,9 @@ __attribute__((weak)) void plat_flash_park_poll(void)
 
 void plat_cpu_idle(void)
 {
+#if TOS_DIAG
+    g_cpu_idle[plat_cpu_id() & 1u]++;     /* liveness probe */
+#endif
     /* A secondary-core flash operation parks this core through its idle
      * loop as well as its tick: while a CPU sits in sched_idle() it is
      * already inside the SysTick exception, so no further tick can preempt
@@ -565,7 +624,9 @@ static void raw_putdec(uint32_t v)
 
 static inline int sio_gate_claim(void)
 {
-    return (int)(mmio_read32(SIO_SPINLOCK0 + 4u * TOS_SIO_GATE) >> 31);
+    /* Non-zero means "claimed".  RP2350 answers one-hot (bit 31 for the gate),
+     * RP2040 answers 1; testing "non-zero" is the only form true on both. */
+    return mmio_read32(SIO_SPINLOCK0 + 4u * TOS_SIO_GATE) != 0u;
 }
 
 static inline void sio_gate_free(void)
@@ -582,6 +643,40 @@ static inline uint32_t sio_gate_irq_save(void)
     return pm;
 }
 
+
+/* Bounded gate acquisition.  An unbounded spin here is the worst possible
+ * failure mode: interrupts are already masked, so the core stops ticking,
+ * prints nothing, and the board only recovers through the watchdog.  If the
+ * gate really is lost (its holder took a fault or was reset mid-window),
+ * saying so on the wire is worth more than another silent 2 s stall. */
+static int sio_gate_claim_bounded(void)
+{
+    for (uint32_t i = 0; ; i++) {
+        if (sio_gate_claim())
+            return 1;
+        if ((i & 0x3fffffu) == 0x3fffffu) {
+            raw_puts("\r\n[GATE!] cpu ");
+            raw_putdec((uint32_t)plat_cpu_id());
+#if TOS_DIAG
+            raw_puts(" msite=");
+            raw_putdec(g_mask_site[0]);
+            raw_puts("/");
+            raw_putdec(g_mask_site[1]);
+            raw_puts(" mlr=");
+            raw_puthex(g_mask_lr[0]);
+            raw_puts("/");
+            raw_puthex(g_mask_lr[1]);
+            raw_puts(" seq=");
+            raw_putdec(g_mask_seq[0]);
+            raw_puts("/");
+            raw_putdec(g_mask_seq[1]);
+#endif
+            raw_puts("\r\n");
+            plat_panic_halt();      /* let the watchdog take it from here */
+        }
+    }
+}
+
 static inline void sio_gate_irq_restore(uint32_t pm)
 {
     __asm__ volatile("msr primask, %0" :: "r"(pm) : "memory");
@@ -595,6 +690,14 @@ void plat_spin_acquire(volatile int *v)
 
     for (;;) {
         while (*v != 0) {
+            /* A flash park may be pending.  The core that asked for it is
+             * inside a ROM flash call and needs every other core off XIP; a
+             * core stuck in this loop never reaches a tick or an idle poll,
+             * so it cannot answer that request and the writer waits forever.
+             * This is the loop the "[spin] cpu 0 stuck on lock" freeze came
+             * from. */
+            plat_flash_park_poll();
+
             if (++spins == SPIN_LIMIT) {
                 /* The holder is not coming back.  A hung board that says which
                  * lock and which core is worth a hundred blind reboots; a panic
@@ -611,9 +714,12 @@ void plat_spin_acquire(volatile int *v)
         }
 #if defined(TOS_ARM_SIO_SPIN)
         {
-            uint32_t pm = sio_gate_irq_save();
+            uint32_t pm;
 
-            while (!sio_gate_claim()) { }
+            arm_mask_probe(TOS_MASKSITE_SPIN_GATE, __builtin_return_address(0));
+            pm = sio_gate_irq_save();
+
+            (void)sio_gate_claim_bounded();
             __asm__ volatile("dmb" ::: "memory");   /* order the gate vs *v */
             if (*v == 0) {
                 *v = 1;
@@ -641,9 +747,12 @@ void plat_spin_acquire(volatile int *v)
 int plat_spin_try_acquire(volatile int *v)
 {
 #if defined(TOS_ARM_SIO_SPIN)
-    uint32_t pm = sio_gate_irq_save();
+    uint32_t pm;
 
-    while (!sio_gate_claim()) { }
+    arm_mask_probe(TOS_MASKSITE_SPIN_TRY_GATE, __builtin_return_address(0));
+    pm = sio_gate_irq_save();
+
+    (void)sio_gate_claim_bounded();
     __asm__ volatile("dmb" ::: "memory");
     if (*v == 0) {
         *v = 1;

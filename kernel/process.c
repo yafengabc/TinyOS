@@ -446,6 +446,7 @@ static void preempt_if_higher(proc_t *p)
         need_resched = 1;
 }
 
+
 /* Hand a blocked task its result and make it runnable.  `val` lands in the
  * saved frame, so the task resumes straight in user mode with that return
  * value - nothing is replayed.
@@ -565,10 +566,26 @@ static void sched_idle(void)
         g_idle_poll();
 
     if (cpu_id() == 0) {
+        /* This block runs masked, so a core that wedges between here and
+         * plat_irq_enable() stops ticking and can never answer the flash
+         * park handshake.  TOS_DIAG makes g_idle_site name the step it never
+         * left (see kernel/diag.h). */
         plat_irq_disable();
+#if TOS_DIAG
+        g_idle_site = 1;
+#endif
         tty_poll();
+#if TOS_DIAG
+        g_idle_site = 2;
+#endif
         console_echo_tick();
+#if TOS_DIAG
+        g_idle_site = 3;
+#endif
         plat_irq_enable();
+#if TOS_DIAG
+        g_idle_site = 0;
+#endif
         process_console_kick();
     }
     plat_cpu_idle();
@@ -635,6 +652,7 @@ static regs_t *sched_switch(regs_t *r)
 {
     proc_t *prev = current;
     int first = 1;
+    int requeued = 0;
 
     /* Somebody asked for this switch; whoever asked (a wake-up, a syscall)
        does not need to ask again once we are here. */
@@ -690,6 +708,7 @@ static regs_t *sched_switch(regs_t *r)
                 prev->kframe = r;
                 prev->state = ST_READY;
                 prev->cpu = -1;
+                requeued = 1;
 
                 /* Hand it to the other core if that core has nothing to do.
                  * Without this an idle CPU never sees a READY task at all:
@@ -707,6 +726,33 @@ static regs_t *sched_switch(regs_t *r)
                     plat_wake_cpu();
                     spin_lock(&proc_lock);
                 }
+            } else if (!requeued && prev && prev->state == ST_READY &&
+                       prev->cpu < 0) {
+                /* Woken in the window between block_locked() clearing `cpu`
+                 * and this switch.  The waker already stamped its result into
+                 * prev->saved, so the task is runnable again - and NOT yet
+                 * owned by anyone, which is exactly what a secondary CPU's
+                 * idle loop looks for.  Scanning for a successor here then
+                 * picks the same task, on this core, while the other core
+                 * may be picking it too: both cores ran the same shell on two
+                 * kernel stacks and the console line went to the copy that
+                 * lost (measured on rp2350rvsmp: `cur0=1 cur1=1`, the slot
+                 * stuck in WAIT_INPUT, and every command of 16+ characters
+                 * silently swallowed).
+                 *
+                 * Claim it back and resume it here instead of going through
+                 * sched_pick(): one owner, and the frame is the one the waker
+                 * patched, not the live trap frame whose r0 still holds the
+                 * syscall number. */
+                prev->state = ST_RUNNING;
+                prev->cpu = cpu_id();
+                current = prev;
+                ktask_running = prev->is_ktask ? 1 : 0;
+                quantum = QUANTUM;
+                spin_unlock(&proc_lock);
+                apply_protection(prev);
+                return prev->is_ktask ? (prev->kframe ? prev->kframe : &prev->saved)
+                                      : &prev->saved;
             }
         }
 
@@ -752,6 +798,26 @@ static regs_t *sched_switch(regs_t *r)
             if (sys_down) {
                 sched_idle();
                 continue;
+            }
+            /* "Nothing runnable" on an SMP kernel is only a bug when the
+             * neighbour is not busy with the task this core wants - so say
+             * what both cores' current process is before dying.  A panic
+             * that names the state it died in saves a reflash per guess. */
+            {
+                int p0 = -1, s0 = -1, p1 = -1, s1 = -1;
+
+                if (cpus[0].cur) {
+                    p0 = cpus[0].cur->pid;
+                    s0 = (int)cpus[0].cur->state;
+                }
+#if MAX_CPUS > 1
+                if (cpus[1].cur) {
+                    p1 = cpus[1].cur->pid;
+                    s1 = (int)cpus[1].cur->state;
+                }
+#endif
+                kprintf("[sched] cpu %u idle: c0=%d/%d c1=%d/%d\n",
+                        (unsigned)cpu_id(), p0, s0, p1, s1);
             }
             panic("no runnable process");
         }
@@ -3194,8 +3260,9 @@ static regs_t *console_read(regs_t *r, uint32_t ptr, uint32_t len)
     }
 
     uint32_t room = len < TTY_LINE_MAX ? len : TTY_LINE_MAX;
-    if (!tty_line_ready())
+    if (!tty_line_ready()) {
         return process_block_read(r, ptr, room);
+    }
     return done(r, (uint32_t)tty_take_line((char *)ptr, (int)room));
 }
 

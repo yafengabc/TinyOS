@@ -63,8 +63,16 @@ static void usb_irq_trampoline(void)
 
     g_usb_irq_count++;
     usb_cdc_trace_snap();       /* raw registers, before anything clears them */
-    if (s_usb_isr)
-        s_usb_isr();            /* dcd_int_handler(): latch SIE events */
+    /* The controller handler races usb_cdc_putc() on the other core - run
+     * it inside the cross-core USB critical section.  The section masks
+     * PRIMASK first, so this ISR can never spin on a lock held by the
+     * thread it just pre-empted: a lock holder is always interrupt-masked. */
+    {
+        uint32_t lk = usb_cdc_lock();
+        if (s_usb_isr)
+            s_usb_isr();        /* dcd_int_handler(): latch SIE events */
+        usb_cdc_unlock(lk);
+    }
     /* Erratum RP2040-E15 (B0/B1): the SIE needs 800 us of LS_J after a bus
      * reset before it will accept packets.  The SDK fix is compiled out of
      * the vendored TinyUSB port; request our equivalent here, but let the

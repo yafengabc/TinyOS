@@ -153,10 +153,26 @@ void cpu_secondary_main(void)
 
     plat_irq_enable();
 
+#if TOS_DIAG
+    /* Which of the two failure modes this is: the hart never reaches the
+     * loop, or it reaches it and sched_pick() never hands it a task.  Once
+     * per 20 000 idle rounds is enough to tell them apart without turning
+     * the console into a spin counter. */
+    kprintf("[cpu%u] secondary ready\n", (unsigned)id);
+#endif
+
     for (;;) {
         struct proc *p = cpu_take_task();
 
         if (p) {
+#if TOS_DIAG
+            static uint32_t shown;
+            if (shown < 4u) {
+                kprintf("[cpu%u] took pid %d\n",
+                        (unsigned)id, process_current_pid());
+                shown++;
+            }
+#endif
             /* First task on this CPU: drop straight into user mode.  From
              * here on every entry is a trap, exactly like the boot CPU. */
             plat_enter_user(process_saved_frame(p));
@@ -167,6 +183,32 @@ void cpu_secondary_main(void)
 }
 
 /* ---- locks ----------------------------------------------------------- */
+
+#if TOS_DIAG
+/* The crash record itself - see kernel/diag.h for what each field answers.
+ * .noinit, so a watchdog reset leaves the evidence for the next boot. */
+TOS_NOINIT volatile uint32_t g_spin_wait[2];       /* spin_lock retries per core */
+TOS_NOINIT volatile uint32_t g_cpu_idle[2];        /* times each core went idle */
+TOS_NOINIT volatile uint32_t g_spin_lock_addr[2];  /* lock the core is waiting on */
+TOS_NOINIT volatile uint32_t g_spin_caller[2];     /* who called spin_lock() */
+TOS_NOINIT volatile uint32_t g_spin_count[2];      /* retries in the current wait */
+TOS_NOINIT volatile uint32_t g_idle_site;          /* step inside sched_idle */
+TOS_NOINIT volatile uint32_t g_usb_site[2];        /* step inside the CDC driver */
+TOS_NOINIT volatile uint32_t g_tick_ctr[2];        /* ticks taken per core */
+TOS_NOINIT volatile uint32_t g_mask_in[2];         /* inside a masked section */
+TOS_NOINIT volatile uint32_t g_spin_in[2];         /* spinning for a kernel lock */
+TOS_NOINIT volatile uint32_t g_park_in[2];         /* parked for a flash write */
+
+__attribute__((weak)) void plat_diag_poll(void)
+{
+}
+#endif
+
+/* Weak default: a port that has no flash parking (or a single-core build)
+ * simply never parks.  The board's real implementation overrides it. */
+__attribute__((weak)) void plat_flash_park_poll(void)
+{
+}
 
 /* Weak defaults for a port that has no atomic instruction of its own.  Every
  * board here is a uniprocessor except the qemu-virt SMP build, so "do
@@ -190,22 +232,63 @@ __attribute__((weak)) void plat_spin_release(volatile int *v)
  * Keeping the test here rather than in each port means a single-hart build
  * of an SMP-capable port still assembles - and, more importantly, that a
  * board which cannot do atomics does not have to fake them. */
+__attribute__((weak)) int plat_spin_try_acquire(volatile int *v)
+{
+    (void)v;
+    return 1;              /* one CPU: the lock is never contended */
+}
+
 void spin_lock(spin_t *s)
 {
-    if (cpu_count > 1)
-        plat_spin_acquire(&s->v);
+    uint32_t spins = 0;
+
+    if (cpu_count <= 1)
+        return;
+
+    for (;;) {
+        if (plat_spin_try_acquire(&s->v)) {
+#if TOS_DIAG
+            g_spin_in[plat_cpu_id() & 1u] = 0;
+#endif
+            return;
+        }
+
+#if TOS_DIAG
+        {
+            uint32_t id = plat_cpu_id() & 1u;
+
+            g_spin_in[id] = 1;
+            g_spin_wait[id]++;
+            g_spin_lock_addr[id] = (uint32_t)(uintptr_t)&s->v;
+            g_spin_caller[id] =
+                (uint32_t)(uintptr_t)__builtin_return_address(0);
+            g_spin_count[id] = spins;
+        }
+        plat_diag_poll();
+#endif
+        /* A flash park may be pending.  The core that asked for it is inside
+         * a ROM flash call and needs every other core off XIP; a core that is
+         * spinning here for a lock cannot answer that request, because it
+         * never reaches a tick or an idle poll.  The two then deadlock against
+         * each other: the writer holds the lock we are waiting for and waits
+         * for us to park, we hold nothing and wait for the writer to finish.
+         * That is the "[spin] cpu 0 stuck on lock" freeze seen on rp2350smp.
+         * Park first, then try the lock again - we are holding nothing, so
+         * there is nothing to release first. */
+        plat_flash_park_poll();
+
+        if (++spins == 40000000u) {
+            kprintf("\n[spin] cpu %u stuck on lock %p\n",
+                    plat_cpu_id(), (void *)&s->v);
+            panic("spin lock");
+        }
+    }
 }
 
 void spin_unlock(spin_t *s)
 {
     if (cpu_count > 1)
         plat_spin_release(&s->v);
-}
-
-__attribute__((weak)) int plat_spin_try_acquire(volatile int *v)
-{
-    (void)v;
-    return 1;              /* one CPU: the lock is never contended */
 }
 
 int spin_trylock(spin_t *s)

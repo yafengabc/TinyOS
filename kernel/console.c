@@ -356,23 +356,59 @@ void console_set_color(uint8_t fg, uint8_t bg)
     (void)bg;
 }
 
+/* Console output lock.  A task's own output must not be thrown away when the
+ * lock is busy: on SMP the holder is usually the other core draining queued
+ * echo in its 1 ms tick, and dropping a whole write there is visible as "the
+ * command printed nothing at all" - measured on rp2350rvsmp, where any command
+ * line of 16 bytes or more (`cat  /readme.txt`, `ls /proc/xxxxxxx`) lost both
+ * the program's output and the following prompt while the command itself ran
+ * to completion.  Sixteen bytes of echo fit in the drain that happens before
+ * the program starts; seventeen did not, so the tick still held the lock when
+ * the write arrived.
+ *
+ * Waiting is only safe when the holder is the OTHER core.  When it is this
+ * core the caller is an interrupt landing inside our own critical section, and
+ * waiting would deadlock - there dropping is the only answer.  Kernel logging
+ * (kprintf) keeps its own try-lock rule: a line of diagnostics is worth
+ * losing to keep a wedged board printable. */
+static volatile int out_lock_cpu = -1;
+
+static int out_lock_take(void)
+{
+    if (spin_trylock(&out_lock)) {
+        out_lock_cpu = (int)plat_cpu_id();
+        return 1;
+    }
+    if (out_lock_cpu == (int)plat_cpu_id())
+        return 0;                       /* re-entry from this core: drop */
+    spin_lock(&out_lock);               /* the other core: wait it out   */
+    out_lock_cpu = (int)plat_cpu_id();
+    return 1;
+}
+
+static void out_lock_give(void)
+{
+    out_lock_cpu = -1;
+    spin_unlock(&out_lock);
+}
+
 void console_putc(char c)
 {
-    if (!spin_trylock(&out_lock))
+    if (!out_lock_take())
         return;
     echo_drain_locked(-1);
     out_char(c);
-    spin_unlock(&out_lock);
+    out_lock_give();
 }
 
 void console_write(const char *s, size_t n)
 {
-    if (!spin_trylock(&out_lock))
+    if (!out_lock_take())
         return;
     echo_drain_locked(-1);
     for (size_t i = 0; i < n; i++)
         out_char(s[i]);
-    spin_unlock(&out_lock);
+    out_lock_give();
 }
 
 void panic(const char *fmt, ...)
