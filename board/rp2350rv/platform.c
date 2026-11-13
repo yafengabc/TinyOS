@@ -940,6 +940,11 @@ void plat_board_early(void)
     usb_cdc_console_init(g_clk_hz);
     g_usb_ready = usb_cdc_hw_ready() ? 1 : 0;
 
+    /* Open the external-interrupt gate (XH3IRQ line 14) now that the
+     * controller is up.  Empty when built for polling.  mstatus.MIE is still
+     * closed here, so nothing can fire until the scheduler starts. */
+    usb_cdc_irq_enable();
+
     early_puts("[U] usb hw=");
     early_puts(g_usb_ready ? "1" : "0");
     early_puts(" cfg=");

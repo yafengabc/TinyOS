@@ -36,7 +36,7 @@
  * The idle poll stays in place either way, so a missed interrupt degrades to
  * the old behaviour instead of a dead console. */
 #ifndef TOS_RV_USB_IRQ
-#define TOS_RV_USB_IRQ 0
+#define TOS_RV_USB_IRQ 1
 #endif
 
 #include "platform.h"
