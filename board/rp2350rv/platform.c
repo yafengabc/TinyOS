@@ -178,14 +178,28 @@ int plat_console_tx_room(void)
     return (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF) ? 0 : 16;
 }
 
+extern void (*g_idle_poll)(void);       /* kernel/process.c: idle hook */
+
+/* Runs the polled USB controller's state machine from the scheduler's idle
+ * loop: thread context, interrupts on.  See plat_console_getchar() for why it
+ * must not run from the tick. */
+static void usb_idle_poll(void)
+{
+    if (plat_cpu_id() == 0 && g_usb_ready)
+        usb_cdc_poll();
+}
+
 int plat_console_getchar(void)
 {
     int c;
 
-    /* Thread context, called on every console poll: the natural place to
-     * run the USB state machine while the shell is blocked reading. */
+    /* tty_poll() runs with interrupts masked and, on the tick path, inside
+     * the timer interrupt.  TinyUSB's state machine does not belong there:
+     * a retry loop inside tud_task() then holds the console lock forever and
+     * the boot stops mid-line.  The state machine runs from the scheduler's
+     * idle loop instead - real thread context, interrupts on (see
+     * usb_idle_poll() above).  Only the byte queue is touched here. */
     if (plat_cpu_id() == 0 && g_usb_ready) {
-        usb_cdc_poll();
         c = usb_cdc_getchar();
         if (c >= 0)
             return c;
@@ -272,6 +286,21 @@ static void clocks_init(void)
                 break;
         }
     }
+    /* The 64-bit TIMER (TIMERAWL, and the RV32 mtime it feeds) only counts
+     * while the TICKS block is emitting its 1 MHz tick: TIMER0_CTRL.ENABLE
+     * plus TIMER0_CYCLES = clk_ref/clk_tick - 1.  The ROM sets this up for
+     * the clock it booted with; changing clk_ref without touching it leaves
+     * the counter stopped, which the panel driver sees as "every delay takes
+     * its full safety bound" (~13 s per delay) and the scheduler as "no
+     * ticks, no console drain".  Program it here, after clk_ref is final. */
+    if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2)) {
+        /* clk_ref = XOSC 12 MHz -> 12 cycles per microsecond */
+        mmio_write32(TICKS_BASE + TICKS_TIMER0_CYCLES_OFFSET, 11u);
+        mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 1u);
+    } else {
+        mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 0u);
+    }
+
     /* clk_peri = clk_sys, undivided.  AUXSRC 0 is clk_sys on the RP2350. */
     mmio_write32(CLOCKS_BASE + CLK_PERI_DIV_OFFSET, CLK_DIV_1);
     mmio_write32(CLOCKS_BASE + CLK_PERI_CTRL_OFFSET,
@@ -834,7 +863,14 @@ void plat_board_early(void)
     g_clk_hz = 12000000u;
     clocks_init();
 
-    unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0);
+    /* TIMER0 is the 64-bit microsecond counter behind TIMERAWL *and* behind
+     * the RV32 mtime/mtimecmp pair, and it comes out of reset held in reset.
+     * The ROM only deasserts it as part of its flash boot, so after a plain
+     * RUN reset it stays frozen: every delay in the panel driver spins its
+     * safety bound, mtime never advances, the scheduler never ticks and the
+     * console ring is never drained - the boot then hangs after the banner. */
+    unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0 |
+            RESET_TIMER0 | RESET_TIMER1);
     led_init();
 
     uart_init();
@@ -884,6 +920,11 @@ void plat_board_init(void)
     g_rom_program   = (rv_rom_program_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_PROGRAM);
     g_rom_ready = (g_rom_connect && g_rom_exit_xip && g_rom_enter_xip &&
                    g_rom_flush && g_rom_erase && g_rom_program) ? 1 : 0;
+
+    /* The USB controller is polled, not interrupt driven, and its state
+     * machine must not run in interrupt context - hook it into the
+     * scheduler's idle loop instead (see usb_idle_poll above). */
+    g_idle_poll = usb_idle_poll;
 }
 
 /* ---- power ------------------------------------------------------------- */

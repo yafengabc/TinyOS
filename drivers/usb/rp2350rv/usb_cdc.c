@@ -32,11 +32,25 @@
 #include "usb_cdc.h"
 
 #include "tusb.h"
+#include "device/usbd_pvt.h"
 #include "device/dcd.h"
 #include "hardware/structs/usb.h"
 #include "string.h"
 #include "console.h"
 #include "cpu.h"
+
+/* TinyUSB declares this weak and only calls it when the symbol is non-NULL.
+ * An *undefined* weak symbol is not 0 everywhere: on RV32 with the medany
+ * code model the reference is PC-relative, lld hands back a non-zero address,
+ * the NULL test passes and the call jumps into nothing - which kept the
+ * RP2350 RISC-V image from booting unless the ROM had already brought USB up.
+ * A definition that reports "no application driver" gives the same answer on
+ * every target, and stays weak so an application can still replace it. */
+usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count)
+{
+    (void)driver_count;
+    return 0;
+}
 
 /* The port header defines this pair; the bring-up path uses both to
  * re-assert the pull-up after the pads come up. */
@@ -358,6 +372,7 @@ void usb_cdc_irq_task(void)
  * whole body is single-entry: the tick can interrupt a thread-context poll.
  * Must run on CPU 0 - it is the only owner of the controller state machine. */
 static volatile int g_in_poll;
+static uint32_t g_tx_dropped;
 
 static void usb_tx_drain(void)
 {
@@ -387,6 +402,17 @@ void usb_cdc_poll(void)
     g_in_poll = 1;
     plat_irq_restore(irq);
 
+    /* A host that just showed up must not be handed the backlog that piled
+     * up while nobody was listening. */
+    if (!tud_cdc_connected()) {
+        uint32_t irq2 = plat_irq_save();
+
+        plat_spin_acquire(&g_tx_lock);
+        g_tx_tail = g_tx_head;
+        plat_spin_release(&g_tx_lock);
+        plat_irq_restore(irq2);
+    }
+
     /* Polled controller: any pending SIE event is serviced here instead of
      * in an IRQ 14 handler (Hazard3 external lines need its CSR window). */
     if (usb_hw->ints)
@@ -409,6 +435,15 @@ void usb_cdc_putc(char c)
 
     if (!g_hw_ready || !tud_mounted())
         return;
+
+    /* Nobody is reading: drop instead of queueing.  A full ring used to be
+     * held until a host finally opened the port, which then received a
+     * kilobyte of stale console output before anything new.  The host sets
+     * DTR when it opens the port, so that is the "reader present" test. */
+    if (!tud_cdc_connected()) {
+        g_tx_dropped++;
+        return;
+    }
 
     /* Enqueue only: the producer may be CPU 1, while TinyUSB's FIFO and
      * task loop belong to CPU 0.  The spin lock is held for a handful of

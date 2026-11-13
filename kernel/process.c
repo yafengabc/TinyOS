@@ -548,9 +548,21 @@ static int other_cpu_busy(void)
  * which came out as `ps` arriving as "sp" plus a stray "p" and ended in a
  * "no runnable process" panic.  Handing the finished line over happens with
  * interrupts back on - it takes only the process lock. */
+
+/* Boards may pump a device state machine here.  It runs in thread context
+ * with interrupts on, which is where a polled controller belongs: a stuck
+ * poll then costs a slice, not the console lock the tick holds.
+ * A plain pointer, not a weak symbol: an undefined weak symbol on RV32 with
+ * the medany code model links to a non-zero address, so "if (hook)" is true
+ * and the call jumps into nothing (same trap as TinyUSB's
+ * usbd_app_driver_get_cb). */
+void (*g_idle_poll)(void);
+
 static void sched_idle(void)
 {
     plat_irq_enable();
+    if (g_idle_poll)
+        g_idle_poll();
 
     if (cpu_id() == 0) {
         plat_irq_disable();

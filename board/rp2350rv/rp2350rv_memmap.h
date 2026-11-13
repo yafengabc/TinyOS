@@ -52,6 +52,11 @@
 #define RESETS_RESET_OFFSET      0x00u
 #define RESETS_RESET_DONE_OFFSET 0x08u
 #define RESET_UART0     (1u << 26)
+#define TICKS_BASE      0x40108000u   /* 1 MHz tick generator (TIMERAWL) */
+#define TICKS_TIMER0_CTRL_OFFSET   0x18u
+#define TICKS_TIMER0_CYCLES_OFFSET 0x1cu
+#define RESET_TIMER0    (1u << 23)   /* us counter: TIMERAWL + mtime */
+#define RESET_TIMER1    (1u << 24)
 #define RESET_PADS_BANK0 (1u << 9)
 #define RESET_IO_BANK0  (1u << 6)
 #define RESET_PLL_SYS   (1u << 14)
