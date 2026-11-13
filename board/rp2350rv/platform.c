@@ -528,8 +528,13 @@ void plat_timer_tick(void)
 #endif
     /* Only the boot CPU counts time.  With one hart this is always true; it
      * is written this way so an SMP build would not run the clock at 2x. */
-    if (plat_cpu_id() == 0)
+    if (plat_cpu_id() == 0) {
         g_ticks++;
+        /* Keep the CDC FIFO fed from the ring.  tuD's state machine stays in
+         * thread context; this only moves bytes, which is safe here. */
+        if (g_usb_ready)
+            usb_cdc_tx_kick();
+    }
     mtime_set_cmp(mtime_read() + g_interval);
 
     if (plat_cpu_id() == 0 && (g_ticks % 1000u) == 0u && !plat_led_owned())
@@ -542,6 +547,25 @@ int plat_irq_is_tick(uint32_t line)
 {
     return line == 7u;
 }
+
+#if TOS_RV_USB_IRQ
+/* mcause 11 = machine external.  Read the XH3IRQ pending array and hand the
+ * USB line to the same task the polled path runs, but immediately: the
+ * control-transfer timing needs it.  Returning 1 tells the trap handler the
+ * line was ours; anything else falls through to its panic. */
+int plat_irq_foreign(uint32_t line)
+{
+    uint32_t pend;
+
+    if (line != 11u)
+        return 0;
+    __asm__ volatile("csrr %0, 0xbe1" : "=r"(pend));
+    if (!(pend & (1u << 14u)))
+        return 0;
+    usb_cdc_irq_task();
+    return 1;
+}
+#endif
 
 void plat_irq_service(uint32_t line)
 {

@@ -28,6 +28,9 @@ void usb_cdc_putc(char c);
  * but knowing the room lets echo pace itself instead of losing characters. */
 int  usb_cdc_tx_room(void);
 void usb_cdc_flush(void);
+/* Bounded transmit drain, safe from interrupt context: refills the CDC FIFO
+ * from the ring without running TinyUSB's state machine. */
+void usb_cdc_tx_kick(void);
 int  usb_cdc_getchar(void);
 
 int  usb_cdc_configured(void);   /* 1 once the host has SET_CONFIGURATION */

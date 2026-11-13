@@ -26,6 +26,19 @@
  * upstream port needs is in third_party/tinyusb/port_rp2 and tusb_shim.c.
  */
 
+/* Take the USB controller's interrupt on Hazard3 instead of polling it.
+ *
+ * Hazard3 has no NVIC: external lines arrive as mcause 11 (machine external)
+ * and the per-line enable/pending bits live in the XH3IRQ CSR arrays
+ * meiea/meipa (0xbe0/0xbe1; element 0 covers lines 0..31).  USBCTRL_IRQ is
+ * line 14 on the RP2350.  Off by default because the polled path is the one
+ * that has run on hardware; flip to 1 (or -DTOS_RV_USB_IRQ=1) to A/B it.
+ * The idle poll stays in place either way, so a missed interrupt degrades to
+ * the old behaviour instead of a dead console. */
+#ifndef TOS_RV_USB_IRQ
+#define TOS_RV_USB_IRQ 0
+#endif
+
 #include "platform.h"
 #include "board.h"
 #include "rp2350rv_memmap.h"
@@ -298,6 +311,12 @@ void usb_cdc_init(void)
  * sequence reads the same as the ARM board. */
 void usb_cdc_irq_enable(void)
 {
+#if TOS_RV_USB_IRQ
+    /* meiea: enable line 14; mie.MEIE: let the core take cause 11 at all.
+     * mstatus.MIE is opened later by the scheduler. */
+    __asm__ volatile("csrs 0xbe0, %0" :: "r"(1u << 14u));
+    __asm__ volatile("csrs mie, %0"   :: "r"(1u << 11u));
+#endif
 }
 
 /* Wait (bounded) for the host to finish SET_CONFIGURATION so the boot banner
@@ -385,6 +404,16 @@ static void usb_tx_drain(void)
     }
     plat_spin_release(&g_tx_lock);
     plat_irq_restore(irq);
+}
+
+/* Move whatever the ring holds into the CDC FIFO.  Deliberately does not run
+ * tud_task(): this is called from the 1 ms tick, and the state machine must
+ * stay in thread context (see usb_cdc_poll).  Without this a program that
+ * never blocks cannot print more than the 1 KiB ring. */
+void usb_cdc_tx_kick(void)
+{
+    if (g_hw_ready)
+        usb_tx_drain();
 }
 
 void usb_cdc_poll(void)
