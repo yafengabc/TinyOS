@@ -31,11 +31,32 @@
 #include "usb_cdc.h"
 
 #include "tusb.h"
+#include "device/usbd_pvt.h"
+
+
 #include "device/dcd.h"
 #include "hardware/structs/usb.h"
 #include "string.h"
 #include "console.h"
 #include "uart_dbg.h"
+
+/* TinyUSB declares this weak and calls it only when the symbol is non-NULL:
+ *
+ *     if (usbd_app_driver_get_cb) _app_driver = usbd_app_driver_get_cb(...);
+ *
+ * An *undefined* weak symbol does not materialise as 0 on every port.  On
+ * RV32 the medany code model makes the reference PC-relative, lld hands back
+ * a non-zero address for it, the NULL test passes and the call jumps into
+ * nothing - which is what kept the RP2350 RISC-V image from booting unless
+ * the ROM had already brought USB up.  A definition that reports "no
+ * application driver" gives the same answer on every target; it stays weak
+ * so an application can still replace it.
+ */
+usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count)
+{
+    (void)driver_count;
+    return 0;
+}
 
 /* The port header defines this pair; the bring-up path uses both to
  * re-assert the pull-up after the pads come up. */

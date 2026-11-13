@@ -3665,14 +3665,18 @@ void process_start_shell(const char *path)
     /* Published already claimed: see proc_create_claim().  On an SMP build
      * the other core's idle loop is scanning for READY tasks from the moment
      * cpu_init() returns, and the shell must not be one of them. */
+    plat_console_putc('S'); /* DIAG */
     proc_t *p = proc_create_claim(path, NULL, 0, 1);
+    plat_console_putc('K'); /* DIAG */
     if (!p)
         panic("cannot load initial program '%s'", path);
 
     init_proc = p;
 
     plat_set_kernel_stack(KSTACK_TOP);
+    plat_console_putc('X'); /* DIAG */
     apply_protection(p);
+    plat_console_putc('Y'); /* DIAG */
 
     /* Straight into the frame proc_create prepared. */
     plat_enter_user(&p->saved);

@@ -601,6 +601,7 @@ static int g_init_done;
 
 void hwdev_init(void)
 {
+    plat_console_putc('H'); /* DIAG */
     const board_dev_t *devs;
     int count = 0, nl = 0, nk = 0, nd = 0;
     char name[16];
@@ -660,6 +661,7 @@ void hwdev_init(void)
                           devfs_dropped());
         console_write(msg, (size_t)n);
     }
+    plat_console_putc('h'); /* DIAG */
 }
 
 #else  /* !TOS_DEVNODES: no /dev nodes, no board table, no class code.

@@ -44,19 +44,35 @@ static void screen_banner(void)
     screen_puts("----------------------------------------\n");
 }
 
+/* DIAG: where the flash writers really live.  They must be in SRAM
+ * (0x2xxxxxxx); an address in the flash window means the .data.ramfunc copy
+ * did not cover them and the first flash write will hang. */
+static void diag_hex(uint32_t v)
+{
+    static const char hx[] = "0123456789abcdef";
+    plat_console_putc('0'); plat_console_putc('x');
+    for (int i = 28; i >= 0; i -= 4)
+        plat_console_putc(hx[(v >> i) & 0xfu]);
+}
+
 void kmain(void)
 {
     plat_early_init();
+    plat_console_putc('1'); /* DIAG */
     plat_init();
+    plat_console_putc('2'); /* DIAG */
 
     /* The scheduler runs off this tick: it is what preempts a task, wakes
        sleepers and hands console input to whoever is reading.  1000 Hz so
        that sleep(1) means 1 ms and a sampler can keep a millisecond
        cadence - see the QUANTUM note in process.c for what that costs. */
     plat_timer_init(1000);
+    plat_console_putc('3'); /* DIAG */
 
     heap_init();
+    plat_console_putc('4'); /* DIAG */
     ramdisk_init();
+    plat_console_putc('5'); /* DIAG */
 
     /* Device files exist before the first task does.  Registration is a boot
      * act and the table is read-only afterwards, which is what lets open()
@@ -66,15 +82,20 @@ void kmain(void)
     devfs_init();
     periph_init_devs();
     procfs_init();
+    plat_console_putc('6'); /* DIAG */
 
     /* Board devices: the table becomes /dev nodes here, and display 0
      * becomes a text screen the console can mirror onto.  A board with no
      * panel reports no display, both calls return -1, and every screen_*
      * call below is a no-op. */
     hwdev_init();
+    plat_console_putc('h'); /* DIAG */
     screen_init();
+    plat_console_putc('n'); /* DIAG */
+    plat_console_putc('7'); /* DIAG */
 
     process_init();
+    plat_console_putc('8'); /* DIAG */
 
     banner();
     screen_banner();
@@ -85,6 +106,7 @@ void kmain(void)
      * other harts and waits for them to report in, so that "2 of 2 online"
      * either appears before the shell does or the boot says why not. */
     cpu_init();
+    plat_console_putc('9'); /* DIAG */
 
     /* Bring-up self-check: bounded wait for the first scheduler tick.  A
        dead timer otherwise boots fine here and fails confusingly later

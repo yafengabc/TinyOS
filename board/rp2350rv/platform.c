@@ -46,6 +46,10 @@ typedef void (*rv_rom_reboot_t)(uint32_t flags, uint32_t delay_ms,
 #define ROM_FUNC_FLASH_RANGE_ERASE    0x4552u   /* 'R','E' */
 #define ROM_FUNC_FLASH_RANGE_PROGRAM   0x5052u   /* 'R','P' */
 #define ROM_FUNC_REBOOT                0x4252u   /* 'R','B' */
+/* The ROM exposes its own stage-2 loader as a callable function.  It is
+ * the only thing that reprograms QMI *for the running clk_sys* after a
+ * flash write. */
+#define ROM_FUNC_BOOT2                 0x3242u   /* 'B','2' */
 
 /* RISC-V lookup: the entry at 0x7dfa is a 16-bit address of a jump
  * instruction (the code is embedded in the table, unlike ARM where the
@@ -66,6 +70,7 @@ static rv_rom_void_t    g_rom_enter_xip;
 static rv_rom_void_t    g_rom_flush;
 static rv_rom_erase_t   g_rom_erase;
 static rv_rom_program_t g_rom_program;
+static rv_rom_void_t    g_rom_boot2;
 static int              g_rom_ready;
 
 /* BOOTSEL on Ctrl-D: the host script sends 0x04 on UART0 and the ROM
@@ -513,6 +518,89 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
  * linker script copies .data.ramfunc to SRAM before kmain. */
 #define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
 
+/* The ROM leaves its stage-2 loader in boot RAM.  It is the code that
+ * reprograms QMI for the running clk_sys, so it is what has to run again
+ * after flash_exit_xip() - not the ROM's flash_enter_cmd_xip(), which only
+ * installs a slow 03h command-mode read sized for the boot clock. */
+#define BOOTRAM_BASE    0x400e0000u
+#define BOOT2_WORDS     64
+
+static uint32_t g_boot2[BOOT2_WORDS];
+
+RAMFUNC static int boot2_valid(void)
+{
+    const volatile uint32_t *p = (const volatile uint32_t *)BOOTRAM_BASE;
+    uint32_t sum = 0;
+
+    for (int i = 0; i < BOOT2_WORDS; i++)
+        sum |= p[i];
+    /* Absent boot RAM reads as all-zero or all-ones; never jump at that. */
+    return sum != 0u && sum != 0xffffffffu;
+}
+
+/* Bringing XIP back after an erase/program.
+ *
+ * flash_enter_cmd_xip() only installs the slow 03h command-mode read, with
+ * timings derived from the clock the ROM booted at.  At 150 MHz the write
+ * lands and QMI then reads back identical to its pre-write state, yet the
+ * first instruction fetch that misses the XIP cache comes back garbled and
+ * the core hangs - which is why the board only booted right after flashing
+ * (a warm boot still ran kernel text out of the cache, a cold one did not).
+ * Running the ROM's stage-2 loader is what pico-sdk does here: boot2 is the
+ * code that reprograms QMI for the running clk_sys (divider, RX delay, pads,
+ * cache) instead of for the boot clock. */
+RAMFUNC static void boot2_copyout(void)
+{
+    const volatile uint32_t *p = (const volatile uint32_t *)BOOTRAM_BASE;
+
+    for (int i = 0; i < BOOT2_WORDS; i++)
+        g_boot2[i] = p[i];
+    __sync_synchronize();
+}
+
+RAMFUNC static void xip_restore(void)
+{
+    /* Fresh copy every time: boot2 is re-entrant as a function, but it keeps
+     * no state of its own here, and re-copying also guards against the ROM
+     * reusing boot RAM later on. */
+    if (boot2_valid()) {
+        boot2_copyout();
+        /* +1 is the Thumb bit; JALR clears bit 0 on RISC-V, so the call is
+         * correct on both architectures (this is what pico-sdk does). */
+        ((void (*)(void))((uintptr_t)g_boot2 + 1u))();
+        __sync_synchronize();
+        return;
+    }
+    if (g_rom_boot2) {
+        g_rom_boot2();
+        return;
+    }
+    g_rom_enter_xip();
+}
+
+/* Retune the flash interface for the clock we are actually running at.
+ *
+ * boot2 configures QMI (CLKDIV, RXDELAY, pads) for the clock the ROM booted
+ * with.  Raising clk_sys to 150 MHz afterwards leaves both fields sized for
+ * the old clock, so reads are sampled at a delay that no longer matches the
+ * SCK period - usually the XIP cache hides it, occasionally an instruction
+ * fetch comes back garbled and the hart hangs.  That is the same failure
+ * that shows up right after a flash write.  Re-running boot2 after the PLL
+ * switch puts QMI back in step with the real clock. */
+RAMFUNC static void qmi_retune(void)
+{
+    rv_rom_void_t connect = (rv_rom_void_t)rp_rom_func(ROM_FUNC_CONNECT_INTERNAL_FLASH);
+    rv_rom_void_t exit_xip = (rv_rom_void_t)rp_rom_func(ROM_FUNC_FLASH_EXIT_XIP);
+
+    if (!boot2_valid() || !connect || !exit_xip)
+        return;
+    connect();
+    exit_xip();
+    boot2_copyout();
+    ((void (*)(void))((uintptr_t)g_boot2 + 1u))();
+    __sync_synchronize();
+}
+
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t addr, end, was_enabled;
@@ -529,7 +617,7 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     g_rom_exit_xip();
     g_rom_erase(addr, end - addr, RP_FLASH_SECTOR, RP_SECTOR_ERASE_CMD);
     g_rom_flush();
-    g_rom_enter_xip();
+    xip_restore();
     if (was_enabled & 8u)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return 0;
@@ -549,7 +637,7 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     g_rom_exit_xip();
     g_rom_program(addr, (const uint8_t *)buf, count * 512u);
     g_rom_flush();
-    g_rom_enter_xip();
+    xip_restore();
     if (was_enabled & 8u)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return 0;
@@ -714,7 +802,17 @@ void plat_board_early(void)
     g_clk_hz = 12000000u;
     clocks_init();
 
-    unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0);
+    /* TIMER0 is the 64-bit microsecond counter behind TIMERAWL and behind the
+     * RV32 mtime/mtimecmp pair.  It comes out of reset held in reset, and the
+     * ROM only deasserts it as part of its flash boot - so after a plain RUN
+     * reset the counter stays frozen.  That is not a cosmetic problem: every
+     * millisecond delay in the panel driver spins its safety bound (13 s of
+     * LCD init), mtime never advances so the scheduler never ticks, and the
+     * console ring is never drained - the boot then hangs right after the
+     * banner with no output at all.  Deassert it before anything waits. */
+    unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0 |
+            RESET_TIMER0 | RESET_TIMER1);
+
     led_init();
 
     uart_init();
@@ -734,6 +832,13 @@ void plat_board_early(void)
     early_puts("[B] clk=0x");
     early_put_hex(g_clk_hz);
     early_puts(" Hz\r\n");
+
+    /* QMI is still tuned for the pre-PLL clock at this point. */
+    if (boot2_valid()) {
+        qmi_retune();
+        uart_init();                /* the retune touches the QSPI pads only */
+        early_puts("[T] qmi retuned for clk_sys\r\n");
+    }
 
     /* USB CDC shares the console with UART0.  The wait inside is bounded
      * (~1.5 s scaled by the measured clock), so a board with no USB cable
@@ -762,8 +867,15 @@ void plat_board_init(void)
     g_rom_flush     = (rv_rom_void_t)rp_rom_func(ROM_FUNC_FLASH_FLUSH_CACHE);
     g_rom_erase     = (rv_rom_erase_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_ERASE);
     g_rom_program   = (rv_rom_program_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_PROGRAM);
+    g_rom_boot2     = (rv_rom_void_t)rp_rom_func(ROM_FUNC_BOOT2);
     g_rom_ready = (g_rom_connect && g_rom_exit_xip && g_rom_enter_xip &&
                    g_rom_flush && g_rom_erase && g_rom_program) ? 1 : 0;
+
+    /* Which post-write XIP path is available: the ROM's stage-2 loader
+     * (correct at any clk_sys) or the command-mode fallback. */
+    early_puts("[F] xip-restore=");
+    early_puts(boot2_valid() ? "bootram-boot2" : (g_rom_boot2 ? "rom-b2" : "cmd-xip"));
+    early_puts("\r\n");
 }
 
 /* ---- power ------------------------------------------------------------- */

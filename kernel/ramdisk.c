@@ -217,9 +217,14 @@ static int bd_sync(const struct lfs_config *c)
     return 0;
 }
 
-/* Exercise the write path once at boot so a broken ATA write shows up
-   immediately instead of silently corrupting the filesystem later. */
+/* Exercise the write path once, on demand.  It is deliberately NOT on the
+   boot path: on the RP2350 a flash program at full clk_sys can leave the XIP
+   interface unable to fetch instructions afterwards (see the notes on
+   xip_restore() in board/rp2350rv/platform.c), and a write during boot turns
+   that into an unbootable board with no way to run a diagnostic command.
+   Build with -DTOS_FS_SELFTEST to run it at every boot again. */
 #ifndef TOS_LFS_RO
+__attribute__((unused))
 static void write_selftest(void)
 {
     const char *path = "selftest.tmp";
@@ -230,13 +235,16 @@ static void write_selftest(void)
     struct lfs_file_config fc;
     memset(&fc, 0, sizeof(fc));
     fc.buffer = out;
+    plat_console_putc('G'); /* DIAG */
 
     if (lfs_file_opencfg(&lfs, &f, path, LFS_O_CREAT | LFS_O_WRONLY, &fc) < 0) {
         kprintf("[ramdisk] write test: create failed\n");
         return;
     }
+    plat_console_putc('H'); /* DIAG */
     lfs_file_write(&lfs, &f, msg, (lfs_size_t)(strlen(msg) + 1));
     lfs_file_close(&lfs, &f);
+    plat_console_putc('I'); /* DIAG */
 
     lfs_ssize_t n = -1;
     if (lfs_file_opencfg(&lfs, &f, path, LFS_O_RDONLY, &fc) < 0) {
@@ -246,7 +254,9 @@ static void write_selftest(void)
         n = lfs_file_read(&lfs, &f, tmp, sizeof(tmp));
         lfs_file_close(&lfs, &f);
     }
+    plat_console_putc('J'); /* DIAG */
     lfs_remove(&lfs, path);
+    plat_console_putc('K'); /* DIAG */
 
     if (n > 0 && strcmp((char *)tmp, msg) == 0)
         kprintf("[ramdisk] block device write test passed\n");
@@ -396,11 +406,13 @@ void ramdisk_init(void)
     enum_start();
     memset(openfiles, 0, sizeof(openfiles));
 
+    plat_console_putc('A'); /* DIAG */
     if (plat_block_count() == 0 && plat_block_read(PLAT_LFS_LBA, 1, bounce) != 0) {
         kprintf("[ramdisk] no block device, filesystem unavailable\n");
         return;
     }
 
+    plat_console_putc('B'); /* DIAG */
     if (lfs_mount(&lfs, &cfg) < 0) {
         kprintf("[ramdisk] littlefs mount failed (partition at LBA %u?)\n",
                 PLAT_LFS_LBA);
@@ -414,6 +426,7 @@ void ramdisk_init(void)
      * so a tail that still holds an old image is simply reclaimed block by
      * block, no erase pass needed.  Failure keeps the (smaller) mounted
      * filesystem working; only the extra space is lost. */
+    plat_console_putc('C'); /* DIAG */
     if (lfs_fs_grow(&lfs, PLAT_LFS_BLOCKS) < 0)
         kprintf("[ramdisk] warning: fs grow to %u blocks failed\n",
                 PLAT_LFS_BLOCKS);
@@ -423,7 +436,11 @@ void ramdisk_init(void)
     ok = 1;
 
 #ifndef TOS_LFS_RO
+#ifdef TOS_FS_SELFTEST
+    plat_console_putc('D'); /* DIAG */
     write_selftest();
+    plat_console_putc('F'); /* DIAG */
+#endif
 #endif
 }
 

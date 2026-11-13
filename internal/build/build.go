@@ -116,9 +116,9 @@ type Target struct {
 
 var (
 	esp32c3Drivers  = []string{"drivers/gpio/esp32c3", "drivers/serial/esp32c3"}
-	rp2040Drivers   = []string{"drivers/gpio/rp2040", "drivers/usb/rp2040"}
-	rp2350Drivers   = []string{"drivers/gpio/rp2350", "drivers/spi/rp2350", "drivers/display/st7789/rp2350", "drivers/usb/rp2350"}
-	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv"}
+	rp2040Drivers   = []string{"drivers/gpio/rp2040", "drivers/usb/rp2040", "drivers/pio/rp2"}
+	rp2350Drivers   = []string{"drivers/gpio/rp2350", "drivers/spi/rp2350", "drivers/display/st7789/rp2350", "drivers/usb/rp2350", "drivers/pio/rp2"}
+	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv", "drivers/pio/rp2"}
 
 	// Neither RP2 board has WiFi hardware: the ESP32-C3 WiFi/net programs
 	// are built from the same user tree, so exclude them by default instead
@@ -135,6 +135,11 @@ var (
 	// menuconfig.  The code behind each is a TOS_<NAME> define, so turning
 	// one off removes the driver, not just its /dev entry.
 	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma", "pio"}
+
+	// RP2350 default features.  PIO is the same driver as the RP2040's
+	// (drivers/pio/rp2) with three blocks instead of two; without it the
+	// `pio` command and the /pio/*.pio examples are not worth the ramdisk.
+	rp2350Features = []string{"pio"}
 
 	// ESP32-C3: LEDC PWM, the SPI2 master and the I2C master.  No DMA yet
 	// (the GDMA channel/link descriptors are a separate piece of work), and
@@ -200,7 +205,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// one.  The link places __app_base after whatever .bss turns out to be, so
 	// the panel's DMA row buffer (3.8 KiB in lcd_st7789.c) no longer has to fit
 	// a fixed 128 KiB line.
-	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers},
+	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 704, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// rp2350rv: the same physical board with its Hazard3 RISC-V cores
 	// instead of the Cortex-M33 pair.  RP2350 boots either architecture,
@@ -216,7 +221,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	//
 	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
 	// spin lock will need later, and it costs nothing on this core.
-	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers},
+	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 704, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// rp2350rvsmp: both Hazard3 cores.  Core 1 is parked in the boot ROM's
 	// SIO-FIFO launch loop, not at our reset vector, so the board pushes the
@@ -225,7 +230,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// core-local (pico-sdk riscv_platform_timer.h), so each hart gets its own
 	// tick.  The second 16 KiB kernel stack comes out of .bss; the heap arena
 	// drops to the same 32 KiB the single-core image uses.
-	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers},
+	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 704, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
 	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
@@ -234,7 +239,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// stack drops to 16 KiB (KSTACK_BYTES in kernel/cpu.h is per arch), so
 	// two cores still reserve the 32 KiB the single-core image did and the
 	// 60 KiB exec arena is untouched.
-	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers},
+	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 704, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what

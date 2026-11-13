@@ -39,6 +39,39 @@ static const char *cause_name(uint32_t cause)
     }
 }
 
+/* DIAG: a kernel-mode trap during early init would print through kprintf,
+ * whose console ring does not exist yet - the output would vanish and a
+ * second fault inside kprintf would spin forever.  This writes straight to
+ * the board console so such a fault is visible. */
+static void diag_hex(uint32_t v)
+{
+    static const char hx[] = "0123456789abcdef";
+
+    plat_console_putc('0');
+    plat_console_putc('x');
+    for (int i = 28; i >= 0; i -= 4)
+        plat_console_putc(hx[(v >> i) & 0xfu]);
+}
+
+static void diag_kernel_trap(uint32_t cause, uint32_t mepc, uint32_t mtval)
+{
+    plat_console_putc('\r');
+    plat_console_putc('\n');
+    plat_console_putc('!');
+    plat_console_putc('t');
+    plat_console_putc('r');
+    plat_console_putc('a');
+    plat_console_putc('p');
+    plat_console_putc(' ');
+    diag_hex(cause);
+    plat_console_putc(' ');
+    diag_hex(mepc);
+    plat_console_putc(' ');
+    diag_hex(mtval);
+    plat_console_putc('\r');
+    plat_console_putc('\n');
+}
+
 regs_t *trap_handler(regs_t *f)
 {
     uint32_t cause = f->mcause;
@@ -136,6 +169,7 @@ regs_t *trap_handler(regs_t *f)
         return process_exit(f, 139);
     }
 
+    diag_kernel_trap(cause, f->mepc, f->mtval);
     kprintf("\n*** RV32 TRAP ***\n");
     kprintf("%s: mcause=0x%x mepc=0x%x mtval=0x%x\n",
             cause_name(cause), cause, f->mepc, f->mtval);
@@ -186,8 +220,11 @@ static void pmp_open_trap_vector(void);
 void plat_init(void)
 {
     pmp_deny_user();
+    plat_console_putc('a'); /* DIAG */
     plat_board_init();
+    plat_console_putc('b'); /* DIAG */
     pmp_open_trap_vector();
+    plat_console_putc('c'); /* DIAG */
 }
 
 /* PMP access bits, shared by the boot-time vector opening and the

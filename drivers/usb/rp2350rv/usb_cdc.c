@@ -32,11 +32,32 @@
 #include "usb_cdc.h"
 
 #include "tusb.h"
+#include "device/usbd_pvt.h"
+
+
 #include "device/dcd.h"
 #include "hardware/structs/usb.h"
 #include "string.h"
 #include "console.h"
 #include "cpu.h"
+
+/* TinyUSB declares this weak and calls it only when the symbol is non-NULL:
+ *
+ *     if (usbd_app_driver_get_cb) _app_driver = usbd_app_driver_get_cb(...);
+ *
+ * An *undefined* weak symbol does not materialise as 0 on every port.  On
+ * RV32 the medany code model makes the reference PC-relative, lld hands back
+ * a non-zero address for it, the NULL test passes and the call jumps into
+ * nothing - which is what kept the RP2350 RISC-V image from booting unless
+ * the ROM had already brought USB up.  A definition that reports "no
+ * application driver" gives the same answer on every target; it stays weak
+ * so an application can still replace it.
+ */
+usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count)
+{
+    (void)driver_count;
+    return 0;
+}
 
 /* The port header defines this pair; the bring-up path uses both to
  * re-assert the pull-up after the pads come up. */
@@ -98,6 +119,60 @@ static volatile int      g_tx_lock;
 static volatile uint8_t  g_tx_ring[USB_TX_RING];
 static volatile uint32_t g_tx_head;
 static volatile uint32_t g_tx_tail;
+
+/* ---- no-host-reader backlog guard ---------------------------------------
+ *
+ * A configured CDC device whose bulk IN transfer is never completed means
+ * nobody on the host is draining the endpoint.  TinyUSB copes with that on
+ * its own: SET_CONTROL_LINE_STATE clears DTR and makes tx_ff overwritable
+ * (cdc_device.c:418), i.e. old bytes are discarded when the FIFO fills.
+ * Our 1024-byte ring defeated that: usb_tx_drain() used to stop as soon as
+ * write_available() hit zero, so a full FIFO parked *all* newer output in
+ * the ring, and every 1 ms poll re-attempted the same drain + flush against
+ * a permanently pending xfer.  On this port that work is CPU0-only and has
+ * no USB IRQ to share it, which is what made the two harts asymmetric.
+ *
+ * Rule: there is a reader if DTR is asserted or a bulk IN completed recently
+ * (the latter covers usbser.sys reading with DTR held low).  With no reader,
+ * output is dropped at the producer, except for one probe byte every
+ * CDC_PROBE_MS.  The probe is what lets a terminal that appears later bring
+ * the path back - without it the FIFO would stay empty forever and no
+ * completion could ever clear the state.  No ring is accumulated, so the
+ * endpoint never ends up with a permanently pending full xfer.
+ *
+ * Everything here lives on the producer side (usb_cdc_putc).  The 1 ms
+ * usb_cdc_poll()/usb_tx_drain() path is byte-for-byte the original: adding
+ * even a handful of instructions there changed smpbench by 0.15x in both
+ * directions during the A/B runs, which would fake any performance result.
+ *
+ * g_cdc_fix (kernel/procfs.c, flipped by /proc/cdcfix) is a run-time A/B
+ * switch so fix=0 and fix=1 can be compared within one firmware image. */
+#define CDC_AGE_MS      200u
+#define CDC_PROBE_MS    100u
+
+extern volatile uint32_t g_cdc_fix;
+extern volatile uint32_t g_cdc_diag[6];
+
+static volatile uint32_t g_tx_done_ms;    /* last bulk IN completion       */
+static volatile uint32_t g_putc_probe_ms; /* last probe byte admitted      */
+
+static uint32_t cdc_idle_ms(void)
+{
+    return (uint32_t)plat_uptime_ms() - g_tx_done_ms;
+}
+
+static int cdc_has_reader(void)
+{
+    return tud_cdc_connected() || (cdc_idle_ms() < CDC_AGE_MS);
+}
+
+/* TinyUSB weak callback: a completed IN transfer is the only reliable proof
+ * that the host is taking data (it works even when DTR is held low). */
+void tud_cdc_tx_complete_cb(uint8_t itf)
+{
+    (void)itf;
+    g_tx_done_ms = (uint32_t)plat_uptime_ms();
+}
 
 /* ---- GPIO46/47 -> USB PHY ----------------------------------------------- */
 
@@ -169,7 +244,10 @@ static int usb_clock_init(void)
      * must not be touched at all. */
     if (!(PLL_CS_REG & PLL_CS_LOCK)) {
         /* A PLL left in a bad state needs a real reset/unreset cycle, not
-         * just a deassert. */
+         * just a deassert.  Re-read RESETS instead of reusing `m`: the value
+         * read before the deassert above still has USBCTRL asserted, so
+         * writing it back here would put the controller into reset a second
+         * time and the final RESET_DONE wait below could never pass. */
         m = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
         mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, m | RESETS_PLL_USB);
         mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, m & ~RESETS_PLL_USB);
@@ -345,6 +423,8 @@ void usb_cdc_irq_task(void)
  * Must run on CPU 0 - it is the only owner of the controller state machine. */
 static volatile int g_in_poll;
 
+
+
 static void usb_tx_drain(void)
 {
     uint32_t irq = plat_irq_save();
@@ -378,6 +458,10 @@ void usb_cdc_poll(void)
     if (usb_hw->ints)
         dcd_int_handler(0);
 
+    /* Deliberately untouched by the no-reader fix.  Measurements showed that
+     * adding even a handful of instructions or volatile diagnostic writes to
+     * this CPU0-only 1 ms path changes smpbench by 0.15x, so the fix lives
+     * entirely on the producer side (usb_cdc_putc) instead. */
     usb_task_run(0);
     usb_tx_drain();
     if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
@@ -392,9 +476,35 @@ void usb_cdc_putc(char c)
 {
     uint32_t irq;
     uint32_t next;
+    int drop = 0;
 
     if (!g_hw_ready || !tud_mounted())
         return;
+
+    /* Refreshed on every output character so /proc/cdcstat always sees a
+     * recent ring snapshot.  This is the producer side, never the 1 ms tick. */
+    g_cdc_diag[1] = g_tx_head - g_tx_tail;
+
+    if (g_cdc_fix && !cdc_has_reader()) {
+        uint32_t now = (uint32_t)plat_uptime_ms();
+
+        g_cdc_diag[0] = 1u;               /* no_reader                     */
+        g_cdc_diag[4] = cdc_idle_ms();     /* ms since last IN completion   */
+        g_cdc_diag[5] = tud_cdc_get_line_state();
+
+        /* Drop console output while no host is reading; the UART mirror has
+         * already been written by plat_console_putc().  Admit one byte per
+         * probe interval so a terminal that appears can complete an IN
+         * transfer and re-arm the path. */
+        if (now - g_putc_probe_ms < CDC_PROBE_MS)
+            drop = 1;
+        else {
+            g_putc_probe_ms = now;
+            g_cdc_diag[3]++;               /* probe bytes admitted          */
+        }
+    } else {
+        g_cdc_diag[0] = 0u;
+    }
 
     /* Enqueue only: the producer may be CPU 1, while TinyUSB's FIFO and
      * task loop belong to CPU 0.  The spin lock is held for a handful of
@@ -402,6 +512,20 @@ void usb_cdc_putc(char c)
      * re-enter this on the same core. */
     irq = plat_irq_save();
     plat_spin_acquire(&g_tx_lock);
+
+    if (drop) {
+        /* No reader: discard this byte AND any backlog left over from the
+         * reader that just went away.  Without this, 200+ bytes survive in
+         * the ring behind a FIFO that never drains.  TinyUSB's own tx_ff is
+         * left alone - it is overwritable when DTR is clear, and touching it
+         * from an arbitrary hart/context is not safe. */
+        g_cdc_diag[2] += (g_tx_head - g_tx_tail) + 1u;
+        g_tx_tail = g_tx_head;
+        plat_spin_release(&g_tx_lock);
+        plat_irq_restore(irq);
+        return;
+    }
+
     next = g_tx_head + 1;
     if (next - g_tx_tail <= USB_TX_RING) {
         g_tx_ring[g_tx_head % USB_TX_RING] = (uint8_t)c;

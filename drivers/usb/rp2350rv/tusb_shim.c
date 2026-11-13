@@ -29,6 +29,7 @@ static void (*s_usb_isr)(void);
 void irq_add_shared_handler(uint num, void (*handler)(void), uint8_t order_priority)
 {
     (void)order_priority;
+    plat_console_putc('c');          /* DIAG: dcd_init reached IRQ wiring */
     if (num != USBCTRL_IRQ)
         return;
     s_usb_isr = handler;
@@ -53,6 +54,7 @@ void irq_set_enabled(uint num, bool enabled)
 
 void reset_block(uint32_t bits)
 {
+    plat_console_putc('a');          /* DIAG: dcd_init resets USBCTRL here */
     mmio_write32(RESETS_BASE + 0x2000u + RESETS_RESET_OFFSET, bits);
 }
 
@@ -68,9 +70,12 @@ void unreset_block_wait(uint32_t bits)
      * running never reports RESET_DONE, and an unbounded spin there turns a
      * USB problem into an unbootable board. */
     for (uint32_t spins = 0; spins < 1000000u; spins++) {
-        if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bits) == bits)
+        if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bits) == bits) {
+            plat_console_putc('b');  /* DIAG: reset finished */
             return;
+        }
     }
+    plat_console_putc('T');          /* DIAG: reset never finished */
 }
 
 /* ---- misc ---------------------------------------------------------------- */
@@ -80,6 +85,7 @@ void unreset_block_wait(uint32_t bits)
  * errata workaround and not something this RP2350 port has verified. */
 uint8_t rp2040_chip_version(void)
 {
+    plat_console_putc('d');          /* DIAG: dcd_init entry */
     return 1;
 }
 

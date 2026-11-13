@@ -1,29 +1,36 @@
 #include "platform.h"
 #include "board.h"
-#include "arm_memmap.h"
 #include "string.h"
 
 #ifdef TOS_PIO
 
-/* PIO0/PIO1 loader for the RP2040.
+/* PIO loader for the RP2040 and the RP2350.
  *
- * Two blocks, four state machines each, 32 instruction words per block.  The
- * assembler lives in user space (user/pio.c); the kernel only takes a word
+ * RP2040: two blocks, RP2350: three; four state machines and 32 instruction
+ * words per block either way, and the register map is byte-for-byte the same
+ * (pico-sdk's hardware/regs/pio.h has identical offsets for both parts).  What
+ * moved is the surrounding land: RESETS and IO_BANK0 live at different base
+ * addresses, PIO0/PIO1 sit on different RESETS bits (10/11 vs 11/12), the
+ * RP2350 adds a PIO2 on bit 13 / FUNCSEL 8, and every RP2350 pad comes out of
+ * reset with ISO asserted.  Those constants come from the board's memmap
+ * header (RP_PIO_*), so one driver covers all three boards.
+ *
+ * The assembler lives in user space (user/pio.c); the kernel only takes a word
  * array plus the configuration that is *not* encoded in the words: wrap
  * addresses, side-set width/flags, clock divider, pin base and the shift
  * control flags.
  *
- * Ownership matters because PIO is system hardware: a state machine loaded
- * by a task is disabled and its pins handed back to the GPIO block when that
- * task exits (plat_pio_release).  Otherwise a program that loads a PIO
- * program and returns would leave GP0/GP1 muxed away from the console UART.
- *
- * Register layout from the RP2040 datasheet, "PIO" chapter; the field
- * positions below are the ones in pico-sdk's hardware/structs/pio.h.
+ * Ownership matters because PIO is system hardware: a state machine loaded by
+ * a task is disabled and its pins handed back to the GPIO block when that task
+ * exits (plat_pio_release).  Otherwise a program that loads a PIO program and
+ * returns would leave GP0/GP1 muxed away from the console UART.
  */
 
-#define PIO0_BASE          0x50200000u
-#define PIO1_BASE          0x50300000u
+#if defined(__arm__)
+#include "arm_memmap.h"        /* board/rp2040 or board/rp2350, per target */
+#else
+#include "rp2350rv_memmap.h"   /* the only RISC-V board with PIO            */
+#endif
 
 #define PIO_CTRL           0x000u
 #define PIO_FSTAT          0x004u
@@ -57,23 +64,25 @@
 #define PINCTRL_SET_BASE(p)     ((uint32_t)(p) << 5)
 #define PINCTRL_OUT_BASE(p)     ((uint32_t)(p))
 
-#define PIO_FUNCSEL(block) ((block) == 0 ? 6u : 7u)
-
-static const uint32_t pio_base[2] = { PIO0_BASE, PIO1_BASE };
-static const uint32_t pio_reset_bit[2] = { 1u << 10, 1u << 11 };
-
 /* pid that owns each SM, 0 when free; the pin window to hand back on release. */
-static int32_t pio_owner[2][4];
-static int8_t  pio_pinbase[2][4];
-static uint8_t pio_pincount[2][4];
+static int32_t pio_owner[RP_PIO_BLOCKS][4];
+static int8_t  pio_pinbase[RP_PIO_BLOCKS][4];
+static uint8_t pio_pincount[RP_PIO_BLOCKS][4];
 static int     pio_inited;
+
+static int block_ok(int b)
+{
+    return b >= 0 && b < RP_PIO_BLOCKS;
+}
 
 static void pio_init_once(void)
 {
-    uint32_t want = pio_reset_bit[0] | pio_reset_bit[1];
+    uint32_t want = 0;
 
     if (pio_inited)
         return;
+    for (int b = 0; b < RP_PIO_BLOCKS; b++)
+        want |= RP_PIO_RESET_BIT(b);
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) & ~want);
     for (uint32_t i = 0; i < 1000000u; i++)
@@ -84,11 +93,13 @@ static void pio_init_once(void)
 
 static void pin_to_pio(int block, int pin)
 {
-    uint32_t ctrl = IO_BANK0_BASE + 0x04u + 8u * (uint32_t)pin;
-    uint32_t pad  = PADS_BANK0_BASE + 0x04u + 4u * (uint32_t)pin;
+    uint32_t ctrl = RP_GPIO_CTRL(pin);
+    uint32_t pad  = RP_GPIO_PAD(pin);
 
-    mmio_write32(ctrl, PIO_FUNCSEL(block));
-    /* Input enable on (IN pins and readback), open drain off, ISO off. */
+    mmio_write32(ctrl, RP_PIO_FUNCSEL(block));
+    /* Input enable on (IN pins and readback), open drain off, ISO off.
+     * Bit 8 is the isolation bit: reserved on the RP2040, and 1 out of
+     * reset on every RP2350 pad, so it has to be cleared on both. */
     mmio_write32(pad, (mmio_read32(pad) | (1u << 6)) &
                       ~((1u << 7) | (1u << 8)));
 }
@@ -101,7 +112,7 @@ static void pin_release(int pin)
 
 static void stop_sm(int block, int sm)
 {
-    uint32_t base = pio_base[block];
+    uint32_t base = RP_PIO_BASE(block);
 
     mmio_write32(base + PIO_CTRL,
                  mmio_read32(base + PIO_CTRL) & ~CTRL_ENABLE(sm));
@@ -109,7 +120,6 @@ static void stop_sm(int block, int sm)
 
 static void release_sm(int block, int sm)
 {
-    uint32_t base = pio_base[block];
     int base_pin = pio_pinbase[block][sm];
     int count = pio_pincount[block][sm];
 
@@ -126,7 +136,7 @@ void plat_pio_release(int pid)
 {
     if (!pio_inited)
         return;
-    for (int b = 0; b < 2; b++)
+    for (int b = 0; b < RP_PIO_BLOCKS; b++)
         for (int s = 0; s < 4; s++)
             if (pio_owner[b][s] == pid)
                 release_sm(b, s);
@@ -136,8 +146,9 @@ static int pio_load(struct pio_req *q, int pid)
 {
     int b = q->block, sm = q->sm;
     uint32_t base, top, bottom, exec, pinctrl;
+    int pins = plat_gpio_count();
 
-    if (b < 0 || b > 1 || sm < 0 || sm > 3)
+    if (!block_ok(b) || sm < 0 || sm > 3)
         return -1;
     if (q->len < 1 || q->len > 32 || q->origin < 0 ||
         q->origin + q->len > 32)
@@ -158,11 +169,18 @@ static int pio_load(struct pio_req *q, int pid)
         bottom < q->origin || bottom >= q->origin + q->len || bottom > top)
         return -1;
 
+    /* The pin window is checked before anything is stopped or muxed, so a bad
+     * request cannot leave a state machine half configured. */
+    if (q->pin_base >= 0) {
+        if (pins <= 0 || q->pin_base + q->pin_count > pins)
+            return -1;
+    }
+
     pio_init_once();
     if (pio_owner[b][sm] && pio_owner[b][sm] != pid)
         return -1;
 
-    base = pio_base[b];
+    base = RP_PIO_BASE(b);
 
     /* Stop, clear internal state and both FIFOs, then load the words. */
     stop_sm(b, sm);
@@ -199,8 +217,6 @@ static int pio_load(struct pio_req *q, int pid)
 
     pinctrl = PINCTRL_SIDESET_CNT(q->side_set);
     if (q->pin_base >= 0) {
-        if (q->pin_base + q->pin_count > 30)
-            return -1;
         pinctrl |= PINCTRL_OUT_CNT(q->pin_count & 0x3f);
         pinctrl |= PINCTRL_SET_CNT((q->pin_count > 5 ? 5 : q->pin_count));
         pinctrl |= PINCTRL_IN_BASE(q->pin_base);
@@ -224,10 +240,10 @@ static int pio_tx(struct pio_req *q)
     const uint32_t *w = (const uint32_t *)q->buf;
     int n = 0;
 
-    if (q->block < 0 || q->block > 1 || q->sm < 0 || q->sm > 3 ||
+    if (!block_ok(q->block) || q->sm < 0 || q->sm > 3 ||
         !q->buf || q->len < 0)
         return -1;
-    base = pio_base[q->block];
+    base = RP_PIO_BASE(q->block);
     while (n < q->len) {
         if (mmio_read32(base + PIO_FSTAT) & FSTAT_TXFULL(q->sm))
             break;
@@ -243,10 +259,10 @@ static int pio_rx(struct pio_req *q)
     uint32_t *w = (uint32_t *)q->buf;
     int n = 0;
 
-    if (q->block < 0 || q->block > 1 || q->sm < 0 || q->sm > 3 ||
+    if (!block_ok(q->block) || q->sm < 0 || q->sm > 3 ||
         !q->buf || q->len < 0)
         return -1;
-    base = pio_base[q->block];
+    base = RP_PIO_BASE(q->block);
     while (n < q->len) {
         if (mmio_read32(base + PIO_FSTAT) & FSTAT_RXEMPTY(q->sm))
             break;
@@ -267,17 +283,17 @@ int plat_pio(int op, struct pio_req *req, int pid)
         return pio_load(req, pid);
 
     case PIO_START:
-        if (req->block < 0 || req->block > 1 || req->sm < 0 || req->sm > 3)
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
         if (pio_owner[req->block][req->sm] != pid)
             return -1;
-        base = pio_base[req->block];
+        base = RP_PIO_BASE(req->block);
         mmio_write32(base + PIO_CTRL,
                      mmio_read32(base + PIO_CTRL) | CTRL_ENABLE(req->sm));
         return 0;
 
     case PIO_STOP:
-        if (req->block < 0 || req->block > 1 || req->sm < 0 || req->sm > 3)
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
         if (pio_owner[req->block][req->sm] != pid)
             return -1;
@@ -285,21 +301,21 @@ int plat_pio(int op, struct pio_req *req, int pid)
         return 0;
 
     case PIO_TX:
-        if (req->block < 0 || req->block > 1 || req->sm < 0 || req->sm > 3)
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
         if (pio_owner[req->block][req->sm] != pid)
             return -1;
         return pio_tx(req);
 
     case PIO_RX:
-        if (req->block < 0 || req->block > 1 || req->sm < 0 || req->sm > 3)
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
         if (pio_owner[req->block][req->sm] != pid)
             return -1;
         return pio_rx(req);
 
     case PIO_RELEASE:
-        if (req->block < 0 || req->block > 1 || req->sm < 0 || req->sm > 3)
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
         if (pio_owner[req->block][req->sm] != pid)
             return -1;

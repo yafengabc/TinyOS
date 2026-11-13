@@ -33,6 +33,18 @@
 #define SIO_BASE        0xd0000000u
 #define SIO_CPUID       (SIO_BASE + 0x000u)  /* 0 on core 0, 1 on core 1 */
 
+/* PIO: two blocks of four state machines, 1 MiB apart.  RESETS de-asserts
+ * them on bits 10/11 and FUNCSEL 6/7 hands a pin over.  drivers/pio/rp2 is
+ * shared with the RP2350, which raises these to three blocks / bit 11+. */
+#define RP_PIO_BLOCKS       2
+#define RP_PIO_BASE(b)      (0x50200000u + 0x100000u * (uint32_t)(b))
+#define RP_PIO_RESET_BIT(b) (1u << (10 + (b)))
+#define RP_PIO_FUNCSEL(b)   (6u + (uint32_t)(b))
+
+/* GPIO mux and pad registers (PIO pin muxing needs them directly). */
+#define RP_GPIO_CTRL(n) (IO_BANK0_BASE + 0x04u + 8u * (uint32_t)(n))
+#define RP_GPIO_PAD(n)  (PADS_BANK0_BASE + 0x04u + 4u * (uint32_t)(n))
+
 /* RP2040 boot ROM flash API function codes (ROM_TABLE_CODE('R','E') etc.). */
 #define ROM_FUNC_FLASH_RANGE_ERASE    0x4552u
 #define ROM_FUNC_FLASH_RANGE_PROGRAM 0x5052u
