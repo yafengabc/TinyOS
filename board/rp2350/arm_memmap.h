@@ -179,6 +179,15 @@
 /* FUNCSEL "NULL": the pin belongs to no peripheral.  An ADC input needs this
  * (or any non-digital function) plus a pad with the digital input off. */
 #define RP_GPIO_FUNC_NULL 0x1fu
+
+/* PIO on the RP2350: three blocks of four state machines, 1 MiB apart
+ * (0x50200000 / 0x50300000 / 0x50400000).  RESETS bits are 11/12/13 and
+ * FUNCSEL 6/7/8.  Contrast with the RP2040, where PIO0/PIO1 sit on RESETS
+ * bits 10/11 - a shared driver reads both from here. */
+#define RP_PIO_BLOCKS       3
+#define RP_PIO_BASE(b)      (0x50200000u + 0x100000u * (uint32_t)(b))
+#define RP_PIO_RESET_BIT(b) (1u << (11 + (b)))
+#define RP_PIO_FUNCSEL(b)   (6u + (uint32_t)(b))
 #define RP_PAD_OD         (1u << 7)
 #define RP_PAD_IE         (1u << 6)
 /* RP2350-only: every PADS_BANK0 GPIO comes out of reset with ISO=1, which

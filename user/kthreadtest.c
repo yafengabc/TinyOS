@@ -12,7 +12,11 @@
 
 #ifdef TOS_KTHREADS
 
-TOS_HEAP(72 * 1024);
+/* 18 threads x (4112 B stack + 8 B start record) = 74,160 B, plus ~8 KiB
+ * of startup malloc.  At a 16 KiB window grain 72 KiB leaves only ~3.6 KiB
+ * for the last thread, so kthread_create() silently returns -1 on real
+ * hardware.  QEMU's 64 KiB grain rounds the window up and masks it. */
+TOS_HEAP(96 * 1024);
 TOS_STACK(4 * 1024);
 
 static int fails;
@@ -56,7 +60,11 @@ static void fduser(void *arg)
     char b;
 
     fd_read_result = read(fd, &b, 1);   /* 1 while the file is open */
-    sleep(60);                          /* the leader closes it now */
+    /* On real hardware the leader's 20 ms sleep can stretch past 70 ms
+     * (preemptive SMP + 1 ms tick), so 60 ms here let the thread finish
+     * its second read BEFORE the leader's close().  Give the leader a wide
+     * margin: the test is about a shared fd table, not a race. */
+    sleep(200);                         /* the leader closes it now */
     fd_read_result = read(fd, &b, 1);   /* must be -1: shared table */
     kthread_exit(0);
 }
