@@ -2768,6 +2768,19 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 这一节只列**代码已落地、等板子**的项，按“刷哪个镜像、跑什么、判什么”写。上机
 顺序建议从上到下：前两项是这一轮刚改的，越早暴露问题越省事。
 
+`scripts/rp2350/accept33.py` 会按本表的顺序把下面这些问一遍，并保存原始日志
+（`build/sizeprobe/accept33-*.log`，不入库）：
+
+```
+python scripts/rp2350/accept33.py --image rp2350rvsmp --uf2 build/rp2350rvsmp.uf2
+python scripts/rp2350/accept33.py --image rp2350 --no-flash     # 板子已经在跑
+python scripts/rp2350/accept33.py --image rp2350rv --replay <日志>  # 只跑判定
+```
+
+`--uf2` 走的是"刷完**不按 RESET**"那条路：串口先开着，拷 UF2 之后**不碰 RTS、不重开
+端口**，所以 `[A]` 一定是 ROM 自己重启出来的；首字节超过 `--first-byte-max`（默认
+5 s）就算失败——33.4 的故障形状是"120 s 沉默"，只判"有没有输出"会放过它。
+
 | # | 镜像 | 要做的事 | 判据 | 状态 |
 | --- | --- | --- | --- | --- |
 | 0 | `rp2350rv` / `rp2350rvsmp` | 刷完**不按 RESET**，看 `[A]` 的时钟快照 | 见 33.4 | **PASS**（11-15，0.68 s 进 shell） |
