@@ -305,7 +305,16 @@ extern void ktask_start_stub(void);
  *
  * Lock order, the only one in the kernel: proc_lock, then nothing.  Nothing
  * that blocks (console, pipe, timer wait) is ever called while holding it -
- * the scheduler hands the lock back before it idles. */
+ * the scheduler hands the lock back before it idles.
+ *
+ * Every acquisition masks interrupts, because the timer tick takes this lock
+ * itself (it reaps, it wakes console readers).  A section taken with them on
+ * would be a self-deadlock the moment a tick landed inside it, so use
+ * plat_spin_lock_irqsave()/plat_spin_unlock_irqrestore() unless the site says
+ * in a comment why it cannot - the three that do are sched_switch(), which has
+ * to keep the lock and the mask as separate lifetimes, cpu_take_task() and
+ * process_ktask_create(), both of which are entered with interrupts already
+ * off. */
 static spin_t proc_lock = SPIN_INIT;
 
 /* The machine is on its way down: init has exited and the boot CPU is in
@@ -593,7 +602,12 @@ static void sched_idle(void)
 /* Serialises the group's mutable state: the heap break and the descriptor
  * table.  On a uniprocessor spin_lock()/spin_unlock() compile to nothing, so
  * this costs the single-core build exactly zero; on SMP it is what keeps two
- * threads from handing out the same address or descriptor slot. */
+ * threads from handing out the same address or descriptor slot.
+ *
+ * Plain spin_lock(), unlike proc_lock: every caller is a syscall handler, so
+ * interrupts are already masked, and nothing in interrupt context touches a
+ * descriptor table or a heap break.  If one ever does, this becomes the
+ * irqsave pair too. */
 #ifdef TOS_KTHREADS
 static void group_lock(proc_t *p)   { spin_lock(&PROC_GROUP(p)->glock); }
 static void group_unlock(proc_t *p) { spin_unlock(&PROC_GROUP(p)->glock); }
@@ -1228,7 +1242,7 @@ static int win_alloc(proc_t *p, uint32_t bytes)
     uint32_t align;
     int ok = 0;
 
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
         uint32_t next = end;
 
@@ -1270,7 +1284,7 @@ static int win_alloc(proc_t *p, uint32_t bytes)
         if (cand >= end)
             break;
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return ok ? 0 : -1;
 }
 
@@ -1283,7 +1297,7 @@ static uint32_t win_largest_free(void)
     uint32_t end = PLAT_APP_MAX;
     uint32_t best = 0;
 
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
         uint32_t next = end;
 
@@ -1305,7 +1319,7 @@ static uint32_t win_largest_free(void)
         if (cand >= end)
             break;
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return best;
 }
 
@@ -1320,7 +1334,7 @@ static proc_t *proc_alloc(void)
      * the slot owned, and ST_NEW says "owned, not runnable". */
     proc_t *p = NULL;
 
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (int i = 0; i < MAX_PROCS; i++) {
         if (procs[i].state == ST_FREE) {
             p = &procs[i];
@@ -1333,7 +1347,7 @@ static proc_t *proc_alloc(void)
             break;
         }
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return p;
 }
 
@@ -1368,9 +1382,9 @@ static void proc_retire(proc_t *p)
      * pipe nobody will ever close. */
     for (int i = 0; i < MAX_FDS; i++)
         fd_close_in(p, i);
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_retire_locked(p);
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 }
 
 /* Where the initial [argc][argv..][NULL] block would start for argc
@@ -1909,9 +1923,9 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     /* Pid allocation is under the table lock for the same reason the window
      * is: two exec()s on two CPUs would otherwise hand out the same number,
      * and `wait(pid)` would then reap the wrong task. */
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     p->pid = next_pid++;
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     /* Descriptors.  0/1/2 are the console by default; everything else is
      * inherited from the parent, which is the whole reason `a | b` works:
@@ -2018,14 +2032,14 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        window is not theoretical - with core 1 up, `starting /bin/msh` is
        followed by a boot that dies in the shell roughly one time in three,
        because both cores end up running it on different stacks. */
-    spin_lock(&proc_lock);
+    irq = plat_spin_lock_irqsave(&proc_lock);
     p->state = claim ? ST_RUNNING : ST_READY;
     if (claim) {
         p->cpu = cpu_id();
         current = p;
         quantum = QUANTUM;
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return p;
 }
 

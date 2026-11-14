@@ -154,19 +154,21 @@ static void kfree_locked(void *ptr)
  * and that does not fail loudly - it silently corrupts whoever got the block
  * first.
  *
- * Interrupts are not disabled around the lock because no handler allocates:
- * the tty queues are static arrays and the timer path only touches the
- * process table.  If that ever changes, this becomes irqsave + spin.
- */
+ * Interrupts are masked too.  Today no handler allocates (the tty queues are
+ * static arrays and the timer path only touches the process table), so the
+ * lock alone would be enough - but that is an invariant every future driver
+ * has to keep, and the failure mode when one does not is a self-deadlock that
+ * shows up as "the board stopped".  A first-fit walk over a few dozen blocks
+ * is a dozen instructions of masking; it is cheaper than the audit. */
 static spin_t heap_lock = SPIN_INIT;
 
 void *kmalloc(size_t size)
 {
     void *p;
 
-    spin_lock(&heap_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&heap_lock);
     p = kmalloc_locked(size);
-    spin_unlock(&heap_lock);
+    plat_spin_unlock_irqrestore(&heap_lock, irq);
     return p;
 }
 
@@ -192,9 +194,10 @@ void *krealloc(void *ptr, size_t size)
 
 void kfree(void *ptr)
 {
-    spin_lock(&heap_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&heap_lock);
+
     kfree_locked(ptr);
-    spin_unlock(&heap_lock);
+    plat_spin_unlock_irqrestore(&heap_lock, irq);
 }
 
 uint32_t heap_peak_bytes(void)
