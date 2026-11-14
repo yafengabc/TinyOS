@@ -33,6 +33,7 @@ REPO = "yafengabc/TinyOS"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(ROOT, "build", "issue-watch")
 STATE = os.path.join(STATE_DIR, "state.json")
+LOCK = os.path.join(STATE_DIR, "lock")
 LOG = os.path.join(STATE_DIR, "watch.log")
 
 # Overridable so the fetch path can be exercised without the real gh (and so a
@@ -52,10 +53,36 @@ def log(msg):
 
 
 def gh(*args):
-    out = subprocess.run(shlex.split(GH_CMD) + list(args), capture_output=True)
+    out = subprocess.run(shlex.split(GH_CMD) + list(args), capture_output=True,
+                         timeout=60)
     if out.returncode != 0:
         raise RuntimeError(out.stderr.decode("utf-8", "replace").strip())
     return out.stdout.decode("utf-8", "replace")
+
+
+def take_lock():
+    """Return True when this process may run, False when another one holds it."""
+    try:
+        with open(LOCK, encoding="utf-8") as f:
+            pid = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        pid = 0
+    if pid:
+        try:
+            os.kill(pid, 0)          # alive? (works on Windows for existence)
+            return False
+        except OSError:
+            pass                      # stale lock from a killed run
+    with open(LOCK, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def drop_lock():
+    try:
+        os.remove(LOCK)
+    except OSError:
+        pass
 
 
 def load_state():
@@ -118,7 +145,8 @@ def judge(log_path, comment_text):
         r = subprocess.run([sys.executable,
                             os.path.join(ROOT, "scripts", "rp2350", "pio_accept.py"),
                             "--image", "rp2350", "--replay", log_path],
-                           capture_output=True, text=True, cwd=ROOT)
+                           capture_output=True, text=True, cwd=ROOT,
+                           timeout=180)
         verdicts.append(("pio_accept", r.returncode == 0, r.stdout.strip()))
 
     if any(m in text for m in ("[A] pre-pll", "[mpu]", "MemManage",
@@ -160,8 +188,17 @@ def main():
     ap.add_argument("--no-notify", action="store_true")
     args = ap.parse_args()
 
-    fresh = not os.path.exists(STATE)
     os.makedirs(STATE_DIR, exist_ok=True)
+    if not take_lock():
+        return 0                      # a slow run is still going: skip this tick
+    try:
+        return poll(args)
+    finally:
+        drop_lock()
+
+
+def poll(args):
+    fresh = not os.path.exists(STATE)
     with open(os.path.join(STATE_DIR, "last-run"), "w", encoding="utf-8") as f:
         f.write(time.strftime("%Y-%m-%d %H:%M:%S\n"))
 
