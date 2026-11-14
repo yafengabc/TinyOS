@@ -89,6 +89,38 @@ NuttX RP2350 端口支持 `CONFIG_SCHED_TICKLESS`，用 TIMER 的 alarm/oneshot 
 1 ms 中断。我们的 `sleep`/超时全部按 tick 计（`mtime` 在 RISC-V 侧已经走
 `mtimecmp`），要做低功耗时这是现成路线。
 
+### 2.5 RISC-V 的 PMP（`arch/risc-v/src/common/riscv_pmp.c`）
+
+NuttX 把 PMP 藏在和 ARM **同一个** `mpu_configure_region(base, size, flags)` 接口
+后面：内核只谈"段和权限"，由 `arm_mpu.c` 或 `riscv_pmp.c` 决定怎么写寄存器。这正
+是我在本项目里说的"段模型 + 后端"，区别是我们的 `plat_task_protect()` 签名是
+TOR 形状的六个边界，而他们是 `(base, size, flags)`。
+
+四个能直接用的点：
+
+1. **NAPOT 编码**：`napot = (base >> 2) | ((size - 1) >> 3)`。我们写的是
+   `(base >> 2) | ((size >> 3) - 1)`，对 2 的幂两者等价；他们的形式是规范写法，
+   照抄更不容易看错。
+2. **他们的校验 vs 我们的分块**。2023 年他们补了 NAPOT 合法性检查（PR #10451）：
+   `base` 必须按 `size` 对齐、`size` 必须是 2 的幂，否则直接 `-EINVAL`，因为
+   "size 变大时可供编码 base 的位数变少"。我们走的是相反的路线——`pmp_cover()`
+   把任意 4 KiB 对齐的区间拆成若干 2 的幂块，所以从不拒绝调用者，代价是消耗条目
+   （`rp2350rv` 的 15 条预算）。两条都成立：他们要求调用者把区间做成 POT，我们
+   让内核替调用者拆。
+3. **TOR 是易错点**。他们修过两轮：PR #10451（NAPOT 校验）、PR #10724
+   "fix broken TOR checks"（−28/+3 行）。根源是 TOR 的 `pmpaddr(N-1)` 耦合，以及
+   region 0 的 bottom 恒为 0 这个特例。我们在 C3 上的 TOR 布局（5 个边界、
+   entry 1..4、entry 3 故意 OFF 当护栏）正好压在这条耦合上，所以
+   `prot rodata/heap/stack/null` 这四条是最小回归集，不能省。
+4. **不要写死 region 编号**。PR #11864：bootloader 可能留下带 lock 位的 PMP 条目，
+   所以他们改成不假设编号，用位图 `ffs(~mask)` 分配。我们在 Hazard3 上写死
+   entry 5（trap vector）和 0..14（块）是安全的——复位后我们没有别人的 PMP 遗产
+   ——但如果以后有第二个 RV 平台从 bootloader 手里接管，先读 `pmpcfg*` 跳过 `L`
+   位，再按位图分配。
+
+另外他们讨论过一个 RV32 细节：pmpaddr 是 34 位物理地址，编码大于 4 GiB 的区域时
+需要 64 位中间值。我们的窗口都在 520 KiB 里，不涉及。
+
 ## 3. 不要照抄的三条
 
 1. **栈大小**：PR 里写 "Double size for idle, irq and main stacks"，我们刚把 ARM 内核
