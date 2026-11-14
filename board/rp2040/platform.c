@@ -1237,3 +1237,11 @@ uint32_t plat_cpu_hz(void)
 {
     return g_cpu_hz;
 }
+
+/* No MPU and no MMU: a stack overflow is a silent write into the same window,
+ * not a fault, so process_stack_grow() never runs.  Do not reserve the extra
+ * step - here it would only delay the corruption, and RAM is 264 KiB. */
+uint32_t plat_window_grow_reserve(void)
+{
+    return 0;
+}
