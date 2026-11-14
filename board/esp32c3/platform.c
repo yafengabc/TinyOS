@@ -1033,3 +1033,10 @@ int plat_window_needs_stack_alignment(void)
 {
     return 0;
 }
+
+/* 4 KiB grain: the rounding can never leave a 4 KiB step behind, so a task
+ * that did not declare a stack gets one explicitly (see process.c). */
+uint32_t plat_window_grow_reserve(void)
+{
+    return PLAT_STACK_BYTES;
+}

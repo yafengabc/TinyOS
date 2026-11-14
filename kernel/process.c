@@ -1660,7 +1660,13 @@ __attribute__((weak)) int plat_user_stack_guard(void)
  * answers 0 and keeps the windows tight. */
 __attribute__((weak)) uint32_t plat_window_grow_reserve(void)
 {
-    return PLAT_STACK_BYTES;
+    /* Opt-in, because on a coarse grain the reserve is not free: with a 16 KiB
+     * step, a program whose need is an exact multiple of it (hello world:
+     * 4 image + 4 guard + 8 stack) jumps a whole grain the moment anything is
+     * added.  Boards whose rounding already leaves a stack of slack therefore
+     * keep 0 and grow opportunistically; the 4 KiB-step boards, where the
+     * rounding can never leave 4 KiB, override this with their stack size. */
+    return 0;
 }
 
 static int stack_request_ok(uint32_t v)
