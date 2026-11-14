@@ -2826,11 +2826,16 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
         return 0;                            /* the port cannot describe it */
 
     low = p->stack_top - want;
-    if (addr < low)
-        return 0;                            /* deeper than one step reaches */
-
-    if (p->brk + HEAP_GUARD > low)
-        return 0;                            /* the heap is in the way */
+    if (addr < low || p->brk + HEAP_GUARD > low) {
+        /* Refused for want of room, not because the program is buggy: say
+         * which knob turns, since the fault message alone only says "access
+         * fault".  addr < low means the write jumped further than one step;
+         * brk in the way means the heap got the slack first. */
+        kprintf("\n[pid %d] %u KiB stack and no room to double it; "
+                "declare TOS_STACK() for the depth you need\n",
+                p->pid, old / 1024u);
+        return 0;
+    }
 
     /* Poison the new strip before it becomes writable: stack_used() scans up
      * from the bottom and would otherwise report the heap's leftovers as
