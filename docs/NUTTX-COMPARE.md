@@ -158,7 +158,7 @@ static const struct uart_ops_s g_uart_ops = {
 | `uart_connected()` | 无 | USB CDC 掉线没有统一语义 |
 | `block_operations` + `mount` | `plat_block_read/write/erase` + 直接 littlefs | 没有块设备层 |
 | `mtd_dev_s` + `BIOC_XIPBASE` | 同上，XIP 基址是常量 | 接 TF/PSRAM 时要重写 |
-| `ioctl`（`BIOC_*`、`MTDIOC_*`） | 每类设备一个 syscall（`SYS_GPIO`、`SYS_ADC`…） | 新功能必须加 syscall |
+| `ioctl`（`BIOC_*`、`MTDIOC_*`） | `SYS_IOCTL` → `dev_ops.ioctl()`；另有 `SYS_GPIO`/`SYS_ADC` 这种强类型包装 | 通用口本来就有；强类型包装是便利，不是唯一入口 |
 
 **值得借的四条，按性价比**
 
@@ -171,10 +171,15 @@ static const struct uart_ops_s g_uart_ops = {
    表只会给每个字符加一次间接调用——和 devfs 不引 VFS 是同一个取舍。
    顺带把三处仍然无界的等待改成了有界：C3 的 UART TX FIFO（`platform.c`）、
    QEMU 16550（`qemu-virt`）、CMSDK（`qemu-mps2`）。
-2. **`connected/disconnected` 语义**（便宜）。USB CDC 拔线后让读写返回 `-ENOTCONN`
-   而不是等一个不会来的中断；我们现在是靠超时和"没主机就丢"绕过去的。
-3. **`SYS_IOCTL(fd, cmd, arg)` 一个通用口**（便宜）。保留现有强类型 syscall，
-   但给设备私有命令留一个逃生口，省掉"每加一个功能就加一个 syscall"。
+2. **`connected/disconnected` 语义**（已核：**不适用**）。NuttX 的 `uart_connected()`
+   是每设备语义；我们的控制台是 UART0 + CDC 的复合体，UART 侧永远"连着"，所以
+   控制台层的 connected 恒为真，做了就是死代码。能承载 `-ENOTCONN` 的只有设备节点，
+   而 `/dev` 里没有 cdc 节点；状态已经可观测（`/proc/cdcfix` 的 `no_reader/pending/
+   dropped`），且两个端口都是轮询，没有"等一个不会来的中断"的路径。
+3. **`SYS_IOCTL(fd, cmd, arg)` 一个通用口**（**本来就有**）。`include/tos.h` 的
+   `SYS_IOCTL = 30`，内核 `process_ioctl()` 经 `dev_ops.ioctl()` 分派，用户侧有
+   `ioctl()` 包装，`LCD_OP_*` / `FB_OP_*` / `GPIO_OP_*` 都在用。强类型 syscall
+   （`SYS_GPIO`、`SYS_ADC`）只是便利包装，不是唯一入口。
 4. **MTD 分层**（等有 TF/PSRAM 再做）。`plat_block_*` 现在够用，接第二种存储时
    再引入；`BIOC_XIPBASE` 那种"这块设备能不能就地执行"的元数据值得一起抄。
 

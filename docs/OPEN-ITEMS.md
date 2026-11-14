@@ -3272,12 +3272,24 @@ NAPOT 的页映射就是从这个列表算出来的——它和 TOR 版本吃的
 顺带确认 `[mpu] regions=3` 指的是 code/data/stack 三段，landing(6)/guard(7)
 是固定编号、不计入，与 §33.5 的记录一致。
 
-现在"想做但先不做"的只剩两条驱动侧重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
+剩下两条驱动侧重构，**都已核完，结论是这条清单空了**：
 
-- **`connected/disconnected`**：USB CDC 掉线时让读写返回 `-ENOTCONN`，而不是靠超时；
-- **`SYS_IOCTL(fd, cmd, arg)`**：给设备私有命令留一个逃生口。
+- **`connected/disconnected`（不适用，不实现）**：NuttX 的 `uart_connected()` 是
+  **每设备**语义，而我们的控制台是复合的（UART0 + CDC），UART 侧从软件看永远"连着"，
+  所以一个 `plat_console_connected()` 在这些板上恒为真，是实现即死代码。真正能承载
+  `-ENOTCONN` 的是**设备节点**，而 `/dev` 里没有 `usb`/`cdc` 节点（板上实测只有
+  `rgb0`/`key0`/`gpio`/`adc`），要给 CDC 造一个 read/write 节点是另一次设计。另外
+  两个端口都是**轮询**，没有"等一个不会来的中断"，所以也没有会挂住的路径；状态本身
+  已经可观测——`/proc/cdcfix`（`no_reader` / `pending` / `dropped`）在 C3 和 RP 上都
+  打得出来。哪天 CDC 变成 `/dev` 节点，再在这一条下面接 `-ENOTCONN`。
+- **`SYS_IOCTL(fd, cmd, arg)`（早已存在）**：`include/tos.h` 的 `SYS_IOCTL = 30`，
+  内核 `process_ioctl()` 走 `dev_ops.ioctl(devpriv, cmd, arg)` 分派，用户侧
+  `user/syscall.c` 有 `ioctl()` 包装；`led`/`key`/`lcd`/`fb` 四类设备各有自己的
+  `*_dev_ioctl()`，`fb`/`screen`/`splash`/`gpio`/`wificonn` 已经在用
+  （`LCD_OP_*`、`FB_OP_*`、`GPIO_OP_*`）。这条当初是照 NuttX 清单写的，没核树——核完
+  发现逃生口本来就在。
 
-（第三条"控制台的上下半拆分"也已做，见下面。）
+（"控制台的上下半拆分"也已做，见下面。）
 
 **（2026-11-14 已做）控制台的下半契约**：`kernel/platform.h` 把
 `plat_console_{init,putc,tx_room,flush,getchar}` 明确写成"下半"，并列出四条规矩
