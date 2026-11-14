@@ -19,7 +19,11 @@
  * where it belongs.  If the doubling had run into the heap, the journal would
  * be the first casualty.
  *
- * Six levels of 2 KiB are 12 KiB: past the default, inside a single doubling.
+ * Six levels of 2 KiB are 12 KiB: past the default, inside a single doubling
+ * on a board whose grain leaves that much slack.  Where the grain is fine
+ * enough that a window is exactly image+guard+stack (the C3 at 4 KiB), there
+ * is nothing to grow into and this run is killed at the fault instead - which
+ * is why `stk` exists and why a program that needs depth should declare it.
  * A third argument takes the slack first - `deep 6 0 8` mallocs 8 KiB, which
  * is what the stack would have grown into, and the overflow then kills the
  * task as it always did.  That is the other side of sharing one region: the
