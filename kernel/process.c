@@ -1061,6 +1061,16 @@ regs_t *process_suspend(regs_t *r)
  * checks the *default* stack; a program that asks for its own (TOS_STACK)
  * is checked against the same rules in exec(), because one bad image must
  * not be able to boot-loosen the board. */
+/* Whether a window has to be a whole multiple of the stack size.  True when a
+ * single NAPOT PMP entry (or one MPU region) describes the stack, because the
+ * region's base then has to be aligned to its size.  A board whose PMP has
+ * TOR matching - which has no alignment rule - can size the image region to
+ * the page and give the stack its own region instead, and says so here. */
+__attribute__((weak)) int plat_window_needs_stack_alignment(void)
+{
+    return 1;
+}
+
 static void layout_check(void)
 {
     uint32_t grain = PLAT_APP_GRAIN;
@@ -1071,7 +1081,7 @@ static void layout_check(void)
 
     if (stk == 0 || (stk & (stk - 1)) != 0)
         panic("task layout: stack is %u bytes, which is not a power of two", stk);
-    if (grain % stk != 0)
+    if (plat_window_needs_stack_alignment() && grain % stk != 0)
         panic("task layout: the %u KiB grain is not a multiple of the %u KiB stack, "
               "so stack_low would drift off its own alignment",
               grain / 1024u, stk / 1024u);
@@ -1623,8 +1633,14 @@ regs_t *process_ktask_syscall(regs_t *r)
    has always had. */
 static int stack_request_ok(uint32_t v)
 {
-    return (v & (v - 1u)) == 0 && v >= PLAT_PAGE_SIZE &&
-           PLAT_APP_GRAIN % v == 0;
+    if ((v & (v - 1u)) != 0 || v < PLAT_PAGE_SIZE)
+        return 0;
+    /* Where the stack is its own TOR region it does not have to divide the
+     * grain; it only has to be able to fit in a window. */
+    if (!plat_window_needs_stack_alignment())
+        return v <= PLAT_APP_MAX - PLAT_APP_BASE - PLAT_HEAP_GUARD -
+                    PLAT_PAGE_SIZE;
+    return PLAT_APP_GRAIN % v == 0;
 }
 
 /* ---- streaming exec ----------------------------------------------------

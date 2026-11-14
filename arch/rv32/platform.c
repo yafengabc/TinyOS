@@ -217,10 +217,14 @@ static void pmp_open_trap_vector(void)
 {
     uint32_t base = (uint32_t)(uintptr_t)trap_vectors;
     uint32_t addr = (base >> 2) | ((256u >> 3) - 1u);   /* NAPOT, 256 B */
-    uint32_t cfg = PMP_NAPOT | PMP_R | PMP_X;           /* entry 4 bits 7:0 */
+    uint32_t cfg1;
 
-    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(addr));
-    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg));
+    /* Entry 5, not 4: entry 4 is the task's stack region (see
+     * plat_task_protect) and is rewritten on every switch. */
+    __asm__ volatile("csrw pmpaddr5, %0" : : "r"(addr));
+    __asm__ volatile("csrr %0, pmpcfg1" : "=r"(cfg1));
+    cfg1 = (cfg1 & ~0xff00u) | ((uint32_t)(PMP_NAPOT | PMP_R | PMP_X) << 8);
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg1));
 }
 
 /* ---- interrupts ------------------------------------------------------ */
@@ -281,7 +285,7 @@ void plat_cpu_idle(void)
  * off its end and a stack that runs off its bottom both fault instead of
  * quietly eating the other.  The stack uses NAPOT because it is absolute:
  * a TOR entry there would have to start at brk and would fill that hole.
- * Entry 4 (vector table, see pmp_open_trap_vector) is boot-time only. */
+ * Entry 5 (vector table, see pmp_open_trap_vector) is boot-time only. */
 #define PMP_R     0x01u
 #define PMP_W     0x02u
 #define PMP_X     0x04u
@@ -291,7 +295,7 @@ void plat_cpu_idle(void)
 void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
                        uint32_t brk, uint32_t stack_low, uint32_t stack_top)
 {
-    uint32_t size = stack_top - stack_low;
+    uint32_t cfg, cfg1;
 
     /* A board whose PMP cannot express the TOR layout (RP2350 Hazard3 has no
      * TOR matching) programs its own regions. */
@@ -299,21 +303,37 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
         return;
 
     /* The window's end is implied by whichever region is highest (the
-       stack), so the TOR/NAPOT entries do not need it.  An ARM-style port
-       that describes the whole window would. */
+       stack), so the entries do not need it.  An ARM-style port that
+       describes the whole window would. */
     (void)win_end;
 
+    /* TOR region N is [pmpaddr(N-1), pmpaddr(N)), so four boundaries give
+     * three regions plus the hole between them:
+     *
+     *   entry 1  [win_base, wx)         image,      R+X
+     *   entry 2  [wx, brk)              data/heap,  R+W
+     *   entry 3  [brk, stack_low)       guard,      not configured -> faults
+     *   entry 4  [stack_low, stack_top) stack,      R+W
+     *
+     * TOR has no size/alignment rule of its own, which is what frees the
+     * window size from the stack size: the image rounds to PLAT_APP_GRAIN
+     * (4 KiB on the C3) instead of to the 8 KiB stack. */
     __asm__ volatile("csrw pmpaddr0, %0" : : "r"(win_base >> 2));
     __asm__ volatile("csrw pmpaddr1, %0" : : "r"((wx  & ~3u) >> 2));
     __asm__ volatile("csrw pmpaddr2, %0" : : "r"((brk & ~3u) >> 2));
-    /* NAPOT: all ones above the size bit, so 32 KiB is (32K>>3)-1 = 0xFFF. */
-    __asm__ volatile("csrw pmpaddr3, %0" : :
-                     "r"((stack_low >> 2) | ((size >> 3) - 1u)));
+    __asm__ volatile("csrw pmpaddr3, %0" : : "r"(stack_low >> 2));
+    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(stack_top >> 2));
 
-    uint32_t cfg = ((PMP_TOR   | PMP_R | PMP_X) << 8)    /* entry 1 */
-                 | ((PMP_TOR   | PMP_R | PMP_W) << 16)   /* entry 2 */
-                 | ((PMP_NAPOT | PMP_R | PMP_W) << 24);  /* entry 3 */
+    cfg = ((PMP_TOR | PMP_R | PMP_X) << 8)       /* entry 1 */
+        | ((PMP_TOR | PMP_R | PMP_W) << 16)      /* entry 2 */
+        | (0u << 24);                            /* entry 3: guard off */
     __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg));
+
+    /* Entry 4 lives in pmpcfg1 next to entry 5 (the trap vector), so this
+     * has to preserve the other byte. */
+    __asm__ volatile("csrr %0, pmpcfg1" : "=r"(cfg1));
+    cfg1 = (cfg1 & ~0xffu) | (PMP_TOR | PMP_R | PMP_W);
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg1));
 }
 
 /* First argument of a user entry point: thread trampolines take one. */

@@ -1025,3 +1025,11 @@ uint32_t c3_apb_hz(void)
 {
     return apb_hz;
 }
+
+/* This PMP has TOR matching (entry 1..4 in arch/rv32/platform.c), so the
+ * stack is its own region and a window may be any multiple of the page: the
+ * 4 KiB grain is what lets a 10 KiB image take 24 KiB instead of 32. */
+int plat_window_needs_stack_alignment(void)
+{
+    return 0;
+}

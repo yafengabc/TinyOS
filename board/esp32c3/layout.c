@@ -34,14 +34,17 @@ const uint32_t PLAT_RAM_TOP    = 0x403DC710;
  * a single window. */
 
 /* Task windows are carved out of the rest of SRAM above __app_base, in
- * 16 KiB steps: a shell takes 32 KiB, the editor
- * 32, a 1 KiB tool 16, and the rest of the area stays usable by whatever
- * comes next.  The Python interpreter's 128 KiB window plus the shell's
+ * 4 KiB steps: a 1 KiB tool takes 16 KiB, a 10 KiB program 24 KiB, the
+ * editor 32, and the rest of the area stays usable by whatever comes next.
+ * The step can be smaller than the 8 KiB stack because this PMP has TOR
+ * matching: the stack is its own TOR region, so nothing here needs the
+ * window to be a multiple of the stack size (see plat_task_protect and
+ * plat_window_needs_stack_alignment).  The Python interpreter's 128 KiB window plus the shell's
  * 32 KiB still fit.  Stack at the top of every window, image below it,
  * guard hole between image and stack; see kernel/platform.h for the
  * constraints this grain has to satisfy. */
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
-const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
+const uint32_t PLAT_APP_GRAIN  = 0x00001000;   /* 4 KiB per step  */
 /* Stack at the top of every task window, and the hole left under it.  See
  * kernel/platform.h for the four conditions this pair has to satisfy.
  *
