@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: TinyOS documents
+    url: https://github.com/yafengabc/TinyOS/blob/threads-preemptive/docs/OPEN-ITEMS.md
+    about: Open items, criteria and hardware results live here - the issue tracker is for hand-offs, not state.

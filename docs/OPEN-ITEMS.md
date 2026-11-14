@@ -2505,6 +2505,9 @@ MMU，`prot` 在 `configs/rp2040.conf` 里被排除）。所以"窗口和 C3 一
 
 ### 30.3 待真机验收（有 RP2040 的机器）
 
+> 跟踪：[issue #1](https://github.com/yafengabc/TinyOS/issues/1)（和 §32 共用工单；
+> 结论回写到本节，别在工单里维护第二份状态）。
+
 ```sh
 go run ./cmd/tos build -config configs/rp2040.conf
 python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2   # 按 BOOTSEL
@@ -2732,6 +2735,8 @@ blocks than the budget`，该任务访问未覆盖区域会 fault —— 响的�
 `pmp_cover()` 那套分块逻辑只在 `rp2350rv`（NAPOT）需要，ARM 不复制。
 
 ## 32. PIO 从未上过真机（2026-11-14，待 RP2040 / RP2350）
+
+> 跟踪：[issue #1](https://github.com/yafengabc/TinyOS/issues/1)（和 §30.3 共用）。
 
 PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实现完不久就撞上 §28 那
 批 SMP/flash 问题，板子时间全花在那里了。现在它同时在三类目标上编进去了，覆盖面
