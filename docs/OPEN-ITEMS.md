@@ -2800,6 +2800,23 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 `cpus=2` 双核在线。用 `uptime` 复核比只看 banner 可靠——一次静默复位可能
 来不及打启动日志，但 uptime 一定归零。
 
+**换另一个 port 复测（同一块板，`rp2350rvsmp` / Hazard3 RV32 双核）**：刷完
+镜像后用户手动按物理 RESET，`cat /proc/cpuinfo` 显示 `rv32imac` / `cpus=2`；
+同样 100 次 `dd` → ok=100 / err=0 / 无重启，平均 1.12 s，`dd if=/x` 仍是
+`pattern verified`，`uptime` 连续 236 s，`build/sizeprobe/dd100_rv.log`。
+两点端口差异：
+
+1. **刷完 RV 镜像后 120 s 内 UART0 一个字节都没有，是用户按物理 RESET 之后
+   才起来的**——又一次印证"刚刷完"和"RESET 后"不是同一状态；
+2. **RV32 的 `df` 是 `307200 total / 323584 used / 105%`**，ARM 是
+   `3670016 / 352256 / 9%`。根因是 `board/rp2350rv/layout.c` 的
+   `PLAT_LFS_BLOCKS = 75`（300 KiB，注释写明"把分区 grow 到剩余 flash 是
+   后续改动"），ARM 是 896（3.5 MiB）；`df` 的 total 取配置值、used 取
+   `lfs_fs_size()*4096`，两者不一致就出现 >100%。覆写同一个 `/x` 靠块回收
+   仍能成功，但 RV 端口几乎没有空闲卷空间，写第二个大文件会失败。
+   要让 RV 也 grow 到 896，得先确认 RV32 冷启动期间写 flash superblock
+   的安全性（见 §9 的"写后取指挂"）。
+
 构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
 `rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
 三个都是 `SMOKE TEST OK`。
