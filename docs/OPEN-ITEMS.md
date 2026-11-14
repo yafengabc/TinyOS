@@ -2629,6 +2629,34 @@ RW/no-X 区，取指即 fault（原注释说"代价是代码可写"，实际是"
   测试办法是给 `prot` 加一个 `prot dev`（写一个 UART 寄存器）看是否 fault；结果
   决定这条是"记录为不可保护"还是"必须找 ROM/OTF 的办法"。
 
+**决策（2026-11-14）：`prot rodata` 不再作为开口项**
+
+不是"做不到"，而是它不属于这一层要守的边界：
+
+- 页粒度硬件上，`.rodata` 只读**靠链接器把段摆到页边界**才成立。Windows 的 PE
+  就是这样：`.rdata` 映射成 `PAGE_READONLY`，但前提是 `SectionAlignment = 4K`；
+  没有这个前提，页粒度保护根本分不开 `.rdata` 和 `.data`。Hazard3 的 PMP 是
+  4 KiB 粒度，而 `user.ld` 现在是 `ALIGN(32)`，所以"含 `wx` 的那一页整页 RWX"
+  是唯一可编码的布局。为它改链接脚本，代价是每程序最多 4 KiB 镜像 + 窗口
+  （C3 上 `msh` 的 `TOS_ONE_GRAIN` 会被顶破），换到的是"程序别写自己的常量"。
+- 真正要守的三条边界是：**内核 / 另一个任务 / 外设与 MMIO**。前两者由窗口两端
+  保证（`prot heap`、`prot stack` 在这个布局下都 fault）；第三条见 `prot null`。
+- `rp2350`（PMSAv8，**32 字节**粒度）本来就能按真实 `wx` 精确切分，W^X 在那边是
+  免费的；所以这一项的期望**按板子分**，验收时按表判而不是"四项都必须 fault"：
+
+| 板子 | rodata | heap | stack | null |
+| --- | --- | --- | --- | --- |
+| `rp2350` (M33, PMSAv8) | fault | fault | fault | fault |
+| `rp2350rv` (Hazard3) | **survive**（页粒度） | fault | fault | **survive**（bootrom 硬连线） |
+| `esp32c3` (PMP TOR) | fault | fault | fault | fault |
+| `rp2040` (无 MPU) | survive | survive | survive（软件守卫只管 sp，管不了野指针） | survive |
+| `x86`（无分页） | survive | survive | survive | survive |
+
+`prot` 自己的注释（`user/prot.c` 顶部）写的就是这个口径：没有保护单元的机器
+"survives"是诚实答案。剩下唯一还要查的是 `prot null` 的**危害面**——如果 bootrom
+硬连线的 8..10 条目也是 RW，用户态就能直接写外设寄存器，那要从"能读 ROM"升级为
+隔离漏洞。查法：给 `prot` 加一个 `prot dev`（写一个 UART 寄存器）。
+
 ### 31.1 `rp2350rv`：分块 NAPOT，4 KiB 步子
 
 `board/rp2350rv/platform.c` 的 `plat_board_task_protect()` 不再要求窗口是 2 的
