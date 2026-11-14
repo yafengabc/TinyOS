@@ -2381,3 +2381,62 @@ CH343**（约 18 轮 dd 之后 UART 的 host→MCU 方向会单向死掉，探�
 7. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
 8. **最小 shell 进不进 init 位**（§21）：`bin/msh` 已实测一个 16 KiB 窗口够用
    （rv32 5 792 B 镜像、余 2 400），但谁叫 `bin/sh` 会牵动脚本、文档和验收，先拍板。
+
+## 29. 待真机验收：SMP 的删除/回收路径与 RV 的 USB 中断（2026-11-14）
+
+两条都只能在有 RP2350 的机器上做，代码已在 `threads-preemptive`。
+
+### 29.1 `rp2350smp` / `rp2350rvsmp`：`dd` + `rm` 回收 200 轮
+
+§28 的 200 轮都是**覆盖写同一个文件**：第一轮之后基本复用同一批块，erase 和
+littlefs 元数据更新的流量远小于"删掉再重新分配"。而停核握手的代际计数正是在
+**背靠背块操作**上暴露的（`dd: write error at block 0 (-1)`），所以回收路径要
+单独压一遍。
+
+```sh
+# 主机侧循环 200 轮，每轮写完就删，逼下一轮重新分配
+for i in $(seq 200); do
+    dd of=/x bs=4096 count=8
+    rm /x
+done
+df
+```
+
+判据：
+
+- 200 轮内没有 `dd: write error at block N (-1)`；
+- 没有 `[flash] park timeout`（park 握手超时的日志）；
+- 结束后 `df` 的 used 回到循环前的值（块没有泄漏）；
+- 两个镜像都要过：`rp2350smp` 和 `rp2350rvsmp`。
+
+失败时怎么读：`park timeout` → 代际计数没生效；`write error` → 另一核在 XIP
+被拿走的瞬间还在取指；`df` 涨上去不回落 → littlefs 回收没跑完。
+
+### 29.2 `rp2350rv`：USB 走中断
+
+RV 端口的 USB 一直是轮询（`usb_cdc_poll()` 在调度器空闲时跑 `tud_task()`），
+因为 Hazard3 没有 NVIC。现在有一条与 ARM 对等的中断路径，而且**已经是默认**
+（`drivers/usb/rp2350rv/usb_cdc.c` 里 `TOS_RV_USB_IRQ` = 1）：
+
+- 外部中断统一是 `mcause = 11`（machine external），**不是** mcause 里的线号；
+- 每根线的使能/挂起在 Hazard3 的 XH3IRQ 数组 CSR 里：`meiea` / `meipa`
+  （0xbe0 / 0xbe1，元素 0 覆盖 0..31 号线），USBCTRL 是 **14 号线**；
+- `usb_cdc_irq_enable()` 置 `meiea` 的 14 位 + `mie.MEIE`；
+- `plat_irq_foreign()` 收到 cause 11 读 `meipa`，命中 14 就调
+  `usb_cdc_irq_task()`（`dcd_int_handler` + ISR 版 `tud_task`，`g_in_task` 防重入）；
+- idle 轮询保留作兜底：中断没来就退回旧行为，不会变成死控制台。
+
+验收：
+
+| 项目 | 期望 |
+|---|---|
+| 启动日志 | `[u0]`~`[u4]` 全部出现，`[U] usb hw=1 cfg=1 stage=0` |
+| 主机 | 能枚举出 CDC 口并交互 |
+| `help`（3 KB） | 不丢字（丢字 = 中断在跑但 FIFO 排空不够，tick 里的 `tx_kick` 应兜住） |
+| 跑 `bench` 时敲键 | 有回显（轮询版在 CPU 不空闲时会明显迟钝） |
+| `dd of=/x bs=4096 count=8` 期间 | USB 不掉线，命令正常返回 |
+
+失败时：UART 正常但 USB 完全没反应 → 大概率是 `meiea` 的编码或 14 号线号不对，
+把 `plat_irq_foreign()` 里读到的 `meipa` 打到 UART 上，一行就能定位。要回退到
+轮询，把 `usb_cdc.c` 里那个 `#define TOS_RV_USB_IRQ` 改回 0 即可，idle 轮询和
+tick 排空都还在。
