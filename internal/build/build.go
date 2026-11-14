@@ -184,14 +184,14 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// littlefs partition at 0x80000, instead of the old 256 KiB.
 	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 80 * 1024, MaxProcs: 8, XipFlashBase: 0x10000, Drivers: esp32c3Drivers, DefaultFeatures: esp32c3Features},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 1200, HeapBytes: 128 * 1024},
-	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
+	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 8 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
 	// rp2040smp: both Cortex-M0+ cores.  Core 1 sits in the boot ROM's
 	// wait-for-FIFO loop, not at our reset vector, so the board's
 	// plat_start_cpu() pushes the pico-sdk handshake (VTOR/SP/entry) and
 	// start.S joins the scheduler from arm_core1_entry.  The second 16 KiB
 	// kernel stack comes out of .bss, which shrinks the task area; the
 	// kernel image and the 1.5 MiB littlefs partition are unchanged.
-	"rp2040smp": {Name: "rp2040smp", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", CPUs: 2, FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
+	"rp2040smp": {Name: "rp2040smp", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", CPUs: 2, FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 8 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
 	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
 	// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
 	// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.

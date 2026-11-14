@@ -10,11 +10,15 @@
  * The RP2040 has no MMU and no MPU: a user task runs unprivileged (so a fault
  * cannot corrupt the kernel) but with the whole flat address space visible,
  * exactly like the x86 port.  A window is therefore just an allocation, and
- * PLAT_APP_GRAIN is the step it is rounded to: 16 KiB leaves room for the
- * image and heap once the 8 KiB stack and the 4 KiB guard are accounted
- * for.  The current kernel end leaves about 200 KiB of task area, so twelve
- * such windows fit.  (It used to say 16 KiB guard and a 32 KiB stack here,
- * which could not fit at all - every exec was refused.) */
+ * PLAT_APP_GRAIN is the step it is rounded to.
+ *
+ * The task area is not a fixed reservation: kernel.ld puts __app_base at the
+ * first 16 KiB boundary after the real __kernel_end, so every byte the kernel
+ * does not use is user memory.  With the current kernel (about 46 KiB: 8 KiB
+ * heap, 8 KiB kernel stack, 8 process slots) that leaves 0x2000c000..
+ * 0x20042000 = 216 KiB, i.e. 54 windows of 4 KiB - plenty for a board whose
+ * whole SRAM is 264 KiB.  Growing the kernel by a 16 KiB boundary costs one
+ * window's worth, which is the intended trade. */
 
 const uint32_t PLAT_KERNEL_BASE = 0x20000000u;   /* SRAM reserved for the
                                                    kernel image + .bss      */
