@@ -52,7 +52,37 @@ void plat_early_init(void);
 /* Full initialisation: interrupt controller, timer, console, block device. */
 void plat_init(void);
 
-/* ---- console --------------------------------------------------------- */
+/* ---- console: the lower half ------------------------------------------
+ *
+ * A board implements exactly these five calls.  Everything above them lives
+ * in the kernel, once: the output lock and the escape/colour filter
+ * (console.c), the input ring, line editing, history and echo pacing
+ * (tty.c), and the decision of which physical device a byte goes to.
+ *
+ * The split is not cosmetic; it is what stops the class of bug that cost the
+ * C3 port a week: a driver that ran its own state machine, or waited for a
+ * peer, from inside the trap handler.  The rules below are all consequences
+ * of "this can be called with the output lock held and interrupts off,
+ * sometimes from inside the timer interrupt":
+ *
+ *   - No function here takes a kernel lock, calls the scheduler, sleeps, or
+ *     runs a device state machine.  A state machine that needs thread
+ *     context belongs in the idle hook (see g_idle_poll), not here.
+ *   - Every wait is bounded.  A transmitter that has stopped (gated clock,
+ *     no host on the other end) must cost a dropped character, never a
+ *     silent board: the bound is what turns "hung" into "garbled".
+ *   - putc() may drop.  It is called with the lock held; blocking on a peer
+ *     would stall every other core's output with it.
+ *   - getchar() must not need more than a register read per device: it runs
+ *     from tty_poll(), which is called with interrupts masked and also from
+ *     the block driver while a task waits for flash.  Returning -1 because
+ *     "nothing to do yet" is correct; driving the device to find out is not.
+ *
+ * (NuttX splits the same seam into struct uart_ops_s plus drivers/serial.c.
+ * We keep the five functions instead of an ops table because there is one
+ * console per board and the table would only add an indirect call per
+ * character - the same reasoning that keeps our devfs a static table rather
+ * than a VFS.) */
 
 void plat_console_init(void);
 void plat_console_putc(char c);
@@ -64,7 +94,8 @@ void plat_console_putc(char c);
  * FIFO and characters are lost.  Return 0 when nothing fits. */
 int  plat_console_tx_room(void);
 /* Wait until everything written has actually been transmitted.  Called once
- * on the way down: the device may buffer, and the CPU is about to stop. */
+ * on the way down: the device may buffer, and the CPU is about to stop.
+ * Bounded for the same reason as putc(). */
 void plat_console_flush(void);
 int  plat_console_getchar(void);      /* -1 when no input is pending */
 

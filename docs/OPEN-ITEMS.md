@@ -3016,12 +3016,36 @@ ARM 同一个 `mpu_configure_region(base, size, flags)` 后面，内核只谈“
 要动三块目前最敏感的代码（ARM 的 MPU 切换、rv32 的 PMP 切换、process.c 的窗口
 账本），所以**建议等 rp2350rv / rp2350 真机稳定一轮之后再动**。
 
-同样"想做但先不做"的还有三条驱动侧的重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
+同样"想做但先不做"的还有两条驱动侧的重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
 
-- **控制台的上下半拆分**：每块板只留 `{tx_ready, putc, getc, irq_on, irq_off}`，
-  环/回显/阻塞留在内核一份。C3 的 `usj_putc` 空转 bug 就是分层错位的产物；
 - **`connected/disconnected`**：USB CDC 掉线时让读写返回 `-ENOTCONN`，而不是靠超时；
 - **`SYS_IOCTL(fd, cmd, arg)`**：给设备私有命令留一个逃生口。
+
+（第三条"控制台的上下半拆分"已做，见下面。）
+
+**（2026-11-14 已做）控制台的下半契约**：`kernel/platform.h` 把
+`plat_console_{init,putc,tx_room,flush,getchar}` 明确写成"下半"，并列出四条规矩
+——不取内核锁、不调调度器、不跑状态机；**每个等待必须有界**；`putc` 允许丢弃；
+`getchar` 只做一次寄存器读（它跑在 `tty_poll()` 里，而 `tty_poll()` 在关中断的
+tick 路径和块设备等待路径上都会被调用）。环、回显、行编辑、输出锁全部留在内核
+（`console.c` / `tty.c`）一份，四块板本来就没有自己的环，所以这次是**把纪律写
+下来 + 补齐违反它的三处**，不是搬家：
+
+| 位置 | 改之前 | 改之后 |
+| --- | --- | --- |
+| `board/esp32c3/platform.c` | `while (uart_tx_count() >= 100);` / `while (uart_tx_count() > 0);` | 100000 次有界，超时照写（丢一字节） |
+| `board/qemu-virt/platform.c` | THRE / TEMT 无界自旋 | 同上 |
+| `board/qemu-mps2/platform.c` | CMSDK TX 空标志无界自旋 | 同上 |
+
+没有做成 NuttX 那种 ops 表：一块板只有一个控制台，表只会给每个字符加一次间接
+调用，和 devfs 不引 VFS 是同一个理由。
+
+验证：十个目标（`x86`/`rv32`/`arm`/`rp2040`/`rp2040smp`/`rp2350`/`rp2350smp`/
+`rp2350rv`/`rp2350rvsmp`/`esp32c3`）构建通过；QEMU `x86`/`rv32`/`arm` 三个 smoke
+都是 `SMOKE TEST OK`；**C3 真机（COM4）`accept.py` 24/24**。注意本机 `tos.conf`
+的 `[user] exclude` 把 `hello` 等程序排掉了，此时跑 `accept.py` 会是 23/24
+（`source s.sh` 找不到 `/bin/hello`）——那不是回归；临时放开 exclude 重刷就是
+24/24，测完已把 `tos.conf` 原样恢复（不入库）。
 
 **（2026-11-14 已做）`plat_spin_lock_irqsave()`**：加进 `kernel/cpu.h` / `cpu.c`，
 先关中断再取锁、先放锁再恢复，返回值就是中断状态。`process.c` 的 14 处、

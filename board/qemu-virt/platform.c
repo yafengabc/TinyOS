@@ -29,16 +29,25 @@ void plat_console_init(void)
 
 void plat_console_putc(char c)
 {
-    while (!(mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_THRE))
-        ;
+    uint32_t spins;
+
+    /* Bounded like every other lower half (kernel/platform.h): a 16550 that
+     * is not draining must cost a byte, not the boot.  On QEMU THRE is
+     * always set, so the loop exits on the first pass. */
+    for (spins = 0; spins < 100000u; spins++) {
+        if (mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_THRE)
+            break;
+    }
     mmio_write8(RV32_UART_BASE + UART_REG_DATA, (uint8_t)c);
 }
 
 /* console_shutdown() drains the transmitter before a shutdown or reset. */
 void plat_console_flush(void)
 {
-    while (!(mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_TEMT))
-        ;
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (mmio_read8(RV32_UART_BASE + UART_REG_LSR) & UART_LSR_TEMT)
+            break;
+    }
 }
 
 int plat_console_getchar(void)

@@ -65,17 +65,32 @@ void plat_console_init(void)
 
 void plat_console_putc(char c)
 {
-    /* The FIFO is 128 deep; 100 leaves headroom for our own CRLF pairs. */
-    while (uart_tx_count() >= 100)
-        ;
+    uint32_t spins;
+
+    /* The FIFO is 128 deep; 100 leaves headroom for our own CRLF pairs.
+     * The wait is bounded on purpose (kernel/platform.h, console lower
+     * half): TX_COUNT is a hardware counter that a wedged UART pin, a
+     * stopped APB clock or an overflowing FIFO can hold at its limit, and
+     * an unbounded loop here runs with the console lock held - one dead
+     * transmitter would take the whole board's output with it.  Write
+     * anyway when the bound expires: a dropped byte is diagnosable, a
+     * silent board is not. */
+    for (spins = 0; spins < 100000u; spins++) {
+        if (uart_tx_count() < 100)
+            break;
+    }
     mmio_write32(UART0_BASE + UART_FIFO_REG, (uint8_t)c);
     usj_putc(c);
 }
 
 void plat_console_flush(void)
 {
-    while (uart_tx_count() > 0)
-        ;
+    uint32_t spins;
+
+    for (spins = 0; spins < 100000u; spins++) {
+        if (uart_tx_count() == 0)
+            break;
+    }
     usj_flush();
 }
 

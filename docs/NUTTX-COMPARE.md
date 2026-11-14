@@ -161,10 +161,15 @@ static const struct uart_ops_s g_uart_ops = {
 
 **值得借的四条，按性价比**
 
-1. **控制台的上下半**（最高）。C3 那个 `usj_putc` 在 trap 里空转 40000 次的 bug，
-   本质上就是"下半被塞进了上半的位置"。把每块板缩成
-   `{tx_ready, putc, getc, irq_on, irq_off}` 五六个函数，环、回显、阻塞和
-   `process_console_kick` 留在内核一份，结构上就不可能再犯。
+1. **控制台的上下半**（最高）**——已做，2026-11-14**。C3 那个 `usj_putc` 在 trap 里
+   空转 40000 次的 bug，本质上就是"下半被塞进了上半的位置"。现在
+   `kernel/platform.h` 把 `plat_console_{init,putc,tx_room,flush,getchar}` 定义为
+   **下半**并写死四条规矩（不取内核锁/不调调度器/不跑状态机；每个等待必须有界；
+   `putc` 可以丢弃；`getchar` 只能读寄存器），环、回显、行编辑、锁和
+   `process_console_kick` 全在内核一份。**没有做成 ops 表**：一块板只有一个控制台，
+   表只会给每个字符加一次间接调用——和 devfs 不引 VFS 是同一个取舍。
+   顺带把三处仍然无界的等待改成了有界：C3 的 UART TX FIFO（`platform.c`）、
+   QEMU 16550（`qemu-virt`）、CMSDK（`qemu-mps2`）。
 2. **`connected/disconnected` 语义**（便宜）。USB CDC 拔线后让读写返回 `-ENOTCONN`
    而不是等一个不会来的中断；我们现在是靠超时和"没主机就丢"绕过去的。
 3. **`SYS_IOCTL(fd, cmd, arg)` 一个通用口**（便宜）。保留现有强类型 syscall，
