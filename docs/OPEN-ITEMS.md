@@ -2657,6 +2657,11 @@ RW/no-X 区，取指即 fault（原注释说"代价是代码可写"，实际是"
 硬连线的 8..10 条目也是 RW，用户态就能直接写外设寄存器，那要从"能读 ROM"升级为
 隔离漏洞。查法：给 `prot` 加一个 `prot dev`（写一个 UART 寄存器）。
 
+**已查（2026-11-14 晚，COM14）**：`prot dev 0x40070000` 在 `rp2350rvsmp` 和
+`rp2350smp` 上都 FAULT，用户态写不了 UART0 数据寄存器。所以 `prot null` 的
+SURVIVE 只是"能读 ROM"，不是隔离漏洞，按上面按板子分的表记成已知限制即可，
+不必再找 ROM/OTF 的办法。过程见 §33.0。
+
 ### 31.1 `rp2350rv`：分块 NAPOT，4 KiB 步子
 
 `board/rp2350rv/platform.c` 的 `plat_board_task_protect()` 不再要求窗口是 2 的
@@ -2772,6 +2777,44 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 | 5 | `rp2040` | §30.3 的 4 KiB 窗口 + 软件栈守卫 | 见 §30.3 |
 | 6 | `rp2040` / `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 |
 
+### 33.0 2026-11-14 晚真机收口（COM14 / rp2350rvsmp + rp2350smp）
+
+本机只插了一块 ATK-DNRP2350AM（UART0 = COM14，原生 USB CDC = COM17），所以
+**第 5、6 项（RP2040、PIO 三关）没做**，其余四项全部上板。脚本与原始回显在
+`build/sizeprobe/s33_*.log`（该目录被 `.gitignore` 忽略，只留本机）。
+
+构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
+`rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
+三个都是 `SMOKE TEST OK`。
+
+| # | 结果 |
+| --- | --- |
+| 1 §33.1 | **PASS**：`deep 3` → `stack grown to 8 KiB` + `journal intact`；`prot dev 0x40070000` **FAULT**；`prot heap` / `prot stack` FAULT；`ps` 里 msh 16 KiB。刷完、ROM RESET 稳态、硬件 RESET 三轮一致 |
+| 2 §33.2 | **大部分 PASS，1 项 FAIL**：ps msh 16 KiB、`prot` 四条全 FAULT、`prot dev` FAULT、`smpbench` **1.97x**、§29.1 200 轮 PASS、§22 BAD=0；**`deep 3` 不长栈**，见 33.2.1 |
+| 3 §29.1 | **PASS**：`rp2350smp` 与 `rp2350rvsmp` 各 200 轮 `dd`+`rm`，errors=0、df 回收 YES、存活 OK |
+| 4 §29.2 | **PASS（判据要改）**：见下面的 DTR 说明 |
+
+**`prot dev` 的结论**：UART0 数据寄存器 `0x40070000` 从用户态写会 fault，说明
+bootrom 硬连线的 PMP 8..10 条目**没有给用户态开外设**。§31.0 里"`prot null`
+SURVIVE"只是"能读 ROM"，不是隔离漏洞，按板子分表记为已知限制即可，不需要找
+ROM/OTF 的办法。
+
+**§29.2 主机侧（上次未完成的那半）**：设备侧 `[u0]`~`[u4]` 与
+`[U] usb hw=1 cfg=1 stage=0` 每轮都在。主机侧的关键是 **DTR**：
+
+- `rp2350_drive.py` 的 `s29b` 用 `cdc.setDTR(False)` 打开 COM17 → 设备侧
+  `g_cdc_fix` 的 no-reader 保护把输出丢掉，只剩每 100 ms 一个探测字节，
+  于是 `help` 0 字节、看起来像"USB 没反应"；
+- 改成 **DTR=1** 后 `echo CDC_OK` 回显、`dd of=/x bs=4096 count=8` 写
+  32768 字节、`rm /x` 都正常；
+- 3 KB 不丢字的判据不能再用 `help`：`help` 是 `sh` 的内建命令，默认 shell
+  是 `msh`，这个镜像里 `/bin/help` 不存在。改用 `cat /pytest.py`（3447 B），
+  `g_cdc_fix` 保持默认 1，**连续 4 轮都是完整 3569 字节且回到 `tos> `**。
+- 之前看到的 877 B / 1232 B 截断是测试脚本"读到 0.6 s 静默就提前收读"
+  以及翻 `/proc/cdcfix` 的时序副作用，不是固件丢字。`cat /proc/cdcstat` 里的
+  `line` / `idle_ms` 是**上一次丢弃时**冻结的快照（那两个字段只在丢弃分支写），
+  别拿它判断当前有没有读者。
+
 ### 33.1 `rp2350rv`：PMP 修复后的三件事
 
 1. **`deep 3` 现在应该长栈**：`arch/rv32/platform.c` 已把 growth 的地址改成
@@ -2799,9 +2842,58 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 | `ps` 里 `msh` | 16 KiB（不变） |
 | `ps` 里 `sh` | 36 KiB（原来是 48） |
 | `ps` 里 `py` | 44 KiB（原来是 48） |
-| `prot rodata` / `heap` / `stack` / `null` | **四条全部 fault**（32 字节粒度，rodata 也是 RX） |
-| `deep 3` | `stack grown to 8 KiB` |
-| `rp2350smp` 的 `smpbench` | 仍 ≥1.8x（布局变小不该影响，但这是回归基线） |
+| `prot rodata` / `heap` / `stack` / `null` | **四条全部 fault**（32 字节粒度，rodata 也是 RX）—— 实测四条全过 |
+| `deep 3` | `stack grown to 8 KiB` —— **实测 FAIL，见 33.2.1** |
+| `rp2350smp` 的 `smpbench` | 仍 ≥1.8x —— 实测 **1.97x**（single 140 ms / dual 142 ms） |
+
+`ps` 里 `sh` 36 KiB / `py` 44 KiB 这两行**没有直接观测**：默认只有 `msh` 一个
+进程，要在它运行期间另开一路 `ps` 才能看到，本轮没做。其余行在刷完、ROM RESET、
+硬件 RESET 三轮都一致。
+
+### 33.2.1 新开口：`deep 3` 在 Cortex-M33 上不长栈（2026-11-14 真机）
+
+**现象**（`rp2350smp`，三轮一致，`build/sizeprobe/s33_arm.log`）：
+
+```
+[pid 7] MemManage at 0x00000000 (address 0x20028eb8)
+  cfsr=0x00000092 ... mmfar=0x20028eb8
+  (stacking error: sp 0x20028e98 left the stack - stack overrun, not a wild pointer)
+  hwords: 00000000 ... 00000000   lr=0x00000000 xpsr=0x00000000
+```
+
+不是普通 store fault，是 **MSTKERR**：用户 sp 越过 `stack_low` 后，异常入口往
+PSP 压栈的那次写落在 `[stack_low-4K, stack_low)` 的 `MPU_ATTR_GUARD` 区
+（`AP 00` = 仅特权 RW），压栈失败，硬件帧**根本没建立**——`hwords` / `lr` /
+`xpsr` 全是 0。RV32 那条"growth 后返回 `f` 重试指令"的路在这里走不通，连
+要重试的 PC 都没有。
+
+**根因**：`arch/arm/platform.c` 的注释就写着"The ARM ports have no stack
+growth; rv32's process_stack_grow() does"。全树只有两个地方会调
+`process_stack_grow()`：RV32 的 `trap_handler()`，以及 `process_stack_guard()`
+（只在 syscall 时跑，且只有 x86 / rp2040 把 `plat_user_stack_guard()` 打开）。
+`rp2350` 三处都没接。8 KiB 栈时 `deep 3`（6 KiB）不溢出，所以一直看不出来；
+`c3a7250` 把栈降到 4 KiB 后必然踩到，这是这轮 4 KiB 窗口改动的回归。
+
+软件守卫也救不了：`deep.c` 的溢出发生在递归途中（每层 2 KiB frame、无
+syscall），只有最深帧才 `sleep()`，而 `process_stack_guard()` 只在 syscall
+入口检查。等得到 syscall 时早就 MSTKERR 了。
+
+**候选修法（按代价从小到大，都没上板）**：
+
+1. guard 洞顶部划出一小块"异常压栈着陆区"（用户 RW、XN），让压栈成功，
+   随后越界写变成完整帧的 `DACCVIOL`；在 `arm_handle_fault()` 里对
+   `f->vec==4 && (cfsr & DACCVIOL)` 调
+   `process_stack_grow(fault_addr(f), plat_frame_get_user_sp(f))`，成功就返回
+   `f` 重试。要先确认两件事：Cortex-M 的 stacking 用的是用户还是特权访问；
+   landing 区要覆盖 `deep` 每层 2 KiB 的跨度，不能只留 32 字节。
+   `prot heap` 的探针是 `brk+64`（在 guard 洞底部），这样切仍能保持 fault。
+2. 用编译器的栈探测（`-fstack-limit-*`）在函数入口经 syscall 请求增长，
+   把检测点提前到压栈之前；代价是改所有用户程序的编译选项。
+3. 退回 8 KiB 默认栈；但 `ps` 里 msh 会从 16 KiB 涨到 20 KiB，与本节表格的
+   期望冲突，等于放弃 4 KiB 窗口在 ARM 上的收益。
+
+**判据**：`deep 3` 打印 `stack grown to 8 KiB` + `journal intact`，同时
+`prot heap` / `prot stack` 仍然 fault、`smpbench` 仍 ≥1.8x。
 
 ### 33.3 已在这边验过、不用再测的
 
