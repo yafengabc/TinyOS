@@ -2440,3 +2440,61 @@ RV 端口的 USB 一直是轮询（`usb_cdc_poll()` 在调度器空闲时跑 `tu
 把 `plat_irq_foreign()` 里读到的 `meipa` 打到 UART 上，一行就能定位。要回退到
 轮询，把 `usb_cdc.c` 里那个 `#define TOS_RV_USB_IRQ` 改回 0 即可，idle 轮询和
 tick 排空都还在。
+
+## 30. RP2040 与 C3 同构的窗口：软件栈守卫 + 4 KiB 步长（2026-11-14，待真机）
+
+RP2040 是整个仓库里唯一**没有任何内存保护**的用户态（Cortex-M0+ 既无 MPU 也无
+MMU，`prot` 在 `configs/rp2040.conf` 里被排除）。所以"窗口和 C3 一致"这件事在
+它上面不是改一个常量，而是要先**用软件造出 C3 靠硬件得到的那次 fault**。
+
+### 30.1 落地了什么
+
+- **软件栈守卫**（`kernel/process.c`）：`exec()` 在护栏洞的顶部（`stack_low - 4`）
+  写一个 `"STAK"` 哨兵字；每次进入内核（`syscall_dispatch()`）检查它。被踩坏就
+  当作栈溢出：先尝试一步增长，失败则打印
+  `stack overflow: guard word at 0x... destroyed` 并杀掉任务（退出码 139）。
+  用弱符号 `plat_user_stack_guard()` 开门，只有 RP2040 返回 1，其它端口零成本。
+- **一步增长**：`plat_window_grow_reserve()` 在 RP2040 上返回 `PLAT_STACK_BYTES`
+  （4 KiB），于是没有声明栈的程序拿到一步 4 KiB 余量，和 C3 完全同构。
+- **窗口**：`PLAT_APP_GRAIN` 16 KiB → **4 KiB**，`PLAT_STACK_BYTES` 8 KiB →
+  **4 KiB**；`plat_window_needs_stack_alignment()` 返回 0（这里没有需要编码的
+  region，与 C3 的 TOR 同理）。
+
+### 30.2 这个守卫能做什么、不能做什么
+
+- **能**：越界的第一笔写在护栏洞里（4 KiB 池子），下一次系统调用就发现并处理，
+  不会一路写进镜像；报错明确，不再伪装成"野指针"；
+- **不能**：紧递归且完全不调系统调用的程序，要到下一次进内核才被抓到，期间可能
+  已经吃掉几 KB 堆；另外**堆写坏、跨窗口野指针、写内核内存仍然拦不住**，那需要
+  MPU，RP2040 没有。这条要写在这块板的 README 里，别让人以为它有了保护。
+
+### 30.3 待真机验收（有 RP2040 的机器）
+
+```sh
+go run ./cmd/tos build -config configs/rp2040.conf
+python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2   # 按 BOOTSEL
+```
+
+| 项目 | 期望 |
+|---|---|
+| 启动 | 进 `tos>`，`/proc/dev`、`ls`、`dd` 正常 |
+| `ps` 里 `msh` 的 wink | **16 KiB**（镜像 8K + 护栏 4K + 栈 4K） |
+| `sleep` 之类的 wink | **16 KiB**（原来 24/32），并发窗口数明显变多 |
+| `deep 3`（6 KiB 递归） | `stack grown to 8 KiB` + `journal intact` |
+| `deep 6`（12 KiB） | 先长到 8K，再打 `stack overflow: guard word ...`，最后 `no room to grow it; killing` |
+| `deep 6 0 8`（堆先占余量） | 同上，应在增长阶段就拒绝 |
+| `dd of=/x bs=4096 count=8` × 若干轮 + `reboot` | 文件系统行为不变 |
+
+失败签名：
+
+- `deep 3` 直接被 `store access fault`（或 journal 损坏）→ 守卫没生效：
+  检查 `plat_user_stack_guard()` 是否返回 1、`exec()` 是否真的写了哨兵字；
+- `deep 6` 打出了 `guard word` 但没有增长也没有 `killing` → `process_stack_grow()`
+  的参数不对（它用 `sp = low - 4` 表示"已经出界"）；
+- 窗口还是 24/32 KiB → `layout.c` 的 grain/stack 或 `WindowGeometry()` 没对齐。
+
+### 30.4 顺带一提
+
+x86/PC 端口也是"无分页 + `plat_task_protect()` 空实现"，处境和 RP2040 一样。
+守卫是同一个弱符号，打开只需让 `arch/x86/platform.c` 返回 1，而且 QEMU 里就能
+验——如果 RP2040 这轮通过，可以顺手把 x86 也打开。

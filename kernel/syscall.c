@@ -235,6 +235,12 @@ static regs_t *dispatch(regs_t *r);
 
 regs_t *syscall_dispatch(regs_t *r)
 {
+    /* No-op unless the board has no faulting protection unit (the RP2040):
+     * there the guard word under the stack is the only way to notice that a
+     * task ran off its bottom, and this is the first point after the fact. */
+    if (!process_stack_guard())
+        return process_suspend(process_exit(r, 139));
+
     /* Whatever the syscall did - including waiting for a child, for the
        console or for a sleep - this is the last point at which the task's
        kernel stack is still needed, so a stop request lands here. */

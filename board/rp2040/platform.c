@@ -1239,9 +1239,29 @@ uint32_t plat_cpu_hz(void)
 }
 
 /* No MPU and no MMU: a stack overflow is a silent write into the same window,
- * not a fault, so process_stack_grow() never runs.  Do not reserve the extra
- * step - here it would only delay the corruption, and RAM is 264 KiB. */
+ * not a fault.  Two things stand in for the missing protection:
+ *
+ *   - plat_user_stack_guard(): a canary word under the stack, checked on every
+ *     syscall, so an overflow is detected and either grown into the heap's
+ *     tail or turned into a kill with a message;
+ *   - the reserve below: one 4 KiB step for a task that did not declare its
+ *     stack, which is what that growth consumes.
+ *
+ * A window can therefore be the same shape as the C3's - 4 KiB steps, 4 KiB
+ * default stack - without losing the growth path. */
 uint32_t plat_window_grow_reserve(void)
+{
+    return PLAT_STACK_BYTES;
+}
+
+int plat_user_stack_guard(void)
+{
+    return 1;
+}
+
+/* Nothing here encodes a region, so the stack does not have to divide the
+ * grain (see kernel/process.c). */
+int plat_window_needs_stack_alignment(void)
 {
     return 0;
 }

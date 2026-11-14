@@ -21,6 +21,9 @@ void     process_start_shell(const char *path) __attribute__((noreturn));
 /* Trap entry points.  Both return the frame to resume: usually the one that
  * came in, but a switch (or a blocked syscall) hands back another task's. */
 regs_t  *syscall_dispatch(regs_t *r);
+
+/* Software stack guard for ports without an MPU; 0 means the task must die. */
+int process_stack_guard(void);
 regs_t  *process_exit(regs_t *r, int code);
 
 /* Called by the arch on every timer tick, with the interrupted frame. */

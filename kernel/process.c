@@ -1631,6 +1631,23 @@ regs_t *process_ktask_syscall(regs_t *r)
    has to be one the protection unit can describe and the window grain can
    hold.  Both paths use this so a hint cannot bypass the check the ELF note
    has always had. */
+/* ---- software stack guard (ports without an MPU) ----------------------- */
+
+/* A port whose PMP/MPU faults on the guard hole does not need this: the
+ * hardware stops the store itself.  One that has neither - the RP2040 - gets
+ * a canary word at the top of the hole instead, planted when the window is
+ * created.  A store that runs off the bottom of the stack clobbers it, and
+ * the next entry into the kernel notices: the stack is grown one step into
+ * the heap's tail, or the task is killed, instead of the writes continuing
+ * quietly down into the image.  Nothing is checked on the way out, so a tight
+ * recursion with no syscalls is only caught at its next call. */
+#define USER_STACK_GUARD 0x5354414Bu               /* "STAK" */
+
+__attribute__((weak)) int plat_user_stack_guard(void)
+{
+    return 0;
+}
+
 /* Slack reserved under the stack of a task that did not declare one, so the
  * first unexpected recursion can double the stack instead of dying.
  *
@@ -1954,6 +1971,8 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     p->stack_size = stk;
     p->heap_base = base + span;
     p->heap_end = p->stack_top - stk - HEAP_GUARD;
+    if (plat_user_stack_guard())
+        *((uint32_t *)(p->stack_top - stk) - 1) = USER_STACK_GUARD;
 
     /* Fill the stack with a poison byte before anything uses it, so the
        deepest address the program ever wrote to can be recovered later: the
@@ -2801,6 +2820,34 @@ uint32_t process_sbrk(uint32_t bytes)
  * Returning 1 means the faulting instruction can be re-executed unchanged:
  * it was refused before it wrote anything.  0 leaves the decision to the
  * caller, which kills the task exactly as it always did. */
+/* Called on every syscall from user mode when the board has no faulting
+ * protection unit.  1 = the stack is intact (or was grown); 0 = the task has
+ * run out and could not be grown, and the caller must kill it. */
+int process_stack_guard(void)
+{
+    proc_t *p = current;
+    uint32_t low, *gw;
+
+    if (!plat_user_stack_guard())
+        return 1;
+    if (!p || p->win_size == 0 || p->stack_size == 0)
+        return 1;
+
+    low = p->stack_top - p->stack_size;
+    gw = (uint32_t *)low - 1;
+    if (*gw == USER_STACK_GUARD)
+        return 1;
+
+    kprintf("\n[pid %d] stack overflow: guard word at 0x%08x destroyed\n",
+            p->pid, (uint32_t)gw);
+    *gw = USER_STACK_GUARD;          /* re-arm before the growth decision */
+    if (!process_stack_grow(low - 4u, low - 4u)) {
+        kprintf("[pid %d] no room to grow it; killing\n", p->pid);
+        return 0;
+    }
+    return 1;
+}
+
 int process_stack_grow(uint32_t addr, uint32_t sp)
 {
     proc_t *p = current;
@@ -2844,6 +2891,8 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
 
     p->stack_size = want;
     p->heap_end = low - HEAP_GUARD;
+    if (plat_user_stack_guard())
+        *((uint32_t *)low - 1) = USER_STACK_GUARD;
     apply_protection(p);
 
     kprintf("\n[pid %d] stack grown to %u KiB, heap ceiling %u KiB\n",
