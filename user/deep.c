@@ -19,11 +19,12 @@
  * where it belongs.  If the doubling had run into the heap, the journal would
  * be the first casualty.
  *
- * Six levels of 2 KiB are 12 KiB: past the default, inside a single doubling
- * on a board whose grain leaves that much slack.  Where the grain is fine
- * enough that a window is exactly image+guard+stack (the C3 at 4 KiB), there
- * is nothing to grow into and this run is killed at the fault instead - which
- * is why `stk` exists and why a program that needs depth should declare it.
+ * Depth is the first argument.  One growth step is what an undeclared stack
+ * gets (plat_window_grow_reserve), so on the C3 - 4 KiB default - `deep 3`
+ * (6 KiB) is the run that grows, 4 -> 8 KiB, and `deep 6` (12 KiB) shows the
+ * other side: a second step has nowhere to come from and the task is killed.
+ * A program that knows it goes deeper should say so with TOS_STACK (`stk`
+ * does) instead of relying on steps.
  * A third argument takes the slack first - `deep 6 0 8` mallocs 8 KiB, which
  * is what the stack would have grown into, and the overflow then kills the
  * task as it always did.  That is the other side of sharing one region: the

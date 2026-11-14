@@ -66,7 +66,14 @@ const uint32_t PLAT_APP_GRAIN  = 0x00001000;   /* 4 KiB per step  */
  * that runs off its bottom - the hole is simply not covered by any PMP
  * entry, so any store into it faults, and the write that overflows lands
  * there first unless a single frame is larger than the hole. */
-const uint32_t PLAT_STACK_BYTES = 8u * 1024u;
+/* 4 KiB, not 8.  With a 4 KiB grain a window is image + 4 guard + 4 stack
+ * (+ one 4 KiB growth step for a task that did not declare a stack), so a
+ * small tool stays at 16 KiB - the same as before - while the growth reserve
+ * is a 4 KiB step instead of an 8 KiB doubling.  That is what makes the
+ * reserve affordable: two steps cover what the old 8 KiB default did, one
+ * fault at a time, and only for programs that need it.  The shell already
+ * declares 4 KiB (user/msh/msh.c) and `sh` the same, so neither is affected. */
+const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
 
