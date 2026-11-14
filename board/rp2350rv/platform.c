@@ -309,28 +309,39 @@ static void unreset(uint32_t bits)
     }
 }
 
-/* clk_ref = XOSC (12 MHz); clk_peri = clk_sys.  The crystal has to be
- * enabled first: XOSC_CTRL_ENABLE resets to DISABLE and a flash boot does
- * not leave it running.
+/* What the ROM handed us, captured before the first clock write and printed
+ * in the [A] line.  The "just flashed" and "after RESET" boots are supposed
+ * to differ in exactly these three registers, so this is the one place that
+ * can tell the two apart. */
+static uint32_t g_boot_sys_sel;
+static uint32_t g_boot_ref_sel;
+static uint32_t g_boot_xosc;
+
+/* clk_ref = XOSC (12 MHz); clk_peri = clk_sys.  Two rules decide the order.
  *
- * The first two writes are the important part on RISC-V: move clk_sys and
- * then clk_ref off their aux muxes before anything resets a PLL.  The boot
- * ROM may have selected PLL_SYS for clk_sys, and resetting the PLL while it
- * is still feeding the core stops the CPU mid-instruction (pico-sdk's
- * runtime_init_clocks does exactly this before pll_init). */
+ * First, the crystal has to be enabled before anything else: XOSC_CTRL
+ * resets to DISABLE and a flash boot does not leave it running (measured on
+ * hardware: XOSC_STATUS=0, clk_ref = ROSC), so PLL_USB would power up without
+ * a reference and never lock.
+ *
+ * Second, never move the CPU onto a clock that has not just been seen
+ * running.  The previous version followed pico-sdk's runtime_init_clocks
+ * order - clk_sys onto clk_ref first, then clk_ref onto ROSC - and assumed
+ * ROSC is always there.  If the ROM leaves ROSC stopped (the USB boot path
+ * can), that second write routes the core onto a dead clock: no output, no
+ * fault, nothing until a RUN/power reset brings ROSC back.  That is the shape
+ * of "after flashing the RV image UART0 is silent until RESET".
+ *
+ * So the order is the ARM port's, which is proven on this board in both boot
+ * states: crystal up, clk_ref onto the crystal once STABLE is set, and only
+ * then clk_sys onto clk_ref.  If the crystal never starts, clk_ref is left
+ * exactly as the ROM left it - a source the CPU is demonstrably running from
+ * - and the board boots slowly instead of not at all. */
 static void clocks_init(void)
 {
-    /* clk_sys = glitchless source 0 (clk_ref), clk_ref = ROSC. */
-    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);
-    for (uint32_t i = 0; i < 1000000u; i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
-            break;
-    }
-    mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, 0u);
-    for (uint32_t i = 0; i < 1000000u; i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & 1u)
-            break;
-    }
+    g_boot_sys_sel = mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET);
+    g_boot_ref_sel = mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET);
+    g_boot_xosc    = mmio_read32(XOSC_STATUS);
 
     if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE))
         mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
@@ -339,13 +350,26 @@ static void clocks_init(void)
             break;
     }
 
-    if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
+    if ((mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) &&
+        !(mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))) {
         mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);
         for (uint32_t i = 0; i < 1000000u; i++) {
             if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
                 break;
         }
     }
+
+    /* clk_ref is a running source at this point - the crystal just proved it,
+     * or it is whatever the ROM was already feeding the core from - so taking
+     * clk_sys off its aux mux cannot stop the CPU.  Placing clk_sys on
+     * clk_ref before pll_sys_init() resets PLL_SYS is what makes that reset
+     * safe. */
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);
+    for (uint32_t i = 0; i < 1000000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
+            break;
+    }
+
     /* TIMER0 is programmed by ticks_init() once it is out of reset. */
 
     /* clk_peri = clk_sys, undivided.  AUXSRC 0 is clk_sys on the RP2350. */
@@ -387,9 +411,10 @@ static void ticks_init(void)
  * (12 MHz) and every divisor is re-derived from the measured value.
  *
  * The safety rule is in clocks_init(): clk_sys is already on clk_ref before
- * this runs, so resetting PLL_SYS cannot stop the CPU.  The RISC-V boot ROM
- * is allowed to leave clk_sys on PLL_SYS, which is exactly why the switch
- * away from the aux mux comes first (pico-sdk's runtime_init_clocks order). */
+ * this runs, and clk_ref is a source the CPU has just been running from, so
+ * resetting PLL_SYS cannot stop the core.  The RISC-V boot ROM is allowed to
+ * leave clk_sys on PLL_SYS, which is why the move off the aux mux happens
+ * before the reset rather than here. */
 static void pll_sys_init(void)
 {
     uint32_t i;
@@ -1387,6 +1412,12 @@ void plat_board_early(void)
      * instead of looking like a dead board. */
     g_clk_hz = 12000000u;
     clocks_init();
+
+    /* The [A] line is divided for the clock the core is actually on now: if
+     * the crystal did not start, clk_ref is still the ROM's ROSC (~6.5 MHz)
+     * and a 12 MHz divisor would garble the very line that reports it. */
+    g_clk_hz = (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
+               ? 12000000u : 6500000u;
     wdt_enable();               /* a wedge later resets the board by itself */
 
     /* TIMER0 is the 64-bit microsecond counter behind TIMERAWL *and* behind
@@ -1404,7 +1435,13 @@ void plat_board_early(void)
     led_init();
 
     uart_init();
-    early_puts("\r\n[A] pre-pll ok\r\n");
+    early_puts("\r\n[A] pre-pll ok sys=0x");
+    early_put_hex(g_boot_sys_sel);
+    early_puts(" ref=0x");
+    early_put_hex(g_boot_ref_sel);
+    early_puts(" xosc=0x");
+    early_put_hex(g_boot_xosc);
+    early_puts("\r\n");
     /* Let the shift register finish before clk_peri changes: the last bytes
      * of that line would otherwise be clocked out at 150 MHz with the
      * 12 MHz divisor and arrive as garbage. */

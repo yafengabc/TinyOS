@@ -2770,6 +2770,7 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 
 | # | 镜像 | 要做的事 | 判据 |
 | --- | --- | --- | --- |
+| 0 | `rp2350rv` / `rp2350rvsmp` | 刷完**不按 RESET**，看 `[A]` 的时钟快照 | 见 33.4 |
 | 1 | `rp2350rv` / `rp2350rvsmp` | 复测 PMP 修复后的三件事 | 见 33.1 |
 | 2 | `rp2350` / `rp2350smp` | 4 KiB 窗口（新） | 见 33.2 |
 | 3 | `rp2350smp` / `rp2350rvsmp` | §29.1 的 `dd`+`rm` 200 轮 | 见 §29.1 |
@@ -2828,8 +2829,8 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 `dd`+RESET 的实测；而且 `lfs_fs_grow()` 失败只打
 `[ramdisk] warning: fs grow to 896 blocks failed` 然后继续用小的文件系统，不会
 让板子起不来。待真机确认两点：刷完后 `df` 应是 `3670016 / ~9%`；启动日志里
-**不应**出现那行 grow 警告。第 1 条（刷完 120 s UART 无输出、要按 RESET）仍未
-解决，另计。
+**不应**出现那行 grow 警告。第 1 条（刷完 120 s UART 无输出、要按 RESET）另计，
+见 **§33.4**（时钟顺序 + `[A]` 快照，已改，待上板）。
 
 构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
 `rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
@@ -2967,6 +2968,36 @@ rodata/null 按板子分表 SURVIVE、prot dev FAULT，共享代码改动无回�
 - C3 的 4 KiB 窗口 / 4 KiB 默认栈 / 一拍增长：`prot` 四连、`deep 3`、`dd`+`rm`、
   `accept.py` 24/24。
 - `prot dev` 本身：QEMU rv32 上 `prot dev 0x10000000` 正确 fault，说明测试路径可用。
+
+### 33.4 `rp2350rv` 刷完不出字：时钟顺序（2026-11-14，只构建过，待上板）
+
+§33.0 第 1 条（刷完 RV 镜像后 UART0 一个字节都没有、要按物理 RESET 才好）的原因
+候选在 `board/rp2350rv/platform.c::clocks_init()`：它是**唯一**还在用 pico-sdk 老顺序
+的端口——先把 clk_sys 切到 clk_ref，再把 **clk_ref 切到 ROSC**，然后才去开晶振。
+`rp2040`、`rp2350` 两个端口早就是"晶振先起 → clk_ref 上晶振 → 最后才动 clk_sys"。
+
+老顺序成立的前提是 ROSC 一定在跑。若 ROM 的 USB/BOOTSEL 路径把 ROSC 停了，第二次
+写就是把 CPU 接到一个停摆的时钟上：没有输出、没有 fault，直到 RUN/上电复位把 ROSC
+带回来——正好是"刷完没字、按 RESET 就好"的形状。
+
+改动（`board/rp2350rv/platform.c`）：
+
+1. 不再写 `CLK_REF_CTRL = 0`（不再主动选 ROSC）；
+2. 顺序改成：开晶振并等 `STABLE` → 只有 STABLE 时才把 clk_ref 切到 XOSC →
+   最后才把 clk_sys 放到 clk_ref（`pll_sys_init()` 重置 PLL_SYS 的安全性仍然靠这步）；
+3. 晶振没起来时 clk_ref 保持 ROM 留下的源（CPU 正在它上面跑），退化成慢速启动而
+   不是死机；
+4. `[A]` 行现在带快照：`[A] pre-pll ok sys=0x.. ref=0x.. xosc=0x..`，这三个值是在
+   第一次时钟写之前读的，就是"ROM 交给我们时"的状态。
+
+验证方法（刷完**不要按 RESET**，读线程提前挂好）：
+
+- 出现 `[A] pre-pll ok ...` → 老顺序确实是杀手；把 `sys=` / `ref=` / `xosc=` 三个值
+  记下来，和"按过 RESET 之后"的同一条比对，就知道两条路径差在哪个寄存器上；
+- 仍然一个字节都没有，看设备管理器：**还有 BOOTSEL 的 UF2 盘符/U 盘** → 芯片根本
+  没离开 ROM，问题在刷写/重启路径而不是时钟；**盘符消失、没有任何 COM 口** → 我们
+  的镜像在跑但死在更早的地方，把 `[SCR]`（TOS_DIAG 构建）里的 step 号贴回来；
+- 顺带确认 `[B] clk` 应仍是 150 MHz 附近，`df` 应是 `3670016 / ~9%`（§33.0 第 2 条）。
 
 ## 34. 未实现的设计项：MPU/PMP 的段接口
 
