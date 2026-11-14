@@ -2783,6 +2783,16 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 **第 5、6 项（RP2040、PIO 三关）没做**，其余四项全部上板。脚本与原始回显在
 `build/sizeprobe/s33_*.log`（该目录被 `.gitignore` 忽略，只留本机）。
 
+**复位口径（别混）**：`reboot` 是软件走 ROM，**不是**硬件复位；脚本里的
+"RTS pulse + close/reopen" 只是拉 RUN 线／重开串口，也**不是**按板上 RESET
+键。用户手按 **RESET 键** 才是真硬件复位，PLL / USB / MPU 会整条冷启动链重跑，
+状态与"刚刷完"不同。按这个要求补做过一次：合并远端锁重构后刷入 ARM 修复
+镜像，读线程在复位前挂好（不发 `reboot`、不发 RTS、不重开串口），手动按 RESET，
+抓到完整冷启动 banner（`[B] clk` / `[C] vtor+sau` / `[D] cpu0` /
+`[E] usb hw=1` / `[smp] 2 of 2` / `[mpu] ... regions=3`）后自动跑 §33.2
+全套，全部 PASS（`smpbench` 1.94x）。日志
+`build/sizeprobe/manual_reset_arm.log`，脚本 `manual_reset_accept.py`。
+
 构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
 `rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
 三个都是 `SMOKE TEST OK`。
@@ -2901,6 +2911,9 @@ syscall），只有最深帧才 `sleep()`，而 `process_stack_guard()` 只在 s
 smoke OK；ARM 上 §29.1 200 轮 PASS、§22 BAD=0；**刷回 RV 镜像复测**
 `deep 3` 仍 GROW 8 KiB + journal intact、prot heap/stack 仍 FAULT、
 rodata/null 按板子分表 SURVIVE、prot dev FAULT，共享代码改动无回归。
+另外按用户要求做了**手动物理 RESET**（`manual_reset_arm.log`）：读线程先挂好，
+不发 `reboot`、不发 RTS、不重开串口，按键后冷启动 banner 完整，全套结果与
+上面一致（`smpbench` 1.94x），确认修复不依赖某一种复位路径。
 
 **剩余限制（按布局推断，未上板）**：着陆区 2560 B 只够 `deep 3` 约 2 KiB
 的越界；`deep 6`（12 KiB）会越过着陆区、重新踩到 MSTKERR。要在 ARM 上
