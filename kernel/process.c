@@ -2773,7 +2773,10 @@ uint32_t process_sbrk(uint32_t bytes)
  *     describe a power of two aligned to itself, so the sizes reachable from
  *     here are 2x, and only while stack_top is a multiple of it.  That is
  *     what keeps the rule count at four and lets an 8 KiB task and a 16 KiB
- *     task share the machine.
+ *     task share the machine.  A TOR PMP (the C3) has no alignment rule, so
+ *     a board that says so can double any window's stack, however its top
+ *     happens to be aligned - which is why the C3 can also keep 4 KiB
+ *     windows without losing this.
  *   - the heap must not be in the way: brk + guard has to stay below the new
  *     low, so the hole that turns the *next* overflow into a fault instead of
  *     a silent overwrite keeps its board size.
@@ -2802,7 +2805,7 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     if (sp >= p->stack_top - old)
         return 0;
 
-    if ((p->stack_top % want) != 0)
+    if (plat_window_needs_stack_alignment() && (p->stack_top % want) != 0)
         return 0;                            /* the port cannot describe it */
 
     low = p->stack_top - want;
