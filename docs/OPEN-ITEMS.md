@@ -3248,9 +3248,29 @@ NAPOT 的页映射就是从这个列表算出来的——它和 TOR 版本吃的
   一致，`prot stack` / `prot null` fault，`deep 3` 正常；
 - x86：空实现，`prot` 按预期 survive，`deep 3` + `piperace` 正常。
 
-**未验的部分**（只有板子能回答，用 `scripts/rp2350/accept33.py` 一条命令）：
-`rp2350`（PMSAv8 精确三段 + 着陆区）和 `rp2350rv`（NAPOT 页映射）两个后端，本地只
-过了编译。判据不变：`prot` 五条全 fault、`deep 3` 长栈、`ps`、`smpbench`（smp）。
+**另外两个后端已在真机上补齐（2026-11-15，`scripts/rp2350/accept33.py` 各跑一轮）**：
+
+| 镜像 | 后端 | 结果 |
+| --- | --- | --- |
+| `rp2350smp` | PMSAv8 | **16/16**：`prot` 五条全 fault、`deep 3` 长栈、`ps` wink 16、`smpbench` 1.95x、200 轮 `dd`+`rm` PASS |
+| `rp2350rvsmp` | NAPOT | **17/17**：同上，`smpbench` 2.00x；`rodata`/`null` 按 RV32 分表 SURVIVE |
+| `rp2350` | PMSAv8 | **13/13**（单核基线） |
+| `rp2350rv` | NAPOT | **14/14**（单核基线） |
+
+四个镜像都是**刷完即起**（0.33–0.44 s 进 shell），不需要 RESET——§33.4 的时钟顺序
+修复在四种镜像上同时成立。
+
+段接口没有改变任何实际布局，这一点在两个后端上都能从日志核对：
+
+- PMSAv8：`[mpu] win=20020000..20024000 wx=20021560 brk=20022000
+  stk=20022000..20023000 regions=3` —— code `..20021560`、data `..20022000`、
+  guard `20022000..20023000`、stack `20023000..20024000`，与改动前逐段一致
+  （`stk=` 打印的向来回是 guard 洞 `stack_low-4K .. stack_low`，不是栈本身）。
+- NAPOT：`prot rodata` 仍 SURVIVE（每页 RWX 的已知限制，§31.0），
+  `prot heap`/`stack`/`dev` 仍 fault —— 说明「洞不覆盖」这条规矩在新页映射里守住了。
+
+顺带确认 `[mpu] regions=3` 指的是 code/data/stack 三段，landing(6)/guard(7)
+是固定编号、不计入，与 §33.5 的记录一致。
 
 现在"想做但先不做"的只剩两条驱动侧重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
 
