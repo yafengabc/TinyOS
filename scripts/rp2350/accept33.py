@@ -118,26 +118,34 @@ def msh_wink(ps_text):
     return None
 
 
-def wait_boot(con, timeout):
+def wait_boot(con, timeout, start=0):
     """Read until the prompt, timing the first byte and the prompt.
 
     The bug in 33.4 was not "no output" but "output after 120 s", so the
     latency is part of the result, not a detail: a 20-second boot would
     otherwise pass a check that only asked for output within 25.
+
+    `start` is an offset into the console log.  The flash path pumps the port
+    while waiting for the drive to unmount, and on this part the shell can be
+    up before that returns (measured 0.35 s), so the [A] line may already be
+    in the log before this function is called.  Reading from the log instead
+    of from "now" is what keeps the snapshot in the text the checks look at.
     """
     t0 = time.time()
     first = None
-    buf = bytearray()
     end = t0 + timeout
     while time.time() < end:
+        text = bytes(con.log[start:]).decode("utf-8", "replace")
+        if text.rstrip().endswith("tos>"):
+            break
         chunk = con.read()
-        if chunk:
-            if first is None:
-                first = time.time() - t0
-            buf += chunk
-            if buf.decode("utf-8", "replace").rstrip().endswith("tos>"):
-                break
-    return buf.decode("utf-8", "replace"), first, time.time() - t0
+        if chunk and first is None:
+            first = time.time() - t0
+    text = bytes(con.log[start:]).decode("utf-8", "replace")
+    if first is None and text:
+        # Arrived while flash() was still waiting for the drive to go away.
+        first = 0.0
+    return text, first, time.time() - t0
 
 
 def run_checks(con, image, results, opts, boot_text):
@@ -153,8 +161,10 @@ def run_checks(con, image, results, opts, boot_text):
                    "no snapshot: old image?")
         check(results, "A clock measured", boot_text, want=("[B] clk=0x",))
     else:
-        check(results, "A boot markers [A]..[E]", boot_text,
-              want=("[A]", "[B] clk=", "[C] vtor+sau", "[D] cpu0", "[E] usb"))
+        # The ARM port has no [A] pre-pll line - that snapshot exists because
+        # the RV32 clock bug needed one.  Its chain starts at [B] clk.
+        check(results, "A boot markers [B]..[E]", boot_text,
+              want=("[B] clk=", "[C] vtor+sau", "[D] cpu0", "[E] usb"))
 
     # --- 33.0: 3.5 MiB partition, grown without a warning ---
     check(results, "B no fs-grow warning", boot_text, avoid=("fs grow",))
@@ -166,16 +176,25 @@ def run_checks(con, image, results, opts, boot_text):
           want=("msh wink",), note=("msh wink %s" % wink) if wink else
           "could not parse ps")
 
+    # RV32 survives two of the four by design, not by oversight: rodata shares
+    # its 4 KiB page with .text that must stay executable, and address zero
+    # falls in the bootrom-hardwired RWX entries 8..10 which software cannot
+    # override.  Both are recorded in OPEN-ITEMS 31.0; what still has to fault
+    # there is the heap, the stack and a device register.  The ARM port denies
+    # all four because PMSAv8 is byte-granular.
+    # The two ports name the same event differently: rv32 prints
+    # "load/store access fault", the M33 prints "MemManage".  Matching only
+    # one string makes every prot case fail on the other arch.
+    fault_mark = "access fault" if spec["rv"] else "MemManage"
+    rv_survives = {"prot rodata", "prot null"}
     for line in ("prot rodata", "prot heap", "prot stack", "prot null",
                  "prot dev 0x40070000"):
         out = con.cmd(line)
-        ok = check(results, "D " + line, out, want=("access fault",))
-        if not ok and line == "prot heap":
-            # brk+64 only lands in the guard hole when brk is page aligned on
-            # rp2350rv; surviving is a layout note, not a pass (see 33.1.3).
-            results[-1] = (results[-1][0], False, results[-1][2],
-                           results[-1][3], results[-1][4],
-                           "survived: check whether brk was page aligned")
+        if spec["rv"] and line in rv_survives:
+            check(results, "D %s (RV32: survives)" % line, out,
+                  want=("survived",))
+        else:
+            check(results, "D " + line, out, want=(fault_mark,))
 
     out = con.cmd("deep 3", timeout=25.0)
     check(results, "E deep 3 grows the stack", out, want=("stack grown",))
@@ -222,16 +241,22 @@ def replay_checks(text, image, results):
               note=("sys=%s ref=%s xosc=%s" % m.groups()) if m else "")
         check(results, "A clock measured", text, want=("[B] clk=0x",))
     else:
+        # ARM images start their banner at [B]; [A] pre-pll is RV32-only.
         check(results, "A boot markers in log", text,
-              want=("[A]", "[B] clk=", "[C] vtor+sau", "[D] cpu0", "[E] usb"))
+              want=("[B] clk=", "[C] vtor+sau", "[D] cpu0", "[E] usb"))
 
     check(results, "B no fs-grow warning", text, avoid=("fs grow",))
     check(results, "B df total 3670016", text, want=("3670016",))
     wink = msh_wink(text)
     check(results, "C ps lists msh", "msh wink %s" % wink if wink else "",
           want=("msh wink",))
-    faults = text.count("access fault")
-    check_ok(results, "D five prot cases fault", faults >= 5, "%d/5" % faults)
+    # Same two things as the live path: the fault wording differs per arch, and
+    # RV32 cannot deny rodata or address zero, so only three of the five fault.
+    fault_mark = "access fault" if run_checks_replay["rv"] else "MemManage"
+    faults = text.count(fault_mark)
+    want_faults = 3 if run_checks_replay["rv"] else 5
+    check_ok(results, "D prot cases fault", faults >= want_faults,
+             "%d/%d" % (faults, want_faults))
     check(results, "E deep 3 grows the stack", text, want=("stack grown",))
     check(results, "E deep 3 journal intact", text, want=("journal intact",))
     if IMAGES[image]["cpus"] > 1:
@@ -300,8 +325,13 @@ def main():
             if not root:
                 print("no BOOTSEL drive: hold BOOTSEL and replug, or --no-flash")
                 return 2
+            # Before the flash: flash() pumps the port while it waits for the
+            # drive to unmount, and the shell can be up by then (measured
+            # 0.35 s), so the [A] line lands in the log *during* the flash.
+            # Taking the offset afterwards would cut exactly that line out.
+            mark = len(con.log)
             fw.flash(args.uf2, root, tick=lambda: con.pump(0.05))
-            boot_text, first, took = wait_boot(con, args.first_boot)
+            boot_text, first, took = wait_boot(con, args.first_boot, mark)
             if first is None:
                 root, _ = fw.bootsel_drive()
                 print("first boot after the flash: NOTHING on the wire in %.0fs"

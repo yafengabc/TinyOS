@@ -3121,6 +3121,29 @@ rp2350rv 时钟顺序、RV32 3.5 MiB littlefs）后在本机同一块 ATK-DNRP23
 只属于 RV32 端口（判据表已按此修正）。另外 ARM 那块在复位瞬间会漏半个字节进 banner
 首行（`P?[B] clk=`），是 UART 在芯片复位沿上的噪声，不是解析问题。
 
+**`scripts/rp2350/accept33.py` 实跑**（它是 `98eb55c` 收进仓库的一键版，替换掉
+`build/sizeprobe/` 下这一轮临时攒的脚本）：
+
+| 调用 | 结果 |
+| --- | --- |
+| `--image rp2350rvsmp --uf2 … --dd-rounds 200` | **17/17**，`first byte 0.35s`，`smpbench 2.00x` |
+| `--image rp2350 --uf2 …` | **13/13**，`first byte 0.42s`，四条 `prot` 全 fault |
+| `--replay` 一份 RV32 日志 | **8/8**（无板也能验解析） |
+
+实跑修掉脚本三处判据 bug（都已提交，值得记住，因为它们都是"看起来像固件坏了"）：
+
+1. **banner 抓不到 `[A]`**：`flash()` 在等盘卸载时会 `pump()` 端口，而这块板
+   `0.35 s` 就起 shell，`[A]` 在刷写**期间**就进了 log。偏移必须取在 `flash()` **之前**，
+   取在之后正好把那一行切掉（第一次跑报 `no snapshot: old image?`，其实镜像是对的）。
+2. **`prot` 的 fault 用词分架构**：RV32 打 `load/store access fault`，M33 打
+   `MemManage`。只认前者会让 ARM 镜像五条 `prot` 全 FAIL。
+3. **RV32 的 `rodata`/`null` 是** `survived`（§31.0 的分表），判据要按 `rv` 分支；
+   ARM 才是四条全 fault。
+
+一个使用注意：脚本**不会自己触发进 BOOTSEL**（这是有意的，任何 RTS 脉冲都会破坏
+33.4 那条"不碰 RTS"的前提），所以板子还在跑固件时要先发 Ctrl-D 或手按 BOOTSEL，
+否则它会打出 `no BOOTSEL drive: hold BOOTSEL and replug, or --no-flash`。
+
 ## 34. 未实现的设计项：MPU/PMP 的段接口
 
 现在三个后端吃的是同一个**TOR 形状**的签名：
