@@ -821,8 +821,7 @@ static regs_t *block_locked(regs_t *r, int st, uint32_t irq)
     plat_frame_set_ret(&p->saved, (uint32_t)-1);
     p->state = st;
     p->cpu = -1;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     return sched_switch(r);
 }
@@ -834,9 +833,8 @@ static regs_t *block_locked(regs_t *r, int st, uint32_t irq)
  * or the wake-up can be spent before this task is sleepable. */
 static regs_t *block(regs_t *r, int st)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-    spin_lock(&proc_lock);
     return block_locked(r, st, irq);
 }
 
@@ -1506,6 +1504,12 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     if (stack_bytes == 0 || stack_bytes > KTASK_STACK_BYTES)
         stack_bytes = KTASK_STACK_BYTES;
 
+    /* Plain interrupt masking, not plat_spin_lock_irqsave(): the lock that
+     * guards the process table is *not* held across this region.  proc_alloc()
+     * takes it itself, and holding it here (which is what a single
+     * lock+mask primitive would mean) would deadlock.  What this section
+     * actually protects is the ktask stack bitmap; proc_lock is taken for the
+     * two fields at the end, which is all the rest of the kernel reads. */
     uint32_t irq = plat_irq_save();
     for (int i = 0; i < KTASK_SLOTS; i++) {
         if (!(ktask_stack_used & (1u << i))) {
@@ -2373,8 +2377,7 @@ regs_t *process_wait(regs_t *r, int pid)
 
     /* No live child by that pid, and no remembered code either: it never
        existed (or it is one of the exits that did not fit in lag_pid). */
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return done(r, -1);
 }
 
@@ -2573,8 +2576,7 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     plat_prepare_user_frame(&p->saved, entry, ustack);
     plat_frame_set_arg(&p->saved, arg);
 
-    irq = plat_irq_save();
-    spin_lock(&proc_lock);
+    irq = plat_spin_lock_irqsave(&proc_lock);
     pid = next_pid++;
     p->pid = pid;
     p->name[0] = 't';
@@ -2585,8 +2587,7 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     p->state = ST_READY;
     p->cpu = -1;
     leader->live_threads++;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     return pid;
 }
@@ -2652,8 +2653,7 @@ regs_t *process_thread_exit(regs_t *r, int code)
         return process_exit(r, code);
 
     leader = p->leader;
-    irq = plat_irq_save();
-    spin_lock(&proc_lock);
+    irq = plat_spin_lock_irqsave(&proc_lock);
     p->exit_code = code;
     woke = wake_joiner_locked(p, code);
     if (woke) {
@@ -2674,8 +2674,7 @@ regs_t *process_thread_exit(regs_t *r, int code)
     if (leader->state == ST_DYING && leader->live_threads == 0)
         woke_leader = finish_group_locked(leader);
 
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     if (woke_leader)
         preempt_if_higher(woke_leader);
@@ -2695,8 +2694,7 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
     if (!g || (codeptr && !group_user_ok(g, codeptr, sizeof(int))))
         return done(r, -1);
 
-    irq = plat_irq_save();
-    spin_lock(&proc_lock);
+    irq = plat_spin_lock_irqsave(&proc_lock);
 
     for (int i = 0; i < MAX_PROCS; i++)
         if (procs[i].state != ST_FREE && procs[i].pid == tid) {
@@ -2704,16 +2702,14 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
             break;
         }
     if (!t || t->leader != g || t == me) {
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         return done(r, -1);
     }
 
     if (t->state == ST_THREAD_ZOMBIE) {
         code = t->exit_code;
         proc_retire_locked(t);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (codeptr)
             *(int *)codeptr = code;
         return done(r, 0);
@@ -3316,8 +3312,7 @@ static regs_t *block_on_pipe_locked(regs_t *r, struct pipe *p, int dir,
     me->wlen  = len;
     me->state = ST_WAIT_PIPE;
     me->cpu   = -1;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     return sched_switch(r);
 }

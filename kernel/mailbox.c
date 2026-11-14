@@ -40,8 +40,7 @@ int mailbox_send(int dst, int src, const void *buf, int len)
     if (dst <= 0 || !process_pid_exists(dst))
         return -1;
 
-    irq = plat_irq_save();
-    spin_lock(&mb_lock);
+    irq = plat_spin_lock_irqsave(&mb_lock);
     for (int i = 0; i < MB_SLOTS; i++) {
         if (pool[i].dst == 0) {         /* 0 means free */
             slot = i;
@@ -49,8 +48,7 @@ int mailbox_send(int dst, int src, const void *buf, int len)
         }
     }
     if (slot < 0) {
-        spin_unlock(&mb_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&mb_lock, irq);
         return -1;                      /* pool full: caller retries */
     }
     pool[slot].dst = dst;
@@ -58,8 +56,7 @@ int mailbox_send(int dst, int src, const void *buf, int len)
     pool[slot].len = len;
     pool[slot].seq = next_seq++;
     memcpy(pool[slot].data, buf, (size_t)len);
-    spin_unlock(&mb_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&mb_lock, irq);
     return 0;
 }
 
@@ -73,8 +70,7 @@ int mailbox_recv(int me, void *buf, int cap)
     if (!buf || cap <= 0)
         return -1;
 
-    irq = plat_irq_save();
-    spin_lock(&mb_lock);
+    irq = plat_spin_lock_irqsave(&mb_lock);
     for (int i = 0; i < MB_SLOTS; i++) {
         if (pool[i].dst != me)
             continue;
@@ -84,21 +80,18 @@ int mailbox_recv(int me, void *buf, int cap)
         }
     }
     if (best < 0) {
-        spin_unlock(&mb_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&mb_lock, irq);
         return MSG_EAGAIN;
     }
     if (cap < pool[best].len) {
         /* Leave it queued: the caller may come back with a bigger buffer. */
-        spin_unlock(&mb_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&mb_lock, irq);
         return -1;
     }
     len = pool[best].len;
     memcpy(buf, pool[best].data, (size_t)len);
     pool[best].dst = 0;                 /* free */
-    spin_unlock(&mb_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&mb_lock, irq);
     return len;
 }
 

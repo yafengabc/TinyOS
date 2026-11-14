@@ -3048,11 +3048,33 @@ tick 路径和块设备等待路径上都会被调用）。环、回显、行编
 24/24，测完已把 `tos.conf` 原样恢复（不入库）。
 
 **（2026-11-14 已做）`plat_spin_lock_irqsave()`**：加进 `kernel/cpu.h` / `cpu.c`，
-先关中断再取锁、先放锁再恢复，返回值就是中断状态。`process.c` 的 14 处、
-`mailbox.c` 的 1 处"取锁 + 关中断"配对已改成这个单一原语；`pipe.c` 的 6 处和
-`process.c` 里一个临界区持有多把锁的几处保持原样——机械替换会漏掉多返回路径，
-等下次改到那些函数再顺手做。验证：x86 / rv32 的 QEMU smoke、rv32smp 的双核
-`smp -s 2 200`（两个 worker 分别落在 cpu 0 / cpu 1）。
+先关中断再取锁、先放锁再恢复，返回值就是中断状态。全部"一个临界区一把锁"的配对
+现在都用它了：`process.c` 14 处机械替换 + 7 处手工（`block_locked`/`block`/
+`process_wait`/`process_thread_create`/`process_thread_exit`/`process_thread_join`/
+`block_on_pipe_locked`，这些有多条返回路径或多把锁），`pipe.c` 6 处，
+`mailbox.c` 3 处（含两条多返回路径的 send/recv）。
+
+剩下的 `plat_irq_save()` 分两类，都**故意不换**：
+
+- **纯关中断、不取锁**：`process_ktask_create()` 里保护 `ktask_stack_used` 位图的那段
+  （`proc_alloc()` 自己会取 `proc_lock`，这里持锁就是死锁，注释已写明）、
+  `procfs` 里切 `g_cdc_fix`、以及 `sched_switch()`——后者要求"锁"和"中断"两个
+  生命周期分开：它在循环里反复 `plat_irq_disable()`，中途为了 `plat_wake_cpu()`
+  只放锁、不放中断，返回时还要把中断留给 trap exit 的 `mret` 去恢复；
+- **只取锁、不关中断**（`win_alloc` / `win_largest_free` / `proc_claim` /
+  `proc_retire` / pid 分配 / 发布槽位，约 9 处）：它们今天成立是因为调用者
+  （trap / exec 路径）本来就关着中断。真机 SMP 上 `smp -s 2 200` 与 200 轮 `dd`
+  都过了，说明现状没问题；但这是一条**隐式契约**，哪天有人从线程上下文调用就会
+  自旋死锁。要么逐个核对调用者并注明，要么一并换成 `plat_spin_lock_irqsave`
+  （严格更安全，只是临界区变长一点点）——留作独立一次改动，不混在这次里。
+
+验证：十一个目标构建通过；QEMU `x86`/`rv32`/`arm` smoke 全 OK，其中
+`ls /bin | wc`（管道）与 `piperace`（64 KiB 双向）通过；`rv32smp` 的
+`smp -s 2 200`（kthread 双核）、`smp -t 4 2 200`（任务双核）、`piperace` 全过；
+**C3 真机（COM4）`accept.py` 24/24**，另跑 `ls /bin | wc` / `piperace` /
+`smp -s 2 200` / `mailtest` 正常。`mailbox.c` 默认不参与编译（`[build] mailbox`
+默认 off），所以它是在临时打开 mailbox 的镜像上验的（rv32、rv32smp、C3 三处
+`mailtest` 都是 `reply 1..3`），验完已把 `tos.conf` 原样恢复。
 
 顺序上它们都排在"三块 PMP/MPU 代码稳定之后"，和段接口重构一起做最省事。
 
