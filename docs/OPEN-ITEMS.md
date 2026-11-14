@@ -2835,6 +2835,13 @@ ARM 同一个 `mpu_configure_region(base, size, flags)` 后面，内核只谈“
 - **`connected/disconnected`**：USB CDC 掉线时让读写返回 `-ENOTCONN`，而不是靠超时；
 - **`SYS_IOCTL(fd, cmd, arg)`**：给设备私有命令留一个逃生口。
 
+**（2026-11-14 已做）`plat_spin_lock_irqsave()`**：加进 `kernel/cpu.h` / `cpu.c`，
+先关中断再取锁、先放锁再恢复，返回值就是中断状态。`process.c` 的 14 处、
+`mailbox.c` 的 1 处"取锁 + 关中断"配对已改成这个单一原语；`pipe.c` 的 6 处和
+`process.c` 里一个临界区持有多把锁的几处保持原样——机械替换会漏掉多返回路径，
+等下次改到那些函数再顺手做。验证：x86 / rv32 的 QEMU smoke、rv32smp 的双核
+`smp -s 2 200`（两个 worker 分别落在 cpu 0 / cpu 1）。
+
 顺序上它们都排在"三块 PMP/MPU 代码稳定之后"，和段接口重构一起做最省事。
 
 调度/内存侧还有三条（`docs/NUTTX-COMPARE.md` §2.7、§2.8）：

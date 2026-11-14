@@ -226,6 +226,20 @@ __attribute__((weak)) void plat_spin_release(volatile int *v)
     (void)v;
 }
 
+uint32_t plat_spin_lock_irqsave(spin_t *s)
+{
+    uint32_t state = plat_irq_save();
+
+    spin_lock(s);
+    return state;
+}
+
+void plat_spin_unlock_irqrestore(spin_t *s, uint32_t state)
+{
+    spin_unlock(s);
+    plat_irq_restore(state);
+}
+
 /* On a uniprocessor the lock is a no-op in the compiler, not just in the
  * hardware: the kernel is never preempted inside a kernel call (a tick that
  * lands there returns without rescheduling), so there is nothing to exclude.

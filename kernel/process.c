@@ -409,13 +409,11 @@ static proc_t *proc_by_pid(int pid)
 
 int process_pid_exists(int pid)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_t *p;
 
-    spin_lock(&proc_lock);
     p = proc_by_pid(pid);
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return p != NULL;
 }
 
@@ -444,14 +442,12 @@ static void make_ready(proc_t *p, int32_t val)
     /* Interrupts off, not just the lock: a waker in system-call context has
      * them on, and a tick landing between the acquire and the release calls
      * this again on the same CPU, spinning on a lock it already holds. */
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
 
     plat_frame_set_ret(frame, (uint32_t)val);
-    spin_lock(&proc_lock);
     p->state = ST_READY;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     preempt_if_higher(p);
 }
 
@@ -1597,15 +1593,13 @@ regs_t *process_ktask_syscall(regs_t *r)
         return sched_switch(r);
 
     case SYS_KTASK_EXIT: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
         ktask_stack_used &= ~(1u << p->kstack_slot);
         p->is_ktask = 0;
         p->kstack_slot = 0;
-        spin_lock(&proc_lock);
         proc_retire_locked(p);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         current = NULL;
         return sched_switch(r);
     }
@@ -2230,10 +2224,9 @@ static proc_t *reap_into_parent_locked(proc_t *p, int code)
  * forever on a result that had already been recorded. */
 static void retire_and_reap(proc_t *p, int code)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_t *woke;
 
-    spin_lock(&proc_lock);
 #ifdef TOS_KTHREADS
     /* A process leader takes its threads with it: they share the window that
      * is about to disappear. */
@@ -2243,8 +2236,7 @@ static void retire_and_reap(proc_t *p, int code)
 #endif
     woke = reap_into_parent_locked(p, code);
     proc_retire_locked(p);
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     if (woke)
         preempt_if_higher(woke);
@@ -2260,15 +2252,13 @@ static void task_kill(proc_t *p, int code)
      * the group finalisation run in one place; a leader with live threads
      * follows the same deferred path process_exit() uses. */
     if (p->leader || p->live_threads > 0) {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        spin_lock(&proc_lock);
         if (p->leader)
             p->kill_pending = 1;
         else
             begin_group_exit_locked(p, code);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         return;
     }
 #endif
@@ -2293,12 +2283,10 @@ regs_t *process_exit(regs_t *r, int code)
      * finish the reap.  This is also the only safe order on SMP, where a
      * sibling may be running on the other core at this instant. */
     if (p->live_threads > 0) {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        spin_lock(&proc_lock);
         begin_group_exit_locked(p, code);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         mailbox_drop(p->pid);
         return sched_switch(r);
@@ -2318,10 +2306,9 @@ regs_t *process_exit(regs_t *r, int code)
          * way to guarantee that without a shared clock is to make the flag
          * visible first.  Folding the reap in lets it share the lock, and
          * keeps the flag ahead of the slot as before. */
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke;
 
-        spin_lock(&proc_lock);
         sys_down = 1;
 #ifdef TOS_KTHREADS
         for (int i = 0; i < MAX_PROCS; i++)
@@ -2330,8 +2317,7 @@ regs_t *process_exit(regs_t *r, int code)
 #endif
         woke = reap_into_parent_locked(p, code);
         proc_retire_locked(p);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (woke)
             preempt_if_higher(woke);
@@ -2353,7 +2339,7 @@ regs_t *process_exit(regs_t *r, int code)
 regs_t *process_wait(regs_t *r, int pid)
 {
     proc_t *p = current;
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     int code;
 
     /* The scan and the sleep are one critical section.  A child exiting on
@@ -2367,14 +2353,12 @@ regs_t *process_wait(regs_t *r, int pid)
      *
      * The old code scanned outside the lock and slept afterwards, which left
      * a third order: recorded, then we sleep, then nobody ever wakes us. */
-    spin_lock(&proc_lock);
     /* A child that has already gone is in the lag list, and taking it first
      * is what keeps the codes straight: several children can exit between
      * two wait() calls, and the one asked about is not necessarily the last
      * to go. */
     if (lag_take(p, pid, &code)) {
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         return done(r, code);
     }
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -3408,18 +3392,16 @@ regs_t *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
          * other CPU runs pipe_write and pipe_wake_locked inside this same
          * lock, so it either sees ST_WAIT_PIPE and delivers, or it ran
          * first and the read above would have returned the data. */
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke;
         int n;
 
-        spin_lock(&proc_lock);
         n = pipe_read(f->pipe, (void *)ubuf, len);
         if (n == PIPE_EAGAIN)
             return block_on_pipe_locked(r, f->pipe, 0, ubuf, len, irq);
         /* Room appeared: writers may be parked waiting for it. */
         woke = n > 0 ? pipe_wake_locked(f->pipe, 1) : NULL;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (woke)
             preempt_if_higher(woke);
         return done(r, (uint32_t)n);
@@ -3474,19 +3456,17 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
     }
 
     case FD_PIPE_W: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke;
         int n;
 
-        spin_lock(&proc_lock);
         n = pipe_write(f->pipe, (const void *)ubuf, len);
         if (n == PIPE_EAGAIN)
             return block_on_pipe_locked(r, f->pipe, 1, ubuf, len, irq);
         /* Data for a sleeping reader - delivered before the lock goes, so
          * nobody can drain it in between and leave the reader parked. */
         woke = n > 0 ? pipe_wake_locked(f->pipe, 0) : NULL;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (woke)
             preempt_if_higher(woke);
         return done(r, (uint32_t)(n == PIPE_EPIPE ? -1 : n));
@@ -3520,7 +3500,7 @@ static void fd_close_in(proc_t *p, int fd)
 
     case FD_PIPE_R: {
         struct pipe *pp = f->pipe;
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke = NULL;
         int last;
 
@@ -3529,12 +3509,10 @@ static void fd_close_in(proc_t *p, int fd)
          * "no data will ever arrive", and a writer that checks in between
          * would miss it.  The free is safe because a pipe with no
          * references has no descriptor and therefore no task inside it. */
-        spin_lock(&proc_lock);
         last = pipe_drop_reader(pp);
         if (!last && pipe_readers(pp) == 0)
             woke = pipe_wake_locked(pp, 1);     /* writers have nobody to write to */
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (last)
             kfree(pp);              /* no references left at all */
@@ -3545,16 +3523,14 @@ static void fd_close_in(proc_t *p, int fd)
 
     case FD_PIPE_W: {
         struct pipe *pp = f->pipe;
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke = NULL;
         int last;
 
-        spin_lock(&proc_lock);
         last = pipe_drop_writer(pp);
         if (!last && pipe_writers(pp) == 0)
             woke = pipe_wake_locked(pp, 0);     /* readers must see EOF */
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (last)
             kfree(pp);
@@ -3793,24 +3769,20 @@ short process_poll(int fd, short events)
         break;
 
     case FD_PIPE_R: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        spin_lock(&proc_lock);
         if (pipe_readable(f->pipe))
             rev |= TOS_POLLIN;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         break;
     }
 
     case FD_PIPE_W: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        spin_lock(&proc_lock);
         if (pipe_writable(f->pipe))
             rev |= TOS_POLLOUT;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         break;
     }
 

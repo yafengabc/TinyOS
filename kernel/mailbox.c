@@ -104,14 +104,12 @@ int mailbox_recv(int me, void *buf, int cap)
 
 void mailbox_drop(int pid)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&mb_lock);
 
-    spin_lock(&mb_lock);
     for (int i = 0; i < MB_SLOTS; i++)
         if (pool[i].dst == pid)
             pool[i].dst = 0;
-    spin_unlock(&mb_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&mb_lock, irq);
 }
 
 #else  /* !TOS_MAILBOX: the syscalls exist, the pool does not */
