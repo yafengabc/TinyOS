@@ -115,6 +115,13 @@ isr_common:
  */
     .globl enter_user_frame
 enter_user_frame:
+    /* Interrupts off before sp leaves the kernel stack: the frame handed in
+       lives in the process table, and this routine is called from C with
+       IF=1, so an IRQ landing between this and the iret would push its frame
+       onto that table entry (the i386 shape of the rv32 bug fixed in
+       arch/rv32/start.S).  iret reloads EFLAGS from the frame, so IF comes
+       back on its own. */
+    cli
     movl 4(%esp), %esp
 
 .Lrestore:
