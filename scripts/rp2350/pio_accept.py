@@ -43,10 +43,15 @@ BAD = ("KERNEL PANIC", "System halted", "MSTKERR", "HardFault")
 
 # Expected instruction words.  `blink` and `blink3` differ only in the .pin
 # directive, which is not an instruction, so they share a table.
+#
+# Index 5 and 10 are `jmp x--, <label>` with no delay, so their delay field is
+# 0: 0x0043 / 0x0048.  An earlier revision of this table carried 0x1f43 /
+# 0x1f48 (delay 31 copied from the `jmp y--` lines above them), which no
+# correct assembler produces - it made a good image look broken.
 WORDS = {
     "loopback": [0xE081, 0x80A0, 0x6001, 0x4001, 0x8020],
-    "blink": [0xE081, 0xE001, 0xE03F, 0xE05F, 0x1F84, 0x1F43,
-              0xE000, 0xE03F, 0xE05F, 0x1F89, 0x1F48],
+    "blink": [0xE081, 0xE001, 0xE03F, 0xE05F, 0x1F84, 0x0043,
+              0xE000, 0xE03F, 0xE05F, 0x1F89, 0x0048],
     "ws2812": [0x6221, 0x1123, 0x1400, 0xA442],
 }
 
@@ -129,9 +134,11 @@ def asm(con, results, path, block, sm, table, pins=None):
     check_ok(results, "asm %s -> pio%d sm%d" % (os.path.basename(path),
                                                 block, sm), ok, note)
     if pins is not None:
-        check_ok(results, "asm %s pin window gp%d..gp%d"
+        # The tool prints the window as `gp<base>..<base+count-1>`, so a
+        # one-pin window on GP4 reads `gp4..4`, not `gp4..gp4`.
+        check_ok(results, "asm %s pin window gp%d..%d"
                  % (os.path.basename(path), pins[0], pins[1]),
-                 ("gp%d..gp%d" % pins) in out, "")
+                 ("gp%d..%d" % pins) in out, "")
     check(results, "asm %s loaded" % os.path.basename(path), out,
           want=("pio: loaded into",))
     return out

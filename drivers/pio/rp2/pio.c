@@ -53,8 +53,17 @@
 #define FSTAT_TXFULL(sm)   (1u << (16 + (sm)))
 #define FSTAT_RXEMPTY(sm)  (1u << (8 + (sm)))
 
-#define EXEC_SIDE_EN       (1u << 30)   /* `.side_set N opt`            */
-#define EXEC_SIDE_PINDIR   (1u << 29)
+/* SMx_EXECCTRL bit layout (pico-sdk PIO_SM0_EXECCTRL_*): WRAP_BOTTOM [4:0],
+ * WRAP_TOP [11:7], SIDE_EN [12], SIDE_PINDIR [13].  These two flags used to be
+ * written as bits 30/29, which is 18 positions too high - and `exec` built
+ * the wrap fields at bits 12/7, so WRAP_TOP landed on SIDE_EN and both wrap
+ * fields were zero.  A machine in wrap 0..0 executes instruction 0 forever:
+ * it never pulls, so `pio tx` fills a FIFO nothing drains and `pio rx` returns
+ * zero words (measured on the RP2350). */
+#define EXEC_WRAP_BOTTOM(b) ((uint32_t)((b) & 0x1fu))
+#define EXEC_WRAP_TOP(t)    ((uint32_t)((t) & 0x1fu) << 7)
+#define EXEC_SIDE_EN       (1u << 12)   /* `.side_set N opt`            */
+#define EXEC_SIDE_PINDIR   (1u << 13)
 
 #define PINCTRL_SIDESET_CNT(n)  ((uint32_t)(n) << 29)
 #define PINCTRL_SET_CNT(n)      ((uint32_t)(n) << 26)
@@ -132,6 +141,21 @@ static void release_sm(int block, int sm)
     pio_pincount[block][sm] = 0;
 }
 
+/* Called when a process exits.  It gives up ownership but deliberately does
+ * NOT stop the machine or hand the pins back.
+ *
+ * The shell runs every `pio ...` verb as its own process, so stopping on exit
+ * made the whole tool useless: `pio start` set CTRL.ENABLE, the process
+ * exited, this function cleared it again, and the following `pio tx` filled a
+ * FIFO nothing was draining - `pio rx` then read zero words (measured on the
+ * RP2350 with a fresh boot: start ok, wrote 4, read 0).  A machine that keeps
+ * running is also the point of `blink`: the LED is supposed to keep blinking
+ * after the command that started it has returned.
+ *
+ * Releasing the hardware stays explicit (`pio rel`), which stops the machine
+ * and returns the pins to GPIO.  Ownership is cleared here so the next
+ * command can claim the machine; a machine whose owner died without calling
+ * rel keeps running until somebody does. */
 void plat_pio_release(int pid)
 {
     if (!pio_inited)
@@ -139,7 +163,7 @@ void plat_pio_release(int pid)
     for (int b = 0; b < RP_PIO_BLOCKS; b++)
         for (int s = 0; s < 4; s++)
             if (pio_owner[b][s] == pid)
-                release_sm(b, s);
+                pio_owner[b][s] = 0;
 }
 
 static int pio_load(struct pio_req *q, int pid)
@@ -203,7 +227,7 @@ static int pio_load(struct pio_req *q, int pid)
         mmio_write32(base + PIO_SM(sm, SM_CLKDIV), div ? div : (1u << 16));
     }
 
-    exec = (top << 12) | (bottom << 7);
+    exec = EXEC_WRAP_TOP(top) | EXEC_WRAP_BOTTOM(bottom);
     /* Optional side-set is an encoding detail: with `opt` the top side-set bit
      * means "drive the pins this cycle".  EXECCTRL only needs to know that the
      * delay field carries side-set bits at all, so the flag is not consulted. */
@@ -271,6 +295,24 @@ static int pio_rx(struct pio_req *q)
     return n;
 }
 
+/* Take ownership of a state machine for this call, or refuse.
+ *
+ * The claim does not have to be made by the process that loaded the program.
+ * The shell runs every `pio ...` verb as its own process, so `pio asm` and
+ * `pio start` are never the same pid; requiring equality made the tool
+ * unusable - asm reported `loaded into pio0 sm0` and every later verb
+ * answered `failed (not owner, or no PIO)` (measured on the RP2350).  An
+ * unowned SM is therefore claimable, exactly as pio_load() already treats it,
+ * while a live owner still keeps a second process out until it exits
+ * (plat_pio_release) or releases explicitly. */
+static int claim_sm(int block, int sm, int pid)
+{
+    if (pio_owner[block][sm] && pio_owner[block][sm] != pid)
+        return -1;
+    pio_owner[block][sm] = pid;
+    return 0;
+}
+
 int plat_pio(int op, struct pio_req *req, int pid)
 {
     uint32_t base;
@@ -285,7 +327,7 @@ int plat_pio(int op, struct pio_req *req, int pid)
     case PIO_START:
         if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
-        if (pio_owner[req->block][req->sm] != pid)
+        if (claim_sm(req->block, req->sm, pid) < 0)
             return -1;
         base = RP_PIO_BASE(req->block);
         mmio_write32(base + PIO_CTRL,
@@ -295,7 +337,7 @@ int plat_pio(int op, struct pio_req *req, int pid)
     case PIO_STOP:
         if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
-        if (pio_owner[req->block][req->sm] != pid)
+        if (claim_sm(req->block, req->sm, pid) < 0)
             return -1;
         stop_sm(req->block, req->sm);
         return 0;
@@ -303,21 +345,21 @@ int plat_pio(int op, struct pio_req *req, int pid)
     case PIO_TX:
         if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
-        if (pio_owner[req->block][req->sm] != pid)
+        if (claim_sm(req->block, req->sm, pid) < 0)
             return -1;
         return pio_tx(req);
 
     case PIO_RX:
         if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
-        if (pio_owner[req->block][req->sm] != pid)
+        if (claim_sm(req->block, req->sm, pid) < 0)
             return -1;
         return pio_rx(req);
 
     case PIO_RELEASE:
         if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
-        if (pio_owner[req->block][req->sm] != pid)
+        if (claim_sm(req->block, req->sm, pid) < 0)
             return -1;
         release_sm(req->block, req->sm);
         return 0;

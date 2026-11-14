@@ -7,8 +7,12 @@
 ;   outer: 32 * 1025 = 32800 cycles per half period
 .pin 3 1
 .clkdiv 1000
-set pindirs, 1
 .wrap_target
+; Inside the wrap window, not before it: SM_RESTART sets PC to
+; wrap_bottom, so an instruction above .wrap_target only runs if the
+; SM happens to start at origin - and CTRL_RESTART (issued by pio
+; load) puts it at wrap_bottom instead.
+set pindirs, 1
 set pins, 1
 set x, 31
 outer_hi:

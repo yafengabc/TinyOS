@@ -2782,6 +2782,43 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 - 回环读回全 0 → OUT 的 base 与 IN 的 base 不一致（`.pin` 只给了一个窗口）；
 - 只有 RP2350 的第三块不对 → `PIO2` 的 FUNCSEL 8 与 RESETS 位。
 
+### 32.1 2026-11-15 真机第一轮（`rp2350`，COM14）：7/17 → 16/17，剩回环一项
+
+按 issue #1 的评论跑了 `pio_accept.py --image rp2350 --uf2 build/rp2350.uf2`。
+第一次 **7/17**，逐条查下来是**四个真 bug**（都不是脚本的判据问题），修完 **16/17**：
+
+| # | 位置 | 症状 | 根因 |
+| --- | --- | --- | --- |
+| 1 | `drivers/pio/rp2/pio.c` `plat_pio()` | `asm` 打印 `loaded into pio0 sm0`，之后 `start`/`tx`/`rx`/`stop`/`rel` 全报 `failed (not owner, or no PIO)` | shell 每条命令一个进程，`pio_owner[block][sm] = pid` 是 `asm` 那个进程的 pid，后续命令必然不等。改成"空位可认领"（`claim_sm()`），与 `pio_load()` 原有的语义一致 |
+| 2 | 同上 `plat_pio_release()` | 同上，且 `blink` 那种"启动后一直闪"不可能工作 | 进程退出时它调 `release_sm()` → `stop_sm()`，`pio start` 一退出就把 ENABLE 清了。改成只放弃所有权、不停机不还引脚；释放硬件仍由 `pio rel` 显式完成 |
+| 3 | `files/pio/{loopback,blink,blink3}.pio` | `set pindirs, 1` 写了但引脚不驱动 | `SM_RESTART` 把 PC 设到 **`wrap_bottom`**，而这条初始化写在 `.wrap_target` **之前**，从不执行 → GP4 一直是输入。移到 wrap 窗口内（字表不变，`wrap` 由 `4..1`/`10..1` 变 `4..0`/`10..0`） |
+| 4 | 同上 `SM_EXECCTRL` 编码 | wrap 从来没生效，SM 在 `wrap 0..0` 里空转 | `exec = (top << 12) \| (bottom << 7)` 位域错了：pico-sdk 是 `WRAP_BOTTOM [4:0]`、`WRAP_TOP [11:7]`，bit12 是 `SIDE_EN`；`EXEC_SIDE_EN/PINDIR` 还写成了 bit30/29（应为 bit12/13）。改成 `EXEC_WRAP_TOP/BOTTOM` |
+
+脚本本身的两处笔误也一并修了：`WORDS["blink"]` 里第 5/10 字写成 `0x1f43`/`0x1f48`
+（`jmp x--` 没有延迟，正确是 `0x0043`/`0x0048`），以及 pin window 检查写成
+`gp4..gp4`（`pio asm` 打印的是 `gp4..4`）。
+
+**仍然 FAIL 的一项：回环读回 0。** 现状与证据：
+
+- `asm` 三个程序的字表全对（`loopback` 5 字、`blink3` 11 字、`ws2812` 4 字，
+  含 `6221 1123 1400 a442`），`start`/`tx`/`stop`/`rel` 全部 `pio: ok`；
+- `pio tx 0 0 1 0 1 1` 报 `wrote 4`，但 `pio rx 0 0 4` 读回全 `0`
+  （修 EXECCTRL 前连一个字都读不到，之后能读到 4 个 0 —— 说明 wrap 修对了、
+  SM 确实在 pull/out/in/push，是 `in pins` 这一侧读不到）；
+- **线路本身没问题**：`gpio dev mode 4 out` + `gpio dev 4 1` + `gpio dev 4` 读到
+  `1`，写 `0` 读到 `0`，`mode up` 读到 `1` —— SIO 路径完全正常，所以不是悬空/短路；
+- `pin_to_pio()` 已设 IE、清 OD 与 ISO（RP2350 的 pad 复位时 ISO=1），FUNCSEL=6。
+
+所以还差的是 PIO 输出到 pad / pad 回读到 `pins` 总线这一环，下一步要看
+`PINCTRL.OUT_BASE/IN_BASE` 之外的 `EXECCTRL.OUT_STICKY`、`GWSTATUS`，或者直接
+用 `pio tx` 后 `gpio dev 4` 观测 pad 是否真被拉高（这一步还没做，因为 `gpio dev`
+会重新配置 FUNCSEL）。
+
+另外**期望值本身可能也需要改**：`in pins` 读的是经两级同步的 `pins` 总线，
+`out pins` 之后紧跟 `in pins` 只隔一个 SM 周期，硬件上读到的是**上一拍**的电平。
+`1 0 1 1` 在真机上更可能得到 `0 1 0 1`，而不是 issue 里写的 `1 0 0... 1`。这一点
+等回环通了再用实测值定。
+
 真机通过后要回来改三处状态：`board/rp2040/README.md` 的 PIO 行（◐ → ✅）、
 `board/rp2350/README.md` 与 `board/rp2350rv/README.md` 补一行 PIO、`docs/PIO.md`
 的"验证"小节。
