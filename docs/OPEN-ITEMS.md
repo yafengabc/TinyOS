@@ -2805,8 +2805,8 @@ bug 的 bisect 基线**：出现"两个核抢同一个东西"的症状时，先�
 
 | 镜像 | 跑什么 | 判据 |
 | --- | --- | --- |
-| `rp2350` | 启动 banner、`ps`、`prot rodata`/`heap`/`stack`/`null` | `[A]`~`[E]` 齐全；`ps` 里 msh 的 `wink` 与 `rp2350smp` 上一致；四条 `prot` **全 fault** |
-| `rp2350rv` | 同上 | banner 里 `[A] pre-pll ok sys=/ref=/xosc=` 三个值都有；`ps` 里 msh 的 `wink` 与 `rp2350rvsmp` 上一致；四条 `prot` 全 fault |
+| `rp2350` | 启动 banner、`ps`、`prot rodata`/`heap`/`stack`/`null` | `[B]`~`[E]` 齐全（**ARM 端口没有 `[A] pre-pll`**，那是 RV 端的行）且 `[mpu]` 行 `regions=3`；`ps` 里 msh 的 `wink` 与 `rp2350smp` 上一致；四条 `prot` **全 fault** |
+| `rp2350rv` | 同上 | banner 里 `[A] pre-pll ok sys=/ref=/xosc=` 三个值都有、`[B] clk` ≈150 MHz（RV 端**没有** `[C]`~`[E]` 和 `[mpu]`）；`ps` 里 msh 的 `wink` 与 `rp2350rvsmp` 上一致；`prot heap`/`stack`/`dev` fault，`rodata`/`null` 按 RV32 分表 SURVIVE |
 
 两条都**不承诺新功能**：跑不过时先判"单核专属还是共性问题"——共性问题按正常流程
 修，单核专属（SMP 镜像正常）就记成 `33.x` 一条待办，不要让主验收等它。
@@ -3107,6 +3107,19 @@ rp2350rv 时钟顺序、RV32 3.5 MiB littlefs）后在本机同一块 ATK-DNRP23
 | `ls /bin \| wc` | `44 176 1751`，管道正常 |
 | `mem` / `wheap` / `free` | 64 KiB 堆 demo 完整、12 KiB 窗口模式完整、kernel heap peak 1792 B |
 | `uptime` | 149.5 s 连续、`cpus=2`，无静默复位 |
+
+**两个单核镜像（§33 新增的每轮附加项）**：`single_core.py` 各刷一次，都是刷完
+即起、不需要 RESET。
+
+| 镜像 | 结果 |
+| --- | --- |
+| `rp2350rv` | `[A] pre-pll ok sys=0x1 ref=0x1 xosc=0x0`、`[B] clk`≈150 MHz、427 B banner；`ps` msh `wink=16`（与 `rp2350rvsmp` 一致）；`prot heap`/`stack`/`dev` FAULT，`rodata`/`null` SURVIVE（RV32 分表）；`deep 3` 长栈 |
+| `rp2350` | `[B]`~`[E]` 齐全、`[mpu] regions=3`、582 B banner；`ps` msh `wink=16`（与 `rp2350smp` 一致）；**四条 `prot` 全 FAULT** + `prot dev` FAULT；`deep 3` 长栈 |
+
+两条注释免得下次误判：`regions=3` 指的是窗口的 code/data/stack 三个区，landing(6)
+和 guard(7) 是固定编号、不进这个计数；`rp2350` 的 banner 从 `[B]` 开始，`[A] pre-pll`
+只属于 RV32 端口（判据表已按此修正）。另外 ARM 那块在复位瞬间会漏半个字节进 banner
+首行（`P?[B] clk=`），是 UART 在芯片复位沿上的噪声，不是解析问题。
 
 ## 34. 未实现的设计项：MPU/PMP 的段接口
 
