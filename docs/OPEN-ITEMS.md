@@ -2768,15 +2768,15 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 这一节只列**代码已落地、等板子**的项，按“刷哪个镜像、跑什么、判什么”写。上机
 顺序建议从上到下：前两项是这一轮刚改的，越早暴露问题越省事。
 
-| # | 镜像 | 要做的事 | 判据 |
-| --- | --- | --- | --- |
-| 0 | `rp2350rv` / `rp2350rvsmp` | 刷完**不按 RESET**，看 `[A]` 的时钟快照 | 见 33.4 |
-| 1 | `rp2350rv` / `rp2350rvsmp` | 复测 PMP 修复后的三件事 | 见 33.1 |
-| 2 | `rp2350` / `rp2350smp` | 4 KiB 窗口（新） | 见 33.2 |
-| 3 | `rp2350smp` / `rp2350rvsmp` | §29.1 的 `dd`+`rm` 200 轮 | 见 §29.1 |
-| 4 | `rp2350rv` / `rp2350rvsmp` | §29.2 的 USB 中断版枚举（上次主机侧 COM17 被独占，未完成） | 见 §29.2 |
-| 5 | `rp2040` | §30.3 的 4 KiB 窗口 + 软件栈守卫 | 见 §30.3 |
-| 6 | `rp2040` / `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 |
+| # | 镜像 | 要做的事 | 判据 | 状态 |
+| --- | --- | --- | --- | --- |
+| 0 | `rp2350rv` / `rp2350rvsmp` | 刷完**不按 RESET**，看 `[A]` 的时钟快照 | 见 33.4 | **PASS**（11-15，0.68 s 进 shell） |
+| 1 | `rp2350rv` / `rp2350rvsmp` | 复测 PMP 修复后的三件事 | 见 33.1 | **PASS** |
+| 2 | `rp2350` / `rp2350smp` | 4 KiB 窗口（新） | 见 33.2 | **PASS** |
+| 3 | `rp2350smp` / `rp2350rvsmp` | §29.1 的 `dd`+`rm` 200 轮 | 见 §29.1 | **PASS**（两端口各 200 轮） |
+| 4 | `rp2350rv` / `rp2350rvsmp` | §29.2 的 USB 中断版枚举 | 见 §29.2 | 设备侧 PASS；主机侧须 **DTR=1** |
+| 5 | `rp2040` | §30.3 的 4 KiB 窗口 + 软件栈守卫 | 见 §30.3 | 未做（无板） |
+| 6 | `rp2040` / `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 | 未做（无接线） |
 
 **为什么第 3 项和第 2 项里的 `smpbench` 这次是回归、不只是验收**：
 `f37e58d` / `84009e7` / `537df98` 三条锁语义改动（`spin_lock_irqsave`、`pipe`/`mailbox`
@@ -2989,7 +2989,7 @@ rodata/null 按板子分表 SURVIVE、prot dev FAULT，共享代码改动无回�
   `accept.py` 24/24。
 - `prot dev` 本身：QEMU rv32 上 `prot dev 0x10000000` 正确 fault，说明测试路径可用。
 
-### 33.4 `rp2350rv` 刷完不出字：时钟顺序（2026-11-14，只构建过，待上板）
+### 33.4 `rp2350rv` 刷完不出字：时钟顺序（2026-11-14 改，2026-11-15 真机确认已修）
 
 §33.0 第 1 条（刷完 RV 镜像后 UART0 一个字节都没有、要按物理 RESET 才好）的原因
 候选在 `board/rp2350rv/platform.c::clocks_init()`：它是**唯一**还在用 pico-sdk 老顺序
@@ -3010,14 +3010,62 @@ rodata/null 按板子分表 SURVIVE、prot dev FAULT，共享代码改动无回�
 4. `[A]` 行现在带快照：`[A] pre-pll ok sys=0x.. ref=0x.. xosc=0x..`，这三个值是在
    第一次时钟写之前读的，就是"ROM 交给我们时"的状态。
 
-验证方法（刷完**不要按 RESET**，读线程提前挂好）：
+**实测结果（2026-11-15，`build/sizeprobe/s334_noreset.log`，脚本
+`s334_noreset.py`）**：UF2 拷贝完成后驱动盘 0.6 s 消失、芯片自重启，读线程全程
+**一个字节都没写**（不发 CR、不发 `reboot`、不拉 RTS、不重开串口）：
 
-- 出现 `[A] pre-pll ok ...` → 老顺序确实是杀手；把 `sys=` / `ref=` / `xosc=` 三个值
-  记下来，和"按过 RESET 之后"的同一条比对，就知道两条路径差在哪个寄存器上；
+```
+[20.28s] UF2 drive gone after 0.6s - chip restarted on its own
+[20.33s] FIRST BYTE after 0.05s of listening
+[20.96s] shell prompt seen after 0.68s
+```
+
+- **刷完 0.68 s 就进 `tos>`**，不需要任何 RESET。改动前同一路径是 120 s 零字节。
+- `[A] pre-pll ok sys=0x00000001 ref=0x00000001 xosc=0x00000000`
+  ——ROM 交给我们时**晶振没起**（`xosc=0`）、`clk_ref` 在 **ROSC**（`ref` bit0）、
+  `clk_sys` 已经坐在 `clk_ref` 上（`sys` bit0）。老代码那次 `CLK_REF_CTRL = 0`
+  写在这个状态下是纯粹的 glitchless 重选，一旦 ROSC 在那一刻停摆，CPU 就没了——
+  与新顺序的行为差正好落在这一个写操作上。
+- `[B] clk=0x08f0d568 Hz` ≈ 150 MHz，`[smp] 2 of 2 CPU(s) online`，`usb-cdc=up`。
+- 启动日志里**没有** `[ramdisk] ... grow ... failed`，`df` = `3670016 / 286720 / 7%`
+  ——§33.0 第 2 条（3.5 MiB 分区）同时确认。
+
+两个可能的失败形状仍保留在这里，供以后复用：
+
 - 仍然一个字节都没有，看设备管理器：**还有 BOOTSEL 的 UF2 盘符/U 盘** → 芯片根本
   没离开 ROM，问题在刷写/重启路径而不是时钟；**盘符消失、没有任何 COM 口** → 我们
   的镜像在跑但死在更早的地方，把 `[SCR]`（TOS_DIAG 构建）里的 step 号贴回来；
-- 顺带确认 `[B] clk` 应仍是 150 MHz 附近，`df` 应是 `3670016 / ~9%`（§33.0 第 2 条）。
+
+### 33.5 2026-11-15 凌晨：锁重构 + 时钟顺序 + 3.5 MiB 分区一次过（`rp2350rvsmp`）
+
+拉到 `537df98`（6 个提交：`plat_spin_lock_irqsave` 全量收口、console 下半契约、
+rp2350rv 时钟顺序、RV32 3.5 MiB littlefs）后在本机同一块 ATK-DNRP2350AM 上验证。
+
+**静态与模拟**：十个目标（`x86` / `rv32` / `arm` / `rp2040` / `rp2040smp` / `rp2350` /
+`rp2350smp` / `rp2350rv` / `rp2350rvsmp` / `esp32c3`）构建通过；QEMU
+`x86` / `rv32` / `arm` / `rv32smp` 四个 smoke 全 `SMOKE TEST OK`。
+
+**§33.4（第 0 项）**：刷完**没有按 RESET**，读线程全程只读，0.68 s 进 `tos>`
+（明细见 33.4）。
+
+**§33.0 第 2 项（RV32 分区）**：`df` = `3670016 / 286720 / 7%`，与 ARM 同构；
+启动日志没有 `[ramdisk] ... grow ... failed`。刷完后 `ls /` 内容完整
+（`demo.py` / `pytest.py` / `pytest2.py` / `readme.txt` 都在），说明
+`lfs_fs_grow()` 提交新超级块没有伤到已有文件——**RV32 冷启动写 flash 的顾虑就此消除**。
+
+**锁重构回归**（`proc_lock` / `heap_lock` 改 irqsave，`pipe.c` 6 处、
+`mailbox.c` 3 处、`process.c` 21 处的实际风险面）：
+
+| 测试 | 结果 |
+| --- | --- |
+| §29.1 `dd`+`rm` 200 轮 | PASS（errors=0、df recovered YES、liveness OK） |
+| 100 轮纯 `dd`（此轮为最后一次，之后按约定只跑 200 轮 dd/rm） | ok=100 / err=0 / resets=0，1.07 s/轮，`pattern verified` |
+| `smp -s 2 400` | w0=6761（cpu1）/ w1=6812（cpu0），双核均衡 |
+| `smp -t 4 2 300` | 两 worker 跨 cpu0/cpu1，13640 / 13686 块 |
+| `piperace` | 64 KiB 发/校全部 `ok` |
+| `ls /bin \| wc` | `44 176 1751`，管道正常 |
+| `mem` / `wheap` / `free` | 64 KiB 堆 demo 完整、12 KiB 窗口模式完整、kernel heap peak 1792 B |
+| `uptime` | 149.5 s 连续、`cpus=2`，无静默复位 |
 
 ## 34. 未实现的设计项：MPU/PMP 的段接口
 
