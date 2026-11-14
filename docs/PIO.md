@@ -25,7 +25,12 @@ pio tx 0 0 1 0 1 1              # 写 TX FIFO（32 位字）
 pio rx 0 0 4                    # 读 RX FIFO，打印十六进制
 pio stop 0 0
 pio rel 0 0                     # 停 SM 并把引脚交回 GPIO
+pio regs 0 0                    # 读回 SM 寄存器（诊断用，只读）
 ```
+
+`pio regs` 打印 `ctrl / fstat / execctrl / shiftctrl / pinctrl / clkdiv / addr / owner`
+八个字。装载器的"意图"和寄存器里的内容是两件事——位域写偏了会写到一个看起来也
+合理的值上，只有读回来才能和手册对上；`addr` 还能看出 SM 是不是卡在 `pull`。
 
 `loopback.pio` 用一个引脚同时做 OUT 和 IN（GP4），不需要跳线：`pio tx` 的 bit0
 被驱动到 GP4，`in pins,1` 再从 pad 读回来。`blink.pio` 用两层循环和 delay 让

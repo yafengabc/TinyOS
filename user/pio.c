@@ -852,6 +852,26 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    if (!strcmp(argv[1], "regs")) {
+        static const char *name[8] = {
+            "ctrl", "fstat", "execctrl", "shiftctrl",
+            "pinctrl", "clkdiv", "addr", "owner",
+        };
+        uint32_t w[8];
+        int n;
+
+        q.buf = w;
+        q.len = 8;
+        n = pio_call(PIO_STATE, &q);
+        if (n < 0) {
+            puts("pio: cannot read the state machine\n");
+            return 1;
+        }
+        for (int i = 0; i < n; i++)
+            printf("  %-10s %08x\n", name[i], w[i]);
+        return 0;
+    }
+
     if (!strcmp(argv[1], "tx")) {
         uint32_t w[8];
         int n = 0;

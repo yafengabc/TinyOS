@@ -313,6 +313,32 @@ static int claim_sm(int block, int sm, int pid)
     return 0;
 }
 
+/* Read back what the hardware holds.  Diagnostic only, but the loader's
+ * intent and the register contents are not the same thing: a wrong field
+ * offset writes a plausible-looking value somewhere else, and no amount of
+ * reading the driver tells you which.  Eight words: CTRL, FSTAT, EXECCTRL,
+ * SHIFTCTRL, PINCTRL, CLKDIV, ADDR, owner pid. */
+#define PIO_STATE_WORDS 8
+
+static int pio_state(struct pio_req *q)
+{
+    uint32_t *w = (uint32_t *)q->buf;
+    uint32_t base;
+
+    if (!w || q->len < PIO_STATE_WORDS)
+        return -1;
+    base = RP_PIO_BASE(q->block);
+    w[0] = mmio_read32(base + PIO_CTRL);
+    w[1] = mmio_read32(base + PIO_FSTAT);
+    w[2] = mmio_read32(base + PIO_SM(q->sm, SM_EXECCTRL));
+    w[3] = mmio_read32(base + PIO_SM(q->sm, SM_SHIFTCTRL));
+    w[4] = mmio_read32(base + PIO_SM(q->sm, SM_PINCTRL));
+    w[5] = mmio_read32(base + PIO_SM(q->sm, SM_CLKDIV));
+    w[6] = mmio_read32(base + PIO_SM(q->sm, SM_ADDR));
+    w[7] = (uint32_t)pio_owner[q->block][q->sm];   /* 0 = unowned */
+    return PIO_STATE_WORDS;
+}
+
 int plat_pio(int op, struct pio_req *req, int pid)
 {
     uint32_t base;
@@ -363,6 +389,13 @@ int plat_pio(int op, struct pio_req *req, int pid)
             return -1;
         release_sm(req->block, req->sm);
         return 0;
+
+    case PIO_STATE:
+        /* No claim: reading registers must be possible even when another
+         * process owns the machine, which is exactly when it is interesting. */
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
+            return -1;
+        return pio_state(req);
     }
     return -1;
 }

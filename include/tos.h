@@ -78,6 +78,7 @@
 #define PIO_TX       3   /* req.buf = u32 words, req.len = count          */
 #define PIO_RX       4
 #define PIO_RELEASE  5
+#define PIO_STATE    6   /* req.buf = u32[8]: SM registers read back      */
 
 #define PIO_F_SIDE_OPT     0x01   /* .side_set N opt                    */
 #define PIO_F_SIDE_PINDIR  0x02   /* .side_set N pindirs                */
