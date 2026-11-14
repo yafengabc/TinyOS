@@ -2837,6 +2837,16 @@ ARM 同一个 `mpu_configure_region(base, size, flags)` 后面，内核只谈“
 
 顺序上它们都排在"三块 PMP/MPU 代码稳定之后"，和段接口重构一起做最省事。
 
+调度/内存侧还有三条（`docs/NUTTX-COMPARE.md` §2.7、§2.8）：
+
+- **`spin_lock_irqsave(&lock, &flags)`**：把"取锁 + 关中断"并成一个原语。§23.3 的
+  自死锁就是两者分开写导致的，这个改动小、收益是消掉一类 bug；
+- **granule 分配器**：`win_alloc()` 的"按最大块对齐 + first-fit"正是它的形状
+  （granule = grain，对齐参数 = 最大块）。MAX_PROCS=16 时没必要换，等窗口数或
+  不连续窗口的需求出现再说；
+- **工作队列**：现在只有 USB 一个延迟用户，`g_idle_poll` 足够；出现第二个时再上
+  HP/LP 两级队列，别加第二个钩子。
+
 另一个可以顺手借的点：region 编号用位图分配（NuttX 的 `ffs(~mask)`），而不是现在
 写死的“entry 5 是 trap vector、0..14 是块”。Hazard3 上现在没问题，但如果以后有
 第二个 RV 平台从 bootloader 手里接管 PMP，就需要先跳过 `L` 位占用的条目。

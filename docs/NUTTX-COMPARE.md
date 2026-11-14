@@ -175,6 +175,30 @@ static const struct uart_ops_s g_uart_ops = {
 **不要借的**：VFS。NuttX 的 inode/挂载表/路径解析/dup 是为了 POSIX 兼容，我们的
 整个 devfs 只有 20 项、736 字节的表；引进来会立刻变成内核里最大的一块。
 
+### 2.7 调度器与 SMP
+
+| NuttX | 我们 | 评价 |
+| --- | --- | --- |
+| `spin_lock_irqsave(&lock, &flags)` / `spin_unlock_irqrestore` | `plat_irq_save()` + `plat_spin_acquire()` 两个独立原语 | **最该借的一个**：§23.3 记的那个自死锁（持锁后中断没关，tick 重入同一把锁）靠命名把纪律固定下来 |
+| `up_cpu_pause()`（IPI 停核，用于临界区里重配 MPU） | `rp_flash_park_other()` 代际握手 | 同一种做法，他们用于 MPU/EXCESSIVE 场景，我们只用于 flash |
+| `CONFIG_SCHED_HPWORK` / `LPWORK`：内核工作队列（HP 是驱动下半，默认优先级 224；LP 支持优先级继承） | `g_idle_poll` 一个函数指针钩子 | 现在只有一个延迟用户（USB 轮询），够用；出现第二个（延迟擦除、日志落盘）时再上工作队列，别加第二个钩子 |
+| `nxmutex` + `CONFIG_PRIORITY_INHERITANCE` | 自旋锁 + 调度器；控制台锁没有继承 | 我们现在所有临界区都很短（一次写、一次块操作），优先级反转的窗口有界；**如果以后出现长持有锁**（例如整文件拷贝期间持有 fs 锁），就必须上继承或把锁拆细 |
+| tickless（alarm/oneshot） | 固定 1 ms tick | 低功耗才需要，见 2.4 |
+
+他们调度器本身没有神秘之处（FIFO/RR + 优先级 + SMP 每核 run queue），真正值得抄的是**并发原语的名字和纪律**：`spin_lock_irqsave` 一眼就说清"锁 + 关中断"是原子的一步。
+
+### 2.8 内存管理
+
+| NuttX | 我们 | 评价 |
+| --- | --- | --- |
+| 大/小内存模型：每次分配 8 B 或 4 B 头，`CONFIG_MM_SMALL` 在 32 位 MCU 上强制 16 位头 | `kernel/heap.c` 单 arena | 8 KiB 堆上省下的头开销是几百字节，**不值得**为它改分配器 |
+| 多 heap：`kmm_initialize` / `umm_initialize` + `mm_addregion`（外挂 PSRAM 当第二个区域） | 单一内核堆 | 等有 PSRAM（Pico Plus 2 那类板子）再说 |
+| `mallinfo`（arena/ordblks/fordblks/uordblks） | `free` 里的 total/used/peak | 我们的 already 够用 |
+| **granule allocator**：固定 granule 大小 + 用户指定对齐，`gran_initialize(heap, size, log2gran, log2align)`，位图管理；原版每次最多 32 granule（后来去掉了） | 窗口分配是扫 `procs[]` 的 first-fit，对齐靠 `align_up` | **值得考虑**：我们的"按最大块对齐"正是一个 granule 分配器的参数；4 KiB granule 下 48 KiB 窗口 = 12 个 granule，32 的上限也够。但 MAX_PROCS=16 时扫描成本无所谓，**等窗口数上去或要支持不连续窗口时再换** |
+| 临界区用 `spin_lock_irqsave`（`CONFIG_GRAN_INTR`） | 同上 | 同 2.7 |
+
+**结论**：调度器借**原语纪律**，内存借**granule 分配器的形状**（不是代码），其余保持现状。真正的收益都在"少写一类 bug"，不在功能。
+
 ## 3. 不要照抄的三条
 
 1. **栈大小**：PR 里写 "Double size for idle, irq and main stacks"，我们刚把 ARM 内核
