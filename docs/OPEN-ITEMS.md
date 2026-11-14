@@ -2734,9 +2734,27 @@ blocks than the budget`，该任务访问未覆盖区域会 fault —— 响的�
 
 `pmp_cover()` 那套分块逻辑只在 `rp2350rv`（NAPOT）需要，ARM 不复制。
 
-## 32. PIO 从未上过真机（2026-11-14，待 RP2040 / RP2350）
+## 32. PIO 从未上过真机（2026-11-14 起等验收；**先打 RP2350**）
 
 > 跟踪：[issue #1](https://github.com/yafengabc/TinyOS/issues/1)（和 §30.3 共用）。
+> 2026-11-15 起顺序改为**先 RP2350**：板子在对方手上、`pio` 特性在四个 RP2350
+> 目标上默认打开；RP2040 侧还没有自动化流程，等它的机器再接。
+
+一条命令（脚本见下，`--no-flash` 对已经在跑的板子）：
+
+```sh
+python scripts/rp2350/pio_accept.py --image rp2350 --uf2 build/rp2350.uf2
+python scripts/rp2350/pio_accept.py --image rp2350rvsmp --no-flash --visual --strip
+```
+
+脚本能**完全自动判断**的部分：三个程序汇编出的字表（`loopback` 5 字、`blink`
+11 字、`ws2812` 4 字）、`pio: loaded into pioN smN`、以及回环的四字往返
+（GP4 同时做 OUT/IN，不需要跳线）。需要眼睛的两项（LED 2 Hz、灯带亮红）只有加
+`--visual` 才会问，不加就只报"已装入"。
+
+**这块板的 LED 是 GP3，不是 Pico 的 GP25**（`RP_LED_GPIO = 3`），所以
+`files/pio/blink3.pio` 是同一段程序只换了 `.pin 3 1`；两者指令流相同，所以共用
+一张期望字表。`--led-pin 25` 切回 Pico 的 `blink.pio`。
 
 PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实现完不久就撞上 §28 那
 批 SMP/flash 问题，板子时间全花在那里了。现在它同时在三类目标上编进去了，覆盖面
