@@ -2498,3 +2498,70 @@ python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2   # 按 BOOTSEL
 x86/PC 端口也是"无分页 + `plat_task_protect()` 空实现"，处境和 RP2040 一样。
 守卫是同一个弱符号，打开只需让 `arch/x86/platform.c` 返回 1，而且 QEMU 里就能
 验——如果 RP2040 这轮通过，可以顺手把 x86 也打开。
+
+## 31. RP2350 RV 的 4 KiB 窗口（分块 NAPOT）与 x86 守卫（2026-11-14，待真机）
+
+C3 的 4 KiB 步子能成立，是因为它的 PMP 有 TOR（边界任意）。Hazard3 没有 TOR，
+所以 `rp2350rv` 走的是"每段用若干 2 的幂块拼"的路子；x86 没有分页，补的是软件
+守卫。两件事一起把"所有带保护的端口同一套窗口数字"推到最后一步。
+
+### 31.1 `rp2350rv`：分块 NAPOT，4 KiB 步子
+
+`board/rp2350rv/platform.c` 的 `plat_board_task_protect()` 不再要求窗口是 2 的
+幂，而是把它拆成三段分别覆盖：
+
+| 段 | 权限 | 覆盖方式 |
+| --- | --- | --- |
+| `[win_base, wx)` | R+X | 从底向上，每次取"能放下且 base 对齐"的最大 2 的幂块 |
+| `[wx, brk)` | R+W | 同上 |
+| 护栏 `[brk, stack_low)` | — | **不覆盖**，写进去即 fault |
+| `[stack_low, stack_top)` | R+W | 同上 |
+
+- entry 5 仍是 trap vector（`arch/rv32` 开机时设一次，这里每次切换重写同一个值），
+  其余 15 条是预算；典型窗口 3~5 条；
+- `kernel/process.c`：去掉 `win_pow2()`（窗口不再向上取整到 2 的幂），
+  `win_alloc()` 的基址改成按**最大块**对齐（`largest pow2 <= bytes`），这样 20K
+  窗口落在 16K 边界上，拆成 16K+4K 两块；
+- `board/rp2350rv/layout.c`：grain 16K → **4K**，默认栈 8K → **4K**，
+  `plat_window_grow_reserve()` 返回 4K，`plat_window_needs_stack_alignment()` 返回
+  0（栈增长只是多覆盖一个 4K 块，不再要求栈顶按新大小对齐）。
+
+预算耗尽（极端形状）时保留已覆盖的部分、打一行 `[pmp] window needs more NAPOT
+blocks than the budget`，该任务访问未覆盖区域会 fault —— 响的失败，不是静默的。
+
+待真机（`rp2350rv` / `rp2350rvsmp`）：
+
+| 项目 | 期望 |
+|---|---|
+| 启动 | 进 `tos>`，`ls` / `dd` / `run prot *` 正常 |
+| `ps` 里 `msh` | **16 KiB**（原来是 16 KiB，不变；但 44K 那类程序会小一档） |
+| `deep 3` | `stack grown to 8 KiB`（4K 默认栈，一步） |
+| `prot rodata/heap/stack/null` | 四条都按预期 fault（分块后护栏仍未被覆盖） |
+| `dd` × 若干轮 + `rm` + `reboot` | 与 §29.1 相同的判据 |
+
+失败签名：`prot stack` 不 fault → 护栏被某一块误覆盖了（看 `pmp_cover` 的边界）；
+启动即 fault 在窗口内 → 某段的第一块 base 没对齐（看 `win_alloc` 的对齐）；
+`[pmp] ... budget` 出现 → 窗口碎片太多，需要把该程序的栈/镜像取整。
+
+### 31.2 x86 / PC：软件守卫打开
+
+`arch/x86/platform.c` 的 `plat_user_stack_guard()` 返回 1（分页关着，没有 fault
+可依赖，和 RP2040 同处境）。守卫本体在 `kernel/process.c`，检查两处证据：这次
+系统调用带进来的用户 `sp`（`plat_frame_get_user_sp()`，新增的三个端口实现）和
+护栏洞顶的 `"STAK"` 哨兵字。
+
+已在 QEMU 验证：临时把 PC 的默认栈改成 4 KiB，`deep 3`（6 KiB 递归）打印
+
+```
+[pid 2] stack overflow (sp 0x0011e678, stack 0x0011f000..0x00120000)
+[pid 2] stack grown to 8 KiB, heap ceiling 28 KiB
+```
+
+然后继续跑完；恢复 32 KiB 默认栈后无任何误报，`SMOKE TEST OK`。
+
+### 31.3 还剩：`rp2350`（Cortex-M33 / PMSAv8）
+
+ARM 侧是同一套数学，但预算只有 **8 条 region**（镜像 ≤2 + data 1 + 栈 1~2，余量
+不大），而且它是目前验证最充分的端口（§28 的 200 轮）。建议顺序：先让
+`rp2350rv` 在真机上过一轮，确认分块后端和 `win_alloc` 的对齐没问题，再照搬到
+ARM —— 那时它就是"同一个算法换一套寄存器写"。

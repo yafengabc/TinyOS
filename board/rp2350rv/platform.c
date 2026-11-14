@@ -1089,38 +1089,121 @@ uint32_t plat_block_count(void)
  * WARL-mapped to OFF, so arch/rv32/platform.c's TOR regions never match and
  * every user fetch faults at the window base.
  *
- * Every window is therefore rounded up to a power of two and its base is
- * aligned to that size (TOS_PMP_POW2_WINDOWS in kernel/process.c), which
- * lets one NAPOT entry describe exactly this task's window.  U-mode can
- * reach its own code/data/heap/stack and nothing else: not the kernel, not
- * flash, not MMIO, and not another task.  The code/data/guard split inside
- * the window is not enforced, because a second region would have to start
- * on an unaligned image boundary; the RP2040 port runs with the same flat
- * in-window model. */
+ * A window is not rounded up to a power of two any more.  Each of the three
+ * pieces the kernel distinguishes - image, data+heap, stack - is covered by
+ * as many NAPOT blocks as it takes (largest aligned block first), and the
+ * guard hole between image and stack is simply left uncovered, so a store
+ * into it faults.  Entry 5 stays the trap vector (arch/rv32 sets it once at
+ * boot; this rewrites the same value every switch), and the remaining 15
+ * entries are the budget.  A typical window needs 3-5.
+ *
+ * The budget, not alignment, is now the limit: a window whose pieces fragment
+ * into more than 15 blocks cannot be described, so the excess tail is left
+ * uncovered and that task faults on it.  That takes a pathological shape -
+ * 4 KiB windows on a 384 KiB image - and is loud rather than silent. */
 #define PMP_NAPOT 0x18u
 #define PMP_R     0x01u
 #define PMP_W     0x02u
 #define PMP_X     0x04u
+#define PMP_ENTRIES 16
+#define PMP_VEC_ENTRY 5
+#define PMP_PAGE  0x1000u
+
+extern char trap_vectors[];
 
 static uint32_t napot(uint32_t base, uint32_t size)
 {
     return (base >> 2) | ((size >> 3) - 1u);
 }
 
+/* Cover [base, top) with NAPOT blocks, recording entry numbers in addr[] and
+ * cfg[].  Returns the next free entry, or -1 when the budget runs out. */
+static int pmp_cover(uint32_t base, uint32_t top, uint32_t perm,
+                     uint32_t *addr, uint32_t *cfg, int next)
+{
+    while (base < top) {
+        uint32_t rem = top - base;
+        uint32_t size = PMP_PAGE;
+
+        if (next == PMP_VEC_ENTRY)
+            next++;
+        if (next >= PMP_ENTRIES)
+            return -1;
+        while (2u * size <= rem && (base & (2u * size - 1u)) == 0)
+            size *= 2u;
+
+        addr[next] = napot(base, size);
+        cfg[next] = perm | PMP_NAPOT;
+        next++;
+        base += size;
+    }
+    return next;
+}
+
 int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
                             uint32_t brk, uint32_t stack_low,
                             uint32_t stack_top)
 {
-    uint32_t size = win_end - win_base;
+    uint32_t addr[PMP_ENTRIES], cfg[PMP_ENTRIES];
+    uint32_t w[4];
+    int next = 0;
 
-    (void)wx; (void)brk; (void)stack_low; (void)stack_top;
+    for (int i = 0; i < PMP_ENTRIES; i++) {
+        addr[i] = 0;
+        cfg[i] = 0;
+    }
+    (void)win_end;
 
-    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(napot(win_base, size)));
-    /* Entry 0 is the window; entries 1..3 go OFF.  Entry 4 (the trap
-     * vector, in pmpcfg1) is left alone. */
-    __asm__ volatile("csrw pmpcfg0, %0" : :
-                     "r"(PMP_NAPOT | PMP_R | PMP_W | PMP_X));
+    next = pmp_cover(win_base, wx, PMP_R | PMP_X, addr, cfg, next);
+    if (next >= 0)
+        next = pmp_cover(wx, brk, PMP_R | PMP_W, addr, cfg, next);
+    if (next >= 0)
+        next = pmp_cover(stack_low, stack_top, PMP_R | PMP_W, addr, cfg, next);
+    if (next < 0)
+        early_puts("\r\n[pmp] window needs more NAPOT blocks than the budget\r\n");
+
+    addr[PMP_VEC_ENTRY] = napot((uint32_t)(uintptr_t)trap_vectors, 256u);
+    cfg[PMP_VEC_ENTRY] = PMP_NAPOT | PMP_R | PMP_X;
+
+    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(addr[0]));
+    __asm__ volatile("csrw pmpaddr1, %0" : : "r"(addr[1]));
+    __asm__ volatile("csrw pmpaddr2, %0" : : "r"(addr[2]));
+    __asm__ volatile("csrw pmpaddr3, %0" : : "r"(addr[3]));
+    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(addr[4]));
+    __asm__ volatile("csrw pmpaddr5, %0" : : "r"(addr[5]));
+    __asm__ volatile("csrw pmpaddr6, %0" : : "r"(addr[6]));
+    __asm__ volatile("csrw pmpaddr7, %0" : : "r"(addr[7]));
+    __asm__ volatile("csrw pmpaddr8, %0" : : "r"(addr[8]));
+    __asm__ volatile("csrw pmpaddr9, %0" : : "r"(addr[9]));
+    __asm__ volatile("csrw pmpaddr10, %0" : : "r"(addr[10]));
+    __asm__ volatile("csrw pmpaddr11, %0" : : "r"(addr[11]));
+    __asm__ volatile("csrw pmpaddr12, %0" : : "r"(addr[12]));
+    __asm__ volatile("csrw pmpaddr13, %0" : : "r"(addr[13]));
+    __asm__ volatile("csrw pmpaddr14, %0" : : "r"(addr[14]));
+    __asm__ volatile("csrw pmpaddr15, %0" : : "r"(addr[15]));
+
+    for (int g = 0; g < 4; g++)
+        w[g] = cfg[4 * g] | (cfg[4 * g + 1] << 8) |
+               (cfg[4 * g + 2] << 16) | (cfg[4 * g + 3] << 24);
+    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(w[0]));
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(w[1]));
+    __asm__ volatile("csrw pmpcfg2, %0" : : "r"(w[2]));
+    __asm__ volatile("csrw pmpcfg3, %0" : : "r"(w[3]));
     return 1;
+}
+
+/* Chunked NAPOT needs no alignment from the kernel, and a stack that grows by
+ * a 4 KiB step is just one more block, so the following two answers change
+ * together with the layout: 4 KiB windows get their one-step reserve, and
+ * process_stack_grow() stops demanding that stack_top divide the new size. */
+uint32_t plat_window_grow_reserve(void)
+{
+    return PLAT_STACK_BYTES;
+}
+
+int plat_window_needs_stack_alignment(void)
+{
+    return 0;
 }
 
 /* ---- bringing core 1 up ------------------------------------------------ */

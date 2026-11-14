@@ -62,9 +62,6 @@ static uint32_t stack_used(const struct proc *p);
  * one NAPOT entry isolates the task from the kernel and from every other
  * task.  The cost is that the code/data/guard split inside the window is
  * not enforced there; the build defines this for rp2350rv only. */
-#ifndef TOS_PMP_POW2_WINDOWS
-#define TOS_PMP_POW2_WINDOWS 0
-#endif
 
 /* Ticks a task may run before the timer takes the CPU away.  One tick at
    1000 Hz (main.c) makes a slice 1 ms.
@@ -391,19 +388,6 @@ static int align_up_ok(uint32_t v, uint32_t a, uint32_t *out)
     return 0;
 }
 
-#if TOS_PMP_POW2_WINDOWS
-/* Smallest power of two >= v, never below one grain.  A window must be a
- * power of two so a single NAPOT PMP entry covers it and nothing else; see
- * TOS_PMP_POW2_WINDOWS at the top of this file. */
-static uint32_t win_pow2(uint32_t v)
-{
-    uint32_t p = PLAT_APP_GRAIN;
-
-    while (p < v && p < PLAT_APP_MAX - PLAT_APP_BASE)
-        p <<= 1;
-    return p;
-}
-#endif
 
 /* Look a task up by pid.  Out of line on purpose: -O2 turns a sixteen-step
  * loop over a static array into ~300 bytes of unrolled code, and there are
@@ -1247,18 +1231,24 @@ static int win_alloc(proc_t *p, uint32_t bytes)
 {
     uint32_t cand = PLAT_APP_BASE;
     uint32_t end = PLAT_APP_MAX;
+    uint32_t align;
     int ok = 0;
 
     spin_lock(&proc_lock);
     for (;;) {
         uint32_t next = end;
 
-#if TOS_PMP_POW2_WINDOWS
-        /* A NAPOT region must start at a multiple of its own size. */
-        cand = align_up(cand, bytes);
+        /* A window is made of power-of-two blocks, so its base has to be
+         * aligned to the largest one: two 16 KiB blocks, as a 20 KiB window
+         * needs, start on a 16 KiB boundary.  Aligning to the whole window
+         * instead would put every non-power-of-two size on a boundary no
+         * allocator can reach. */
+        align = 1u;
+        while (align * 2u <= bytes && align * 2u <= end - PLAT_APP_BASE)
+            align *= 2u;
+        cand = align_up(cand, align);
         if (cand >= end)
             break;
-#endif
 
         /* The nearest window at or above `cand` bounds the gap we are
            standing in. */
@@ -1820,15 +1810,6 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     }
     if (win < PLAT_APP_GRAIN)
         win = PLAT_APP_GRAIN;
-#if TOS_PMP_POW2_WINDOWS
-    win = win_pow2(win);
-    if (win > app_total) {
-        kprintf("exec: '%s' needs a %u KiB window, the largest power-of-two "
-                "window is %u KiB\n", path, win / 1024u, app_total / 1024u);
-        proc_retire(p);
-        return NULL;
-    }
-#endif
     if (win_alloc(p, win) != 0) {
         kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
                 path, win / 1024u, win_largest_free() / 1024u);
@@ -2829,10 +2810,10 @@ uint32_t process_sbrk(uint32_t bytes)
 /* Called on every syscall from user mode when the board has no faulting
  * protection unit.  1 = the stack is intact (or was grown); 0 = the task has
  * run out and could not be grown, and the caller must kill it. */
-int process_stack_guard(void)
+int process_stack_guard(const regs_t *r)
 {
     proc_t *p = current;
-    uint32_t low, *gw;
+    uint32_t low, sp, *gw;
 
     if (!plat_user_stack_guard())
         return 1;
@@ -2840,14 +2821,19 @@ int process_stack_guard(void)
         return 1;
 
     low = p->stack_top - p->stack_size;
+    sp = r ? plat_frame_get_user_sp(r) : low;
     gw = (uint32_t *)low - 1;
-    if (*gw == USER_STACK_GUARD)
+
+    /* Two independent witnesses: the sp this call was made with (exact, and
+     * the usual case - a recursion that ran out then called something), and
+     * the canary (a write past the bottom without sp following it). */
+    if (sp >= low && sp < p->stack_top && *gw == USER_STACK_GUARD)
         return 1;
 
-    kprintf("\n[pid %d] stack overflow: guard word at 0x%08x destroyed\n",
-            p->pid, (uint32_t)gw);
+    kprintf("\n[pid %d] stack overflow (sp 0x%08x, stack 0x%08x..0x%08x)\n",
+            p->pid, sp, low, p->stack_top);
     *gw = USER_STACK_GUARD;          /* re-arm before the growth decision */
-    if (!process_stack_grow(low - 4u, low - 4u)) {
+    if (!process_stack_grow(sp < low ? sp : low - 4u, sp)) {
         kprintf("[pid %d] no room to grow it; killing\n", p->pid);
         return 0;
     }

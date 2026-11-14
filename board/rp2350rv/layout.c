@@ -20,9 +20,9 @@ const uint32_t PLAT_KERNEL_BASE = 0x20000000u;
 const uint32_t PLAT_APP_MAX    = 0x20080000u;   /* 512 KiB striped SRAM   */
 const uint32_t PLAT_RAM_TOP    = 0x20080000u;
 const uint32_t PLAT_RAM_BASE   = 0x20000000u;
-const uint32_t PLAT_APP_GRAIN  = 0x00004000u;   /* 16 KiB, 24 windows      */
+const uint32_t PLAT_APP_GRAIN  = 0x00001000u;   /* 4 KiB, 96 windows       */
 
-const uint32_t PLAT_STACK_BYTES = 8u * 1024u;
+const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
 /* littlefs starts at flash 0x80000 (512 KiB), the same offset the ARM image

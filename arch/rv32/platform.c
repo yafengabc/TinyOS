@@ -364,6 +364,11 @@ void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 void plat_frame_set_ret(regs_t *r, uint32_t val) { r->a0 = val; }
 uint32_t plat_frame_get_ret(const regs_t *r)    { return r->a0; }
 
+uint32_t plat_frame_get_user_sp(const regs_t *r)
+{
+    return r->sp;
+}
+
 int plat_fault_is_user(void *frame)
 {
     return from_user((const regs_t *)frame);

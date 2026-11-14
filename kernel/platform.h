@@ -418,6 +418,11 @@ void plat_enter_user(void *frame) __attribute__((noreturn));
  * finish, because the kernel stack below it is not resumable. */
 int plat_fault_is_user(void *frame);
 
+/* The user stack pointer this frame was taken with.  A port with no faulting
+ * protection unit (RP2040, PC) uses it to notice a stack that ran off its
+ * bottom, because nothing else will. */
+uint32_t plat_frame_get_user_sp(const regs_t *r);
+
 /* Stop the machine. */
 void plat_panic_halt(void) __attribute__((noreturn));
 

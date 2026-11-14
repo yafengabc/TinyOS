@@ -1142,6 +1142,13 @@ void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 void plat_frame_set_ret(regs_t *r, uint32_t val) { r->r0 = val; }
 uint32_t plat_frame_get_ret(const regs_t *r)    { return r->r0; }
 
+uint32_t plat_frame_get_user_sp(const regs_t *r)
+{
+    /* The core stacked the exception frame on the PSP, so the user sp before
+     * the trap is one frame above the copy start.S keeps. */
+    return r->hw + ARM_HW_SIZE;
+}
+
 int plat_fault_is_user(void *frame)
 {
     return frame_is_user((const regs_t *)frame);

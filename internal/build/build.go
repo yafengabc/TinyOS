@@ -579,7 +579,6 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// window must be one naturally aligned power-of-two region.  The
 		// window allocator rounds sizes up and aligns the base to the
 		// size; see kernel/process.c and plat_board_task_protect().
-		archFlags = append(archFlags, "-DTOS_PMP_POW2_WINDOWS=1")
 	}
 
 	// How many harts.  Left undefined for a uniprocessor so that every
