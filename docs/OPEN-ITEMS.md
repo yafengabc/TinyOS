@@ -363,6 +363,16 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
    两个方向都在真机验过（旧 `rx` 上确实一行报错就停）。
 
 
+
+**2026-11-14 复测（UART0 侧，本轮所有改动之后）**：`scripts/esp-c3/accept.py`
+**24/24**。第一次跑是 22/24，两条都不是内核问题：
+
+1. `source runs the command file` 报 `/bin/hello` 不存在 —— 板上的 littlefs 是**旧
+   镜像**（`/bin` 少了 9 个程序），完整重刷内核 + 文件系统后恢复。这和上面第 8 条
+   `NAK r1` 是同一类事故：内核与文件系统不是同一次构建出来的；
+2. `reboot resets the chip` 仍在等旧字符串 `rebooting...`，而 `user/reboot.c`
+   早已打印 `reboot: resetting the machine`；已改测试。
+
 **尾巴**：本机只插了 CH343（COM4 = UART0），原生 USB 口没线，所以 USJ 的
 RX 中断和 TX 环只在代码层对称实现，没在真机跑到主机侧。插线后要验：用新出现
 的 COM 口传一遍文件；`cat` 一个大文件确认输出不缺字；`INT_RAW` 里
