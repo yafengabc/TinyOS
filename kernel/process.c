@@ -1631,21 +1631,6 @@ regs_t *process_ktask_syscall(regs_t *r)
    has to be one the protection unit can describe and the window grain can
    hold.  Both paths use this so a hint cannot bypass the check the ELF note
    has always had. */
-/* Slack reserved under the stack of a task that did not declare one, so the
- * first unexpected recursion can double the stack instead of dying.
- *
- * A task that carries TOS_STACK() has said how deep it goes: its window is
- * then exact, which is what keeps a resident program (the shell) at one grain
- * instead of paying for a step it will never take.
- *
- * A board with no faulting protection unit has nothing to grow from - the
- * overflow is a silent write through the heap instead of a fault - so it
- * answers 0 and keeps the windows tight. */
-__attribute__((weak)) uint32_t plat_window_grow_reserve(void)
-{
-    return PLAT_STACK_BYTES;
-}
-
 static int stack_request_ok(uint32_t v)
 {
     if ((v & (v - 1u)) != 0 || v < PLAT_PAGE_SIZE)
@@ -1774,9 +1759,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     uint32_t img = hint.span > raw_size ? hint.span : raw_size;
     uint32_t win_need = img;
     uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
-    uint32_t grow = hint.stack_ask ? 0 : plat_window_grow_reserve();
     if (add_u32_ok(win_need, stk, &win_need) < 0 ||
-        add_u32_ok(win_need, grow, &win_need) < 0 ||
         add_u32_ok(win_need, hint.heap_ask, &win_need) < 0 ||
         add_u32_ok(win_need, HEAP_GUARD, &win_need) < 0) {
         kprintf("exec: '%s' window size overflows\n", path);
