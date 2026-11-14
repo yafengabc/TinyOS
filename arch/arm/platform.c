@@ -351,7 +351,19 @@ int plat_cpu_id(void)
     return (int)plat_board_cpu_id();
 }
 
-void plat_init(void)
+/* Exception priorities and fault enables live in the SCB, and the SCB is
+ * per core: every core has its own SHPR1/2/3 and its own SHCSR.  Both cores
+ * have to run this, which is why it is a function rather than four writes
+ * inside plat_init().  A secondary core used to enter the scheduler with
+ * SHPR1/2/3 = 0 and SHCSR = 0, and the first MPU violation that landed on it
+ * escalated: with SHCSR.MEMFAULTENA clear the MemManage becomes a FORCED
+ * HardFault, so the report said "HardFault" with hfsr=0x40000000 and
+ * shcsr=0x00000004 instead of naming the access that was denied (measured on
+ * the RP2350 with msh scheduled on core 1; the identical test on core 0 gave
+ * the expected MemManage).  Its fault handler also sat at priority 0, above
+ * the tick - the deadlock described below, on the core least likely to be
+ * watched. */
+static void arm_exceptions_init(void)
 {
     /* SysTick must outrank SVCall.  A task that blocks inside a syscall
        idles in sched_idle() with SVCall still marked active (there is no
@@ -393,6 +405,19 @@ void plat_init(void)
                             ARM_SHCSR_BUSFAULTENA |
                             ARM_SHCSR_USGFAULTENA);
 #endif
+}
+
+/* A secondary core calls this from cpu_secondary_main() before it touches the
+ * scheduler, for the same reason it calls plat_timer_start_cpu(): these are
+ * per-core registers and nothing was inherited from core 0. */
+void plat_cpu_secondary_init(void)
+{
+    arm_exceptions_init();
+}
+
+void plat_init(void)
+{
+    arm_exceptions_init();
 
 #if !defined(TOS_ARM_M0P) && !defined(TOS_ARM_NO_MPU)
     /* Nothing here touches the MPU or its MAIR.  Both are programmed by the

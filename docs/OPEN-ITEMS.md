@@ -3144,6 +3144,56 @@ rp2350rv 时钟顺序、RV32 3.5 MiB littlefs）后在本机同一块 ATK-DNRP23
 33.4 那条"不碰 RTS"的前提），所以板子还在跑固件时要先发 Ctrl-D 或手按 BOOTSEL，
 否则它会打出 `no BOOTSEL drive: hold BOOTSEL and replug, or --no-flash`。
 
+### 33.6 第二个核从来没设过自己的 SCB（2026-11-15 发现并修）
+
+在 `rp2350smp` 上跑完整一轮时，**刷完第一次启动**的 `prot rodata` 报的是
+`HardFault` 而不是 `MemManage`：
+
+```
+[pid 3] HardFault at 0x200240f8
+  cfsr=0x00000082 hfsr=0x40000000 mmfar=0x2002422e bfar=0x2002422e
+  sau_ctrl=0x00000001 sau_type=0x00000008
+  aircr=0xfa050000 shcsr=0x00000004
+  shpr1=0x00000000 shpr2=0x00000000 shpr3=0x00000000
+```
+
+同意镜像上紧接着的 `prot heap` 却是正常的 `MemManage`（`shcsr=0x00070001`、
+`sau_ctrl=0`），再后来手动重跑三次 `prot rodata` 也全都正常。**间歇性**，就是全部线索：
+两次 fault 落在**不同的核**上。
+
+根因：`SHCSR`（`MEMFAULTENA`/`BUSFAULTENA`/`USGFAULTENA`）和 `SHPR1/2/3`
+（异常优先级）都是 **SCB 的每核寄存器**，`arch/arm/platform.c::plat_init()` 只在
+**CPU0** 上设过；`cpu_secondary_main()` 只登记 CPU、起 timer、开中断，
+**一次都没设**。于是：
+
+- CPU1 上 `SHCSR=0` ⇒ MemManage 没有使能，`hfsr` 的 FORCED 位置 1，
+  违规被升级成 `HardFault`，报告里说不出是哪次访问被拒；
+- CPU1 上 `SHPR1/2/3=0` ⇒ fault 优先级 0，高于 tick。这正是源码里早写明、
+  在 CPU0 上专门避开的那个死锁（fault handler 里没有可运行任务时 WFI 卡死），
+  只是从没人在 CPU1 上检查过。
+- `sau_ctrl=1` 是 CPU1 自己那份 SAU 的残留状态，CPU0 是 0；它不改变结论，
+  但同样说明"每核状态没初始化"。
+
+修复（3 个文件，都是把已有设置变成"每核都要跑"）：
+
+1. `arch/arm/platform.c`：把 `plat_init()` 里那两块（`SHPR3/2` + `SHPR1` + `SHCSR`）
+   抽成 `arm_exceptions_init()`，`plat_init()` 调用它；
+2. 新增 `plat_cpu_secondary_init()` → `arm_exceptions_init()`；
+3. `kernel/platform.h` 声明 + `kernel/cpu.c` 给 weak 空默认，并在
+   `cpu_secondary_main()` 里 `plat_timer_start_cpu()` 之前调用
+   （rv32 / x86 没有每核 SCB，走空默认，零成本）。
+
+**验证**：十目标构建全过，QEMU `x86`/`rv32`/`arm`/`rv32smp` smoke 全 OK；
+刷 `rp2350smp` 跑完整一轮 **16/16**，`prot rodata` 在 **cpu 1** 上（`ps` 显示
+msh `c=1`，与出问题那次同一个核）报的是正常的 `MemManage`
+（`hfsr=0`、`shcsr=0x00070001`、`sau_ctrl=0`），整轮 5 处 MemManage、**0 处
+HardFault**；`smpbench` 1.97x、200 轮 `dd`+`rm` PASS。
+
+**教训**：凡是"只在 CPU0 看起来正常"的 per-core 状态（异常优先级、fault 使能、
+SAU、MPU 使能位、VTOR），都要在 secondary 路径上再设一次。这次是靠"刷完第一次
+启动恰好把第一个用户故障调度到 CPU1"才暴露的，重跑就消失——**"间歇性 + 重跑就好"
+在 SMP 上第一个该怀疑的就是每核寄存器没初始化**。
+
 ## 34. 未实现的设计项：MPU/PMP 的段接口
 
 现在三个后端吃的是同一个**TOR 形状**的签名：

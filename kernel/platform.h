@@ -112,6 +112,14 @@ uint32_t plat_tick_hz(void);
  * interrupt-enable CSR are per hart - hart 1 inherits nothing from hart 0. */
 void plat_timer_start_cpu(void);
 
+/* Per-core processor state that core 0 set during plat_init() and that a
+ * secondary core does not inherit: on ARM that is the SCB's exception
+ * priorities and its fault-enable bits.  Called from cpu_secondary_main()
+ * before the core first enters user mode.  Weak default does nothing, so
+ * architectures whose secondary cores need no such setup (riscv, x86) are
+ * unaffected. */
+void plat_cpu_secondary_init(void);
+
 /* Bring CPU `id` out of reset.  Boards whose secondaries are already
  * spinning on cpu_release (qemu-virt) leave the weak default in place and
  * return 0; boards where the second core sits in a boot-ROM wait loop

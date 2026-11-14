@@ -129,6 +129,14 @@ void cpu_init(void)
     }
 }
 
+/* Most ports have nothing per-core to set up beyond the timer.  ARM is the
+ * exception: the exception priorities and the fault-enable bits are in that
+ * core's own SCB, so a secondary core that skips them reports its first MPU
+ * violation as a HardFault and runs its fault handler at priority 0. */
+__attribute__((weak)) void plat_cpu_secondary_init(void)
+{
+}
+
 /* Called on a secondary CPU, from start.S, with its own kernel stack and
  * trap vector already installed.  There is no kmain here: the kernel is up,
  * the only thing missing is somebody to run tasks. */
@@ -149,6 +157,7 @@ void cpu_secondary_main(void)
 
     /* This CPU needs its own timer: mtimecmp is per hart, so the one the
      * boot CPU armed says nothing about us. */
+    plat_cpu_secondary_init();
     plat_timer_start_cpu();
 
     plat_irq_enable();
