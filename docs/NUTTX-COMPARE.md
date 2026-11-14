@@ -42,14 +42,37 @@
 PR 里还有一句 "Remove rp23xx chip hw spinlocks/testset"，说明 Hazard3 上那套 SIO
 自旋锁不能用——这点我们早就绕开了（`plat_spin_*` 用 `amoswap.w.aq`）。
 
-### 2.2 ARM MPU 的 region 划分
+### 2.2 ARM MPU 的 region 划分（顺带纠正一个我写错的前提）
 
-`arch/arm/src/**/arm_mpu.c` 与 `arm_mpu.h`：region 数量有限（M33 是 8 条）时怎么
-把 `[base, top)` 拆成 2 的幂块、怎么处理 sub-region disable。我们正在为
-`rp2350`（PMSAv8）写分块后端，这段是最好的参考实现。
+NuttX 按架构分成两个文件，做法完全不同：
 
-对照我们的：`board/rp2350rv/platform.c` 的 `pmp_cover()`（NAPOT 版，已落地但未上机）
-和 `arch/arm/platform.c` 现有的固定 region 划分。
+- **`arch/arm/src/armv8-m/arm_mpu.c`**（M23/M33，即 RP2350）：region 是
+  **base + limit** 两个寄存器，32 字节粒度，**没有 2 的幂要求**：
+
+  ```c
+  limit = (base + size - 1) & MPU_RLAR_LIMIT_MASK;
+  rbase = base & MPU_RBAR_BASE_MASK;
+  putreg32(region, MPU_RNR);
+  putreg32(rbase | flags1, MPU_RBAR);
+  putreg32(limit | flags2 | MPU_RLAR_ENABLE, MPU_RLAR);
+  ```
+
+  也就是说 `[base, base+size)` 任意长度都能一条 region 描述，和 C3 的 TOR 一个形状。
+- **`arch/arm/src/armv7-m/arm_mpu.c`**（M3/M4/M7）：RASR 只有"大小字段 + SRD
+  子区"，这里的 2 的幂才是硬约束，所以他们写了
+  `mpu_log2regionceil()` 取最近的 2 的幂，再用 `mpu_subregion()` 把首尾的 1/8
+  子块关掉来逼近任意区间（`g_ls_regionmask[9] = {0,1,3,...,0xff}`）。**分块/对齐的
+  那套麻烦只在 v7-M 存在。**
+
+  另外它的 region 管理是一套小 API：`mpu_allocregion()`（位图 + `ffs(~mask)`）、
+  `mpu_modify_region(region, …)`（切换时复用）、`mpu_configure_region()`（分配一个）、
+  `mpu_freeregion()`、`mpu_dump_region()`（调试打印）。我们目前是写死的 region 号，
+  没有位图。
+
+我们自己的 `arch/arm/platform.c:803-830` 已经在用 v8 的 RBAR/RLAR 形式
+（`limit = base + size - ARM_MPU_MIN_SIZE`），**所以 RP2350 的 4 KiB 窗口根本不需要
+分块**——只要改常量、并把 `plat_window_needs_stack_alignment()` 改成 0。之前
+OPEN-ITEMS 31.3 里写的"8 条 region、要算着用"是错的，那条已经改正。
 
 ### 2.3 MTD + `BIOC_XIPBASE`
 

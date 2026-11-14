@@ -2594,12 +2594,20 @@ blocks than the budget`，该任务访问未覆盖区域会 fault —— 响的�
 
 然后继续跑完；恢复 32 KiB 默认栈后无任何误报，`SMOKE TEST OK`。
 
-### 31.3 还剩：`rp2350`（Cortex-M33 / PMSAv8）
+### 31.3 还剩：`rp2350`（Cortex-M33 / PMSAv8）——比原计划小得多
 
-ARM 侧是同一套数学，但预算只有 **8 条 region**（镜像 ≤2 + data 1 + 栈 1~2，余量
-不大），而且它是目前验证最充分的端口（§28 的 200 轮）。建议顺序：先让
-`rp2350rv` 在真机上过一轮，确认分块后端和 `win_alloc` 的对齐没问题，再照搬到
-ARM —— 那时它就是"同一个算法换一套寄存器写"。
+**修正**：PMSAv8 的 region 是 `RBAR = base` / `RLAR = limit` 两个寄存器，32 字节
+粒度，**没有 2 的幂要求**（分块/对齐那套麻烦只存在于 ARMv7-M 的 RASR+SRD，见
+`docs/NUTTX-COMPARE.md` §2.2）。我们的 `arch/arm/platform.c` 早就在用这个形式，
+所以把 `rp2350` 拉到 4 KiB 只需要：
+
+1. `board/rp2350/layout.c`：grain 16K → 4K、`PLAT_STACK_BYTES` 8K → 4K；
+2. `board/rp2350/platform.c`：`plat_window_needs_stack_alignment()` → 0、
+   `plat_window_grow_reserve()` → `PLAT_STACK_BYTES`；
+3. `internal/build/build.go` 的 `WindowGeometry()` 里 rp2350 的 16 KiB 注释/断言；
+4. 重跑 §28 的 SMP 200 轮与 `deep`。
+
+`pmp_cover()` 那套分块逻辑只在 `rp2350rv`（NAPOT）需要，ARM 不复制。
 
 ## 32. PIO 从未上过真机（2026-11-14，待 RP2040 / RP2350）
 
