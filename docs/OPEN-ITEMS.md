@@ -2757,3 +2757,77 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 真机通过后要回来改三处状态：`board/rp2040/README.md` 的 PIO 行（◐ → ✅）、
 `board/rp2350/README.md` 与 `board/rp2350rv/README.md` 补一行 PIO、`docs/PIO.md`
 的"验证"小节。
+
+## 33. 待真机清单（2026-11-14 汇总）
+
+这一节只列**代码已落地、等板子**的项，按“刷哪个镜像、跑什么、判什么”写。上机
+顺序建议从上到下：前两项是这一轮刚改的，越早暴露问题越省事。
+
+| # | 镜像 | 要做的事 | 判据 |
+| --- | --- | --- | --- |
+| 1 | `rp2350rv` / `rp2350rvsmp` | 复测 PMP 修复后的三件事 | 见 33.1 |
+| 2 | `rp2350` / `rp2350smp` | 4 KiB 窗口（新） | 见 33.2 |
+| 3 | `rp2350smp` / `rp2350rvsmp` | §29.1 的 `dd`+`rm` 200 轮 | 见 §29.1 |
+| 4 | `rp2350rv` / `rp2350rvsmp` | §29.2 的 USB 中断版枚举（上次主机侧 COM17 被独占，未完成） | 见 §29.2 |
+| 5 | `rp2040` | §30.3 的 4 KiB 窗口 + 软件栈守卫 | 见 §30.3 |
+| 6 | `rp2040` / `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 |
+
+### 33.1 `rp2350rv`：PMP 修复后的三件事
+
+1. **`deep 3` 现在应该长栈**：`arch/rv32/platform.c` 已把 growth 的地址改成
+   `mtval ? mtval : sp`（Hazard3 的 `mtval` 恒为 0）。期望输出
+   `[pid N] stack grown to 8 KiB` + `journal intact`；如果还报
+   `4 KiB stack and no room to double it`，把 `ps` 里这个任务的 `wink` 一起贴回来
+   （窗口应当是 20 KiB，含 4 KiB 增长余量）。
+2. **`prot dev 0x40070000`**（RP2350 的 UART0 数据寄存器）：这就是 `prot null`
+   那个问题的定性实验。fault → bootrom 硬连线的 8..10 条目只覆盖 ROM，“能读 0”
+   记成已知限制即可；**不 fault → 用户态能写外设，属于隔离漏洞**，要单独记一条。
+3. **`prot heap` / `prot stack`** 仍应 fault。注意 `prot heap` 的探针是
+   `brk + 64`，而 `rp2350rv` 的布局把 `brk` 向上取整到页，所以**只有 `brk` 恰好
+   页对齐时它才落在护栏洞里**——测出来 survive 时先看 `brk` 是否对齐，再判断是
+   不是布局问题。
+
+### 33.2 `rp2350`（Cortex-M33）：4 KiB 窗口
+
+改动只有三处：`layout.c` 的 grain 16K→4K、栈 8K→4K，`platform.c` 的两个钩子
+（增长余量 4 KiB、栈不需要按大小对齐）。PMSAv8 是 base/limit、32 字节粒度，所以
+`arch/arm/platform.c` 现有的三段（code / data / stack）切分**本身就是精确的**，
+不需要分块。
+
+| 项目 | 期望 |
+| --- | --- |
+| `ps` 里 `msh` | 16 KiB（不变） |
+| `ps` 里 `sh` | 36 KiB（原来是 48） |
+| `ps` 里 `py` | 44 KiB（原来是 48） |
+| `prot rodata` / `heap` / `stack` / `null` | **四条全部 fault**（32 字节粒度，rodata 也是 RX） |
+| `deep 3` | `stack grown to 8 KiB` |
+| `rp2350smp` 的 `smpbench` | 仍 ≥1.8x（布局变小不该影响，但这是回归基线） |
+
+### 33.3 已在这边验过、不用再测的
+
+- x86 的软件栈守卫：临时 4 KiB 栈 + `deep 3`，能看到 `stack overflow` 并长到
+  8 KiB；恢复 32 KiB 栈后无假阳性（QEMU `SMOKE TEST OK`）。
+- C3 的 4 KiB 窗口 / 4 KiB 默认栈 / 一拍增长：`prot` 四连、`deep 3`、`dd`+`rm`、
+  `accept.py` 24/24。
+- `prot dev` 本身：QEMU rv32 上 `prot dev 0x10000000` 正确 fault，说明测试路径可用。
+
+## 34. 未实现的设计项：MPU/PMP 的段接口
+
+现在三个后端吃的是同一个**TOR 形状**的签名：
+
+```c
+plat_task_protect(win_base, win_end, wx, brk, stack_low, stack_top)
+```
+
+TOR 后端（C3）直接用；NAPOT 后端（rp2350rv）要在 `pmp_cover()` 里重新拆；PMSAv8
+后端（rp2350）在 `arch/arm/platform.c` 里自己切三段。NuttX 的做法是把 PMP 藏在和
+ARM 同一个 `mpu_configure_region(base, size, flags)` 后面，内核只谈“段和权限”。
+
+想做的重构：内核传一个段列表（image R+X / data+heap R+W / stack R+W，洞不出现），
+各后端自己编码。收益是调用代码只剩一份、TOR 与 NAPOT 的差别彻底留在后端；代价是
+要动三块目前最敏感的代码（ARM 的 MPU 切换、rv32 的 PMP 切换、process.c 的窗口
+账本），所以**建议等 rp2350rv / rp2350 真机稳定一轮之后再动**。
+
+另一个可以顺手借的点：region 编号用位图分配（NuttX 的 `ffs(~mask)`），而不是现在
+写死的“entry 5 是 trap vector、0..14 是块”。Hazard3 上现在没问题，但如果以后有
+第二个 RV 平台从 bootloader 手里接管 PMP，就需要先跳过 `L` 位占用的条目。
