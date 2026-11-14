@@ -2793,6 +2793,13 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 全套，全部 PASS（`smpbench` 1.94x）。日志
 `build/sizeprobe/manual_reset_arm.log`，脚本 `manual_reset_accept.py`。
 
+顺着这个 RESET 后的状态又跑了 **100 次 `dd of=/x bs=4096 count=8`**（不 `rm`，
+`build/sizeprobe/dd100.log`）：ok=100、err=0、无输出=0、启动 banner=0，
+平均 1.05 s/轮；`df` 停在 352 KiB / 3.5 MiB（9%，覆盖写不会累积），
+`dd if=/x bs=4096 count=8` 回读 `pattern verified`；`uptime` 274 s 连续、
+`cpus=2` 双核在线。用 `uptime` 复核比只看 banner 可靠——一次静默复位可能
+来不及打启动日志，但 uptime 一定归零。
+
 构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
 `rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
 三个都是 `SMOKE TEST OK`。
