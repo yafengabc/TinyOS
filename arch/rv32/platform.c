@@ -123,14 +123,21 @@ regs_t *trap_handler(regs_t *f)
          * instruction is retried - it faulted before writing, so there is
          * nothing to undo.  Everything else (and a growth that the port
          * cannot encode, or that the heap is in the way of) dies as before. */
+        /* Hazard3 hardwires mtval to zero (measured on the RP2350: every
+         * store fault reports 0), so the faulting address is unavailable.
+         * sp is the next best witness and is what the growth decision turns
+         * on: if sp left the stack the write is a candidate, and
+         * process_stack_grow() refuses it anyway when it did not. */
+        uint32_t fault_addr = f->mtval ? f->mtval : f->sp;
         if ((cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT) &&
-            process_stack_grow(f->mtval, f->sp))
+            process_stack_grow(fault_addr, f->sp))
             return f;
 
         /* A user program trapped: kill it and keep the system alive. */
         kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
                 cause_name(cause), f->mepc);
-        if (cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT)
+        if ((cause == RV_MCAUSE_LOAD_FAULT ||
+             cause == RV_MCAUSE_STORE_FAULT) && f->mtval)
             kprintf(" (address 0x%08x)", f->mtval);
         kprintf("\n");
         return process_exit(f, 139);

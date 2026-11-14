@@ -2609,6 +2609,26 @@ RW/no-X 区，取指即 fault（原注释说"代价是代码可写"，实际是"
 4. §31.1 那张"R+X / R+W"三段表描述的是 `4ef146c` 的旧布局，已不成立，
    以本节为准。
 
+**2026-11-14 晚补记**：上面第 3 条（`deep 3` 不长栈）已修。
+`arch/rv32/platform.c` 的 growth 调用改成 `fault_addr = f->mtval ? f->mtval : f->sp`
+——Hazard3 的 `mtval` 恒为 0，所以之前每次都是 `addr = 0 < low`，直接走到"没地方"
+分支。用 `sp` 当证人正是 `process_stack_grow()` 原本的设计前提（`sp` 出界才考虑）。
+顺带把 fault 打印里 `(address 0x%08x)` 改成只在 `mtval` 非零时打印，免得每次都
+报 `address 0x00000000`。
+
+第 1 条（`prot rodata`）和第 2 条（`prot null`）需要新决策，不是笔误级别：
+
+- **rodata**：Hazard3 的 PMP 是 4 KiB 粒度，**一个页里无法表达两种权限**，所以
+  只要镜像的 `wx` 落在第 0 页，"整张镜像 RWX"就是唯一可编码的布局。真要做
+  W^X，得让 `user.ld` 把 `.data` 推到 4 KiB 边界（现在 `ALIGN(32)`），代价是每个
+  程序最多多 4 KiB 镜像、窗口也跟着涨——**C3 上会把 `msh` 的 `TOS_ONE_GRAIN`
+  顶破**（16K → 20K）。所以这是"每任务 4 KiB 换 rodata 写保护"的全局取舍；
+  而 `rp2350`（PMSAv8，32 字节粒度）可以按真实 `wx` 精确切分，**不需要这个代价**。
+- **null**：读数 0 落在 bootrom 硬连线的 8..10 条目里。要确认的是**负面影响
+  有多大**：如果那几条也是 RW，用户态还能直接写外设寄存器，那就不只是"能读 ROM"。
+  测试办法是给 `prot` 加一个 `prot dev`（写一个 UART 寄存器）看是否 fault；结果
+  决定这条是"记录为不可保护"还是"必须找 ROM/OTF 的办法"。
+
 ### 31.1 `rp2350rv`：分块 NAPOT，4 KiB 步子
 
 `board/rp2350rv/platform.c` 的 `plat_board_task_protect()` 不再要求窗口是 2 的
