@@ -1669,3 +1669,15 @@ int plat_window_needs_stack_alignment(void)
 {
     return 0;
 }
+
+/* The MPU can bound a stack but it cannot grow one: Cortex-M exception entry
+ * pushes its frame onto PSP, and a push that lands below stack_low fails
+ * (MSTKERR) with no frame left to return to.  arch/arm/platform.c leaves a
+ * writable landing strip just under the stack so that push succeeds; the
+ * canary checked on every syscall is what notices the overrun and calls
+ * process_stack_grow() before the next push has to go any deeper.  This is
+ * the same mechanism the MPU-less ports use, not a second fault path. */
+int plat_user_stack_guard(void)
+{
+    return 1;
+}

@@ -803,9 +803,9 @@ void plat_spin_release(volatile int *v)
 #if defined(TOS_ARM_MPU_V8)
 
 /* PMSAv8.  Region n: RBAR = base | AP | XN, RLAR = limit | AttrIndx << 1 |
- * enable.  base and limit are 32-byte granular, and a region still has to
- * be a power of two with base aligned to it - the limit form does not buy
- * arbitrary boundaries.
+ * enable.  RBAR/RLAR are a base and an inclusive limit at 32-byte
+ * granularity - there is NO power-of-two size rule here (that was the
+ * ARMv7-M RASR+SRD shape; see docs/NUTTX-COMPARE.md 2.2).
  *
  * AttrIndx 0 is SRAM: normal, non-cacheable.  The RP2350's M33 has no data
  * cache, and the LCD's DMA reads row buffers straight out of this memory,
@@ -820,6 +820,19 @@ void plat_spin_release(volatile int *v)
 #define MPU_ATTR_WINDOW  (1u << 1) | 1u   /* AP 01 RW both, XN              */
 #define MPU_ATTR_CODE    (3u << 1)        /* AP 11 RO both, executable      */
 #define MPU_ATTR_GUARD   (0u << 1) | 1u   /* AP 00 priv RW only, XN         */
+
+/* Top slice of the guard hole that user mode MAY write.  On Cortex-M an
+ * exception pushes its frame onto PSP, so a stack that has run past its
+ * bottom makes the exception entry itself fault (MSTKERR, cfsr=0x92) before
+ * any fault handler can look at it - and with the push refused, there is no
+ * frame to return to.  Letting the first few bytes below stack_low stay
+ * writable means the push succeeds; the task then reaches its next syscall,
+ * where process_stack_guard() sees sp outside the stack and grows it.
+ *
+ * 2560 B covers deep's 2 KiB frame plus a frame's prologue/push.  The rest
+ * of the 4 KiB hole stays MPU_ATTR_GUARD, which is what keeps prot heap
+ * (brk+64, near the bottom of the hole) and prot stack faulting. */
+#define ARM_STACK_LANDING 0xA00u
 
 static void mpu_region(uint32_t n, uint32_t base, uint32_t size, uint32_t attr)
 {
@@ -1048,9 +1061,21 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
     /* A stack that grows past its bottom hits this block: user mode has no
        access, the kernel still does.  Its size is the hole process.c keeps
        between the break and the stack, so no legitimate heap write lands
-       here. */
+       here.
+       PMSAv8 splits that hole: the top ARM_STACK_LANDING bytes are left
+       writable so an exception taken just after sp ran off the bottom can
+       still push its frame (otherwise MSTKERR leaves no frame at all), and
+       the lower part stays MPU_ATTR_GUARD so prot heap / prot stack still
+       fault.  ARMv7-M and M0+ keep the whole hole denied. */
+#if defined(TOS_ARM_MPU_V8)
+    mpu_region(6, stack_low - ARM_STACK_LANDING, ARM_STACK_LANDING,
+               MPU_ATTR_WINDOW);
+    mpu_region(7, stack_low - PLAT_HEAP_GUARD,
+               PLAT_HEAP_GUARD - ARM_STACK_LANDING, MPU_ATTR_GUARD);
+#else
     mpu_region(7, stack_low - PLAT_HEAP_GUARD, PLAT_HEAP_GUARD,
                MPU_ATTR_GUARD);
+#endif
 
     if (!mpu_on[cid]) {
         mpu_on[cid] = 1;

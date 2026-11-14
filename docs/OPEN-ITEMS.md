@@ -2790,7 +2790,7 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 | # | 结果 |
 | --- | --- |
 | 1 §33.1 | **PASS**：`deep 3` → `stack grown to 8 KiB` + `journal intact`；`prot dev 0x40070000` **FAULT**；`prot heap` / `prot stack` FAULT；`ps` 里 msh 16 KiB。刷完、ROM RESET 稳态、硬件 RESET 三轮一致 |
-| 2 §33.2 | **大部分 PASS，1 项 FAIL**：ps msh 16 KiB、`prot` 四条全 FAULT、`prot dev` FAULT、`smpbench` **1.97x**、§29.1 200 轮 PASS、§22 BAD=0；**`deep 3` 不长栈**，见 33.2.1 |
+| 2 §33.2 | 首轮 **`deep 3` FAIL**（见 33.2.1），当晚已修并复验 **全 PASS**：ps msh 16 KiB、`prot` 四条全 FAULT、`prot dev` FAULT、`smpbench` **1.98x**、`deep 3` GROW 8 KiB + journal intact、§29.1 200 轮 PASS、§22 BAD=0 |
 | 3 §29.1 | **PASS**：`rp2350smp` 与 `rp2350rvsmp` 各 200 轮 `dd`+`rm`，errors=0、df 回收 YES、存活 OK |
 | 4 §29.2 | **PASS（判据要改）**：见下面的 DTR 说明 |
 
@@ -2843,14 +2843,14 @@ ROM/OTF 的办法。
 | `ps` 里 `sh` | 36 KiB（原来是 48） |
 | `ps` 里 `py` | 44 KiB（原来是 48） |
 | `prot rodata` / `heap` / `stack` / `null` | **四条全部 fault**（32 字节粒度，rodata 也是 RX）—— 实测四条全过 |
-| `deep 3` | `stack grown to 8 KiB` —— **实测 FAIL，见 33.2.1** |
-| `rp2350smp` 的 `smpbench` | 仍 ≥1.8x —— 实测 **1.97x**（single 140 ms / dual 142 ms） |
+| `deep 3` | `stack grown to 8 KiB` —— 首轮 FAIL，修复后 **PASS**（见 33.2.1） |
+| `rp2350smp` 的 `smpbench` | 仍 ≥1.8x —— 首轮 1.97x，修复后 **1.98x** |
 
 `ps` 里 `sh` 36 KiB / `py` 44 KiB 这两行**没有直接观测**：默认只有 `msh` 一个
 进程，要在它运行期间另开一路 `ps` 才能看到，本轮没做。其余行在刷完、ROM RESET、
 硬件 RESET 三轮都一致。
 
-### 33.2.1 新开口：`deep 3` 在 Cortex-M33 上不长栈（2026-11-14 真机）
+### 33.2.1 `deep 3` 在 Cortex-M33 上不长栈（2026-11-14 真机，当晚已修）
 
 **现象**（`rp2350smp`，三轮一致，`build/sizeprobe/s33_arm.log`）：
 
@@ -2878,22 +2878,36 @@ growth; rv32's process_stack_grow() does"。全树只有两个地方会调
 syscall），只有最深帧才 `sleep()`，而 `process_stack_guard()` 只在 syscall
 入口检查。等得到 syscall 时早就 MSTKERR 了。
 
-**候选修法（按代价从小到大，都没上板）**：
+**已落地修复（当晚，三处代码）**：
 
-1. guard 洞顶部划出一小块"异常压栈着陆区"（用户 RW、XN），让压栈成功，
-   随后越界写变成完整帧的 `DACCVIOL`；在 `arm_handle_fault()` 里对
-   `f->vec==4 && (cfsr & DACCVIOL)` 调
-   `process_stack_grow(fault_addr(f), plat_frame_get_user_sp(f))`，成功就返回
-   `f` 重试。要先确认两件事：Cortex-M 的 stacking 用的是用户还是特权访问；
-   landing 区要覆盖 `deep` 每层 2 KiB 的跨度，不能只留 32 字节。
-   `prot heap` 的探针是 `brk+64`（在 guard 洞底部），这样切仍能保持 fault。
-2. 用编译器的栈探测（`-fstack-limit-*`）在函数入口经 syscall 请求增长，
-   把检测点提前到压栈之前；代价是改所有用户程序的编译选项。
-3. 退回 8 KiB 默认栈；但 `ps` 里 msh 会从 16 KiB 涨到 20 KiB，与本节表格的
-   期望冲突，等于放弃 4 KiB 窗口在 ARM 上的收益。
+- `arch/arm/platform.c`：PMSAv8 的 guard 洞拆成两段——顶部
+  `ARM_STACK_LANDING = 2560 B` 用 `MPU_ATTR_WINDOW`（用户 RW、XN），
+  下部 1536 B 仍是 `MPU_ATTR_GUARD`（仅特权 RW）。着陆区让异常压栈成功，
+  下半段保证 `prot heap`（探针 `brk+64`，在洞底）与 `prot stack` 仍 fault。
+  ARMv7-M / M0+ 分支不动；顺手改掉那段"PMSAv8 仍要求 2 的幂"的过时注释。
+- `board/rp2350/platform.c`：`plat_user_stack_guard()` 返回 1，让
+  `process_stack_guard()` 在每次 syscall 检查 canary / sp 并调
+  `process_stack_grow()`。走的是**已有**的软件守卫路径，没有新增 fault 分支。
+- `kernel/process.c`：`process_stack_grow()` 毒化新区时**跳过
+  `[sp, old_stack_low)` 的活动帧**。第一版只加了前两条，`deep 3` 打印
+  `stack grown to 8 KiB` 后立刻 `HardFault at 0xcccccccc`（返回地址被 0xcc
+  覆盖），shell 随之失联；补上这个保护才真正跑通。RV32 的 fault-driven
+  growth 里 sp 仍在旧栈内，`poison_end` 不变，行为零回归。
 
-**判据**：`deep 3` 打印 `stack grown to 8 KiB` + `journal intact`，同时
-`prot heap` / `prot stack` 仍然 fault、`smpbench` 仍 ≥1.8x。
+**验证**（`build/sizeprobe/s33_arm_verify.log`，刷完 + 硬件 RESET 两轮一致）：
+`deep 3` → `stack overflow` → `stack grown to 8 KiB` + `journal intact`，
+无 HardFault；`prot` 四条 + `prot dev` 全 FAULT；ps msh 16 KiB；
+`smpbench` 1.98x。回归：六个目标构建通过，QEMU rv32/rv32smp/arm 三个
+smoke OK；ARM 上 §29.1 200 轮 PASS、§22 BAD=0；**刷回 RV 镜像复测**
+`deep 3` 仍 GROW 8 KiB + journal intact、prot heap/stack 仍 FAULT、
+rodata/null 按板子分表 SURVIVE、prot dev FAULT，共享代码改动无回归。
+
+**剩余限制（按布局推断，未上板）**：着陆区 2560 B 只够 `deep 3` 约 2 KiB
+的越界；`deep 6`（12 KiB）会越过着陆区、重新踩到 MSTKERR。要在 ARM 上
+支持多步增长，仍需编译器栈探测（`-fstack-limit-*`）之类的提前检测，
+或把着陆区扩到整个 guard 洞（那会放掉 `prot heap`）。判据不变：
+`deep 3` 长栈 + journal intact，且 `prot heap` / `prot stack` 仍 fault、
+`smpbench` ≥1.8x。
 
 ### 33.3 已在这边验过、不用再测的
 

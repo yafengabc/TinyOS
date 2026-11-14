@@ -2827,7 +2827,7 @@ int process_stack_guard(const regs_t *r)
 int process_stack_grow(uint32_t addr, uint32_t sp)
 {
     proc_t *p = current;
-    uint32_t old, want, low;
+    uint32_t old, want, low, poison_end;
 
     if (!p || p->win_size == 0 || p->stack_size == 0)
         return 0;
@@ -2862,8 +2862,20 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
 
     /* Poison the new strip before it becomes writable: stack_used() scans up
      * from the bottom and would otherwise report the heap's leftovers as
-     * stack the program had used. */
-    memset((void *)low, STACK_POISON, p->stack_top - old - low);
+     * stack the program had used.
+     *
+     * A board with a software stack guard reaches here with sp ALREADY below
+     * the old stack_low: the live frames between sp and old_stack_low were
+     * written before the growth and must survive.  Poisoning all of them
+     * turns the next function return into a jump to 0xcccccccc (measured on
+     * the RP2350 M33: deep 3 printed "stack grown to 8 KiB" and immediately
+     * HardFaulted).  Fault-driven growth never has this problem: the refused
+     * store left nothing in that strip, and sp is still inside the old stack,
+     * so poison_end stays at old_stack_low and the behaviour is unchanged. */
+    poison_end = p->stack_top - old;
+    if (sp >= low && sp < poison_end)
+        poison_end = sp;
+    memset((void *)low, STACK_POISON, poison_end - low);
 
     p->stack_size = want;
     p->heap_end = low - HEAP_GUARD;
