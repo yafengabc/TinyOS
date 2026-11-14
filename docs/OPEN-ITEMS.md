@@ -2817,6 +2817,20 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
    要让 RV 也 grow 到 896，得先确认 RV32 冷启动期间写 flash superblock
    的安全性（见 §9 的"写后取指挂"）。
 
+**（已修，2026-11-14）** 根因比“故意不 grow”更具体：`build.go` 里 `rp2350rv`
+的 `RamdiskSectors` 是 **704**（352 KiB），而 `PLAT_LFS_BLOCKS` 是 **75**
+（300 KiB）——打包出来的镜像比分区大，超级块记的块数和交给 littlefs 的分区对
+不上，`df` 才会出现 105%。把 `PLAT_LFS_BLOCKS` 改成 **896**（3.5 MiB，与 ARM
+一致）后两边同构：镜像仍小于分区，首次挂载走 `lfs_fs_grow()`，它只提交一个新
+超级块，其余块在首次分配时才擦（ARM 端口从发布起就是这么做的）。
+
+“冷启动写 superblock”这条担忧也解除了：写路径已有 200 轮 `dd`+`rm` 和 100 轮
+`dd`+RESET 的实测；而且 `lfs_fs_grow()` 失败只打
+`[ramdisk] warning: fs grow to 896 blocks failed` 然后继续用小的文件系统，不会
+让板子起不来。待真机确认两点：刷完后 `df` 应是 `3670016 / ~9%`；启动日志里
+**不应**出现那行 grow 警告。第 1 条（刷完 120 s UART 无输出、要按 RESET）仍未
+解决，另计。
+
 构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
 `rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
 三个都是 `SMOKE TEST OK`。
