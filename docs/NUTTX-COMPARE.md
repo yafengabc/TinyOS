@@ -121,6 +121,60 @@ TOR 形状的六个边界，而他们是 `(base, size, flags)`。
 另外他们讨论过一个 RV32 细节：pmpaddr 是 34 位物理地址，编码大于 4 GiB 的区域时
 需要 64 位中间值。我们的窗口都在 520 KiB 里，不涉及。
 
+### 2.6 驱动模型
+
+NuttX 的驱动是**两层**：上半（upper half）在 `drivers/` 里，注册给 VFS 并实现
+`struct file_operations`（open/close/read/write/seek/ioctl/poll）；下半（lower
+half）在 `arch/<arch>/src/<chip>/` 里，只做寄存器级动作，通过一个 ops 表被上半调用。
+
+以串口为例（`drivers/serial/serial.c` + `arch/arm/src/stm32/stm32_serial.c`）：
+
+```c
+/* 上半：g_serialops 里的 uart_open/read/write/ioctl/poll */
+/* 下半：只实现这些 */
+static const struct uart_ops_s g_uart_ops = {
+  .setup, .shutdown, .attach, .detach, .ioctl,
+  .receive, .rxint, .rxavailable,
+  .send, .txint, .txready, .txempty,
+};
+```
+
+上半负责环形缓冲、回显、termios、阻塞/唤醒、信号（Ctrl-C）、锁；下半只有一个
+"现在能发吗 / 发一个字节 / 收一个字节 / 开关中断"。一个上半可以服务任意多个下半
+（USART、LPUART、外挂 16550、USB CDC 都是同一个上半）。另外它有一个我们特别该
+学的接口：`uart_connected()` —— 可插拔设备掉线时让 pending 传输以 `ENOTCONN`
+返回，而不是把调用者挂死。
+
+块设备（`struct block_operations` + `register_blockdriver`）平时不直接给用户用，
+而是交给 `mount()`；MTD（`struct mtd_dev_s`：erase/bread/bwrite + `MTDIOC_GEOMETRY`
+/`MTDIOC_BULKERASE`/`MTDIOC_ISBAD`）可以叠：`sector512` 改页大小、
+`mtd_partitions` 切分区、`ftl` 把 MTD 变块设备。
+
+| NuttX | 我们现在的对应物 | 差距 |
+| --- | --- | --- |
+| `struct file_operations` + `register_driver` | `kernel/hwdev.c` 的静态设备表 + `switch (dev->type)` | 加一类设备要改 syscall 分发 |
+| `uart_ops_s` / `serial.c` 上下半 | `plat_console_putc/getchar` + `kernel/tty.c` 的环 | 板级驱动和缓冲/回显混在一起 |
+| `uart_connected()` | 无 | USB CDC 掉线没有统一语义 |
+| `block_operations` + `mount` | `plat_block_read/write/erase` + 直接 littlefs | 没有块设备层 |
+| `mtd_dev_s` + `BIOC_XIPBASE` | 同上，XIP 基址是常量 | 接 TF/PSRAM 时要重写 |
+| `ioctl`（`BIOC_*`、`MTDIOC_*`） | 每类设备一个 syscall（`SYS_GPIO`、`SYS_ADC`…） | 新功能必须加 syscall |
+
+**值得借的四条，按性价比**
+
+1. **控制台的上下半**（最高）。C3 那个 `usj_putc` 在 trap 里空转 40000 次的 bug，
+   本质上就是"下半被塞进了上半的位置"。把每块板缩成
+   `{tx_ready, putc, getc, irq_on, irq_off}` 五六个函数，环、回显、阻塞和
+   `process_console_kick` 留在内核一份，结构上就不可能再犯。
+2. **`connected/disconnected` 语义**（便宜）。USB CDC 拔线后让读写返回 `-ENOTCONN`
+   而不是等一个不会来的中断；我们现在是靠超时和"没主机就丢"绕过去的。
+3. **`SYS_IOCTL(fd, cmd, arg)` 一个通用口**（便宜）。保留现有强类型 syscall，
+   但给设备私有命令留一个逃生口，省掉"每加一个功能就加一个 syscall"。
+4. **MTD 分层**（等有 TF/PSRAM 再做）。`plat_block_*` 现在够用，接第二种存储时
+   再引入；`BIOC_XIPBASE` 那种"这块设备能不能就地执行"的元数据值得一起抄。
+
+**不要借的**：VFS。NuttX 的 inode/挂载表/路径解析/dup 是为了 POSIX 兼容，我们的
+整个 devfs 只有 20 项、736 字节的表；引进来会立刻变成内核里最大的一块。
+
 ## 3. 不要照抄的三条
 
 1. **栈大小**：PR 里写 "Double size for idle, irq and main stacks"，我们刚把 ARM 内核

@@ -2828,6 +2828,15 @@ ARM 同一个 `mpu_configure_region(base, size, flags)` 后面，内核只谈“
 要动三块目前最敏感的代码（ARM 的 MPU 切换、rv32 的 PMP 切换、process.c 的窗口
 账本），所以**建议等 rp2350rv / rp2350 真机稳定一轮之后再动**。
 
+同样"想做但先不做"的还有三条驱动侧的重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
+
+- **控制台的上下半拆分**：每块板只留 `{tx_ready, putc, getc, irq_on, irq_off}`，
+  环/回显/阻塞留在内核一份。C3 的 `usj_putc` 空转 bug 就是分层错位的产物；
+- **`connected/disconnected`**：USB CDC 掉线时让读写返回 `-ENOTCONN`，而不是靠超时；
+- **`SYS_IOCTL(fd, cmd, arg)`**：给设备私有命令留一个逃生口。
+
+顺序上它们都排在"三块 PMP/MPU 代码稳定之后"，和段接口重构一起做最省事。
+
 另一个可以顺手借的点：region 编号用位图分配（NuttX 的 `ffs(~mask)`），而不是现在
 写死的“entry 5 是 trap vector、0..14 是块”。Hazard3 上现在没问题，但如果以后有
 第二个 RV 平台从 bootloader 手里接管 PMP，就需要先跳过 `L` 位占用的条目。
