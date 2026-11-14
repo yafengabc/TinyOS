@@ -220,7 +220,9 @@ static void pmp_open_trap_vector(void)
     uint32_t cfg1;
 
     /* Entry 5, not 4: entry 4 is the task's stack region (see
-     * plat_task_protect) and is rewritten on every switch. */
+     * plat_task_protect) and is rewritten on every switch.  Address before
+     * config, while every A field is still OFF, so the NAPOT value keeps all
+     * of the low bits that encode the 256-byte region size. */
     __asm__ volatile("csrw pmpaddr5, %0" : : "r"(addr));
     __asm__ volatile("csrr %0, pmpcfg1" : "=r"(cfg1));
     cfg1 = (cfg1 & ~0xff00u) | ((uint32_t)(PMP_NAPOT | PMP_R | PMP_X) << 8);

@@ -2534,11 +2534,80 @@ x86/PC 端口也是"无分页 + `plat_task_protect()` 空实现"，处境和 RP2
 守卫是同一个弱符号，打开只需让 `arch/x86/platform.c` 返回 1，而且 QEMU 里就能
 验——如果 RP2040 这轮通过，可以顺手把 x86 也打开。
 
-## 31. RP2350 RV 的 4 KiB 窗口（分块 NAPOT）与 x86 守卫（2026-11-14，待真机）
+## 31. RP2350 RV 的 4 KiB 窗口（分块 NAPOT）与 x86 守卫（2026-11-14，真机已验）
 
 C3 的 4 KiB 步子能成立，是因为它的 PMP 有 TOR（边界任意）。Hazard3 没有 TOR，
 所以 `rp2350rv` 走的是"每段用若干 2 的幂块拼"的路子；x86 没有分页，补的是软件
 守卫。两件事一起把"所有带保护的端口同一套窗口数字"推到最后一步。
+
+### 31.0 真机结论（2026-11-14，COM14 / rp2350rvsmp，刷完 + ROM RESET + 硬件 RESET）
+
+**`4ef146c` 的 W^X 三段布局在真机上是坏的**：`msh` 第一条指令就
+`load access fault at 0x2001c000`，系统反复重启。QEMU rv32 / rv32smp 全绿，
+所以这是纯硬件差异，符合用户对"这代码刚改过"的判断。
+
+受控 A/B（同一镜像内运行期逐级放宽，日志 `build/sizeprobe/pmp_ladder*.log`）：
+
+| 变量 | 结果 |
+| --- | --- |
+| 只改写序（addr-first ↔ cfg-first） | 无差别，`[pmpenc] wr=080071ff off=080071ff napot=080071fc` 证明低 2 位只是 G=2 的 WARL 裁位 |
+| 读 `mseccfg`(0x747) 清 Smepmp MML | **该 CSR 不存在**，`illegal instruction mcause=2`，假设证伪 |
+| 同样的三块 4 KiB NAPOT / 同样 guard hole，只把 RX/RW/RW → RWX/RWX/RWX | **启动成功**（刷完、ROM RESET、硬件 RESET 三次一致） |
+| 只放宽 entry 0（RWX，data/栈仍 RW） | 仍 fault |
+| entry 0 保持 RX，只给 data/栈页加 X | **启动成功** |
+
+根因不是 PMP 编码也不是权限语义，而是**页粒度切分点**：实测
+`wx=0x2001d420`、`brk=0x2001e000`，两者落在同一 4 KiB 页。把 `ro_end` 向下
+取整到 `0x2001d000`，`[0x2001d000, 0x2001d420)` 这段**真实 .text** 被划进了
+RW/no-X 区，取指即 fault（原注释说"代价是代码可写"，实际是"代码不可执行"）；
+向上取整则把 .data/.bss 划进 RX/no-W 区。Hazard3 无 TOR，无法用重叠条目做
+权限并集。
+
+**已落地修复**（`board/rp2350rv/platform.c`、`arch/rv32/platform.c`）：
+
+- `[win_base, wx & ~0xfff)` 保持 R+X；从含 `wx` 的那一页起到 `brk`、以及栈，
+  全部 R+W+X；guard hole 仍不覆盖；entry 5 仍是 trap vector。
+- `pmp_program()` / `pmp_open_trap_vector()` 统一为 addr-first（A=OFF 时写
+  地址，再写 cfg）。A/B 已证明写序**不是**根因，统一顺序只是避免"旧地址 +
+  已生效的 A 字段"这一中间态。
+- 删掉所有一次性探针和重试阶梯，`PMP_ENTRIES` 从 16 收到 **8**（0..7 才是
+  软件可写的；8..10 是 bootrom 硬连线 RWX，11..15 硬连线 OFF）。
+- `rv32` / `rv32smp` / `rp2350rv` / `rp2350rvsmp` 四个目标构建通过；
+  QEMU `tostest smoke -target rv32|rv32smp` 均 `SMOKE TEST OK`。
+
+真机验收（COM14，最终镜像）：
+
+| 项目 | 结果 |
+| --- | --- |
+| 启动（刷完 / ROM RESET / 硬件 RESET） | 三次均进 `tos>`，无 fault、无降级 |
+| `ps` 里 msh 窗口 | **16 KiB** ✓ |
+| `prot heap` | `store access fault` ✓ |
+| `prot stack` | `store access fault` ✓ |
+| `prot rodata` | **SURVIVE**（rodata 落在含 wx 的 RWX 页里） |
+| `prot null` | **SURVIVE**（地址 0 落在 bootrom 硬连线 RWX 区，软件关不掉） |
+| `deep 3` | 打 `4 KiB stack and no room to double it` 后 store fault，**没有长到 8 KiB** |
+| `echo` / `df` / `dd` | 正常 |
+| §29.1 `dd`+`rm` 200 轮 | **PASS**（errors=0，df 回收 YES，存活 OK） |
+| §29.2 RV USB | 设备侧 `[u0]..[u4]` + `[U] usb hw=1` 全在；主机侧 COM17 被独占未响应 |
+| §22 `getcpu` sanity | `smp -s 4 500` × 5 轮，**BAD=0**（历史 ~1-2/轮） |
+
+日志：`build/sizeprobe/accept_s31.log`、`accept_s29.log`、
+`accept_s29b_s22.log`、`final_boot.log`、`final_cmds.log`。
+
+**剩下的开口**：
+
+1. 窗口内 W^X 与 `prot rodata` 要同时成立，得改 `user/user.ld` 把 `.data`
+   推到 4 KiB 页边界（现在是 `ALIGN(32)`），让 `wx` 与 `brk` 分属两页；
+   代价是镜像普遍变大一页。改完需重跑本节 A/B。
+2. `prot null` 要 fault，需要在 `plat_init()` 里把 bootrom 硬连线的 8..10
+   条目覆盖/关掉——但它们是硬连线，先确认能不能写；不能写就只能在验收
+   口径里把它列为"该硬件上不可保护"。
+3. `deep 3` 没能长栈：`plat_window_grow_reserve()` 返回 4 KiB，但 16 KiB
+   窗口已被 `span 0x1cc4 + 4K 栈 + 4K guard` 占满，`process_stack_grow()`
+   又依赖 `mtval`，而 Hazard3 把 `mtval` 硬连线为 0。要修得改用用户 `sp`
+   判定并给窗口留一步余量。
+4. §31.1 那张"R+X / R+W"三段表描述的是 `4ef146c` 的旧布局，已不成立，
+   以本节为准。
 
 ### 31.1 `rp2350rv`：分块 NAPOT，4 KiB 步子
 

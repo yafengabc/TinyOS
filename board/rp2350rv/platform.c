@@ -1089,27 +1089,47 @@ uint32_t plat_block_count(void)
  * WARL-mapped to OFF, so arch/rv32/platform.c's TOR regions never match and
  * every user fetch faults at the window base.
  *
- * A window is not rounded up to a power of two any more.  Each of the three
- * pieces the kernel distinguishes - image, data+heap, stack - is covered by
- * as many NAPOT blocks as it takes (largest aligned block first), and the
- * guard hole between image and stack is simply left uncovered, so a store
- * into it faults.  Entry 5 stays the trap vector (arch/rv32 sets it once at
- * boot; this rewrites the same value every switch), and the remaining 15
- * entries are the budget.  A typical window needs 3-5.
+ * A window is not rounded up to a power of two.  The image+data range and the
+ * stack are each covered by as many NAPOT blocks as they need (largest
+ * aligned block first), the guard hole between them is deliberately left
+ * uncovered, and entry 5 stays the trap vector.  A typical window needs 3-5
+ * of the eight software-writable regions.
  *
- * The budget, not alignment, is now the limit: a window whose pieces fragment
- * into more than 15 blocks cannot be described, so the excess tail is left
- * uncovered and that task faults on it.  That takes a pathological shape -
- * 4 KiB windows on a 384 KiB image - and is loud rather than silent. */
+ * The first page(s), which hold nothing but .text and .rodata, stay R+X so a
+ * write to rodata still faults.  Everything from the page containing wx on is
+ * R+W+X.  A full page-granular W^X split is NOT possible with the ELF layout
+ * the loader produces: wx and brk routinely land inside the same 4 KiB page
+ * (measured on the board: wx=0x2001d420, brk=0x2001e000).  Rounding the cut
+ * DOWN puts the tail of .text into the RW/no-X region and the shell dies on
+ * its first instruction (this is exactly what 4ef146c did); rounding it UP
+ * puts .data/.bss into the RX/no-W region instead.  Hazard3 has no TOR, so
+ * the overlapping regions needed for a permission union are not expressible
+ * either.  Measured on the part: widening only entry 0 does not help, while
+ * giving the page that holds wx the X bit boots reliably.
+ *
+ * What survives is the protection that matters at a window boundary: a task
+ * cannot reach the kernel, another task, flash or MMIO, and the guard hole
+ * still turns a heap overrun or a stack underrun into a fault.  rodata is NOT
+ * reliably protected: when wx falls inside the first page (small images like
+ * `prot`), ro_end collapses to win_base and the whole image lands in the RWX
+ * part, so `prot rodata` survives.  Full W^X and rodata protection need the
+ * linker to put wx on a page boundary - see OPEN-ITEMS §31.0.
+ *
+ * The budget, not alignment, is the limit: a window whose pieces fragment
+ * into more than eight blocks cannot be described. */
 #define PMP_NAPOT 0x18u
 #define PMP_R     0x01u
 #define PMP_W     0x02u
 #define PMP_X     0x04u
-#define PMP_ENTRIES 16
+/* RP2350 gives Hazard3 eight software-writable regions (0..7); 8..10 are
+ * hardwired by the bootrom (ROM and peripherals, RWX) and 11..15 hardwired
+ * OFF, so writing those is a no-op - they are not budget. */
+#define PMP_ENTRIES   8
 #define PMP_VEC_ENTRY 5
 #define PMP_PAGE  0x1000u
-
 extern char trap_vectors[];
+
+static void pmp_program(const uint32_t *addr, const uint32_t *cfg);
 
 static uint32_t napot(uint32_t base, uint32_t size)
 {
@@ -1117,21 +1137,28 @@ static uint32_t napot(uint32_t base, uint32_t size)
 }
 
 /* Cover [base, top) with NAPOT blocks, recording entry numbers in addr[] and
- * cfg[].  Returns the next free entry, or -1 when the budget runs out. */
+ * cfg[].  Returns the next free entry, or -1 when the range cannot be named.
+ *
+ * Every block is at least one page and naturally aligned, and a block never
+ * spills past top: overshooting would cover the guard hole below the stack and
+ * a stack overflow would stop faulting.  Blocks are page-granular - measured
+ * on the part, sub-page NAPOT blocks do not describe the intended range. */
 static int pmp_cover(uint32_t base, uint32_t top, uint32_t perm,
                      uint32_t *addr, uint32_t *cfg, int next)
 {
     while (base < top) {
         uint32_t rem = top - base;
-        uint32_t size = PMP_PAGE;
+        uint32_t size = 1u << 20;
 
         if (next == PMP_VEC_ENTRY)
             next++;
         if (next >= PMP_ENTRIES)
             return -1;
-        while (2u * size <= rem && (base & (2u * size - 1u)) == 0)
-            size *= 2u;
-
+        while (size > PMP_PAGE &&
+               (size > rem || (base & (size - 1u)) != 0))
+            size >>= 1;
+        if (size > rem || (base & (size - 1u)) != 0)
+            return -1;                 /* tail not representable */
         addr[next] = napot(base, size);
         cfg[next] = perm | PMP_NAPOT;
         next++;
@@ -1140,30 +1167,81 @@ static int pmp_cover(uint32_t base, uint32_t top, uint32_t perm,
     return next;
 }
 
+/* Lay the window out into addr[]/cfg[].  Whole pages below the one holding wx
+ * are kept R+X; that page mixes the .text tail with .data/.bss, so it and the
+ * stack are R+W+X.  For a small image wx is in the first page, ro_end equals
+ * win_base and the entire image becomes RWX - `prot rodata` then survives,
+ * which is the known limitation in OPEN-ITEMS §31.0.  The guard hole between
+ * brk and stack_low is left uncovered, so a heap that runs off its end and a
+ * stack that runs off its bottom both fault.  brk is rounded up to a page
+ * because the last image block has to be page-aligned too; the bytes between
+ * brk and that boundary are unwritten window, not somebody else's memory. */
+static int pmp_layout(uint32_t win_base, uint32_t wx, uint32_t brk,
+                      uint32_t stack_low, uint32_t stack_top,
+                      uint32_t *addr, uint32_t *cfg)
+{
+    uint32_t data_end = (brk + PMP_PAGE - 1u) & ~(PMP_PAGE - 1u);
+    uint32_t ro_end = wx & ~(PMP_PAGE - 1u);
+    int next;
+
+    if (ro_end < win_base)
+        ro_end = win_base;
+    if (ro_end > data_end)
+        ro_end = data_end;
+
+    next = pmp_cover(win_base, ro_end, PMP_R | PMP_X, addr, cfg, 0);
+    if (next >= 0)
+        next = pmp_cover(ro_end, data_end, PMP_R | PMP_W | PMP_X,
+                         addr, cfg, next);
+    if (next >= 0)
+        next = pmp_cover(stack_low, stack_top, PMP_R | PMP_W | PMP_X,
+                         addr, cfg, next);
+    return next;
+}
+
 int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
                             uint32_t brk, uint32_t stack_low,
                             uint32_t stack_top)
 {
     uint32_t addr[PMP_ENTRIES], cfg[PMP_ENTRIES];
-    uint32_t w[4];
-    int next = 0;
+    int i, next;
 
-    for (int i = 0; i < PMP_ENTRIES; i++) {
+    (void)win_end;
+
+    for (i = 0; i < PMP_ENTRIES; i++) {
         addr[i] = 0;
         cfg[i] = 0;
     }
-    (void)win_end;
-
-    next = pmp_cover(win_base, wx, PMP_R | PMP_X, addr, cfg, next);
-    if (next >= 0)
-        next = pmp_cover(wx, brk, PMP_R | PMP_W, addr, cfg, next);
-    if (next >= 0)
-        next = pmp_cover(stack_low, stack_top, PMP_R | PMP_W, addr, cfg, next);
+    next = pmp_layout(win_base, wx, brk, stack_low, stack_top, addr, cfg);
     if (next < 0)
-        early_puts("\r\n[pmp] window needs more NAPOT blocks than the budget\r\n");
+        early_puts("\r\n[pmp] window needs more NAPOT blocks than there are "
+                   "regions\r\n");
 
+    /* Entry 5 is the trap vector: U-mode has to be able to fetch the first
+     * vector slot when a trap arrives from user code. */
     addr[PMP_VEC_ENTRY] = napot((uint32_t)(uintptr_t)trap_vectors, 256u);
     cfg[PMP_VEC_ENTRY] = PMP_NAPOT | PMP_R | PMP_X;
+
+    pmp_program(addr, cfg);
+    return 1;
+}
+
+/* Program the eight dynamic regions in two phases: all A fields OFF first,
+ * then every address, then the real config bytes.
+ *
+ * pmpaddr's low two bits are WARL on this core: a 4 KiB NAPOT value written
+ * while A is OFF reads back in full (0x080071ff), and reads back trimmed
+ * (0x080071fc) once A is NAPOT.  That is the G=2 granule doing its job - the
+ * low bits are treated as ones when matching - not a failed write.  Writing
+ * the addresses while A is OFF still avoids a window in which a stale
+ * address is paired with a live A field.  M-mode ignores PMP (no entry sets
+ * L), so the brief all-OFF state cannot hurt the kernel. */
+static void pmp_program(const uint32_t *addr, const uint32_t *cfg)
+{
+    uint32_t w[2];
+
+    __asm__ volatile("csrw pmpcfg0, zero");
+    __asm__ volatile("csrw pmpcfg1, zero");
 
     __asm__ volatile("csrw pmpaddr0, %0" : : "r"(addr[0]));
     __asm__ volatile("csrw pmpaddr1, %0" : : "r"(addr[1]));
@@ -1173,29 +1251,24 @@ int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
     __asm__ volatile("csrw pmpaddr5, %0" : : "r"(addr[5]));
     __asm__ volatile("csrw pmpaddr6, %0" : : "r"(addr[6]));
     __asm__ volatile("csrw pmpaddr7, %0" : : "r"(addr[7]));
-    __asm__ volatile("csrw pmpaddr8, %0" : : "r"(addr[8]));
-    __asm__ volatile("csrw pmpaddr9, %0" : : "r"(addr[9]));
-    __asm__ volatile("csrw pmpaddr10, %0" : : "r"(addr[10]));
-    __asm__ volatile("csrw pmpaddr11, %0" : : "r"(addr[11]));
-    __asm__ volatile("csrw pmpaddr12, %0" : : "r"(addr[12]));
-    __asm__ volatile("csrw pmpaddr13, %0" : : "r"(addr[13]));
-    __asm__ volatile("csrw pmpaddr14, %0" : : "r"(addr[14]));
-    __asm__ volatile("csrw pmpaddr15, %0" : : "r"(addr[15]));
 
-    for (int g = 0; g < 4; g++)
+    for (int g = 0; g < 2; g++)
         w[g] = cfg[4 * g] | (cfg[4 * g + 1] << 8) |
                (cfg[4 * g + 2] << 16) | (cfg[4 * g + 3] << 24);
     __asm__ volatile("csrw pmpcfg0, %0" : : "r"(w[0]));
     __asm__ volatile("csrw pmpcfg1, %0" : : "r"(w[1]));
-    __asm__ volatile("csrw pmpcfg2, %0" : : "r"(w[2]));
-    __asm__ volatile("csrw pmpcfg3, %0" : : "r"(w[3]));
-    return 1;
 }
 
-/* Chunked NAPOT needs no alignment from the kernel, and a stack that grows by
- * a 4 KiB step is just one more block, so the following two answers change
- * together with the layout: 4 KiB windows get their one-step reserve, and
- * process_stack_grow() stops demanding that stack_top divide the new size. */
+/* A window that grows gets one extra stack-sized step of room, because the
+ * stack itself is the thing that usually grows.
+ *
+ * Page alignment is a hard requirement here after all: the regions this board
+ * can program are page-granular (see pmp_layout - sub-page NAPOT blocks are
+ * exactly what broke the first attempt at 4 KiB windows), and an unaligned
+ * stack_top would leave the stack region unrepresentable, i.e. the task would
+ * start with its own stack denied.  Asking the kernel to keep stack_top
+ * aligned is cheaper than silently rounding the region out into the guard
+ * hole, which is the one thing the guard exists to catch. */
 uint32_t plat_window_grow_reserve(void)
 {
     return PLAT_STACK_BYTES;
@@ -1203,7 +1276,7 @@ uint32_t plat_window_grow_reserve(void)
 
 int plat_window_needs_stack_alignment(void)
 {
-    return 0;
+    return 1;
 }
 
 /* ---- bringing core 1 up ------------------------------------------------ */
