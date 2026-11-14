@@ -634,9 +634,39 @@ static volatile uint32_t sched_ticks;     /* timer ticks seen           */
 static void apply_protection(proc_t *p)
 {
     proc_t *g = PROC_GROUP(p);
+    plat_seg_t segs[PLAT_SEG_MAX];
+    uint32_t win_base = g->win_base;
+    uint32_t win_end = win_base + g->win_size;
+    uint32_t stack_low = g->stack_top - g->stack_size;
+    uint32_t brk = g->brk;
+    int n = 0;
 
-    plat_task_protect(g->win_base, g->win_base + g->win_size, g->wx_start,
-                      g->brk, g->stack_top - g->stack_size, g->stack_top);
+    /* Three pieces, in address order, and any of them may be empty.  The gap
+     * between the break and stack_low is left out on purpose - it is the hole
+     * `prot heap` and `prot stack` probe - so the pieces are not a partition
+     * of the window, and a port must not join them. */
+    if (g->wx_start > win_base) {
+        segs[n].base = win_base;
+        segs[n].top  = g->wx_start;
+        segs[n].attr = PLAT_SEG_CODE;
+        n++;
+    }
+    if (brk > stack_low)
+        brk = stack_low;                /* stale break: never overlap the stack */
+    if (brk > g->wx_start) {
+        segs[n].base = g->wx_start;
+        segs[n].top  = brk;
+        segs[n].attr = PLAT_SEG_DATA;
+        n++;
+    }
+    if (stack_low < win_end) {
+        segs[n].base = stack_low;
+        segs[n].top  = win_end;         /* stack_top: they are the same value */
+        segs[n].attr = PLAT_SEG_DATA;
+        n++;
+    }
+
+    plat_task_protect(segs, n);
 }
 
 /* Save the outgoing frame and return the frame to resume.  Callers hold the

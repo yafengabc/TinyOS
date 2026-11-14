@@ -3194,29 +3194,70 @@ SAU、MPU 使能位、VTOR），都要在 secondary 路径上再设一次。这�
 启动恰好把第一个用户故障调度到 CPU1"才暴露的，重跑就消失——**"间歇性 + 重跑就好"
 在 SMP 上第一个该怀疑的就是每核寄存器没初始化**。
 
-## 34. 未实现的设计项：MPU/PMP 的段接口
+## 34. MPU/PMP 的段接口（2026-11-15 已做）
 
-现在三个后端吃的是同一个**TOR 形状**的签名：
+改之前三个后端吃的是同一个**TOR 形状**的签名：
 
 ```c
 plat_task_protect(win_base, win_end, wx, brk, stack_low, stack_top)
 ```
 
 TOR 后端（C3）直接用；NAPOT 后端（rp2350rv）要在 `pmp_cover()` 里重新拆；PMSAv8
-后端（rp2350）在 `arch/arm/platform.c` 里自己切三段。NuttX 的做法是把 PMP 藏在和
-ARM 同一个 `mpu_configure_region(base, size, flags)` 后面，内核只谈“段和权限”。
+后端（rp2350）在 `arch/arm/platform.c` 里自己切三段。"哪些字节用户可写"这个问题
+的答案散在三个文件里，每加一个后端就要重新理解一遍窗口形状。
 
-想做的重构：内核传一个段列表（image R+X / data+heap R+W / stack R+W，洞不出现），
-各后端自己编码。收益是调用代码只剩一份、TOR 与 NAPOT 的差别彻底留在后端；代价是
-要动三块目前最敏感的代码（ARM 的 MPU 切换、rv32 的 PMP 切换、process.c 的窗口
-账本），所以**建议等 rp2350rv / rp2350 真机稳定一轮之后再动**。
+现在是段列表，内核只谈"段和权限"：
 
-同样"想做但先不做"的还有两条驱动侧的重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
+```c
+enum { PLAT_SEG_CODE, PLAT_SEG_DATA };
+typedef struct { uint32_t base, top, attr; } plat_seg_t;   /* [base, top) */
+#define PLAT_SEG_MAX 3
+void plat_task_protect(const plat_seg_t *segs, int n);
+```
+
+`apply_protection()` 每次切换只发三块，按地址升序、互不重叠、**洞不出现**：code
+`[win_base, wx)`、data+heap `[wx, brk)`、stack `[stack_low, win_end)`（`stack_top`
+和 `win_end` 本来就是同一个值）。空段不发——一个还没 `sbrk` 过的任务就是两块。
+
+接口注释里写死了一条**后端不得违反的规矩**：不许把洞盖住。洞正是 `prot heap` 和
+`prot stack` 探的地方，一个把 region 向上取整、溢进洞里的后端，等于顺手把这两个
+测试关掉了——而这两个测试正是能发现它做错了的东西。
+
+各后端（差异全部留在后端，并在源码里写明降级方式）：
+
+| 后端 | 编码 | 行为 |
+| --- | --- | --- |
+| TOR（`arch/rv32`，C3 / qemu-virt） | 边界就是编码；洞用一条 `A=OFF` 的项收尾 | **精确**，无对齐/大小要求；最多 5 项，entry 5 留给 trap vector |
+| NAPOT（`board/rp2350rv`） | 先算每页的属性：整页 code → RX，沾了 data/stack → RWX；同属性的页连成一块，洞的页跳过 | 4 KiB 粒度，所以 `.rodata` 在那块混页里守不住（§31.0 的已知限制）；预算仍是 8 条 |
+| PMSAv8（`arch/arm`，rp2350） | base + limit，32 字节粒度；三段各一条 region，guard 洞劈成 2560 B 着陆区 + 1536 B 私有区 | **精确**，`.rodata` 真的是 RX |
+| ARMv7-M（`arch/arm`，qemu-mps2） | 自然对齐的 2 的幂 region；预算不够就整窗一个 RWX region 并打印原因 | 与改动前逐字节一致（mps2 上仍是 `3+8 blocks (budget 7)` → 1 个 region） |
+| M0+ / x86 | 无 MPU / 无分页 → 空实现 | 只靠软件栈哨兵 |
+
+`board.h` 的板级钩子也跟着改了签名（`plat_board_task_protect(const plat_seg_t*, int)`），
+NAPOT 的页映射就是从这个列表算出来的——它和 TOR 版本吃的是同一份输入。
+
+验证：
+
+- 十一个目标构建通过；
+- **C3 真机（COM4）**：`accept.py` **24/24**；五条 `prot` 全部 fault 且地址合理
+  （rodata `0x4039021e`、heap `0x40391040`、stack `0x40389ed7`、null load fault、
+  `prot dev 0x60000000` fault）；`deep 3` → `stack grown to 8 KiB` + `journal intact`；
+  `ps` 正常。TOR 的精确性没有变：洞仍然不被任何 entry 覆盖；
+- QEMU `rv32` / `rv32smp`：prot 四连 + `prot dev` 全 fault，`deep 3`、管道、`piperace`；
+- QEMU `arm`（Cortex-M3，走 **ARMv7-M** 那条分支）：region 预算回退逻辑与改动前
+  一致，`prot stack` / `prot null` fault，`deep 3` 正常；
+- x86：空实现，`prot` 按预期 survive，`deep 3` + `piperace` 正常。
+
+**未验的部分**（只有板子能回答，用 `scripts/rp2350/accept33.py` 一条命令）：
+`rp2350`（PMSAv8 精确三段 + 着陆区）和 `rp2350rv`（NAPOT 页映射）两个后端，本地只
+过了编译。判据不变：`prot` 五条全 fault、`deep 3` 长栈、`ps`、`smpbench`（smp）。
+
+现在"想做但先不做"的只剩两条驱动侧重构（见 `docs/NUTTX-COMPARE.md` §2.6）：
 
 - **`connected/disconnected`**：USB CDC 掉线时让读写返回 `-ENOTCONN`，而不是靠超时；
 - **`SYS_IOCTL(fd, cmd, arg)`**：给设备私有命令留一个逃生口。
 
-（第三条"控制台的上下半拆分"已做，见下面。）
+（第三条"控制台的上下半拆分"也已做，见下面。）
 
 **（2026-11-14 已做）控制台的下半契约**：`kernel/platform.h` 把
 `plat_console_{init,putc,tx_room,flush,getchar}` 明确写成"下半"，并列出四条规矩

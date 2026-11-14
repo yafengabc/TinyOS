@@ -272,11 +272,9 @@ int plat_user_stack_guard(void)
     return 1;
 }
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    (void)segs; (void)n;
 }
 
 /* The trap frame layout belongs to the arch, so core hands us an opaque

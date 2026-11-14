@@ -1015,17 +1015,33 @@ static uint32_t mpu_blocks(uint32_t base, uint32_t end)
  * space reachable from user mode. */
 static int mpu_on[MAX_CPUS];
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
+    uint32_t win_base = n > 0 ? segs[0].base : 0;
+    uint32_t win_end = n > 0 ? segs[n - 1].top : 0;
+    uint32_t wx = win_base;
+    uint32_t brk, stack_low = win_end;
     uint32_t r;
     int cid = plat_cpu_id();
+    int i = 0;
     static int reported;
 
     if (cid < 0 || cid >= (int)MAX_CPUS)
         cid = 0;
 
-    (void)stack_top;
+    /* Read the pieces back out of the list, by position: code first, then
+     * the heap, then the stack - and any of them may be missing.  This port
+     * describes the task as code / data / stack anyway, so the list is not
+     * being reinterpreted, it is being named. */
+    if (i < n && segs[i].attr == PLAT_SEG_CODE)
+        wx = segs[i++].top;
+    brk = wx;
+    if (i < n - 1)                      /* a data piece that is not the stack */
+        brk = segs[i++].top;
+    if (i < n)
+        stack_low = segs[i].base;
+
+    (void)win_end;
 
     /* wx is 32-byte aligned by user.ld; round up defensively so a stale
        script cannot turn the tail of .text into non-executable memory. */
@@ -1133,11 +1149,9 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
 
 #else /* M0+ or TOS_ARM_NO_MPU: user tasks run unprivileged but unprotected. */
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    (void)segs; (void)n;
 }
 
 #endif

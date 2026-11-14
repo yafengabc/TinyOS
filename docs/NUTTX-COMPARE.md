@@ -92,9 +92,10 @@ NuttX RP2350 端口支持 `CONFIG_SCHED_TICKLESS`，用 TIMER 的 alarm/oneshot 
 ### 2.5 RISC-V 的 PMP（`arch/risc-v/src/common/riscv_pmp.c`）
 
 NuttX 把 PMP 藏在和 ARM **同一个** `mpu_configure_region(base, size, flags)` 接口
-后面：内核只谈"段和权限"，由 `arm_mpu.c` 或 `riscv_pmp.c` 决定怎么写寄存器。这正
-是我在本项目里说的"段模型 + 后端"，区别是我们的 `plat_task_protect()` 签名是
-TOR 形状的六个边界，而他们是 `(base, size, flags)`。
+后面：内核只谈"段和权限"，由 `arm_mpu.c` 或 `riscv_pmp.c` 决定怎么写寄存器。这正是
+本项目 2026-11-15 之后的做法：`plat_task_protect()` 收一张 `plat_seg_t` 段表
+（`{base, top, attr}`，最多三段），各后端自己编码。区别只剩一层——他们的粒度是
+一条 region 一次调用，我们的是一次给整张表。
 
 四个能直接用的点：
 

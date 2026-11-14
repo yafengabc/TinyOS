@@ -1192,52 +1192,105 @@ static int pmp_cover(uint32_t base, uint32_t top, uint32_t perm,
     return next;
 }
 
-/* Lay the window out into addr[]/cfg[].  Whole pages below the one holding wx
- * are kept R+X; that page mixes the .text tail with .data/.bss, so it and the
- * stack are R+W+X.  For a small image wx is in the first page, ro_end equals
- * win_base and the entire image becomes RWX - `prot rodata` then survives,
- * which is the known limitation in OPEN-ITEMS §31.0.  The guard hole between
- * brk and stack_low is left uncovered, so a heap that runs off its end and a
- * stack that runs off its bottom both fault.  brk is rounded up to a page
- * because the last image block has to be page-aligned too; the bytes between
- * brk and that boundary are unwritten window, not somebody else's memory. */
-static int pmp_layout(uint32_t win_base, uint32_t wx, uint32_t brk,
-                      uint32_t stack_low, uint32_t stack_top,
-                      uint32_t *addr, uint32_t *cfg)
+/* Attributes per page, derived from the segment list.
+ *
+ * A page that holds code only stays R+X; any page that also touches data or
+ * the stack becomes R+W+X, because Hazard3 cannot express a permission union
+ * and the page cannot be cut - and that RWX page is exactly the known
+ * limitation (OPEN-ITEMS 31.0): wx usually lands inside the same page that
+ * holds the start of .data.  The guard hole is not a segment, so its pages
+ * are simply absent and stay uncovered, which is what keeps `prot heap` and
+ * `prot stack` faulting.
+ *
+ * The map is one page per byte, and a window can never exceed the whole task
+ * area (96 pages at the 4 KiB grain), so a fixed buffer keeps this off the
+ * heap - this runs on every task switch. */
+#define PMP_PAGE_CODE  0x1u
+#define PMP_PAGE_DATA  0x2u
+#define PMP_MAX_PAGES  128
+
+static int pmp_page_attrs(const plat_seg_t *segs, int n, uint32_t win_base,
+                          int pages, uint8_t *attr)
 {
-    uint32_t data_end = (brk + PMP_PAGE - 1u) & ~(PMP_PAGE - 1u);
-    uint32_t ro_end = wx & ~(PMP_PAGE - 1u);
-    int next;
+    for (int i = 0; i < pages; i++)
+        attr[i] = 0;
 
-    if (ro_end < win_base)
-        ro_end = win_base;
-    if (ro_end > data_end)
-        ro_end = data_end;
+    for (int i = 0; i < n; i++) {
+        uint32_t b = segs[i].base;
+        uint32_t t = segs[i].top;
+        uint8_t bit = (segs[i].attr == PLAT_SEG_CODE) ? PMP_PAGE_CODE
+                                                      : PMP_PAGE_DATA;
 
-    next = pmp_cover(win_base, ro_end, PMP_R | PMP_X, addr, cfg, 0);
-    if (next >= 0)
-        next = pmp_cover(ro_end, data_end, PMP_R | PMP_W | PMP_X,
+        for (uint32_t p = b & ~(PMP_PAGE - 1u); p < t; p += PMP_PAGE) {
+            int idx = (int)((p - win_base) / PMP_PAGE);
+
+            if (idx >= 0 && idx < pages)
+                attr[idx] |= bit;
+        }
+    }
+
+    return pages;
+}
+
+/* Program [win_base, win_end) from the segment list.  Runs of pages with the
+ * same attribute become runs of NAPOT blocks; pages that are in no segment
+ * are skipped, which is how the hole survives. */
+static int pmp_layout(const plat_seg_t *segs, int n, uint32_t win_base,
+                      uint32_t win_end, uint32_t *addr, uint32_t *cfg)
+{
+    uint8_t page[PMP_MAX_PAGES];
+    int pages = (int)((win_end - win_base + PMP_PAGE - 1u) / PMP_PAGE);
+    int next = 0;
+
+    if (pages > PMP_MAX_PAGES)
+        return -1;                      /* a window this wide is a bug */
+
+    pmp_page_attrs(segs, n, win_base, pages, page);
+
+    for (int i = 0; i < pages; ) {
+        uint32_t perm, top;
+        int j;
+
+        if (!page[i]) {                 /* hole: never covered */
+            i++;
+            continue;
+        }
+        perm = (page[i] & PMP_PAGE_DATA) ? (PMP_R | PMP_W | PMP_X)
+                                         : (PMP_R | PMP_X);
+        for (j = i; j < pages && page[j] == page[i]; j++)
+            ;
+        /* A block may not spill past the window: a page that is only partly
+         * inside it stops the run.  On this board stack_top is page aligned,
+         * so this is a guard against a future layout, not a live case. */
+        top = win_base + (uint32_t)j * PMP_PAGE;
+        if (top > win_end)
+            top = win_end;
+        next = pmp_cover(win_base + (uint32_t)i * PMP_PAGE, top, perm,
                          addr, cfg, next);
-    if (next >= 0)
-        next = pmp_cover(stack_low, stack_top, PMP_R | PMP_W | PMP_X,
-                         addr, cfg, next);
+        if (next < 0)
+            return -1;
+        i = j;
+    }
     return next;
 }
 
-int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                            uint32_t brk, uint32_t stack_low,
-                            uint32_t stack_top)
+int plat_board_task_protect(const plat_seg_t *segs, int n)
 {
     uint32_t addr[PMP_ENTRIES], cfg[PMP_ENTRIES];
+    uint32_t win_base, win_end;
     int i, next;
 
-    (void)win_end;
+    if (n <= 0)
+        return 1;                       /* nothing to protect: leave PMP alone */
+
+    win_base = segs[0].base & ~(PMP_PAGE - 1u);
+    win_end = segs[n - 1].top;
 
     for (i = 0; i < PMP_ENTRIES; i++) {
         addr[i] = 0;
         cfg[i] = 0;
     }
-    next = pmp_layout(win_base, wx, brk, stack_low, stack_top, addr, cfg);
+    next = pmp_layout(segs, n, win_base, win_end, addr, cfg);
     if (next < 0)
         early_puts("\r\n[pmp] window needs more NAPOT blocks than there are "
                    "regions\r\n");

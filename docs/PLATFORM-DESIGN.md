@@ -93,8 +93,7 @@ uint32_t plat_block_count(void);
 void plat_set_kernel_stack(vaddr_t top);
 void plat_enter_user(trapframe_t *tf) __attribute__((noreturn));
 int  plat_fault_is_user(trapframe_t *tf);
-void plat_task_protect(uint32_t win_base, uint32_t wx, uint32_t brk,
-                       uint32_t stack_low, uint32_t stack_top);
+void plat_task_protect(const plat_seg_t *segs, int n);
 void plat_panic_halt(void) __attribute__((noreturn));
 
 /* ---- 电源 ---- */
@@ -112,9 +111,10 @@ void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 用户指针校验也不再是平台函数，而是 `process_user_ok(addr, len)`——只做窗口范围检查。
 
 `plat_task_protect()` 是唯一带“内存保护”味道的接口，但语义仍然很薄：它只说
-“现在要跑的这个任务，它的三段地址在哪里”，具体怎么表达交给端口——rv32 写成
-PMP 条目，arm 写成 MPU 区域，x86 什么也不做（见 5.1、5.2）。堆与栈之间的空洞
-大小是平台常量 `PLAT_HEAP_GUARD`（16 KiB），`process_sbrk()` 与能表达该空洞的
+“现在要跑的这个任务由哪几段组成、每段什么权限”（`plat_seg_t` 数组，最多三段，洞
+不出现），具体怎么编码交给端口——rv32 TOR 后端把边界直接写成 PMP 条目，Hazard3
+再拆成 NAPOT 块，arm 写成 MPU 区域，x86 什么也不做（见 5.1、5.2）。堆与栈之间的
+空洞大小是平台常量 `PLAT_HEAP_GUARD`（16 KiB），`process_sbrk()` 与能表达该空洞的
 端口共用同一个数。
 
 ## 4. 平坦内存模型

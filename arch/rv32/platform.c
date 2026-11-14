@@ -284,64 +284,72 @@ void plat_cpu_idle(void)
  * start at address 0, that is how a region below the window is denied:
  * entry 0 is off and holds nothing but the lower bound.
  *
- *   0  off    win_base                     lower bound only
- *   1  RX     [win_base, wx)               code
- *   2  RW     [wx, brk)                    data and heap
- *   3  RW     [stack_low, stack_top)       stack, NAPOT
- *   (4  RX     trap_vectors, 256 B          boot time, see below)
+ * A segment list maps onto this directly, and a gap needs no region of its
+ * own - only a boundary to end the piece below it:
  *
- * Nothing claims the hole between brk and stack_low, so a heap that runs
- * off its end and a stack that runs off its bottom both fault instead of
- * quietly eating the other.  The stack uses NAPOT because it is absolute:
- * a TOR entry there would have to start at brk and would fill that hole.
+ *   0  off    segs[0].base              lower bound only
+ *   1  RX     [win_base, wx)            code
+ *   2  RW     [wx, brk)                 data and heap
+ *   3  off    stack_low                 guard hole, not covered
+ *   4  RW     [stack_low, stack_top)    stack
+ *   (5  RX     trap_vectors, 256 B      boot time, see below)
+ *
+ * TOR has no alignment or size rule, so this port follows the segments
+ * exactly; an empty segment costs no entry.  Nothing claims the hole between
+ * brk and stack_low, so a heap that runs off its end and a stack that runs
+ * off its bottom both fault instead of quietly eating the other.
  * Entry 5 (vector table, see pmp_open_trap_vector) is boot-time only. */
 #define PMP_R     0x01u
 #define PMP_W     0x02u
 #define PMP_X     0x04u
 #define PMP_TOR   0x08u
 #define PMP_NAPOT 0x18u
+#define PMP_TOR_ENTRIES 5u          /* 0..4; 5 is the trap vector */
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
-    uint32_t cfg, cfg1;
+    uint32_t addr[PMP_TOR_ENTRIES];
+    uint32_t cfg[PMP_TOR_ENTRIES];
+    uint32_t cfg0, cfg1;
+    int k = 0;
 
-    /* A board whose PMP cannot express the TOR layout (RP2350 Hazard3 has no
-     * TOR matching) programs its own regions. */
-    if (plat_board_task_protect(win_base, win_end, wx, brk, stack_low, stack_top))
+    /* A board whose PMP cannot express TOR (RP2350's Hazard3) programs its
+     * own regions from the same segment list. */
+    if (plat_board_task_protect(segs, n))
         return;
 
-    /* The window's end is implied by whichever region is highest (the
-       stack), so the entries do not need it.  An ARM-style port that
-       describes the whole window would. */
-    (void)win_end;
+    for (unsigned i = 0; i < PMP_TOR_ENTRIES; i++)
+        addr[i] = cfg[i] = 0;
 
-    /* TOR region N is [pmpaddr(N-1), pmpaddr(N)), so four boundaries give
-     * three regions plus the hole between them:
-     *
-     *   entry 1  [win_base, wx)         image,      R+X
-     *   entry 2  [wx, brk)              data/heap,  R+W
-     *   entry 3  [brk, stack_low)       guard,      not configured -> faults
-     *   entry 4  [stack_low, stack_top) stack,      R+W
-     *
-     * TOR has no size/alignment rule of its own, which is what frees the
-     * window size from the stack size: the image rounds to PLAT_APP_GRAIN
-     * (4 KiB on the C3) instead of to the 8 KiB stack. */
-    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(win_base >> 2));
-    __asm__ volatile("csrw pmpaddr1, %0" : : "r"((wx  & ~3u) >> 2));
-    __asm__ volatile("csrw pmpaddr2, %0" : : "r"((brk & ~3u) >> 2));
-    __asm__ volatile("csrw pmpaddr3, %0" : : "r"(stack_low >> 2));
-    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(stack_top >> 2));
+    if (n > 0) {
+        /* Entry 0 carries only the lower bound: a TOR region needs a start,
+         * and anything below it must stay unmatched. */
+        addr[0] = segs[0].base >> 2;
 
-    cfg = ((PMP_TOR | PMP_R | PMP_X) << 8)       /* entry 1 */
-        | ((PMP_TOR | PMP_R | PMP_W) << 16)      /* entry 2 */
-        | (0u << 24);                            /* entry 3: guard off */
-    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg));
+        for (int i = 0; i < n && k + 1 < (int)PMP_TOR_ENTRIES; i++) {
+            if (i > 0 && segs[i].base > segs[i - 1].top) {
+                /* A gap: close the piece below with a disabled entry whose
+                 * address is the next piece's base, so that piece starts
+                 * there and the hole stays uncovered. */
+                addr[++k] = segs[i].base >> 2;
+            }
+            addr[++k] = (segs[i].top & ~3u) >> 2;
+            cfg[k] = PMP_TOR | PMP_R |
+                     ((segs[i].attr == PLAT_SEG_CODE) ? PMP_X : PMP_W);
+        }
+    }
 
-    /* Entry 4 lives in pmpcfg1 next to entry 5 (the trap vector), so this
-     * has to preserve the other byte. */
+    /* Entries 0..3 live in pmpcfg0; entry 4 shares pmpcfg1 with entry 5 (the
+     * trap vector), so that byte's neighbour has to be preserved. */
+    cfg0 = cfg[0] | (cfg[1] << 8) | (cfg[2] << 16) | (cfg[3] << 24);
+    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(addr[0]));
+    __asm__ volatile("csrw pmpaddr1, %0" : : "r"(addr[1]));
+    __asm__ volatile("csrw pmpaddr2, %0" : : "r"(addr[2]));
+    __asm__ volatile("csrw pmpaddr3, %0" : : "r"(addr[3]));
+    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(addr[4]));
+    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg0));
     __asm__ volatile("csrr %0, pmpcfg1" : "=r"(cfg1));
-    cfg1 = (cfg1 & ~0xffu) | (PMP_TOR | PMP_R | PMP_W);
+    cfg1 = (cfg1 & ~0xffu) | cfg[4];
     __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg1));
 }
 
@@ -416,15 +424,9 @@ __attribute__((weak)) void plat_board_panic_poll(void)
 {
 }
 
-__attribute__((weak)) int plat_board_task_protect(uint32_t win_base,
-                                                  uint32_t win_end,
-                                                  uint32_t wx,
-                                                  uint32_t brk,
-                                                  uint32_t stack_low,
-                                                  uint32_t stack_top)
+__attribute__((weak)) int plat_board_task_protect(const plat_seg_t *segs, int n)
 {
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    (void)segs; (void)n;
     return 0;
 }
 

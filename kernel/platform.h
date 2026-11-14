@@ -339,32 +339,62 @@ int plat_dma_memcpy(void *dst, const void *src, int len);
  * code / data / stack and nothing else.  x86-32 with paging disabled can
  * do nothing here (see docs/PLATFORM-DESIGN.md). */
 
+/* One contiguous piece of the task that is about to run.  `attr` is the
+ * kernel's intent, not a register encoding: how a port reaches it is the
+ * port's business. */
+enum {
+    PLAT_SEG_CODE = 0,      /* image: user read + execute, no write */
+    PLAT_SEG_DATA = 1,      /* data + stack: user read + write      */
+};
+
+typedef struct {
+    uint32_t base;          /* inclusive */
+    uint32_t top;           /* exclusive */
+    uint32_t attr;          /* PLAT_SEG_* */
+} plat_seg_t;
+
+/* A task never has more than this: code, data+heap, stack. */
+#define PLAT_SEG_MAX 3
+
 /* Program the protection for the task that is about to run, then forget
  * about it: memory protection is a property of the running task, not of
  * the kernel.
  *
- *   [win_base, wx)          code            execute + read
- *   [wx, brk)               data + heap     read + write, brk grows via sbrk
- *   [stack_low, stack_top)  stack           read + write
+ * The caller sends the pieces, in ascending order, non-overlapping:
  *
- * Everything else - the kernel's own memory, MMIO, other tasks' windows -
- * is out of reach for user mode, including the hole between brk and
- * stack_low that neither region claims.  `stack_top - stack_low` must be a
- * power of two and stack_low aligned to it.
+ *   PLAT_SEG_CODE   [win_base, wx)          image, ends where .data starts
+ *   PLAT_SEG_DATA   [wx, brk)               data + heap as sbrk() took it
+ *   PLAT_SEG_DATA   [stack_low, stack_top)  stack, stack_top == win_end
  *
- * `win_end` is the end of this task's window.  It varies per task now that
- * windows are sized to their image, and only matters to a port that
- * describes the whole window rather than the three regions inside it (the
- * ARMv7-M MPU, one region for "everything this task may touch"); rv32's
- * TOR entries stop at wx and brk and ignore it.
+ * Any piece may be empty and is then simply absent; a gap between two pieces
+ * is deliberate - it is the hole between the break and the stack that keeps a
+ * heap running off its end and a stack running off its bottom from meeting.
  *
- * How closely a port can follow those bounds is its own business: an
- * ARMv7-M MPU only has naturally aligned power-of-two regions, so there the
- * heap is not cut at `brk` (it ends at the last block the window region
- * covers) and only PLAT_HEAP_GUARD bytes under the stack are a hole (see
- * docs/PLATFORM-DESIGN.md, section 8). */
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top);
+ * **A port must never cover a gap.**  Not because the bytes matter, but
+ * because `prot heap` and `prot stack` are exactly that gap: a port that
+ * rounds a region up to its granularity and spills into the hole turns a
+ * fault into a silent write, and the two tests that would have caught it are
+ * the ones it just disabled.
+ *
+ * Everything else - the kernel's own memory, MMIO, other tasks' windows - is
+ * out of reach for user mode.  x86-32 with paging disabled can do nothing
+ * here (see docs/PLATFORM-DESIGN.md).
+ *
+ * How closely a port can follow the bounds is its own business, and it must
+ * say so in a comment where it degrades:
+ *
+ *   - TOR (rv32 without a board hook): exact, boundaries are the encoding.
+ *   - NAPOT (RP2350's Hazard3): page-sized, naturally aligned blocks that
+ *     never spill past a piece's top, so a page shared by code and data
+ *     becomes RWX and `.rodata` protection needs the linker's help.
+ *   - PMSAv8 (RP2350's M33): base + limit at 32 bytes, so the bounds are
+ *     followed exactly and the guard hole is even split into a landing
+ *     strip for exception entry.
+ *   - ARMv7-M (M0+, M3): naturally aligned power-of-two regions; when the
+ *     precise split does not fit the region budget the whole window becomes
+ *     one RWX region, with a message saying why.
+ */
+void plat_task_protect(const plat_seg_t *segs, int n);
 
 /* Bytes the kernel keeps unclaimed between the top of the heap and the
  * bottom of the stack: process_sbrk refuses to grow the break past
