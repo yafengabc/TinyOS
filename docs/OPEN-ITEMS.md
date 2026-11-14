@@ -3295,6 +3295,40 @@ NAPOT 的页映射就是从这个列表算出来的——它和 TOR 版本吃的
 顺带确认 `[mpu] regions=3` 指的是 code/data/stack 三段，landing(6)/guard(7)
 是固定编号、不计入，与 §33.5 的记录一致。
 
+### 34.1 窗口/段浸泡：QEMU 版与**真机版**（2026-11-15）
+
+`scripts/soak.py`（`6567119`）把累积性失效压出来：每轮 exec 五种大小的程序、长堆、
+64 KiB 管道、再跑一遍保护探针，判据是 `free` 前后逐项相同（heap 的 `peak` 是水位，
+允许不动）。它只跑 QEMU，因为入口是 `tostest smoke`。
+
+**真机更需要这个负载**：板子给的是 4 KiB 栈（QEMU 给 32 KiB），窗口更紧，而且两个核
+真的同时在跑。所以补了 `scripts/rp2350/soak_board.py`（同样的 `CYCLE`、同样的判据，
+走 UART0 逐条等 prompt）。四个镜像各 **8 轮**：
+
+| 镜像 | 结果 | `free` 前后 |
+| --- | --- | --- |
+| `rp2350`（ARM 单核） | **PASS**，`deep 3` 8/8 长栈、`piperace` 8/8 | `kernel heap 61440/0/61440`、`tasks 409600`、`unused 1400` |
+| `rp2350smp`（ARM 双核） | **PASS** | `61440/0/61440`、`tasks 393216`、`unused 568` |
+| `rp2350rv`（RV 单核） | **PASS** | `32768/0/32768`、`tasks 425984`、`unused 12112` |
+| `rp2350rvsmp`（RV 双核） | **PASS** | `32768/0/32768`、`tasks 409600`、`unused 11616` |
+
+四轮 uptime 都是连续的（59–2917 s），pid 到 100–108，**没有一次窗口不归还或段列表
+残留**。段接口重构在真机的四种形态下都是干净的。
+
+**QEMU 侧的两个假失败，值得写下来**（这次踩了两遍）：
+
+1. `scripts/soak.py` 用 `-commandwait-ms 1500`，在本机 `x86` 和 `rv32` 上报 FAIL，
+   而 `arm` / `rv32smp` PASS。原因是 **`piperace` 把 64 KiB 挤过 2 KiB 管道在 TCG
+   单核上极慢**，1.5 s 的窗口远不够，后续命令灌进去、回显与输出错位（能看到 `ps`
+   的结果出现在 `ps` 回显之前）。`cmd/tostest/serial.go` 的注释里早就记过同一个坑
+   （`piperace 1 16` 300 ms 内完成、`piperace 1 32` 就显得"挂了"，手工驱动两者都过）。
+   给脚本加了 `--commandwait-ms`，240 s 下 `rv32` 的 `piperace` 正常返回。
+2. 一开始把"QEMU 进程消失"当成了闪退，实际是脚本超时后自己 `kill` 掉的假象；
+   `qemu alive=True` 才是真相——**guest 卡在 `piperace`，QEMU 好好的**。
+
+结论：QEMU 上的这两个 FAIL 是**测量窗口**问题，不是段接口或窗口分配器的回归；
+真机四个镜像 8 轮零漂移是可以直接引用的结论。
+
 剩下两条驱动侧重构，**都已核完，结论是这条清单空了**：
 
 - **`connected/disconnected`（不适用，不实现）**：NuttX 的 `uart_connected()` 是

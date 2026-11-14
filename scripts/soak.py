@@ -55,12 +55,13 @@ def free_state(text):
     return [m.groups()[:3] + m.groups()[4:] for m in FREE.finditer(text)]
 
 
-def run(target, cycles):
+def run(target, cycles, commandwait_ms):
     spec = TARGETS[target]
     cmds = ["free"] + CYCLE * cycles + ["free", "ps", "uptime"]
     out = subprocess.run(
         ["go", "run", "./cmd/tostest", "smoke", "-target", target,
-         "-commands", ", ".join(cmds), "-commandwait-ms", "1500"],
+         "-commands", ", ".join(cmds),
+         "-commandwait-ms", str(commandwait_ms)],
         capture_output=True, text=True).stdout
     text = out
 
@@ -106,6 +107,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--targets", default="x86,rv32,arm,rv32smp")
     ap.add_argument("--cycles", type=int, default=6)
+    ap.add_argument("--commandwait-ms", type=int, default=1500,
+                    help="per-command output window passed to tostest smoke."
+                         "  1500 is enough on a fast host; a single-core rv32"
+                         " needs more because piperace pushes 64 KiB through a"
+                         " pipe and the next command lands before it finishes")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -115,7 +121,7 @@ def main():
         if target not in TARGETS:
             print("%-8s unknown target" % target)
             continue
-        problems, text, tasks = run(target, args.cycles)
+        problems, text, tasks = run(target, args.cycles, args.commandwait_ms)
         print("%-8s %s  %s  (%d cycles)"
               % (target, "PASS" if not problems else "FAIL", tasks, args.cycles))
         for p in problems:
