@@ -48,73 +48,61 @@ struct pipe *pipe_create(void)
  * ABBA shape as OPEN-ITEMS §23.3). */
 void pipe_ref_reader(struct pipe *p)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&p->lock);
 
-    spin_lock(&p->lock);
     p->readers++;
-    spin_unlock(&p->lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&p->lock, irq);
 }
 
 void pipe_ref_writer(struct pipe *p)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&p->lock);
 
-    spin_lock(&p->lock);
     p->writers++;
-    spin_unlock(&p->lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&p->lock, irq);
 }
 
 int pipe_drop_reader(struct pipe *p)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&p->lock);
     int last;
 
-    spin_lock(&p->lock);
     /* count never underflows: a caller can only drop a reference it took. */
     p->readers = p->readers ? p->readers - 1 : 0;
     last = p->readers == 0 && p->writers == 0;
-    spin_unlock(&p->lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&p->lock, irq);
     return last;
 }
 
 int pipe_drop_writer(struct pipe *p)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&p->lock);
     int last;
 
-    spin_lock(&p->lock);
     p->writers = p->writers ? p->writers - 1 : 0;
     last = p->writers == 0 && p->readers == 0;
-    spin_unlock(&p->lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&p->lock, irq);
     return last;
 }
 
 /* Same rule: never take p->lock with interrupts on. */
 uint32_t pipe_readers(struct pipe *p)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&p->lock);
     uint32_t n;
 
-    spin_lock(&p->lock);
     n = p->readers;
-    spin_unlock(&p->lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&p->lock, irq);
     return n;
 }
 
 uint32_t pipe_writers(struct pipe *p)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&p->lock);
     uint32_t n;
 
-    spin_lock(&p->lock);
     n = p->writers;
-    spin_unlock(&p->lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&p->lock, irq);
     return n;
 }
 

@@ -31,6 +31,14 @@ struct pfile {
 
 extern char __bss_end[];
 
+/* Run-time A/B switch for the CDC no-reader backlog fix.  Defined here (a
+ * file every target links) rather than in the board driver so the RV32-only
+ * USB code can reference it without weak symbols.  /proc/cdcfix flips it on
+ * each read; g_cdc_diag is filled in by the CDC driver on boards that have
+ * one and stays all-zero elsewhere. */
+volatile uint32_t g_cdc_fix = 1;
+volatile uint32_t g_cdc_diag[6];
+
 /* Append formatted text, returning the new offset.  kvsnprintf is what the
  * kernel already prints with, so /proc output and the boot log cannot drift
  * apart in their number formatting. */
@@ -58,6 +66,36 @@ static uint32_t fmt_uptime(char *b, uint32_t cap)
 
     /* Seconds with milliseconds, the shape programs expect to parse. */
     return put(b, cap, 0, "%u.%03u\n", ms / 1000u, ms % 1000u);
+}
+
+/* Read-only snapshot of the board's CDC TX state.  Reading this must not
+ * change anything: it is the device-side criterion for "is output still
+ * piling up while nobody reads", which is immune to the 1 ms timing noise
+ * that makes smpbench useless on a rebuilt image. */
+static uint32_t fmt_cdc_state(char *b, uint32_t cap)
+{
+    return put(b, cap, 0,
+               "cdcfix %u no_reader %u pending %u dropped %u probes %u idle_ms %u line %u\n",
+               g_cdc_fix, g_cdc_diag[0], g_cdc_diag[1], g_cdc_diag[2],
+               g_cdc_diag[3], g_cdc_diag[4], g_cdc_diag[5]);
+}
+
+static uint32_t fmt_cdcstat(char *b, uint32_t cap)
+{
+    return fmt_cdc_state(b, cap);
+}
+
+/* Reading this node flips the CDC fix and reports the state *after* the
+ * flip, so one firmware image can compare fix=0 and fix=1 back to back
+ * without a rebuild (rebuilding this path perturbs the 1 ms USB phase). */
+static uint32_t fmt_cdcfix(char *b, uint32_t cap)
+{
+    uint32_t irq = plat_irq_save();
+
+    g_cdc_fix = !g_cdc_fix;
+    plat_irq_restore(irq);
+
+    return fmt_cdc_state(b, cap);
 }
 
 /* printf has no %-10s, so labels are padded by hand (same reason user/free.c
@@ -193,6 +231,10 @@ static int proc_open(const dev_t *d, void **priv)
 
     if (!strcmp(d->name, "proc/uptime"))
         n = fmt_uptime(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/cdcfix"))
+        n = fmt_cdcfix(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/cdcstat"))
+        n = fmt_cdcstat(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/ps"))
         n = process_ps_text(b, PROC_CAP);
 #if !TOS_PROC_LITE
@@ -263,6 +305,8 @@ static const struct dev_ops proc_ops = {
 void procfs_init(void)
 {
     devfs_register("proc/uptime", &proc_ops, NULL);
+    devfs_register("proc/cdcfix", &proc_ops, NULL);
+    devfs_register("proc/cdcstat", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
 #if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);

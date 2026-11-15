@@ -52,7 +52,37 @@ void plat_early_init(void);
 /* Full initialisation: interrupt controller, timer, console, block device. */
 void plat_init(void);
 
-/* ---- console --------------------------------------------------------- */
+/* ---- console: the lower half ------------------------------------------
+ *
+ * A board implements exactly these five calls.  Everything above them lives
+ * in the kernel, once: the output lock and the escape/colour filter
+ * (console.c), the input ring, line editing, history and echo pacing
+ * (tty.c), and the decision of which physical device a byte goes to.
+ *
+ * The split is not cosmetic; it is what stops the class of bug that cost the
+ * C3 port a week: a driver that ran its own state machine, or waited for a
+ * peer, from inside the trap handler.  The rules below are all consequences
+ * of "this can be called with the output lock held and interrupts off,
+ * sometimes from inside the timer interrupt":
+ *
+ *   - No function here takes a kernel lock, calls the scheduler, sleeps, or
+ *     runs a device state machine.  A state machine that needs thread
+ *     context belongs in the idle hook (see g_idle_poll), not here.
+ *   - Every wait is bounded.  A transmitter that has stopped (gated clock,
+ *     no host on the other end) must cost a dropped character, never a
+ *     silent board: the bound is what turns "hung" into "garbled".
+ *   - putc() may drop.  It is called with the lock held; blocking on a peer
+ *     would stall every other core's output with it.
+ *   - getchar() must not need more than a register read per device: it runs
+ *     from tty_poll(), which is called with interrupts masked and also from
+ *     the block driver while a task waits for flash.  Returning -1 because
+ *     "nothing to do yet" is correct; driving the device to find out is not.
+ *
+ * (NuttX splits the same seam into struct uart_ops_s plus drivers/serial.c.
+ * We keep the five functions instead of an ops table because there is one
+ * console per board and the table would only add an indirect call per
+ * character - the same reasoning that keeps our devfs a static table rather
+ * than a VFS.) */
 
 void plat_console_init(void);
 void plat_console_putc(char c);
@@ -64,7 +94,8 @@ void plat_console_putc(char c);
  * FIFO and characters are lost.  Return 0 when nothing fits. */
 int  plat_console_tx_room(void);
 /* Wait until everything written has actually been transmitted.  Called once
- * on the way down: the device may buffer, and the CPU is about to stop. */
+ * on the way down: the device may buffer, and the CPU is about to stop.
+ * Bounded for the same reason as putc(). */
 void plat_console_flush(void);
 int  plat_console_getchar(void);      /* -1 when no input is pending */
 
@@ -80,6 +111,14 @@ uint32_t plat_tick_hz(void);
  * before it enters the scheduler, because the timer compare register and the
  * interrupt-enable CSR are per hart - hart 1 inherits nothing from hart 0. */
 void plat_timer_start_cpu(void);
+
+/* Per-core processor state that core 0 set during plat_init() and that a
+ * secondary core does not inherit: on ARM that is the SCB's exception
+ * priorities and its fault-enable bits.  Called from cpu_secondary_main()
+ * before the core first enters user mode.  Weak default does nothing, so
+ * architectures whose secondary cores need no such setup (riscv, x86) are
+ * unaffected. */
+void plat_cpu_secondary_init(void);
 
 /* Bring CPU `id` out of reset.  Boards whose secondaries are already
  * spinning on cpu_release (qemu-virt) leave the weak default in place and
@@ -124,6 +163,15 @@ void plat_irq_service(uint32_t line);
  * vectors and the kernel-stack blocks stay in step with it. */
 #ifndef TOS_MAX_CPUS
 #define TOS_MAX_CPUS 1
+#endif
+
+/* Compile-time diagnostics.  `diag = true` in a config's [features] section
+ * is what turns them on; every other build has them compiled out, with no
+ * code and no .bss.  What they add is the ability to answer "which core
+ * wedged, inside what, and what was the other one doing" from a serial
+ * capture instead of from a debugger (see kernel/diag.h for the record). */
+#ifndef TOS_DIAG
+#define TOS_DIAG 0
 #endif
 
 /* How many CPUs the kernel was built for.  Every board but one is a
@@ -256,6 +304,12 @@ int plat_uart_count(void);
 int plat_uart_write(int port, const void *buf, int len);
 int plat_uart_read(int port, void *buf, int len);
 
+/* PIO (RP2040).  `pid` is the calling task, used for ownership: a state
+ * machine loaded by one task is stopped and its pins released when that task
+ * exits.  Boards without PIO leave the weak default in kernel/periph.c. */
+int  plat_pio(int op, struct pio_req *req, int pid);
+void plat_pio_release(int pid);
+
 /* SPI master.  The driver owns SCK/MOSI/MISO for the selected bus; CS is a
  * plain GPIO because the PL022's hardware chip select is not wired on the
  * Pico and sharing one bus between devices needs software control anyway. */
@@ -285,32 +339,62 @@ int plat_dma_memcpy(void *dst, const void *src, int len);
  * code / data / stack and nothing else.  x86-32 with paging disabled can
  * do nothing here (see docs/PLATFORM-DESIGN.md). */
 
+/* One contiguous piece of the task that is about to run.  `attr` is the
+ * kernel's intent, not a register encoding: how a port reaches it is the
+ * port's business. */
+enum {
+    PLAT_SEG_CODE = 0,      /* image: user read + execute, no write */
+    PLAT_SEG_DATA = 1,      /* data + stack: user read + write      */
+};
+
+typedef struct {
+    uint32_t base;          /* inclusive */
+    uint32_t top;           /* exclusive */
+    uint32_t attr;          /* PLAT_SEG_* */
+} plat_seg_t;
+
+/* A task never has more than this: code, data+heap, stack. */
+#define PLAT_SEG_MAX 3
+
 /* Program the protection for the task that is about to run, then forget
  * about it: memory protection is a property of the running task, not of
  * the kernel.
  *
- *   [win_base, wx)          code            execute + read
- *   [wx, brk)               data + heap     read + write, brk grows via sbrk
- *   [stack_low, stack_top)  stack           read + write
+ * The caller sends the pieces, in ascending order, non-overlapping:
  *
- * Everything else - the kernel's own memory, MMIO, other tasks' windows -
- * is out of reach for user mode, including the hole between brk and
- * stack_low that neither region claims.  `stack_top - stack_low` must be a
- * power of two and stack_low aligned to it.
+ *   PLAT_SEG_CODE   [win_base, wx)          image, ends where .data starts
+ *   PLAT_SEG_DATA   [wx, brk)               data + heap as sbrk() took it
+ *   PLAT_SEG_DATA   [stack_low, stack_top)  stack, stack_top == win_end
  *
- * `win_end` is the end of this task's window.  It varies per task now that
- * windows are sized to their image, and only matters to a port that
- * describes the whole window rather than the three regions inside it (the
- * ARMv7-M MPU, one region for "everything this task may touch"); rv32's
- * TOR entries stop at wx and brk and ignore it.
+ * Any piece may be empty and is then simply absent; a gap between two pieces
+ * is deliberate - it is the hole between the break and the stack that keeps a
+ * heap running off its end and a stack running off its bottom from meeting.
  *
- * How closely a port can follow those bounds is its own business: an
- * ARMv7-M MPU only has naturally aligned power-of-two regions, so there the
- * heap is not cut at `brk` (it ends at the last block the window region
- * covers) and only PLAT_HEAP_GUARD bytes under the stack are a hole (see
- * docs/PLATFORM-DESIGN.md, section 8). */
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top);
+ * **A port must never cover a gap.**  Not because the bytes matter, but
+ * because `prot heap` and `prot stack` are exactly that gap: a port that
+ * rounds a region up to its granularity and spills into the hole turns a
+ * fault into a silent write, and the two tests that would have caught it are
+ * the ones it just disabled.
+ *
+ * Everything else - the kernel's own memory, MMIO, other tasks' windows - is
+ * out of reach for user mode.  x86-32 with paging disabled can do nothing
+ * here (see docs/PLATFORM-DESIGN.md).
+ *
+ * How closely a port can follow the bounds is its own business, and it must
+ * say so in a comment where it degrades:
+ *
+ *   - TOR (rv32 without a board hook): exact, boundaries are the encoding.
+ *   - NAPOT (RP2350's Hazard3): page-sized, naturally aligned blocks that
+ *     never spill past a piece's top, so a page shared by code and data
+ *     becomes RWX and `.rodata` protection needs the linker's help.
+ *   - PMSAv8 (RP2350's M33): base + limit at 32 bytes, so the bounds are
+ *     followed exactly and the guard hole is even split into a landing
+ *     strip for exception entry.
+ *   - ARMv7-M (M0+, M3): naturally aligned power-of-two regions; when the
+ *     precise split does not fit the region budget the whole window becomes
+ *     one RWX region, with a message saying why.
+ */
+void plat_task_protect(const plat_seg_t *segs, int n);
 
 /* Bytes the kernel keeps unclaimed between the top of the heap and the
  * bottom of the stack: process_sbrk refuses to grow the break past
@@ -380,6 +464,10 @@ uint32_t plat_frame_get_ret(const regs_t *r);
 
 /* Prepare a trap frame that starts a user program at `entry` with stack
  * `sp`.  Owns all architecture specific segment/CSR setup. */
+/* First argument of a user entry point (the thread trampoline takes one).
+ * Called right after plat_prepare_user_frame(). */
+void     plat_frame_set_arg(regs_t *frame, uint32_t arg);
+
 void     plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp);
 
 /* Power the machine off (best effort). */
@@ -398,6 +486,11 @@ void plat_enter_user(void *frame) __attribute__((noreturn));
  * user frame: a trap that landed inside a kernel call has to let that call
  * finish, because the kernel stack below it is not resumable. */
 int plat_fault_is_user(void *frame);
+
+/* The user stack pointer this frame was taken with.  A port with no faulting
+ * protection unit (RP2040, PC) uses it to notice a stack that ran off its
+ * bottom, because nothing else will. */
+uint32_t plat_frame_get_user_sp(const regs_t *r);
 
 /* Stop the machine. */
 void plat_panic_halt(void) __attribute__((noreturn));

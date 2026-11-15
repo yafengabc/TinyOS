@@ -422,7 +422,11 @@ void ramdisk_init(void)
     /* Readdir walks the tree on demand, so there is nothing to snapshot. */
     ok = 1;
 
-#ifndef TOS_LFS_RO
+    /* Not on the boot path: a flash write during boot turns any problem in
+     * the erase/program path into an unbootable board with no way to run a
+     * diagnostic.  Build with -DTOS_FS_SELFTEST to run it here again; from
+     * the shell the same path is exercised by any file write. */
+#if defined(TOS_FS_SELFTEST) && !defined(TOS_LFS_RO)
     write_selftest();
 #endif
 }

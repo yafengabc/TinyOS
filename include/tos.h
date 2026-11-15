@@ -58,6 +58,60 @@
 #define SYS_SPI      44  /* spi(op, &req) -> depends on op             */
 #define SYS_I2C      45  /* i2c(op, &req) -> depends on op             */
 #define SYS_DMA_MEMCPY 47 /* dma_memcpy(dst, src, len) -> len/-1       */
+/* Kernel threads (TOS_KTHREADS): only built when the kthreads feature is on.
+ * A thread shares the caller's window; `sp` is the top of a stack the caller
+ * allocated inside it.  tid is a pid; join stores the exit code through the
+ * user pointer. */
+#define SYS_THREAD_CREATE 48 /* kthread_create(entry, arg, sp) -> tid  */
+#define SYS_THREAD_EXIT   49 /* kthread_exit(code) -> no return        */
+#define SYS_THREAD_JOIN   50 /* kthread_join(tid, &code) -> 0 or -1    */
+/* Scheduler counters, for benchmarks: schedstat(&st) fills three u32
+ * (switches to another task, scheduler runs that kept the same task, ticks). */
+#define SYS_SCHEDSTAT     51
+/* PIO (RP2040): pio(op, &req).  One request struct carries both the assembled
+ * program and the SM configuration; see struct pio_req below. */
+#define SYS_PIO           52
+
+#define PIO_LOAD     0   /* req.buf = u16 words, req.len = count          */
+#define PIO_START    1
+#define PIO_STOP     2
+#define PIO_TX       3   /* req.buf = u32 words, req.len = count          */
+#define PIO_RX       4
+#define PIO_RELEASE  5
+#define PIO_STATE    6   /* req.buf = u32[PIO_STATE_WORDS]: SM registers  */
+/* Execute one instruction immediately through SMx_INSTR (req.len = opcode).
+ * This is the probe that separated "the machine is not running" from "the
+ * machine runs and the pin does not move": `pio exec 0 0 0xe081` (set
+ * pindirs,1) followed by `pio exec 0 0 0xe001` (set pins,1) drives the pad
+ * directly, with no program and no FIFO in the way. */
+#define PIO_EXEC     7
+
+/* ctrl, fstat, execctrl, shiftctrl, pinctrl, clkdiv, addr, owner,
+ * gpio_ctrl, pad, flevel.  The last three exist because the pin is half of
+ * every PIO question: FUNCSEL, IE/OD/ISO and the FIFO levels are what tell
+ * "the machine never drove it" from "it drove it and nothing read it". */
+#define PIO_STATE_WORDS 11
+
+#define PIO_F_SIDE_OPT     0x01   /* .side_set N opt                    */
+#define PIO_F_SIDE_PINDIR  0x02   /* .side_set N pindirs                */
+
+struct pio_req {
+    int op;
+    int block;          /* 0 or 1                                       */
+    int sm;             /* 0..3                                         */
+    const void *buf;    /* u16 instruction words (LOAD) or u32 data     */
+    int len;            /* words: count for LOAD, TX and RX alike       */
+    int origin;         /* instruction-memory slot for word 0           */
+    int wrap_top;
+    int wrap_bottom;
+    int side_set;       /* side-set bit count, 0..5                     */
+    int flags;          /* PIO_F_*                                      */
+    int clkdiv_int;
+    int clkdiv_frac;
+    int pin_base;       /* first GPIO used, -1 = do not touch pins      */
+    int pin_count;
+    int shiftctrl;      /* extra SHIFTCTRL bits (autopull/autopush...)  */
+};
 
 #define MSG_EAGAIN   (-2)
 #define TOS_MSG_MAX  256    /* bytes per pool slot (mailbox.h) */

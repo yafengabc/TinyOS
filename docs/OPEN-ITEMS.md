@@ -363,6 +363,16 @@ PLATFORM-DESIGN 新增 §6.5；`accept.py` 加了 4 条用例（wfile 写脚本 
    两个方向都在真机验过（旧 `rx` 上确实一行报错就停）。
 
 
+
+**2026-11-14 复测（UART0 侧，本轮所有改动之后）**：`scripts/esp-c3/accept.py`
+**24/24**。第一次跑是 22/24，两条都不是内核问题：
+
+1. `source runs the command file` 报 `/bin/hello` 不存在 —— 板上的 littlefs 是**旧
+   镜像**（`/bin` 少了 9 个程序），完整重刷内核 + 文件系统后恢复。这和上面第 8 条
+   `NAK r1` 是同一类事故：内核与文件系统不是同一次构建出来的；
+2. `reboot resets the chip` 仍在等旧字符串 `rebooting...`，而 `user/reboot.c`
+   早已打印 `reboot: resetting the machine`；已改测试。
+
 **尾巴**：本机只插了 CH343（COM4 = UART0），原生 USB 口没线，所以 USJ 的
 RX 中断和 TX 环只在代码层对称实现，没在真机跑到主机侧。插线后要验：用新出现
 的 COM 口传一遍文件；`cat` 一个大文件确认输出不缺字；`INT_RAW` 里
@@ -954,6 +964,30 @@ kernel ends at 0x20012f00   (77,568 B)   →   0x2000b840   (47,168 B)
 rp2040 手边没有可烧的 Pico，而项目纪律是**内核改动必须真板 A/B**（§16、§18）。
 上面第 1 步是纯布局、可离线验证；2/3/4 需要真板。等有板子再按顺序做。
 
+
+### 19.x 状态（2026-11-14）：已完成，数字比当初估计的更好
+
+三条动作分两批落地，其中最关键的一条其实来自 `cf8cc33`（"derive the task area
+from the kernel's link-time end"）：`board/rp2040/kernel.ld` 现在写的是
+
+```ld
+__app_base = ALIGN(__kernel_end, 0x4000);
+```
+
+也就是**不再预留 128 KiB**，任务区直接从真实内核结束处开始。加上
+`internal/build/build.go` 里 rp2040 的 `HeapBytes` 16 → 8 KiB、`MaxProcs` 8、
+`KStack` 8 KiB（后两项早就在），实测：
+
+| 目标 | `kernel ends at` | `__app_base` | 任务区 | 4 KiB 窗口 |
+| --- | --- | --- | --- | --- |
+| `rp2040` | 0x2000b5c8（约 46 KiB） | 0x2000c000 | **216 KiB** | **54** |
+| `rp2040smp` | 0x2000d6a8 | 0x2000e000 | 208 KiB | 52 |
+
+比本节当初估的 184 KiB 还多 32 KiB，因为堆又少了一半、且内核本身也比当时小。
+剩下的唯一"账单"是内核每长过一个 16 KiB 边界就少一个窗口，这是刻意的。
+
+待真机确认的只有一行：`free` 里 `tasks` 应该显示 216 KiB（`rp2040smp` 是 208）。
+
 ## 20. C3 极限裁剪：把 §19 的动作先在能烧的板上跑一遍（2026-11-07，已落地并真机验证）
 
 ### 动机
@@ -1061,8 +1095,8 @@ i386 上就是这样漂移出了幽灵进程）。
 | `bin/msh`（-O2, rv32，无 history） | 2 696 | 331 | 2 656 | 6 016 | 2 176 | 16 KiB |
 | `bin/msh`（-O2, rv32，有 history） | 2 952 | 331 | 2 656 | 6 272 | 1 920 | 16 KiB |
 | `bin/msh`（-O2, rp2040） | — | — | — | 7 968 | **224** | 16 KiB |
-| **`bin/msh`（-Oz, rv32，现状）** | 2 494 | 348 | 2 656 | **5 792** | **2 400** | **16 KiB** |
-| **`bin/msh`（-Oz, rp2040，现状）** | — | — | — | **6 656** | **1 536** | **16 KiB** |
+| `bin/msh`（-Oz, rv32，**gcc/旧 clang 量，已作废**） | 2 494 | 348 | 2 656 | 5 792 | 2 400 | 16 KiB |
+| `bin/msh`（-Oz, rp2040，**gcc/旧 clang 量，已作废**） | — | — | — | 6 656 | 1 536 | 16 KiB |
 
 `history` 内建精确地花掉 **256 B text、0 B bss**（rv32 6 016 → 6 272）。
 
@@ -1083,12 +1117,33 @@ grain。更糟的组合是只剩一个空闲 grain 时——`exec` 直接失败�
 而源码还是 `user/msh.c`，日志里只有 `OPT py -Oz`，一个字的提示都没有）。所以
 msh 改成了目录型，`user/msh/msh.c` + `user/msh/opt`。
 
-| 目标 | -O2 span / 余量 | -Oz span / 余量 |
+| 目标 | -O2 span / 余量（gcc/旧 clang，已作废） | -Oz 现状（同上，已作废） |
 |---|---|---|
-| rv32 (C3) | 6 272 / 1 920 | **5 792 / 2 400** |
-| x86 | 7 792 / 400 | **6 640 / 1 552** |
-| rp2350 | 7 680 / 512 | **6 208 / 1 984** |
-| rp2040 | 7 968 / **224** | **6 656 / 1 536** |
+| rv32 (C3) | 6 272 / 1 920 | 5 792 / 2 400 |
+| x86 | 7 792 / 400 | 6 640 / 1 552 |
+| rp2350 | 7 680 / 512 | 6 208 / 1 984 |
+| rp2040 | 7 968 / 224 | 6 656 / 1 536 |
+
+> **实测更新（2026-11-14，clang 23.1.4 -Oz — build.go 当前为 rv32/arm 选的工具链）**：
+> 上面两列是在 gcc / 旧 clang 下量的，**已作废**。同样带管道 + `>` 重定向、
+> `POOL_MAX=1536` 的源码，clang 23 下各板 msh **镜像原始尺寸**如下（span 一律向上取整
+> 到 4 KiB 页 = 8 192，所以窗口仍是 16 KiB；「余量」是原始尺寸到 8 192 的距离，不是到
+> 12 KiB span 的距离）：
+>
+> | 目标 | 镜像原始 | span | 到 8 192 的余量 | 窗口 |
+> |---|---|---|---|---|
+> | C3 / rp2350rv / rv32 | 7 364 | 8 192 | **828** | 16 KiB |
+> | rp2350 | 7 684 | 8 192 | **508** | 16 KiB |
+> | rp2040 | 8 132 | 8 192 | **60** | 16 KiB |
+> | x86（64 KiB grain，无约束） | 8 756 | 12 288 | — | 64 KiB |
+>
+> **rp2040 只剩 60 B**：再多一个字节越过 8 192，span 跳到 12 288，窗口
+> 12 288 + 4 096 + 4 096 = 20 480 > 16 384，自动变成 32 KiB（Pico 上 8 个窗口变 7 个；
+> 只剩 1 个空闲 grain 时 `exec` 直接失败，msh 在 Pico 上起不来）。这是 **clang 升级**
+> 把 `-Oz` 代码量涨了 ~400–450 B 带来的真实收窄，不是 msh.c 源码膨胀。给 msh 加任何
+> 功能前先 `readelf -lW build/user/bin/msh | ...` 量一次，别信旧文档里的 1 536 B。
+> 三个硬件 SMP 端口（rp2040smp / rp2350smp / rp2350rvsmp）复用同架构的非 SMP msh 镜像，
+> 尺寸一致，同样守住 16 KiB。
 
 x86 的 400 B 也一并解决了。换优化级别的代价是一个 shell 逐字符搬运、fork 程序，
 没有可测的循环；真机上 `stk` 反而从 1.6 降到 1.3 KiB。
@@ -1125,7 +1180,7 @@ x86 的 400 B 也一并解决了。换优化级别的代价是一个 shell 逐�
 真机（C3）：`history` 打出 6 行右对齐列表（含 `run msh` 这条由完整 sh 敲进去的
 命令 —— 池与 shell 无关，谁敲的都记），↑ 两次退格重绘回 `ls bin` 后回车正常执行。
 
-**rp2040 的 224 B 已经被 `-Oz` 换成了 1 536 B**（见上一节），所以 pool 不必再动。
+**rp2040 在 gcc/旧 clang 下 224 B 被 `-Oz` 换成了 1 536 B；但 clang 23 升级后这 1 536 B 已经被吃光，现在只剩 60 B**（见上面的实测更新框），所以 pool 不必再动——但给 msh 加任何功能前必须先量一次。
 真要再挤，两条仍然在桌上：pool 2 KiB → 1 KiB（`etc/rc` 941 B 够，`etc/demo.sh`
 1 140 B 装不下了），或者反过来把内核 `TOS_HIST_BYTES` 从 512 降到 256，省 256 B
 内核 `.bss` —— 代价是 `HIST_KEEP_MAX`（召回时暂存正在编辑的那一行）从 256 掉到
@@ -1157,6 +1212,57 @@ x86 的 400 B 也一并解决了。换优化级别的代价是一个 shell 逐�
   省一个 grain，但 `source etc/demo.sh`、`run sh <file>` 这些既有用法和文档全要跟着改。
 - **B. 并存**：`bin/sh` 不动，小板上把 init 名字指到 `bin/msh`（要加一个板级常量），
   FS 里两个 shell 都在，多约 2 KiB flash。
+
+### 管道塞进同一个窗口：能（2026-11-14，已上板）
+
+问题：给 msh 加 `A | B` 之后还能不能守住 16 KiB 窗口？
+
+先分清花谁的钱。内核侧一分不用：`pipe()` / `dup2()` 早就有了（§24），
+管道缓冲是 `kmalloc` 的 2 KiB，记在**内核堆**上，不占用户窗口。所以这题
+纯粹是 msh 自己的 8 KiB 镜像预算。
+
+实测（`-Oz`，字节；span 是 `checkWindow()` 算的 PT_LOAD 跨度，按 4 KiB 页
+向上取整，预算 8 192）：
+
+| 目标 | text | rodata | bss | span | 余量 |
+|---|---|---|---|---|---|
+| C3 加管道前 | 3 466 | 744 | 2 656 | 6 944 | 1 248 |
+| **C3 加管道后** | 3 792 | 924 | 2 144 | **6 944** | **1 248** |
+| rp2040 加管道前 | 4 252 | 760 | 2 656 | 7 744 | 448 |
+| **rp2040 加管道后** | 4 576 | 940 | 2 144 | **7 744** | **448** |
+| rp2350 加管道后 | 4 112 | 940 | 2 144 | 7 264 | 928 |
+| rp2350rv 加管道后 | 3 792 | 924 | 2 144 | 6 944 | 1 248 |
+
+管道本身是 **+324~326 B text、+180 B rodata**（`run_pipeline` + `|` 分割 +
+四条错误串），约 0.5 KiB。真正把账抹平的是一个宏：`POOL_MAX` 2 KiB → 1.5 KiB
+（−512 B bss）。`etc/rc` 941 B、`etc/demo.sh` 1 140 B 都仍装得下；嵌套两个脚本
+在 2 KiB 时就已经装不进（941 + 1 140 + 2 > 2 048），所以这不是新增的损失。
+
+结论：**能守住，而且 span 一个字节没动**——+504 与 −512 正好抵消。但这不叫
+有余量：rp2040 还是那 448 B，和加管道之前一样薄。
+
+实现上的三个坑：
+
+1. **`|` 必须在 `split()` 之前找**。`split()` 把空格改写成 NUL，之后再
+   `strchr()` 只看得到第一个词，`a | b | c` 于是被当成 `wc | wc` 的普通参数，
+   报 `wc: |: no such file`。第一版就是这么错的。
+2. **三级管道直接拒绝**，不做链式解析：报 `sh: only two stages per pipeline`
+   比让 `wc` 去找一个叫 `|` 的文件清楚。
+3. **shell 必须关掉自己的两端**。EOF 的定义是"所有写端都没了"，shell 留着
+   一份 `fds[1]` 的话，右边那个程序永远等不到 EOF；`close(1)` / `close(0)`
+   之后 fd 回到控制台，用的是内核既有的"没有 fd 1 就写控制台"行为。
+
+验证（QEMU rv32 / arm + 真机 rp2350rvsmp，RV32 150 MHz，16 KiB 窗口）：
+`cat /readme.txt | wc` → `37 244 1402`；`wc /readme.txt | wc` → `1 4 24`；
+`cat /demo.py | wc` → `116 343 2788`（2 788 B 挤过 2 KiB 的环，两端都真的阻塞过）；
+`cat /readme.txt | wc | wc` 被明确拒绝。只写不读的极端情形没测——`cat big`
+进管道后不消费会一直阻塞，那是内核 pipe 的语义，不是 msh 的。
+
+一个没复现的插曲：调整 `|` 检查顺序之前的那版镜像，在 rv32 QEMU 上
+`cat /demo.py | wc` 报过一次 `kernel stack out of bounds: sp=8009da84`；
+同版本用 `run sh` 走完整 shell 的同一条命令正常，重建之后再没出现过
+（之后的重复 6 次、ARM QEMU、RV32 真机都干净）。查不出来就先记着，
+不当作已解决。
 
 ## 22. RP2350 双核实测：`getcpu()` 偶尔返回系统调用号（2026-11-08，未定性）
 
@@ -2217,6 +2323,80 @@ tick Hz         : 1000
 | `x86` (QEMU) | i686 (PC) | i686 | unknown | PC (i686) |
 
 
+## 28. RV32 双核 SMP：四个真 bug 与一套开关式诊断（2026-11-14，已真机验收）
+
+起点是 `rp2350rvsmp`（Hazard3 ×2，150 MHz）跑 `dd` 写 flash 间歇报
+`dd: write error at block 0 (-1)`，偶尔连 shell 都起两份。四个独立的 bug，
+每一个单独存在时都能装成"偶发"：
+
+1. **RV32 缺 `plat_spin_try_acquire()`**（`arch/rv32/platform.c`）。只有 ARM 实现了
+   它，`kernel/cpu.c` 的弱默认是"单核，锁不会争用，直接返回 1"，于是
+   `spin_trylock()` 在 RV32 SMP 上恒成功、`proc_lock` 形同虚设。指纹很清楚：
+   shell 横幅打两次、`PANIC no runnable process` 前 `[sched] cpu 0 idle:
+   c0=1/1 c1=1/1`、`smpbench` 1.00x、`smp` 的 worker 全报 cpu 0。实现用
+   `amoswap.w.aq`：它无条件写入 1，失败时锁原样不动，只有返回值说明归属。
+2. **park 握手只发布一次 ack**（rp2350 / rp2040 / rp2350rv 三端口同一个错）。
+   驻留核在 `rp_flash_park_loop()` 里写 `g_flash_parked = 1` 然后等 flag 落下；
+   写者清掉它再等下一次 ack。littlefs 背靠背两次块操作时，驻留核还在循环里、
+   不会重新进入，第二个请求等不到 ack，20M 圈后返回 -1 → `dd` 报错。
+   改成**代际计数**：`myreq = ++g_park_req`，判据 `g_park_ack == myreq`，
+   驻留循环每轮都重新发布 ack（flag 只在 XIP 恢复后才清，所以语义安全）。
+3. **`console_write()` 抢不到锁就整体丢弃**（`kernel/console.c`）。
+   双核上通常是对面核在 1 ms tick 里排空回显，此时整块写被丢掉：命令行 ≥16 字节
+   就没输出、连提示符一起消失（16 字节的回显刚好在程序启动前排完，17 字节排不完）。
+   改成记录持锁 CPU：**别的核持锁 → 等，自己持锁（中断重入）→ 丢**。
+   `kprintf()` 保留 trylock，诊断行宁可丢也不能把卡死的板子卡得更死。
+4. **双调度窗口**（`kernel/process.c`）。`block_locked()` 清 `cpu` 与
+   `sched_switch()` 之间，唤醒落在窗口内会把任务重新置 READY 且 `cpu < 0`，
+   两个核可能同时选中它 —— 同一个 shell 跑在两套内核栈上，输的那份拿走了
+   控制台。`sched_switch()` 现在用 `requeued` 标记识别这种情况，就地恢复自身
+   并返回被唤醒者补好的帧，不再走 `sched_pick()`。
+
+顺带修掉的两个"看起来像原因"的问题：
+
+- **SIO 门锁的判定**（`arch/arm/platform.c`）：RP2350 对 `SIO_SPINLOCK0 + 4n` 的
+  读返回 one-hot（lock 31 给 `0x80000000`，lock 30 给 `0x40000000`），
+  `>> 31` 只在 lock 31 上成立。判"非零"两个芯片都对。
+- **写 flash 期间不能关看门狗**。旧代码在 ROM 调用前 `wdt_disable()`，
+  一次 wedge 就从"可恢复的错误"变成"永远静止的板子"。现在全程武装只喂不关
+  （2 s 重装，一次擦写 ~50 ms），并给 `rom_enter_bootsel()` 加了
+  `rom_stop_other_core()`：ROM 引导器只跑 core 0 且事后不复位芯片，
+  另一核必须停死，否则新镜像和旧内核共享一套 `.bss`。
+
+### 诊断开关 `TOS_DIAG`
+
+这轮排查靠的是"板子自己留证据"，不是探针。`[features] diag = true`
+（`configs/README.md` 有说明，默认关、关掉零成本）打开后：
+
+- 每核 tick 心跳 + 三个"现在在不在里面"的标志（屏蔽区 / 自旋 / park），
+  健康核能判断对面是**卡在屏蔽段里**还是**还在周期性地进临界区**；
+- 屏蔽点记 site id + 调用者 LR（`TOS_MASKSITE_*`），
+  `addr2line -e build/kernel-<target>.elf <lr>` 直接落到源码行；
+- 全部放 `.noinit`（链接脚本在 `.bss` 之后），看门狗复位不清 SRAM，
+  下次启动第一行打 `[PREV] ...`；RP2350 另有 `WATCHDOG_SCRATCH0..7`
+  记 flash 序列走到了哪一步（只有上电才清）。
+
+两条方法学上的教训，写在这里免得下次再踩：**抓冷启动必须先挂好读线程再按
+RESET**（CH343 不随 MCU 复位掉线，第一个字节抓得到）；**压力测试走 CDC 不走
+CH343**（约 18 轮 dd 之后 UART 的 host→MCU 方向会单向死掉，探针显示
+`cr`/`pad`/`funcsel` 全正常而 RX FIFO 恒空）。另外 `-DTOS_DIAG` 本身会改变
+时序，A/B 结论要在同一个固件里用运行期开关复核。
+
+### 验收（`rp2350rvsmp` 真机，ATK-DNRP2350AM）
+
+| 项目 | 结果 |
+|---|---|
+| `dd of=/big.bin bs=4096 count=1` × 12 轮（写 + 读校验，CDC） | 0 失败 0 重启 |
+| 单扇区写累计 200+60+30+40+20 轮（诊断版固件，同一天） | 0 失败 0 重启 |
+| `smpbench`（关闭诊断的提交版） | **1.97x**：single 206 ms，dual 205 + 209 ms |
+| `smp -s 2 300` | worker 0 → cpu 0，worker 1 → cpu 1，各 5197 / 5243 blocks |
+| 16 字符命令行 ×18 次 | 0 丢（修前 10 次丢 9 次） |
+| 11 个目标构建 | 全 OK；`diag = true` 的 rp2350 / rp2350smp / rp2350rvsmp 也能编译 |
+
+未验证：`rp2040smp` 只过构建（本机没有 rp2040 板），它的 park 握手是同一份修复。
+`threadbench` 的 ratio 与 SMP 性能数字在 QEMU 里没有意义，别用它们下结论。
+
+
 ## 建议的讨论顺序
 
 1. ~~单文件多入口~~（§6 结论已进 §7.1，等拍板要不要实现）。
@@ -2227,7 +2407,8 @@ tick Hz         : 1000
 4. ~~`script` 先合、`sched-prio` 后 rebase~~（2026-11-02 已按此顺序完成）。
 5. ~~B 路线第二步：输入侧分块 + 输出直写窗口~~（2026-11-06 深夜已做，§18；
    C3 堆 56 → 16 KiB，堆峰值 28 424 → 768 B）。
-6. **RP2040 的 RAM 布局**（§19）：内核窗口写着 128 KiB、实际只用 77.6 KiB，
+6. ~~RP2040 的 RAM 布局~~（§19，2026-11-14 完成：任务区 216 KiB / 54 个窗口，见
+   19.x。原描述：）内核窗口写着 128 KiB、实际只用 77.6 KiB，
    50 KiB 白白占着；把 `PLAT_KERNEL_MAX` 下移 + 缩堆/任务表/内核栈，能把用户区
    从 136 KiB 抬到 190 KiB 以上。同一套动作已在 C3 上完整验证（§20：
    内核 79 088 → 49 760 B、任务区 15 → 19 窗口、24/24 验收通过），
@@ -2235,3 +2416,1083 @@ tick Hz         : 1000
 7. **XIP** 只在「真要跑 64 KiB 以上的程序」时回到桌上，先做 `irom.S` 探针。
 8. **最小 shell 进不进 init 位**（§21）：`bin/msh` 已实测一个 16 KiB 窗口够用
    （rv32 5 792 B 镜像、余 2 400），但谁叫 `bin/sh` 会牵动脚本、文档和验收，先拍板。
+
+## 29. 待真机验收：SMP 的删除/回收路径与 RV 的 USB 中断（2026-11-14）
+
+两条都只能在有 RP2350 的机器上做，代码已在 `threads-preemptive`。
+
+### 29.1 `rp2350smp` / `rp2350rvsmp`：`dd` + `rm` 回收 200 轮
+
+§28 的 200 轮都是**覆盖写同一个文件**：第一轮之后基本复用同一批块，erase 和
+littlefs 元数据更新的流量远小于"删掉再重新分配"。而停核握手的代际计数正是在
+**背靠背块操作**上暴露的（`dd: write error at block 0 (-1)`），所以回收路径要
+单独压一遍。
+
+```sh
+# 主机侧循环 200 轮，每轮写完就删，逼下一轮重新分配
+for i in $(seq 200); do
+    dd of=/x bs=4096 count=8
+    rm /x
+done
+df
+```
+
+判据：
+
+- 200 轮内没有 `dd: write error at block N (-1)`；
+- 没有 `[flash] park timeout`（park 握手超时的日志）；
+- 结束后 `df` 的 used 回到循环前的值（块没有泄漏）；
+- 两个镜像都要过：`rp2350smp` 和 `rp2350rvsmp`。
+
+失败时怎么读：`park timeout` → 代际计数没生效；`write error` → 另一核在 XIP
+被拿走的瞬间还在取指；`df` 涨上去不回落 → littlefs 回收没跑完。
+
+### 29.2 `rp2350rv`：USB 走中断
+
+RV 端口的 USB 一直是轮询（`usb_cdc_poll()` 在调度器空闲时跑 `tud_task()`），
+因为 Hazard3 没有 NVIC。现在有一条与 ARM 对等的中断路径，而且**已经是默认**
+（`drivers/usb/rp2350rv/usb_cdc.c` 里 `TOS_RV_USB_IRQ` = 1）：
+
+- 外部中断统一是 `mcause = 11`（machine external），**不是** mcause 里的线号；
+- 每根线的使能/挂起在 Hazard3 的 XH3IRQ 数组 CSR 里：`meiea` / `meipa`
+  （0xbe0 / 0xbe1，元素 0 覆盖 0..31 号线），USBCTRL 是 **14 号线**；
+- `usb_cdc_irq_enable()` 置 `meiea` 的 14 位 + `mie.MEIE`；
+- `plat_irq_foreign()` 收到 cause 11 读 `meipa`，命中 14 就调
+  `usb_cdc_irq_task()`（`dcd_int_handler` + ISR 版 `tud_task`，`g_in_task` 防重入）；
+- idle 轮询保留作兜底：中断没来就退回旧行为，不会变成死控制台。
+
+验收：
+
+| 项目 | 期望 |
+|---|---|
+| 启动日志 | `[u0]`~`[u4]` 全部出现，`[U] usb hw=1 cfg=1 stage=0` |
+| 主机 | 能枚举出 CDC 口并交互 |
+| `help`（3 KB） | 不丢字（丢字 = 中断在跑但 FIFO 排空不够，tick 里的 `tx_kick` 应兜住） |
+| 跑 `bench` 时敲键 | 有回显（轮询版在 CPU 不空闲时会明显迟钝） |
+| `dd of=/x bs=4096 count=8` 期间 | USB 不掉线，命令正常返回 |
+
+失败时：UART 正常但 USB 完全没反应 → 大概率是 `meiea` 的编码或 14 号线号不对，
+把 `plat_irq_foreign()` 里读到的 `meipa` 打到 UART 上，一行就能定位。要回退到
+轮询，把 `usb_cdc.c` 里那个 `#define TOS_RV_USB_IRQ` 改回 0 即可，idle 轮询和
+tick 排空都还在。
+
+## 30. RP2040 与 C3 同构的窗口：软件栈守卫 + 4 KiB 步长（2026-11-14，待真机）
+
+RP2040 是整个仓库里唯一**没有任何内存保护**的用户态（Cortex-M0+ 既无 MPU 也无
+MMU，`prot` 在 `configs/rp2040.conf` 里被排除）。所以"窗口和 C3 一致"这件事在
+它上面不是改一个常量，而是要先**用软件造出 C3 靠硬件得到的那次 fault**。
+
+### 30.1 落地了什么
+
+- **软件栈守卫**（`kernel/process.c`）：`exec()` 在护栏洞的顶部（`stack_low - 4`）
+  写一个 `"STAK"` 哨兵字；每次进入内核（`syscall_dispatch()`）检查它。被踩坏就
+  当作栈溢出：先尝试一步增长，失败则打印
+  `stack overflow: guard word at 0x... destroyed` 并杀掉任务（退出码 139）。
+  用弱符号 `plat_user_stack_guard()` 开门，只有 RP2040 返回 1，其它端口零成本。
+- **一步增长**：`plat_window_grow_reserve()` 在 RP2040 上返回 `PLAT_STACK_BYTES`
+  （4 KiB），于是没有声明栈的程序拿到一步 4 KiB 余量，和 C3 完全同构。
+- **窗口**：`PLAT_APP_GRAIN` 16 KiB → **4 KiB**，`PLAT_STACK_BYTES` 8 KiB →
+  **4 KiB**；`plat_window_needs_stack_alignment()` 返回 0（这里没有需要编码的
+  region，与 C3 的 TOR 同理）。
+
+### 30.2 这个守卫能做什么、不能做什么
+
+- **能**：越界的第一笔写在护栏洞里（4 KiB 池子），下一次系统调用就发现并处理，
+  不会一路写进镜像；报错明确，不再伪装成"野指针"；
+- **不能**：紧递归且完全不调系统调用的程序，要到下一次进内核才被抓到，期间可能
+  已经吃掉几 KB 堆；另外**堆写坏、跨窗口野指针、写内核内存仍然拦不住**，那需要
+  MPU，RP2040 没有。这条要写在这块板的 README 里，别让人以为它有了保护。
+
+### 30.3 待真机验收（有 RP2040 的机器）
+
+> 跟踪：[issue #1](https://github.com/yafengabc/TinyOS/issues/1)（和 §32 共用工单；
+> 结论回写到本节，别在工单里维护第二份状态）。
+
+```sh
+go run ./cmd/tos build -config configs/rp2040.conf
+python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2   # 按 BOOTSEL
+```
+
+| 项目 | 期望 |
+|---|---|
+| 启动 | 进 `tos>`，`/proc/dev`、`ls`、`dd` 正常 |
+| `ps` 里 `msh` 的 wink | **16 KiB**（镜像 8K + 护栏 4K + 栈 4K） |
+| `sleep` 之类的 wink | **16 KiB**（原来 24/32），并发窗口数明显变多 |
+| `deep 3`（6 KiB 递归） | `stack grown to 8 KiB` + `journal intact` |
+| `deep 6`（12 KiB） | 先长到 8K，再打 `stack overflow: guard word ...`，最后 `no room to grow it; killing` |
+| `deep 6 0 8`（堆先占余量） | 同上，应在增长阶段就拒绝 |
+| `dd of=/x bs=4096 count=8` × 若干轮 + `reboot` | 文件系统行为不变 |
+
+失败签名：
+
+- `deep 3` 直接被 `store access fault`（或 journal 损坏）→ 守卫没生效：
+  检查 `plat_user_stack_guard()` 是否返回 1、`exec()` 是否真的写了哨兵字；
+- `deep 6` 打出了 `guard word` 但没有增长也没有 `killing` → `process_stack_grow()`
+  的参数不对（它用 `sp = low - 4` 表示"已经出界"）；
+- 窗口还是 24/32 KiB → `layout.c` 的 grain/stack 或 `WindowGeometry()` 没对齐。
+
+### 30.4 顺带一提
+
+x86/PC 端口也是"无分页 + `plat_task_protect()` 空实现"，处境和 RP2040 一样。
+守卫是同一个弱符号，打开只需让 `arch/x86/platform.c` 返回 1，而且 QEMU 里就能
+验——如果 RP2040 这轮通过，可以顺手把 x86 也打开。
+
+## 31. RP2350 RV 的 4 KiB 窗口（分块 NAPOT）与 x86 守卫（2026-11-14，真机已验）
+
+C3 的 4 KiB 步子能成立，是因为它的 PMP 有 TOR（边界任意）。Hazard3 没有 TOR，
+所以 `rp2350rv` 走的是"每段用若干 2 的幂块拼"的路子；x86 没有分页，补的是软件
+守卫。两件事一起把"所有带保护的端口同一套窗口数字"推到最后一步。
+
+### 31.0 真机结论（2026-11-14，COM14 / rp2350rvsmp，刷完 + ROM RESET + 硬件 RESET）
+
+**`4ef146c` 的 W^X 三段布局在真机上是坏的**：`msh` 第一条指令就
+`load access fault at 0x2001c000`，系统反复重启。QEMU rv32 / rv32smp 全绿，
+所以这是纯硬件差异，符合用户对"这代码刚改过"的判断。
+
+受控 A/B（同一镜像内运行期逐级放宽，日志 `build/sizeprobe/pmp_ladder*.log`）：
+
+| 变量 | 结果 |
+| --- | --- |
+| 只改写序（addr-first ↔ cfg-first） | 无差别，`[pmpenc] wr=080071ff off=080071ff napot=080071fc` 证明低 2 位只是 G=2 的 WARL 裁位 |
+| 读 `mseccfg`(0x747) 清 Smepmp MML | **该 CSR 不存在**，`illegal instruction mcause=2`，假设证伪 |
+| 同样的三块 4 KiB NAPOT / 同样 guard hole，只把 RX/RW/RW → RWX/RWX/RWX | **启动成功**（刷完、ROM RESET、硬件 RESET 三次一致） |
+| 只放宽 entry 0（RWX，data/栈仍 RW） | 仍 fault |
+| entry 0 保持 RX，只给 data/栈页加 X | **启动成功** |
+
+根因不是 PMP 编码也不是权限语义，而是**页粒度切分点**：实测
+`wx=0x2001d420`、`brk=0x2001e000`，两者落在同一 4 KiB 页。把 `ro_end` 向下
+取整到 `0x2001d000`，`[0x2001d000, 0x2001d420)` 这段**真实 .text** 被划进了
+RW/no-X 区，取指即 fault（原注释说"代价是代码可写"，实际是"代码不可执行"）；
+向上取整则把 .data/.bss 划进 RX/no-W 区。Hazard3 无 TOR，无法用重叠条目做
+权限并集。
+
+**已落地修复**（`board/rp2350rv/platform.c`、`arch/rv32/platform.c`）：
+
+- `[win_base, wx & ~0xfff)` 保持 R+X；从含 `wx` 的那一页起到 `brk`、以及栈，
+  全部 R+W+X；guard hole 仍不覆盖；entry 5 仍是 trap vector。
+- `pmp_program()` / `pmp_open_trap_vector()` 统一为 addr-first（A=OFF 时写
+  地址，再写 cfg）。A/B 已证明写序**不是**根因，统一顺序只是避免"旧地址 +
+  已生效的 A 字段"这一中间态。
+- 删掉所有一次性探针和重试阶梯，`PMP_ENTRIES` 从 16 收到 **8**（0..7 才是
+  软件可写的；8..10 是 bootrom 硬连线 RWX，11..15 硬连线 OFF）。
+- `rv32` / `rv32smp` / `rp2350rv` / `rp2350rvsmp` 四个目标构建通过；
+  QEMU `tostest smoke -target rv32|rv32smp` 均 `SMOKE TEST OK`。
+
+真机验收（COM14，最终镜像）：
+
+| 项目 | 结果 |
+| --- | --- |
+| 启动（刷完 / ROM RESET / 硬件 RESET） | 三次均进 `tos>`，无 fault、无降级 |
+| `ps` 里 msh 窗口 | **16 KiB** ✓ |
+| `prot heap` | `store access fault` ✓ |
+| `prot stack` | `store access fault` ✓ |
+| `prot rodata` | **SURVIVE**（rodata 落在含 wx 的 RWX 页里） |
+| `prot null` | **SURVIVE**（地址 0 落在 bootrom 硬连线 RWX 区，软件关不掉） |
+| `deep 3` | 打 `4 KiB stack and no room to double it` 后 store fault，**没有长到 8 KiB** |
+| `echo` / `df` / `dd` | 正常 |
+| §29.1 `dd`+`rm` 200 轮 | **PASS**（errors=0，df 回收 YES，存活 OK） |
+| §29.2 RV USB | 设备侧 `[u0]..[u4]` + `[U] usb hw=1` 全在；主机侧 COM17 被独占未响应 |
+| §22 `getcpu` sanity | `smp -s 4 500` × 5 轮，**BAD=0**（历史 ~1-2/轮） |
+
+日志：`build/sizeprobe/accept_s31.log`、`accept_s29.log`、
+`accept_s29b_s22.log`、`final_boot.log`、`final_cmds.log`。
+
+**剩下的开口**：
+
+1. 窗口内 W^X 与 `prot rodata` 要同时成立，得改 `user/user.ld` 把 `.data`
+   推到 4 KiB 页边界（现在是 `ALIGN(32)`），让 `wx` 与 `brk` 分属两页；
+   代价是镜像普遍变大一页。改完需重跑本节 A/B。
+2. `prot null` 要 fault，需要在 `plat_init()` 里把 bootrom 硬连线的 8..10
+   条目覆盖/关掉——但它们是硬连线，先确认能不能写；不能写就只能在验收
+   口径里把它列为"该硬件上不可保护"。
+3. `deep 3` 没能长栈：`plat_window_grow_reserve()` 返回 4 KiB，但 16 KiB
+   窗口已被 `span 0x1cc4 + 4K 栈 + 4K guard` 占满，`process_stack_grow()`
+   又依赖 `mtval`，而 Hazard3 把 `mtval` 硬连线为 0。要修得改用用户 `sp`
+   判定并给窗口留一步余量。
+4. §31.1 那张"R+X / R+W"三段表描述的是 `4ef146c` 的旧布局，已不成立，
+   以本节为准。
+
+**2026-11-14 晚补记**：上面第 3 条（`deep 3` 不长栈）已修。
+`arch/rv32/platform.c` 的 growth 调用改成 `fault_addr = f->mtval ? f->mtval : f->sp`
+——Hazard3 的 `mtval` 恒为 0，所以之前每次都是 `addr = 0 < low`，直接走到"没地方"
+分支。用 `sp` 当证人正是 `process_stack_grow()` 原本的设计前提（`sp` 出界才考虑）。
+顺带把 fault 打印里 `(address 0x%08x)` 改成只在 `mtval` 非零时打印，免得每次都
+报 `address 0x00000000`。
+
+第 1 条（`prot rodata`）和第 2 条（`prot null`）需要新决策，不是笔误级别：
+
+- **rodata**：Hazard3 的 PMP 是 4 KiB 粒度，**一个页里无法表达两种权限**，所以
+  只要镜像的 `wx` 落在第 0 页，"整张镜像 RWX"就是唯一可编码的布局。真要做
+  W^X，得让 `user.ld` 把 `.data` 推到 4 KiB 边界（现在 `ALIGN(32)`），代价是每个
+  程序最多多 4 KiB 镜像、窗口也跟着涨——**C3 上会把 `msh` 的 `TOS_ONE_GRAIN`
+  顶破**（16K → 20K）。所以这是"每任务 4 KiB 换 rodata 写保护"的全局取舍；
+  而 `rp2350`（PMSAv8，32 字节粒度）可以按真实 `wx` 精确切分，**不需要这个代价**。
+- **null**：读数 0 落在 bootrom 硬连线的 8..10 条目里。要确认的是**负面影响
+  有多大**：如果那几条也是 RW，用户态还能直接写外设寄存器，那就不只是"能读 ROM"。
+  测试办法是给 `prot` 加一个 `prot dev`（写一个 UART 寄存器）看是否 fault；结果
+  决定这条是"记录为不可保护"还是"必须找 ROM/OTF 的办法"。
+
+**决策（2026-11-14）：`prot rodata` 不再作为开口项**
+
+不是"做不到"，而是它不属于这一层要守的边界：
+
+- 页粒度硬件上，`.rodata` 只读**靠链接器把段摆到页边界**才成立。Windows 的 PE
+  就是这样：`.rdata` 映射成 `PAGE_READONLY`，但前提是 `SectionAlignment = 4K`；
+  没有这个前提，页粒度保护根本分不开 `.rdata` 和 `.data`。Hazard3 的 PMP 是
+  4 KiB 粒度，而 `user.ld` 现在是 `ALIGN(32)`，所以"含 `wx` 的那一页整页 RWX"
+  是唯一可编码的布局。为它改链接脚本，代价是每程序最多 4 KiB 镜像 + 窗口
+  （C3 上 `msh` 的 `TOS_ONE_GRAIN` 会被顶破），换到的是"程序别写自己的常量"。
+- 真正要守的三条边界是：**内核 / 另一个任务 / 外设与 MMIO**。前两者由窗口两端
+  保证（`prot heap`、`prot stack` 在这个布局下都 fault）；第三条见 `prot null`。
+- `rp2350`（PMSAv8，**32 字节**粒度）本来就能按真实 `wx` 精确切分，W^X 在那边是
+  免费的；所以这一项的期望**按板子分**，验收时按表判而不是"四项都必须 fault"：
+
+| 板子 | rodata | heap | stack | null |
+| --- | --- | --- | --- | --- |
+| `rp2350` (M33, PMSAv8) | fault | fault | fault | fault |
+| `rp2350rv` (Hazard3) | **survive**（页粒度） | fault | fault | **survive**（bootrom 硬连线） |
+| `esp32c3` (PMP TOR) | fault | fault | fault | fault |
+| `rp2040` (无 MPU) | survive | survive | survive（软件守卫只管 sp，管不了野指针） | survive |
+| `x86`（无分页） | survive | survive | survive | survive |
+
+`prot` 自己的注释（`user/prot.c` 顶部）写的就是这个口径：没有保护单元的机器
+"survives"是诚实答案。剩下唯一还要查的是 `prot null` 的**危害面**——如果 bootrom
+硬连线的 8..10 条目也是 RW，用户态就能直接写外设寄存器，那要从"能读 ROM"升级为
+隔离漏洞。查法：给 `prot` 加一个 `prot dev`（写一个 UART 寄存器）。
+
+**已查（2026-11-14 晚，COM14）**：`prot dev 0x40070000` 在 `rp2350rvsmp` 和
+`rp2350smp` 上都 FAULT，用户态写不了 UART0 数据寄存器。所以 `prot null` 的
+SURVIVE 只是"能读 ROM"，不是隔离漏洞，按上面按板子分的表记成已知限制即可，
+不必再找 ROM/OTF 的办法。过程见 §33.0。
+
+### 31.1 `rp2350rv`：分块 NAPOT，4 KiB 步子
+
+`board/rp2350rv/platform.c` 的 `plat_board_task_protect()` 不再要求窗口是 2 的
+幂，而是把它拆成三段分别覆盖：
+
+| 段 | 权限 | 覆盖方式 |
+| --- | --- | --- |
+| `[win_base, wx)` | R+X | 从底向上，每次取"能放下且 base 对齐"的最大 2 的幂块 |
+| `[wx, brk)` | R+W | 同上 |
+| 护栏 `[brk, stack_low)` | — | **不覆盖**，写进去即 fault |
+| `[stack_low, stack_top)` | R+W | 同上 |
+
+- entry 5 仍是 trap vector（`arch/rv32` 开机时设一次，这里每次切换重写同一个值），
+  其余 15 条是预算；典型窗口 3~5 条；
+- `kernel/process.c`：去掉 `win_pow2()`（窗口不再向上取整到 2 的幂），
+  `win_alloc()` 的基址改成按**最大块**对齐（`largest pow2 <= bytes`），这样 20K
+  窗口落在 16K 边界上，拆成 16K+4K 两块；
+- `board/rp2350rv/layout.c`：grain 16K → **4K**，默认栈 8K → **4K**，
+  `plat_window_grow_reserve()` 返回 4K，`plat_window_needs_stack_alignment()` 返回
+  0（栈增长只是多覆盖一个 4K 块，不再要求栈顶按新大小对齐）。
+
+预算耗尽（极端形状）时保留已覆盖的部分、打一行 `[pmp] window needs more NAPOT
+blocks than the budget`，该任务访问未覆盖区域会 fault —— 响的失败，不是静默的。
+
+待真机（`rp2350rv` / `rp2350rvsmp`）：
+
+| 项目 | 期望 |
+|---|---|
+| 启动 | 进 `tos>`，`ls` / `dd` / `run prot *` 正常 |
+| `ps` 里 `msh` | **16 KiB**（原来是 16 KiB，不变；但 44K 那类程序会小一档） |
+| `deep 3` | `stack grown to 8 KiB`（4K 默认栈，一步） |
+| `prot rodata/heap/stack/null` | 四条都按预期 fault（分块后护栏仍未被覆盖） |
+| `dd` × 若干轮 + `rm` + `reboot` | 与 §29.1 相同的判据 |
+
+失败签名：`prot stack` 不 fault → 护栏被某一块误覆盖了（看 `pmp_cover` 的边界）；
+启动即 fault 在窗口内 → 某段的第一块 base 没对齐（看 `win_alloc` 的对齐）；
+`[pmp] ... budget` 出现 → 窗口碎片太多，需要把该程序的栈/镜像取整。
+
+### 31.2 x86 / PC：软件守卫打开
+
+`arch/x86/platform.c` 的 `plat_user_stack_guard()` 返回 1（分页关着，没有 fault
+可依赖，和 RP2040 同处境）。守卫本体在 `kernel/process.c`，检查两处证据：这次
+系统调用带进来的用户 `sp`（`plat_frame_get_user_sp()`，新增的三个端口实现）和
+护栏洞顶的 `"STAK"` 哨兵字。
+
+已在 QEMU 验证：临时把 PC 的默认栈改成 4 KiB，`deep 3`（6 KiB 递归）打印
+
+```
+[pid 2] stack overflow (sp 0x0011e678, stack 0x0011f000..0x00120000)
+[pid 2] stack grown to 8 KiB, heap ceiling 28 KiB
+```
+
+然后继续跑完；恢复 32 KiB 默认栈后无任何误报，`SMOKE TEST OK`。
+
+### 31.3 还剩：`rp2350`（Cortex-M33 / PMSAv8）——比原计划小得多
+
+**修正**：PMSAv8 的 region 是 `RBAR = base` / `RLAR = limit` 两个寄存器，32 字节
+粒度，**没有 2 的幂要求**（分块/对齐那套麻烦只存在于 ARMv7-M 的 RASR+SRD，见
+`docs/NUTTX-COMPARE.md` §2.2）。我们的 `arch/arm/platform.c` 早就在用这个形式，
+所以把 `rp2350` 拉到 4 KiB 只需要：
+
+1. `board/rp2350/layout.c`：grain 16K → 4K、`PLAT_STACK_BYTES` 8K → 4K；
+2. `board/rp2350/platform.c`：`plat_window_needs_stack_alignment()` → 0、
+   `plat_window_grow_reserve()` → `PLAT_STACK_BYTES`；
+3. `internal/build/build.go` 的 `WindowGeometry()` 里 rp2350 的 16 KiB 注释/断言；
+4. 重跑 §28 的 SMP 200 轮与 `deep`。
+
+`pmp_cover()` 那套分块逻辑只在 `rp2350rv`（NAPOT）需要，ARM 不复制。
+
+## 32. PIO 三关（2026-11-15 真机通过：`rp2350` 17/17、`rp2350rvsmp` 17/17；
+`rp2040` 未做）
+
+> 跟踪：[issue #1](https://github.com/yafengabc/TinyOS/issues/1)（和 §30.3 共用）。
+> 2026-11-15 起顺序改为**先 RP2350**：板子在对方手上、`pio` 特性在四个 RP2350
+> 目标上默认打开；RP2040 侧还没有自动化流程，等它的机器再接。
+
+一条命令（脚本见下，`--no-flash` 对已经在跑的板子）：
+
+```sh
+python scripts/rp2350/pio_accept.py --image rp2350 --uf2 build/rp2350.uf2
+python scripts/rp2350/pio_accept.py --image rp2350rvsmp --no-flash --visual --strip
+```
+
+脚本能**完全自动判断**的部分：三个程序汇编出的字表（`loopback` 5 字、`blink`
+11 字、`ws2812` 4 字）、`pio: loaded into pioN smN`、以及回环的四字往返
+（GP4 同时做 OUT/IN，不需要跳线）。需要眼睛的两项（LED 2 Hz、灯带亮红）只有加
+`--visual` 才会问，不加就只报"已装入"。
+
+**这块板的 LED 是 GP3，不是 Pico 的 GP25**（`RP_LED_GPIO = 3`），所以
+`files/pio/blink3.pio` 是同一段程序只换了 `.pin 3 1`；两者指令流相同，所以共用
+一张期望字表。`--led-pin 25` 切回 Pico 的 `blink.pio`。
+
+PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实现完不久就撞上 §28 那
+批 SMP/flash 问题，板子时间全花在那里了。现在它同时在三类目标上编进去了，覆盖面
+比当初更大，也就更需要一轮验收：
+
+| 目标 | PIO 形态 | 备注 |
+| --- | --- | --- |
+| `rp2040` | 2 块 × 4 SM，FUNCSEL 6/7 | 随 `pio` feature 默认打开 |
+| `rp2350` / `rp2350smp` | 3 块 × 4 SM，第三块 FUNCSEL 8，pad 需要清 ISO | `drivers/pio/rp2` 按板参数化 |
+| `rp2350rv` / `rp2350rvsmp` | 同上，RISC-V 侧 | 唯一带 PIO 的 RV 端口 |
+
+验收步骤在 `docs/PIO.md` 和 `docs/HW-ACCEPTANCE.md` 关卡 B–D，摘要：
+
+1. **回环**（不用接线）：`pio asm /pio/loopback.pio 0 0` 期望字表
+   `e081 80a0 6001 4001 8020`，`start` → `tx 0 0 1 0 1 1` → `rx 0 0 4`
+   读回 `80000000 00000000 80000000 80000000`（一位的 `in pins` 落在 ISR 的
+   bit31，不是 bit0——见 32.2）；
+2. **板载 LED**：`pio asm /pio/blink.pio 0 0` + `start`，GP25 约 2 Hz；
+3. **WS2812**（需灯带接 GP4）：`pio asm /pio/ws2812.pio 0 0` 期望
+   `6221 1123 1400 a442`，`tx 0 0 0x00ff0000` 应亮红。
+
+失败时优先怀疑的地方（按顺序，前三条都是真机上踩过的）：
+
+- **回环读回全 0，但 `pio tx` 报 `wrote 4`** → 先看 `SHIFTCTRL`：复位值是
+  `0x000c0000`（IN/OUT 都向右移），驱动若用调用者的位直接覆盖就变成**左移**，
+  `out pins,1` 出的是 MSB，`tx 1` 出去是 0。`pio regs` 里 `shiftctrl` 没有
+  `000c0000` 就是它；
+- **换了数据位型结果不成比例（全 1 能通、`1 0 1 1` 全 0）** → 同上，左移/右移；
+- **清了 FIFO 却没清掉**（`tx` 报 `wrote 0`，`regs` 里 `fifo tx0=4`）→ `FJOIN_RX`
+  的位置：RP2040 bit 15/14，**RP2350 bit 31**。改这一位才会清 FIFO；
+- 字对但引脚不动 → 引脚窗口/PINCTRL，或（RP2350）pad 的 ISO 没清。用
+  `pio exec 0 0 0xe081`（`set pindirs,1`）+ `pio exec 0 0 0xe001`（`set pins,1`）
+  直接驱动一次，能把"机器不跑"和"引脚没接上"分开；
+- 只有 RP2350 的第三块不对 → `PIO2` 的 FUNCSEL 8 与 RESETS 位。
+
+### 32.1 2026-11-15 真机第一轮（`rp2350`，COM14）：7/17 → 16/17，剩回环一项
+
+按 issue #1 的评论跑了 `pio_accept.py --image rp2350 --uf2 build/rp2350.uf2`。
+第一次 **7/17**，逐条查下来是**四个真 bug**（都不是脚本的判据问题），修完 **16/17**：
+
+| # | 位置 | 症状 | 根因 |
+| --- | --- | --- | --- |
+| 1 | `drivers/pio/rp2/pio.c` `plat_pio()` | `asm` 打印 `loaded into pio0 sm0`，之后 `start`/`tx`/`rx`/`stop`/`rel` 全报 `failed (not owner, or no PIO)` | shell 每条命令一个进程，`pio_owner[block][sm] = pid` 是 `asm` 那个进程的 pid，后续命令必然不等。改成"空位可认领"（`claim_sm()`），与 `pio_load()` 原有的语义一致 |
+| 2 | 同上 `plat_pio_release()` | 同上，且 `blink` 那种"启动后一直闪"不可能工作 | 进程退出时它调 `release_sm()` → `stop_sm()`，`pio start` 一退出就把 ENABLE 清了。改成只放弃所有权、不停机不还引脚；释放硬件仍由 `pio rel` 显式完成 |
+| 3 | `files/pio/{loopback,blink,blink3}.pio` | `set pindirs, 1` 写了但引脚不驱动 | `SM_RESTART` 把 PC 设到 **`wrap_bottom`**，而这条初始化写在 `.wrap_target` **之前**，从不执行 → GP4 一直是输入。移到 wrap 窗口内（字表不变，`wrap` 由 `4..1`/`10..1` 变 `4..0`/`10..0`） |
+| 4 | 同上 `SM_EXECCTRL` 编码 | （**事后证明是误判，见 32.2**）以为 wrap 从来没生效 | 当时按"相邻寄存器"的直觉认为 `WRAP_BOTTOM [4:0]`/`WRAP_TOP [11:7]`，于是把 `top << 12 \| bottom << 7` 当成错的，改成 `top << 7 \| bottom << 12`。**这正好改反了**：pico-sdk 的头文件里 RP2040 和 RP2350 都是 `WRAP_TOP [16:12]`、`WRAP_BOTTOM [11:7]`、`SIDE_EN bit30`、`SIDE_PINDIR bit29`，原本那版是对的 |
+
+脚本本身的两处笔误也一并修了：`WORDS["blink"]` 里第 5/10 字写成 `0x1f43`/`0x1f48`
+（`jmp x--` 没有延迟，正确是 `0x0043`/`0x0048`），以及 pin window 检查写成
+`gp4..gp4`（`pio asm` 打印的是 `gp4..4`）。
+
+**仍然 FAIL 的一项：回环读回 0**（当时没查出来，第二轮才结案，见 32.2）。
+
+### 32.2 2026-11-15 第二轮：回环通了，17/17
+
+两个镜像都是 **17/17**：`rp2350`（ARM）与 `rp2350rvsmp`（RV32）。真 bug 有两条，
+另外第一条是**把上一轮的"修复"退回去**：
+
+| # | 位置 | 症状 | 根因 |
+| --- | --- | --- | --- |
+| 1 | `drivers/pio/rp2/pio.c` `EXEC_WRAP_TOP/BOTTOM` | `start` 报 ok，`addr` 读 `0x0e`/`0x10`（都在 5 字程序之外），`tx` 的 4 个字永远不被拉走，引脚不动 | 上一轮把 wrap 字段当成"写错了位置"改到 `[11:7]`/`[4:0]`，**改反了**。pico-sdk 的头文件里 RP2040 与 RP2350 一致：`WRAP_TOP [16:12]`、`WRAP_BOTTOM [11:7]`、`SIDE_EN bit30`、`SIDE_PINDIR bit29`。恢复后立刻回到"`tx` 报 wrote 4、`rx` 读回 4 个 0"——也就是 32.1 的原症状，这才是能继续往下查的状态 |
+| 2 | `SM_SHIFTCTRL` 赋值 | `out pins, 1` 出的是**字的 MSB**：`tx 0xffffffff` 回读全是 1，`tx 1 0 1 1` 回读全是 0 | 驱动用调用者的 `q->shiftctrl`（=0）直接覆盖寄存器，而复位值是 `0x000c0000`（`IN_SHIFTDIR`/`OUT_SHIFTDIR` 都是 1=向右）。写 0 就把两个移位器都变成左移。改成 `q->shiftctrl \| 0x000c0000` |
+| 3 | `clear_fifos()` 的 `FJOIN_RX` 位 | 重新 `pio asm` 后 `pio tx` 报 `wrote 0`（FIFO 满），`regs` 显示 `fifo tx0=4` | 清 FIFO 靠翻 `FJOIN_RX`：RP2040 是 bit 15/14，**RP2350 是 bit 31**（两个阈值搬到中间去了）。按 RP2040 的 bit14 翻，在 RP2350 上根本没清，反而动了 `FJOIN_RX_GET`。位上移到板级 memmap 的 `RP_PIO_FJOIN_RX_BIT` |
+
+三条一起修完之后：`tx 0 0 1 0 1 1` → `rx` 读回 `80000000 00000000 80000000 80000000`，
+`gpio dev 4` 读 `1`；`tx 0 0 0 1 0 1` → `00000000 80000000 00000000 80000000`。
+
+**这轮学到的四条硬件事实（都别忘）**
+
+1. **`INSTR_MEM0..31` 是只写的**（四个读口全给状态机）。回读永远 0，看起来和"程序
+   没装进去"一模一样——为这条绕了一个小时。要验程序内容只能让它跑：`pio exec`
+   注入 `jmp N` 再读引脚。
+2. **`SMx_INSTR` 能带外执行一条指令**，机器 enabled 或 disabled 都吃。用它
+   `set pindirs,1` + `set pins,1` 能直接驱动引脚，从而把"机器不跑"和"引脚没接上"
+   彻底分开——这一步是这次定位的分水岭。
+3. `in pins, 1` 读进来的位落在 **ISR 的 bit31**（右移），不是 bit0；而且
+   **没有一拍延迟**：`out pins` 之后紧跟的 `in pins` 读到的是同一拍驱动上去的电平，
+   32.1 里"读到上一拍"的猜测是错的。
+4. `FSTAT` 的 TXFULL 在 `[19:16]`、RXEMPTY 在 `[11:8]`，驱动原来就是这么用的，是对的；
+   `FLEVEL` 是 `[3:0]=TX0`、`[7:4]=RX0`。两者可以互相当校验。
+
+**新增的诊断面**（对面提议的 `pio regs` 已在 `3fa4b9a` 落地，这里在它上面扩了）：
+
+- `pio regs <block> <sm>` 现在是 11 个字：`ctrl fstat execctrl shiftctrl pinctrl
+  clkdiv addr owner gpio_ctrl pad flevel`，另加一行解码后的 `pin gp4 funcsel=6
+  ie=1 od=0 iso=0` 和一行 `fifo tx0=.. rx0=..`。加后三个的原因是"引脚"本来就是
+  PIO 问题的一半：FUNCSEL/IE/OD/ISO 和 FIFO 层数能直接回答"机器没驱动"还是
+  "驱动了但没人读"。
+- `pio exec <block> <sm> <word>`（新动词，`PIO_EXEC`）：把一条指令写进 `SMx_INSTR`
+  立即执行。没有它这轮得多刷五次固件。
+
+**验证矩阵与未覆盖项**
+
+| 镜像 | 结果 | 说明 |
+| --- | --- | --- |
+| `rp2350`（ARM） | **17/17** | 刷写路径 + 三个程序字表 + 回环四字往返 |
+| `rp2350rvsmp`（RV32） | **17/17** | 同一驱动、另一套 memmap，`pio_fence()` 走 `fence` |
+| `rp2040` | — | 本机无板；`FJOIN_RX` 位与 wrap 布局都已按 2040 写进 memmap，未上机 |
+
+`blink`（GP3 约 2 Hz）与 `ws2812`（灯带首像素亮红）仍是**需要眼睛**的两项，
+`--visual` 才问；这一轮只判到"汇编字对 + 装入成功"。灯带也没接。
+
+## 33. 待真机清单（2026-11-14 汇总）
+
+这一节只列**代码已落地、等板子**的项，按“刷哪个镜像、跑什么、判什么”写。上机
+顺序建议从上到下：前两项是这一轮刚改的，越早暴露问题越省事。
+
+`scripts/rp2350/accept33.py` 会按本表的顺序把下面这些问一遍，并保存原始日志
+（`build/sizeprobe/accept33-*.log`，不入库）：
+
+```
+python scripts/rp2350/accept33.py --image rp2350rvsmp --uf2 build/rp2350rvsmp.uf2
+python scripts/rp2350/accept33.py --image rp2350 --no-flash     # 板子已经在跑
+python scripts/rp2350/accept33.py --image rp2350rv --replay <日志>  # 只跑判定
+```
+
+`--uf2` 走的是"刷完**不按 RESET**"那条路：串口先开着，拷 UF2 之后**不碰 RTS、不重开
+端口**，所以 `[A]` 一定是 ROM 自己重启出来的；首字节超过 `--first-byte-max`（默认
+5 s）就算失败——33.4 的故障形状是"120 s 沉默"，只判"有没有输出"会放过它。
+
+| # | 镜像 | 要做的事 | 判据 | 状态 |
+| --- | --- | --- | --- | --- |
+| 0 | `rp2350rv` / `rp2350rvsmp` | 刷完**不按 RESET**，看 `[A]` 的时钟快照 | 见 33.4 | **PASS**（11-15，0.68 s 进 shell） |
+| 1 | `rp2350rv` / `rp2350rvsmp` | 复测 PMP 修复后的三件事 | 见 33.1 | **PASS** |
+| 2 | `rp2350` / `rp2350smp` | 4 KiB 窗口（新） | 见 33.2 | **PASS** |
+| 3 | `rp2350smp` / `rp2350rvsmp` | §29.1 的 `dd`+`rm` 200 轮 | 见 §29.1 | **PASS**（两端口各 200 轮） |
+| 4 | `rp2350rv` / `rp2350rvsmp` | §29.2 的 USB 中断版枚举 | 见 §29.2 | 设备侧 PASS；主机侧须 **DTR=1** |
+| 5 | `rp2040` | §30.3 的 4 KiB 窗口 + 软件栈守卫 | 见 §30.3 | 未做（无板） |
+| 6 | `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 | **PASS**（`rp2350` 17/17、`rp2350rvsmp` 17/17；blink/ws2812 仅判到装入） |
+| 7 | `rp2040` | 同上 | 见 §32 | 未做（无板） |
+
+**为什么第 3 项和第 2 项里的 `smpbench` 这次是回归、不只是验收**：
+`f37e58d` / `84009e7` / `537df98` 三条锁语义改动（`spin_lock_irqsave`、`pipe`/`mailbox`
+多返回路径、`proc_lock`/`heap_lock` 加屏蔽）目前只在 QEMU 的 `rv32smp` 和 C3 上跑过，
+RP2350 的两个核上一次跑的是改之前的代码。所以这两个判据要当"没验过的代码"对待。
+
+**每轮附加：两个单核镜像（不是功能验收，是防烂）**
+
+真机回归目前全在上面那些 `*smp` 上做，`rp2350` 和 `rp2350rv` 事实上是 build-only。
+它们只差一个 `CPUs` 字段（ARM 上每核内核栈减半，内存代价为零），但价值是**SMP
+bug 的 bisect 基线**：出现"两个核抢同一个东西"的症状时，先刷单核镜像就能一步
+排除调度器和锁。放在那儿没人跑就会烂，所以每轮顺带各刷一次，每个约 2 分钟：
+
+| 镜像 | 跑什么 | 判据 |
+| --- | --- | --- |
+| `rp2350` | 启动 banner、`ps`、`prot rodata`/`heap`/`stack`/`null` | `[B]`~`[E]` 齐全（**ARM 端口没有 `[A] pre-pll`**，那是 RV 端的行）且 `[mpu]` 行 `regions=3`；`ps` 里 msh 的 `wink` 与 `rp2350smp` 上一致；四条 `prot` **全 fault** |
+| `rp2350rv` | 同上 | banner 里 `[A] pre-pll ok sys=/ref=/xosc=` 三个值都有、`[B] clk` ≈150 MHz（RV 端**没有** `[C]`~`[E]` 和 `[mpu]`）；`ps` 里 msh 的 `wink` 与 `rp2350rvsmp` 上一致；`prot heap`/`stack`/`dev` fault，`rodata`/`null` 按 RV32 分表 SURVIVE |
+
+两条都**不承诺新功能**：跑不过时先判"单核专属还是共性问题"——共性问题按正常流程
+修，单核专属（SMP 镜像正常）就记成 `33.x` 一条待办，不要让主验收等它。
+
+### 33.0 2026-11-14 晚真机收口（COM14 / rp2350rvsmp + rp2350smp）
+
+本机只插了一块 ATK-DNRP2350AM（UART0 = COM14，原生 USB CDC = COM17），所以
+**第 5、6 项（RP2040、PIO 三关）没做**，其余四项全部上板。脚本与原始回显在
+`build/sizeprobe/s33_*.log`（该目录被 `.gitignore` 忽略，只留本机）。
+
+**复位口径（别混）**：`reboot` 是软件走 ROM，**不是**硬件复位；脚本里的
+"RTS pulse + close/reopen" 只是拉 RUN 线／重开串口，也**不是**按板上 RESET
+键。用户手按 **RESET 键** 才是真硬件复位，PLL / USB / MPU 会整条冷启动链重跑，
+状态与"刚刷完"不同。按这个要求补做过一次：合并远端锁重构后刷入 ARM 修复
+镜像，读线程在复位前挂好（不发 `reboot`、不发 RTS、不重开串口），手动按 RESET，
+抓到完整冷启动 banner（`[B] clk` / `[C] vtor+sau` / `[D] cpu0` /
+`[E] usb hw=1` / `[smp] 2 of 2` / `[mpu] ... regions=3`）后自动跑 §33.2
+全套，全部 PASS（`smpbench` 1.94x）。日志
+`build/sizeprobe/manual_reset_arm.log`，脚本 `manual_reset_accept.py`。
+
+顺着这个 RESET 后的状态又跑了 **100 次 `dd of=/x bs=4096 count=8`**（不 `rm`，
+`build/sizeprobe/dd100.log`）：ok=100、err=0、无输出=0、启动 banner=0，
+平均 1.05 s/轮；`df` 停在 352 KiB / 3.5 MiB（9%，覆盖写不会累积），
+`dd if=/x bs=4096 count=8` 回读 `pattern verified`；`uptime` 274 s 连续、
+`cpus=2` 双核在线。用 `uptime` 复核比只看 banner 可靠——一次静默复位可能
+来不及打启动日志，但 uptime 一定归零。
+
+**换另一个 port 复测（同一块板，`rp2350rvsmp` / Hazard3 RV32 双核）**：刷完
+镜像后用户手动按物理 RESET，`cat /proc/cpuinfo` 显示 `rv32imac` / `cpus=2`；
+同样 100 次 `dd` → ok=100 / err=0 / 无重启，平均 1.12 s，`dd if=/x` 仍是
+`pattern verified`，`uptime` 连续 236 s，`build/sizeprobe/dd100_rv.log`。
+两点端口差异：
+
+1. **刷完 RV 镜像后 120 s 内 UART0 一个字节都没有，是用户按物理 RESET 之后
+   才起来的**——又一次印证"刚刷完"和"RESET 后"不是同一状态；
+2. **RV32 的 `df` 是 `307200 total / 323584 used / 105%`**，ARM 是
+   `3670016 / 352256 / 9%`。根因是 `board/rp2350rv/layout.c` 的
+   `PLAT_LFS_BLOCKS = 75`（300 KiB，注释写明"把分区 grow 到剩余 flash 是
+   后续改动"），ARM 是 896（3.5 MiB）；`df` 的 total 取配置值、used 取
+   `lfs_fs_size()*4096`，两者不一致就出现 >100%。覆写同一个 `/x` 靠块回收
+   仍能成功，但 RV 端口几乎没有空闲卷空间，写第二个大文件会失败。
+   要让 RV 也 grow 到 896，得先确认 RV32 冷启动期间写 flash superblock
+   的安全性（见 §9 的"写后取指挂"）。
+
+**（已修，2026-11-14）** 根因比“故意不 grow”更具体：`build.go` 里 `rp2350rv`
+的 `RamdiskSectors` 是 **704**（352 KiB），而 `PLAT_LFS_BLOCKS` 是 **75**
+（300 KiB）——打包出来的镜像比分区大，超级块记的块数和交给 littlefs 的分区对
+不上，`df` 才会出现 105%。把 `PLAT_LFS_BLOCKS` 改成 **896**（3.5 MiB，与 ARM
+一致）后两边同构：镜像仍小于分区，首次挂载走 `lfs_fs_grow()`，它只提交一个新
+超级块，其余块在首次分配时才擦（ARM 端口从发布起就是这么做的）。
+
+“冷启动写 superblock”这条担忧也解除了：写路径已有 200 轮 `dd`+`rm` 和 100 轮
+`dd`+RESET 的实测；而且 `lfs_fs_grow()` 失败只打
+`[ramdisk] warning: fs grow to 896 blocks failed` 然后继续用小的文件系统，不会
+让板子起不来。待真机确认两点：刷完后 `df` 应是 `3670016 / ~9%`；启动日志里
+**不应**出现那行 grow 警告。第 1 条（刷完 120 s UART 无输出、要按 RESET）另计，
+见 **§33.4**（时钟顺序 + `[A]` 快照，已改，待上板）。
+
+构建与回归：`rv32` / `rv32smp` / `rp2350` / `rp2350smp` / `rp2350rv` /
+`rp2350rvsmp` 六个目标全过；QEMU `tostest smoke -target rv32|rv32smp|arm`
+三个都是 `SMOKE TEST OK`。
+
+| # | 结果 |
+| --- | --- |
+| 1 §33.1 | **PASS**：`deep 3` → `stack grown to 8 KiB` + `journal intact`；`prot dev 0x40070000` **FAULT**；`prot heap` / `prot stack` FAULT；`ps` 里 msh 16 KiB。刷完、ROM RESET 稳态、硬件 RESET 三轮一致 |
+| 2 §33.2 | 首轮 **`deep 3` FAIL**（见 33.2.1），当晚已修并复验 **全 PASS**：ps msh 16 KiB、`prot` 四条全 FAULT、`prot dev` FAULT、`smpbench` **1.98x**、`deep 3` GROW 8 KiB + journal intact、§29.1 200 轮 PASS、§22 BAD=0 |
+| 3 §29.1 | **PASS**：`rp2350smp` 与 `rp2350rvsmp` 各 200 轮 `dd`+`rm`，errors=0、df 回收 YES、存活 OK |
+| 4 §29.2 | **PASS（判据要改）**：见下面的 DTR 说明 |
+
+**`prot dev` 的结论**：UART0 数据寄存器 `0x40070000` 从用户态写会 fault，说明
+bootrom 硬连线的 PMP 8..10 条目**没有给用户态开外设**。§31.0 里"`prot null`
+SURVIVE"只是"能读 ROM"，不是隔离漏洞，按板子分表记为已知限制即可，不需要找
+ROM/OTF 的办法。
+
+**§29.2 主机侧（上次未完成的那半）**：设备侧 `[u0]`~`[u4]` 与
+`[U] usb hw=1 cfg=1 stage=0` 每轮都在。主机侧的关键是 **DTR**：
+
+- `rp2350_drive.py` 的 `s29b` 用 `cdc.setDTR(False)` 打开 COM17 → 设备侧
+  `g_cdc_fix` 的 no-reader 保护把输出丢掉，只剩每 100 ms 一个探测字节，
+  于是 `help` 0 字节、看起来像"USB 没反应"；
+- 改成 **DTR=1** 后 `echo CDC_OK` 回显、`dd of=/x bs=4096 count=8` 写
+  32768 字节、`rm /x` 都正常；
+- 3 KB 不丢字的判据不能再用 `help`：`help` 是 `sh` 的内建命令，默认 shell
+  是 `msh`，这个镜像里 `/bin/help` 不存在。改用 `cat /pytest.py`（3447 B），
+  `g_cdc_fix` 保持默认 1，**连续 4 轮都是完整 3569 字节且回到 `tos> `**。
+- 之前看到的 877 B / 1232 B 截断是测试脚本"读到 0.6 s 静默就提前收读"
+  以及翻 `/proc/cdcfix` 的时序副作用，不是固件丢字。`cat /proc/cdcstat` 里的
+  `line` / `idle_ms` 是**上一次丢弃时**冻结的快照（那两个字段只在丢弃分支写），
+  别拿它判断当前有没有读者。
+
+### 33.1 `rp2350rv`：PMP 修复后的三件事
+
+1. **`deep 3` 现在应该长栈**：`arch/rv32/platform.c` 已把 growth 的地址改成
+   `mtval ? mtval : sp`（Hazard3 的 `mtval` 恒为 0）。期望输出
+   `[pid N] stack grown to 8 KiB` + `journal intact`；如果还报
+   `4 KiB stack and no room to double it`，把 `ps` 里这个任务的 `wink` 一起贴回来
+   （窗口应当是 20 KiB，含 4 KiB 增长余量）。
+2. **`prot dev 0x40070000`**（RP2350 的 UART0 数据寄存器）：这就是 `prot null`
+   那个问题的定性实验。fault → bootrom 硬连线的 8..10 条目只覆盖 ROM，“能读 0”
+   记成已知限制即可；**不 fault → 用户态能写外设，属于隔离漏洞**，要单独记一条。
+3. **`prot heap` / `prot stack`** 仍应 fault。注意 `prot heap` 的探针是
+   `brk + 64`，而 `rp2350rv` 的布局把 `brk` 向上取整到页，所以**只有 `brk` 恰好
+   页对齐时它才落在护栏洞里**——测出来 survive 时先看 `brk` 是否对齐，再判断是
+   不是布局问题。
+
+### 33.2 `rp2350`（Cortex-M33）：4 KiB 窗口
+
+改动只有三处：`layout.c` 的 grain 16K→4K、栈 8K→4K，`platform.c` 的两个钩子
+（增长余量 4 KiB、栈不需要按大小对齐）。PMSAv8 是 base/limit、32 字节粒度，所以
+`arch/arm/platform.c` 现有的三段（code / data / stack）切分**本身就是精确的**，
+不需要分块。
+
+| 项目 | 期望 |
+| --- | --- |
+| `ps` 里 `msh` | 16 KiB（不变） |
+| `ps` 里 `sh` | 36 KiB（原来是 48） |
+| `ps` 里 `py` | 44 KiB（原来是 48） |
+| `prot rodata` / `heap` / `stack` / `null` | **四条全部 fault**（32 字节粒度，rodata 也是 RX）—— 实测四条全过 |
+| `deep 3` | `stack grown to 8 KiB` —— 首轮 FAIL，修复后 **PASS**（见 33.2.1） |
+| `rp2350smp` 的 `smpbench` | 仍 ≥1.8x —— 首轮 1.97x，修复后 **1.98x** |
+
+`ps` 里 `sh` 36 KiB / `py` 44 KiB 这两行**没有直接观测**：默认只有 `msh` 一个
+进程，要在它运行期间另开一路 `ps` 才能看到，本轮没做。其余行在刷完、ROM RESET、
+硬件 RESET 三轮都一致。
+
+### 33.2.1 `deep 3` 在 Cortex-M33 上不长栈（2026-11-14 真机，当晚已修）
+
+**现象**（`rp2350smp`，三轮一致，`build/sizeprobe/s33_arm.log`）：
+
+```
+[pid 7] MemManage at 0x00000000 (address 0x20028eb8)
+  cfsr=0x00000092 ... mmfar=0x20028eb8
+  (stacking error: sp 0x20028e98 left the stack - stack overrun, not a wild pointer)
+  hwords: 00000000 ... 00000000   lr=0x00000000 xpsr=0x00000000
+```
+
+不是普通 store fault，是 **MSTKERR**：用户 sp 越过 `stack_low` 后，异常入口往
+PSP 压栈的那次写落在 `[stack_low-4K, stack_low)` 的 `MPU_ATTR_GUARD` 区
+（`AP 00` = 仅特权 RW），压栈失败，硬件帧**根本没建立**——`hwords` / `lr` /
+`xpsr` 全是 0。RV32 那条"growth 后返回 `f` 重试指令"的路在这里走不通，连
+要重试的 PC 都没有。
+
+**根因**：`arch/arm/platform.c` 的注释就写着"The ARM ports have no stack
+growth; rv32's process_stack_grow() does"。全树只有两个地方会调
+`process_stack_grow()`：RV32 的 `trap_handler()`，以及 `process_stack_guard()`
+（只在 syscall 时跑，且只有 x86 / rp2040 把 `plat_user_stack_guard()` 打开）。
+`rp2350` 三处都没接。8 KiB 栈时 `deep 3`（6 KiB）不溢出，所以一直看不出来；
+`c3a7250` 把栈降到 4 KiB 后必然踩到，这是这轮 4 KiB 窗口改动的回归。
+
+软件守卫也救不了：`deep.c` 的溢出发生在递归途中（每层 2 KiB frame、无
+syscall），只有最深帧才 `sleep()`，而 `process_stack_guard()` 只在 syscall
+入口检查。等得到 syscall 时早就 MSTKERR 了。
+
+**已落地修复（当晚，三处代码）**：
+
+- `arch/arm/platform.c`：PMSAv8 的 guard 洞拆成两段——顶部
+  `ARM_STACK_LANDING = 2560 B` 用 `MPU_ATTR_WINDOW`（用户 RW、XN），
+  下部 1536 B 仍是 `MPU_ATTR_GUARD`（仅特权 RW）。着陆区让异常压栈成功，
+  下半段保证 `prot heap`（探针 `brk+64`，在洞底）与 `prot stack` 仍 fault。
+  ARMv7-M / M0+ 分支不动；顺手改掉那段"PMSAv8 仍要求 2 的幂"的过时注释。
+- `board/rp2350/platform.c`：`plat_user_stack_guard()` 返回 1，让
+  `process_stack_guard()` 在每次 syscall 检查 canary / sp 并调
+  `process_stack_grow()`。走的是**已有**的软件守卫路径，没有新增 fault 分支。
+- `kernel/process.c`：`process_stack_grow()` 毒化新区时**跳过
+  `[sp, old_stack_low)` 的活动帧**。第一版只加了前两条，`deep 3` 打印
+  `stack grown to 8 KiB` 后立刻 `HardFault at 0xcccccccc`（返回地址被 0xcc
+  覆盖），shell 随之失联；补上这个保护才真正跑通。RV32 的 fault-driven
+  growth 里 sp 仍在旧栈内，`poison_end` 不变，行为零回归。
+
+**验证**（`build/sizeprobe/s33_arm_verify.log`，刷完 + 硬件 RESET 两轮一致）：
+`deep 3` → `stack overflow` → `stack grown to 8 KiB` + `journal intact`，
+无 HardFault；`prot` 四条 + `prot dev` 全 FAULT；ps msh 16 KiB；
+`smpbench` 1.98x。回归：六个目标构建通过，QEMU rv32/rv32smp/arm 三个
+smoke OK；ARM 上 §29.1 200 轮 PASS、§22 BAD=0；**刷回 RV 镜像复测**
+`deep 3` 仍 GROW 8 KiB + journal intact、prot heap/stack 仍 FAULT、
+rodata/null 按板子分表 SURVIVE、prot dev FAULT，共享代码改动无回归。
+另外按用户要求做了**手动物理 RESET**（`manual_reset_arm.log`）：读线程先挂好，
+不发 `reboot`、不发 RTS、不重开串口，按键后冷启动 banner 完整，全套结果与
+上面一致（`smpbench` 1.94x），确认修复不依赖某一种复位路径。
+
+**剩余限制（按布局推断，未上板）**：着陆区 2560 B 只够 `deep 3` 约 2 KiB
+的越界；`deep 6`（12 KiB）会越过着陆区、重新踩到 MSTKERR。要在 ARM 上
+支持多步增长，仍需编译器栈探测（`-fstack-limit-*`）之类的提前检测，
+或把着陆区扩到整个 guard 洞（那会放掉 `prot heap`）。判据不变：
+`deep 3` 长栈 + journal intact，且 `prot heap` / `prot stack` 仍 fault、
+`smpbench` ≥1.8x。
+
+### 33.3 已在这边验过、不用再测的
+
+- x86 的软件栈守卫：临时 4 KiB 栈 + `deep 3`，能看到 `stack overflow` 并长到
+  8 KiB；恢复 32 KiB 栈后无假阳性（QEMU `SMOKE TEST OK`）。
+- C3 的 4 KiB 窗口 / 4 KiB 默认栈 / 一拍增长：`prot` 四连、`deep 3`、`dd`+`rm`、
+  `accept.py` 24/24。
+- `prot dev` 本身：QEMU rv32 上 `prot dev 0x10000000` 正确 fault，说明测试路径可用。
+
+### 33.4 `rp2350rv` 刷完不出字：时钟顺序（2026-11-14 改，2026-11-15 真机确认已修）
+
+§33.0 第 1 条（刷完 RV 镜像后 UART0 一个字节都没有、要按物理 RESET 才好）的原因
+候选在 `board/rp2350rv/platform.c::clocks_init()`：它是**唯一**还在用 pico-sdk 老顺序
+的端口——先把 clk_sys 切到 clk_ref，再把 **clk_ref 切到 ROSC**，然后才去开晶振。
+`rp2040`、`rp2350` 两个端口早就是"晶振先起 → clk_ref 上晶振 → 最后才动 clk_sys"。
+
+老顺序成立的前提是 ROSC 一定在跑。当时的假设是 ROM 的 USB/BOOTSEL 路径把 ROSC
+停了，于是第二次写就把 CPU 接到一个停摆的时钟上：没有输出、没有 fault，直到
+RUN/上电复位把 ROSC 带回来——正好是"刷完没字、按 RESET 就好"的形状。
+
+**这个假设已被实测否定一半**（见下面的 `[A]` 对比）：两条路径交出的时钟源**完全相同**，
+`clk_ref` 都在 ROSC 且 `xosc=0`，没有任何"ROSC 被停掉"的迹象。能确证的只是
+**老代码那次 `CLK_REF_CTRL = 0` 写本身是致命的**——它对 ROSC 做一次 glitchless
+重选，而那一刻 ROSC 的可用性无法从软件侧保证；新顺序干脆不写这个寄存器。
+
+改动（`board/rp2350rv/platform.c`）：
+
+1. 不再写 `CLK_REF_CTRL = 0`（不再主动选 ROSC）；
+2. 顺序改成：开晶振并等 `STABLE` → 只有 STABLE 时才把 clk_ref 切到 XOSC →
+   最后才把 clk_sys 放到 clk_ref（`pll_sys_init()` 重置 PLL_SYS 的安全性仍然靠这步）；
+3. 晶振没起来时 clk_ref 保持 ROM 留下的源（CPU 正在它上面跑），退化成慢速启动而
+   不是死机；
+4. `[A]` 行现在带快照：`[A] pre-pll ok sys=0x.. ref=0x.. xosc=0x..`，这三个值是在
+   第一次时钟写之前读的，就是"ROM 交给我们时"的状态。
+
+**实测结果（2026-11-15，`build/sizeprobe/s334_noreset.log`，脚本
+`s334_noreset.py`）**：UF2 拷贝完成后驱动盘 0.6 s 消失、芯片自重启，读线程全程
+**一个字节都没写**（不发 CR、不发 `reboot`、不拉 RTS、不重开串口）：
+
+```
+[20.28s] UF2 drive gone after 0.6s - chip restarted on its own
+[20.33s] FIRST BYTE after 0.05s of listening
+[20.96s] shell prompt seen after 0.68s
+```
+
+- **刷完 0.68 s 就进 `tos>`**，不需要任何 RESET。改动前同一路径是 120 s 零字节。
+- `[A] pre-pll ok sys=0x00000001 ref=0x00000001 xosc=0x00000000`
+  ——ROM 交给我们时**晶振没起**（`xosc=0`）、`clk_ref` 在 **ROSC**（`ref` bit0）、
+  `clk_sys` 已经坐在 `clk_ref` 上（`sys` bit0）。老代码那次 `CLK_REF_CTRL = 0`
+  写在这个状态下是纯粹的 glitchless 重选，一旦 ROSC 在那一刻停摆，CPU 就没了——
+  与新顺序的行为差正好落在这一个写操作上。
+- `[B] clk=0x08f0d568 Hz` ≈ 150 MHz，`[smp] 2 of 2 CPU(s) online`，`usb-cdc=up`。
+- 启动日志里**没有** `[ramdisk] ... grow ... failed`，`df` = `3670016 / 286720 / 7%`
+  ——§33.0 第 2 条（3.5 MiB 分区）同时确认。
+
+**「刷完」对「物理 RESET 后」的同一条 `[A]`**（`build/sizeprobe/reset_snapshot.log`，
+脚本 `wait_reset.py`，同样只读不写，用户手按 RESET 后 64.6 s 抓到）：
+
+| 启动路径 | `[A] pre-pll` | `[B] clk` | 到 `tos> ` 用时 |
+| --- | --- | --- | --- |
+| 刷完（bootloader 自重启） | `sys=0x00000001 ref=0x00000001 xosc=0x00000000` | 150 001 000 Hz | 0.68 s |
+| 物理 RESET | `sys=0x00000001 ref=0x00000001 xosc=0x00000000` | 150 000 000 Hz | 0.6 s |
+
+两次抓到的原始输出都是 **455 字节、逐行相同**，`[B]` 差 1000 Hz 是 UART 线路时间
+测量的抖动。结论有两条：
+
+1. **两条路径 ROM 交出的时钟状态一样**，所以"刷完不行 / RESET 后行"不能解释成
+   两者交接的时钟源不同——原先"ROM 的 USB 路径停了 ROSC"的说法**不成立**，
+   至少 sys/ref/xosc 三个寄存器看不出区别。
+2. 修复后的行为也一致：两条路径都在 0.6–0.7 s 内起 shell。修的是老代码那次多余的
+   `CLK_REF_CTRL` 写，不是"某条路径的特殊状态"。
+
+要不要把机制查到寄存器级（比如量 `CLK_SYS_DIV`、`XOSC` startup 计数、PLL_USB 残留
+状态）已经没有收益：故障不再复现。真要在老代码上复现，得把新顺序的 `[A]` 打印
+移植回去，再刷一次——不建议，那块板子已经用来跑正事了。
+
+两个可能的失败形状仍保留在这里，供以后复用：
+
+- 仍然一个字节都没有，看设备管理器：**还有 BOOTSEL 的 UF2 盘符/U 盘** → 芯片根本
+  没离开 ROM，问题在刷写/重启路径而不是时钟；**盘符消失、没有任何 COM 口** → 我们
+  的镜像在跑但死在更早的地方，把 `[SCR]`（TOS_DIAG 构建）里的 step 号贴回来；
+
+### 33.5 2026-11-15 凌晨：锁重构 + 时钟顺序 + 3.5 MiB 分区一次过（`rp2350rvsmp`）
+
+拉到 `537df98`（6 个提交：`plat_spin_lock_irqsave` 全量收口、console 下半契约、
+rp2350rv 时钟顺序、RV32 3.5 MiB littlefs）后在本机同一块 ATK-DNRP2350AM 上验证。
+
+**静态与模拟**：十个目标（`x86` / `rv32` / `arm` / `rp2040` / `rp2040smp` / `rp2350` /
+`rp2350smp` / `rp2350rv` / `rp2350rvsmp` / `esp32c3`）构建通过；QEMU
+`x86` / `rv32` / `arm` / `rv32smp` 四个 smoke 全 `SMOKE TEST OK`。
+
+**§33.4（第 0 项）**：刷完**没有按 RESET**，读线程全程只读，0.68 s 进 `tos>`；
+随后用户手按 RESET，同样的 `[A]` 快照、0.6 s 进 `tos>`。两条路径交出的时钟状态
+完全相同，所以修掉的是老代码那次多余的 `CLK_REF_CTRL` 写，而不是某条路径的特殊
+状态（明细见 33.4）。
+
+**§33.0 第 2 项（RV32 分区）**：`df` = `3670016 / 286720 / 7%`，与 ARM 同构；
+启动日志没有 `[ramdisk] ... grow ... failed`。刷完后 `ls /` 内容完整
+（`demo.py` / `pytest.py` / `pytest2.py` / `readme.txt` 都在），说明
+`lfs_fs_grow()` 提交新超级块没有伤到已有文件——**RV32 冷启动写 flash 的顾虑就此消除**。
+
+**锁重构回归**（`proc_lock` / `heap_lock` 改 irqsave，`pipe.c` 6 处、
+`mailbox.c` 3 处、`process.c` 21 处的实际风险面）：
+
+| 测试 | 结果 |
+| --- | --- |
+| §29.1 `dd`+`rm` 200 轮 | PASS（errors=0、df recovered YES、liveness OK） |
+| 100 轮纯 `dd`（此轮为最后一次，之后按约定只跑 200 轮 dd/rm） | ok=100 / err=0 / resets=0，1.07 s/轮，`pattern verified` |
+| `smp -s 2 400` | w0=6761（cpu1）/ w1=6812（cpu0），双核均衡 |
+| `smp -t 4 2 300` | 两 worker 跨 cpu0/cpu1，13640 / 13686 块 |
+| `piperace` | 64 KiB 发/校全部 `ok` |
+| `ls /bin \| wc` | `44 176 1751`，管道正常 |
+| `mem` / `wheap` / `free` | 64 KiB 堆 demo 完整、12 KiB 窗口模式完整、kernel heap peak 1792 B |
+| `uptime` | 149.5 s 连续、`cpus=2`，无静默复位 |
+
+**两个单核镜像（§33 新增的每轮附加项）**：`single_core.py` 各刷一次，都是刷完
+即起、不需要 RESET。
+
+| 镜像 | 结果 |
+| --- | --- |
+| `rp2350rv` | `[A] pre-pll ok sys=0x1 ref=0x1 xosc=0x0`、`[B] clk`≈150 MHz、427 B banner；`ps` msh `wink=16`（与 `rp2350rvsmp` 一致）；`prot heap`/`stack`/`dev` FAULT，`rodata`/`null` SURVIVE（RV32 分表）；`deep 3` 长栈 |
+| `rp2350` | `[B]`~`[E]` 齐全、`[mpu] regions=3`、582 B banner；`ps` msh `wink=16`（与 `rp2350smp` 一致）；**四条 `prot` 全 FAULT** + `prot dev` FAULT；`deep 3` 长栈 |
+
+两条注释免得下次误判：`regions=3` 指的是窗口的 code/data/stack 三个区，landing(6)
+和 guard(7) 是固定编号、不进这个计数；`rp2350` 的 banner 从 `[B]` 开始，`[A] pre-pll`
+只属于 RV32 端口（判据表已按此修正）。另外 ARM 那块在复位瞬间会漏半个字节进 banner
+首行（`P?[B] clk=`），是 UART 在芯片复位沿上的噪声，不是解析问题。
+
+**`scripts/rp2350/accept33.py` 实跑**（它是 `98eb55c` 收进仓库的一键版，替换掉
+`build/sizeprobe/` 下这一轮临时攒的脚本）：
+
+| 调用 | 结果 |
+| --- | --- |
+| `--image rp2350rvsmp --uf2 … --dd-rounds 200` | **17/17**，`first byte 0.35s`，`smpbench 2.00x` |
+| `--image rp2350 --uf2 …` | **13/13**，`first byte 0.42s`，四条 `prot` 全 fault |
+| `--replay` 一份 RV32 日志 | **8/8**（无板也能验解析） |
+
+实跑修掉脚本三处判据 bug（都已提交，值得记住，因为它们都是"看起来像固件坏了"）：
+
+1. **banner 抓不到 `[A]`**：`flash()` 在等盘卸载时会 `pump()` 端口，而这块板
+   `0.35 s` 就起 shell，`[A]` 在刷写**期间**就进了 log。偏移必须取在 `flash()` **之前**，
+   取在之后正好把那一行切掉（第一次跑报 `no snapshot: old image?`，其实镜像是对的）。
+2. **`prot` 的 fault 用词分架构**：RV32 打 `load/store access fault`，M33 打
+   `MemManage`。只认前者会让 ARM 镜像五条 `prot` 全 FAIL。
+3. **RV32 的 `rodata`/`null` 是** `survived`（§31.0 的分表），判据要按 `rv` 分支；
+   ARM 才是四条全 fault。
+
+一个使用注意：脚本**不会自己触发进 BOOTSEL**（这是有意的，任何 RTS 脉冲都会破坏
+33.4 那条"不碰 RTS"的前提），所以板子还在跑固件时要先发 Ctrl-D 或手按 BOOTSEL，
+否则它会打出 `no BOOTSEL drive: hold BOOTSEL and replug, or --no-flash`。
+
+### 33.6 第二个核从来没设过自己的 SCB（2026-11-15 发现并修）
+
+在 `rp2350smp` 上跑完整一轮时，**刷完第一次启动**的 `prot rodata` 报的是
+`HardFault` 而不是 `MemManage`：
+
+```
+[pid 3] HardFault at 0x200240f8
+  cfsr=0x00000082 hfsr=0x40000000 mmfar=0x2002422e bfar=0x2002422e
+  sau_ctrl=0x00000001 sau_type=0x00000008
+  aircr=0xfa050000 shcsr=0x00000004
+  shpr1=0x00000000 shpr2=0x00000000 shpr3=0x00000000
+```
+
+同意镜像上紧接着的 `prot heap` 却是正常的 `MemManage`（`shcsr=0x00070001`、
+`sau_ctrl=0`），再后来手动重跑三次 `prot rodata` 也全都正常。**间歇性**，就是全部线索：
+两次 fault 落在**不同的核**上。
+
+根因：`SHCSR`（`MEMFAULTENA`/`BUSFAULTENA`/`USGFAULTENA`）和 `SHPR1/2/3`
+（异常优先级）都是 **SCB 的每核寄存器**，`arch/arm/platform.c::plat_init()` 只在
+**CPU0** 上设过；`cpu_secondary_main()` 只登记 CPU、起 timer、开中断，
+**一次都没设**。于是：
+
+- CPU1 上 `SHCSR=0` ⇒ MemManage 没有使能，`hfsr` 的 FORCED 位置 1，
+  违规被升级成 `HardFault`，报告里说不出是哪次访问被拒；
+- CPU1 上 `SHPR1/2/3=0` ⇒ fault 优先级 0，高于 tick。这正是源码里早写明、
+  在 CPU0 上专门避开的那个死锁（fault handler 里没有可运行任务时 WFI 卡死），
+  只是从没人在 CPU1 上检查过。
+- `sau_ctrl=1` 是 CPU1 自己那份 SAU 的残留状态，CPU0 是 0；它不改变结论，
+  但同样说明"每核状态没初始化"。
+
+修复（3 个文件，都是把已有设置变成"每核都要跑"）：
+
+1. `arch/arm/platform.c`：把 `plat_init()` 里那两块（`SHPR3/2` + `SHPR1` + `SHCSR`）
+   抽成 `arm_exceptions_init()`，`plat_init()` 调用它；
+2. 新增 `plat_cpu_secondary_init()` → `arm_exceptions_init()`；
+3. `kernel/platform.h` 声明 + `kernel/cpu.c` 给 weak 空默认，并在
+   `cpu_secondary_main()` 里 `plat_timer_start_cpu()` 之前调用
+   （rv32 / x86 没有每核 SCB，走空默认，零成本）。
+
+**验证**：十目标构建全过，QEMU `x86`/`rv32`/`arm`/`rv32smp` smoke 全 OK；
+刷 `rp2350smp` 跑完整一轮 **16/16**，`prot rodata` 在 **cpu 1** 上（`ps` 显示
+msh `c=1`，与出问题那次同一个核）报的是正常的 `MemManage`
+（`hfsr=0`、`shcsr=0x00070001`、`sau_ctrl=0`），整轮 5 处 MemManage、**0 处
+HardFault**；`smpbench` 1.97x、200 轮 `dd`+`rm` PASS。
+
+**教训**：凡是"只在 CPU0 看起来正常"的 per-core 状态（异常优先级、fault 使能、
+SAU、MPU 使能位、VTOR），都要在 secondary 路径上再设一次。这次是靠"刷完第一次
+启动恰好把第一个用户故障调度到 CPU1"才暴露的，重跑就消失——**"间歇性 + 重跑就好"
+在 SMP 上第一个该怀疑的就是每核寄存器没初始化**。
+
+## 34. MPU/PMP 的段接口（2026-11-15 已做）
+
+改之前三个后端吃的是同一个**TOR 形状**的签名：
+
+```c
+plat_task_protect(win_base, win_end, wx, brk, stack_low, stack_top)
+```
+
+TOR 后端（C3）直接用；NAPOT 后端（rp2350rv）要在 `pmp_cover()` 里重新拆；PMSAv8
+后端（rp2350）在 `arch/arm/platform.c` 里自己切三段。"哪些字节用户可写"这个问题
+的答案散在三个文件里，每加一个后端就要重新理解一遍窗口形状。
+
+现在是段列表，内核只谈"段和权限"：
+
+```c
+enum { PLAT_SEG_CODE, PLAT_SEG_DATA };
+typedef struct { uint32_t base, top, attr; } plat_seg_t;   /* [base, top) */
+#define PLAT_SEG_MAX 3
+void plat_task_protect(const plat_seg_t *segs, int n);
+```
+
+`apply_protection()` 每次切换只发三块，按地址升序、互不重叠、**洞不出现**：code
+`[win_base, wx)`、data+heap `[wx, brk)`、stack `[stack_low, win_end)`（`stack_top`
+和 `win_end` 本来就是同一个值）。空段不发——一个还没 `sbrk` 过的任务就是两块。
+
+接口注释里写死了一条**后端不得违反的规矩**：不许把洞盖住。洞正是 `prot heap` 和
+`prot stack` 探的地方，一个把 region 向上取整、溢进洞里的后端，等于顺手把这两个
+测试关掉了——而这两个测试正是能发现它做错了的东西。
+
+各后端（差异全部留在后端，并在源码里写明降级方式）：
+
+| 后端 | 编码 | 行为 |
+| --- | --- | --- |
+| TOR（`arch/rv32`，C3 / qemu-virt） | 边界就是编码；洞用一条 `A=OFF` 的项收尾 | **精确**，无对齐/大小要求；最多 5 项，entry 5 留给 trap vector |
+| NAPOT（`board/rp2350rv`） | 先算每页的属性：整页 code → RX，沾了 data/stack → RWX；同属性的页连成一块，洞的页跳过 | 4 KiB 粒度，所以 `.rodata` 在那块混页里守不住（§31.0 的已知限制）；预算仍是 8 条 |
+| PMSAv8（`arch/arm`，rp2350） | base + limit，32 字节粒度；三段各一条 region，guard 洞劈成 2560 B 着陆区 + 1536 B 私有区 | **精确**，`.rodata` 真的是 RX |
+| ARMv7-M（`arch/arm`，qemu-mps2） | 自然对齐的 2 的幂 region；预算不够就整窗一个 RWX region 并打印原因 | 与改动前逐字节一致（mps2 上仍是 `3+8 blocks (budget 7)` → 1 个 region） |
+| M0+ / x86 | 无 MPU / 无分页 → 空实现 | 只靠软件栈哨兵 |
+
+`board.h` 的板级钩子也跟着改了签名（`plat_board_task_protect(const plat_seg_t*, int)`），
+NAPOT 的页映射就是从这个列表算出来的——它和 TOR 版本吃的是同一份输入。
+
+验证：
+
+- 十一个目标构建通过；
+- **C3 真机（COM4）**：`accept.py` **24/24**；五条 `prot` 全部 fault 且地址合理
+  （rodata `0x4039021e`、heap `0x40391040`、stack `0x40389ed7`、null load fault、
+  `prot dev 0x60000000` fault）；`deep 3` → `stack grown to 8 KiB` + `journal intact`；
+  `ps` 正常。TOR 的精确性没有变：洞仍然不被任何 entry 覆盖；
+- QEMU `rv32` / `rv32smp`：prot 四连 + `prot dev` 全 fault，`deep 3`、管道、`piperace`；
+- QEMU `arm`（Cortex-M3，走 **ARMv7-M** 那条分支）：region 预算回退逻辑与改动前
+  一致，`prot stack` / `prot null` fault，`deep 3` 正常；
+- x86：空实现，`prot` 按预期 survive，`deep 3` + `piperace` 正常。
+
+**另外两个后端已在真机上补齐（2026-11-15，`scripts/rp2350/accept33.py` 各跑一轮）**：
+
+| 镜像 | 后端 | 结果 |
+| --- | --- | --- |
+| `rp2350smp` | PMSAv8 | **16/16**：`prot` 五条全 fault、`deep 3` 长栈、`ps` wink 16、`smpbench` 1.95x、200 轮 `dd`+`rm` PASS |
+| `rp2350rvsmp` | NAPOT | **17/17**：同上，`smpbench` 2.00x；`rodata`/`null` 按 RV32 分表 SURVIVE |
+| `rp2350` | PMSAv8 | **13/13**（单核基线） |
+| `rp2350rv` | NAPOT | **14/14**（单核基线） |
+
+四个镜像都是**刷完即起**（0.33–0.44 s 进 shell），不需要 RESET——§33.4 的时钟顺序
+修复在四种镜像上同时成立。
+
+段接口没有改变任何实际布局，这一点在两个后端上都能从日志核对：
+
+- PMSAv8：`[mpu] win=20020000..20024000 wx=20021560 brk=20022000
+  stk=20022000..20023000 regions=3` —— code `..20021560`、data `..20022000`、
+  guard `20022000..20023000`、stack `20023000..20024000`，与改动前逐段一致
+  （`stk=` 打印的向来回是 guard 洞 `stack_low-4K .. stack_low`，不是栈本身）。
+- NAPOT：`prot rodata` 仍 SURVIVE（每页 RWX 的已知限制，§31.0），
+  `prot heap`/`stack`/`dev` 仍 fault —— 说明「洞不覆盖」这条规矩在新页映射里守住了。
+
+顺带确认 `[mpu] regions=3` 指的是 code/data/stack 三段，landing(6)/guard(7)
+是固定编号、不计入，与 §33.5 的记录一致。
+
+### 34.1 窗口/段浸泡：QEMU 版与**真机版**（2026-11-15）
+
+`scripts/soak.py`（`6567119`）把累积性失效压出来：每轮 exec 五种大小的程序、长堆、
+64 KiB 管道、再跑一遍保护探针，判据是 `free` 前后逐项相同（heap 的 `peak` 是水位，
+允许不动）。它只跑 QEMU，因为入口是 `tostest smoke`。
+
+**真机更需要这个负载**：板子给的是 4 KiB 栈（QEMU 给 32 KiB），窗口更紧，而且两个核
+真的同时在跑。所以补了 `scripts/rp2350/soak_board.py`（同样的 `CYCLE`、同样的判据，
+走 UART0 逐条等 prompt）。四个镜像各 **8 轮**：
+
+| 镜像 | 结果 | `free` 前后 |
+| --- | --- | --- |
+| `rp2350`（ARM 单核） | **PASS**，`deep 3` 8/8 长栈、`piperace` 8/8 | `kernel heap 61440/0/61440`、`tasks 409600`、`unused 1400` |
+| `rp2350smp`（ARM 双核） | **PASS** | `61440/0/61440`、`tasks 393216`、`unused 568` |
+| `rp2350rv`（RV 单核） | **PASS** | `32768/0/32768`、`tasks 425984`、`unused 12112` |
+| `rp2350rvsmp`（RV 双核） | **PASS** | `32768/0/32768`、`tasks 409600`、`unused 11616` |
+
+四轮 uptime 都是连续的（59–2917 s），pid 到 100–108，**没有一次窗口不归还或段列表
+残留**。段接口重构在真机的四种形态下都是干净的。
+
+**QEMU 侧的两个假失败，值得写下来**（这次踩了两遍）：
+
+1. `scripts/soak.py` 用 `-commandwait-ms 1500`，在本机 `x86` 和 `rv32` 上报 FAIL，
+   而 `arm` / `rv32smp` PASS。原因是 **`piperace` 把 64 KiB 挤过 2 KiB 管道在 TCG
+   单核上极慢**，1.5 s 的窗口远不够，后续命令灌进去、回显与输出错位（能看到 `ps`
+   的结果出现在 `ps` 回显之前）。`cmd/tostest/serial.go` 的注释里早就记过同一个坑
+   （`piperace 1 16` 300 ms 内完成、`piperace 1 32` 就显得"挂了"，手工驱动两者都过）。
+   给脚本加了 `--commandwait-ms`，240 s 下 `rv32` 的 `piperace` 正常返回。
+2. 一开始把"QEMU 进程消失"当成了闪退，实际是脚本超时后自己 `kill` 掉的假象；
+   `qemu alive=True` 才是真相——**guest 卡在 `piperace`，QEMU 好好的**。
+
+结论：QEMU 上的这两个 FAIL 是**测量窗口**问题，不是段接口或窗口分配器的回归；
+真机四个镜像 8 轮零漂移是可以直接引用的结论。
+
+剩下两条驱动侧重构，**都已核完，结论是这条清单空了**：
+
+- **`connected/disconnected`（不适用，不实现）**：NuttX 的 `uart_connected()` 是
+  **每设备**语义，而我们的控制台是复合的（UART0 + CDC），UART 侧从软件看永远"连着"，
+  所以一个 `plat_console_connected()` 在这些板上恒为真，是实现即死代码。真正能承载
+  `-ENOTCONN` 的是**设备节点**，而 `/dev` 里没有 `usb`/`cdc` 节点（板上实测只有
+  `rgb0`/`key0`/`gpio`/`adc`），要给 CDC 造一个 read/write 节点是另一次设计。另外
+  两个端口都是**轮询**，没有"等一个不会来的中断"，所以也没有会挂住的路径；状态本身
+  已经可观测——`/proc/cdcfix`（`no_reader` / `pending` / `dropped`）在 C3 和 RP 上都
+  打得出来。哪天 CDC 变成 `/dev` 节点，再在这一条下面接 `-ENOTCONN`。
+- **`SYS_IOCTL(fd, cmd, arg)`（早已存在）**：`include/tos.h` 的 `SYS_IOCTL = 30`，
+  内核 `process_ioctl()` 走 `dev_ops.ioctl(devpriv, cmd, arg)` 分派，用户侧
+  `user/syscall.c` 有 `ioctl()` 包装；`led`/`key`/`lcd`/`fb` 四类设备各有自己的
+  `*_dev_ioctl()`，`fb`/`screen`/`splash`/`gpio`/`wificonn` 已经在用
+  （`LCD_OP_*`、`FB_OP_*`、`GPIO_OP_*`）。这条当初是照 NuttX 清单写的，没核树——核完
+  发现逃生口本来就在。
+
+（"控制台的上下半拆分"也已做，见下面。）
+
+**（2026-11-14 已做）控制台的下半契约**：`kernel/platform.h` 把
+`plat_console_{init,putc,tx_room,flush,getchar}` 明确写成"下半"，并列出四条规矩
+——不取内核锁、不调调度器、不跑状态机；**每个等待必须有界**；`putc` 允许丢弃；
+`getchar` 只做一次寄存器读（它跑在 `tty_poll()` 里，而 `tty_poll()` 在关中断的
+tick 路径和块设备等待路径上都会被调用）。环、回显、行编辑、输出锁全部留在内核
+（`console.c` / `tty.c`）一份，四块板本来就没有自己的环，所以这次是**把纪律写
+下来 + 补齐违反它的三处**，不是搬家：
+
+| 位置 | 改之前 | 改之后 |
+| --- | --- | --- |
+| `board/esp32c3/platform.c` | `while (uart_tx_count() >= 100);` / `while (uart_tx_count() > 0);` | 100000 次有界，超时照写（丢一字节） |
+| `board/qemu-virt/platform.c` | THRE / TEMT 无界自旋 | 同上 |
+| `board/qemu-mps2/platform.c` | CMSDK TX 空标志无界自旋 | 同上 |
+
+没有做成 NuttX 那种 ops 表：一块板只有一个控制台，表只会给每个字符加一次间接
+调用，和 devfs 不引 VFS 是同一个理由。
+
+验证：十个目标（`x86`/`rv32`/`arm`/`rp2040`/`rp2040smp`/`rp2350`/`rp2350smp`/
+`rp2350rv`/`rp2350rvsmp`/`esp32c3`）构建通过；QEMU `x86`/`rv32`/`arm` 三个 smoke
+都是 `SMOKE TEST OK`；**C3 真机（COM4）`accept.py` 24/24**。注意本机 `tos.conf`
+的 `[user] exclude` 把 `hello` 等程序排掉了，此时跑 `accept.py` 会是 23/24
+（`source s.sh` 找不到 `/bin/hello`）——那不是回归；临时放开 exclude 重刷就是
+24/24，测完已把 `tos.conf` 原样恢复（不入库）。
+
+**（2026-11-14 已做）`plat_spin_lock_irqsave()`**：加进 `kernel/cpu.h` / `cpu.c`，
+先关中断再取锁、先放锁再恢复，返回值就是中断状态。全部"一个临界区一把锁"的配对
+现在都用它了：`process.c` 14 处机械替换 + 7 处手工（`block_locked`/`block`/
+`process_wait`/`process_thread_create`/`process_thread_exit`/`process_thread_join`/
+`block_on_pipe_locked`，这些有多条返回路径或多把锁），`pipe.c` 6 处，
+`mailbox.c` 3 处（含两条多返回路径的 send/recv）。`mailbox.c` 默认不参与编译
+（`[build] mailbox` 默认 off），所以它是在临时打开 mailbox 的镜像上验的：rv32、
+rv32smp 和 C3 真机三处 `mailtest` 都是 `reply 1..3`。
+
+剩下的 `plat_irq_save()` 分两类，都**故意不换**：
+
+- **纯关中断、不取锁**：`process_ktask_create()` 里保护 `ktask_stack_used` 位图的那段
+  （`proc_alloc()` 自己会取 `proc_lock`，这里持锁就是死锁，注释已写明）、
+  `procfs` 里切 `g_cdc_fix`、以及 `sched_switch()`——后者要求"锁"和"中断"两个
+  生命周期分开：它在循环里反复 `plat_irq_disable()`，中途为了 `plat_wake_cpu()`
+  只放锁、不放中断，返回时还要把中断留给 trap exit 的 `mret` 去恢复；
+- **只取锁、不关中断**：这一轮已经逐个核完，结论按锁分别写进了源码注释：
+
+| 锁 | 结论 | 理由 |
+| --- | --- | --- |
+| `proc_lock` 的短临界区（`win_alloc`、`win_largest_free`、`proc_alloc`、`proc_retire`、pid 分配、发布槽位） | **改成 irqsave** | tick 自己会取 `proc_lock`（回收、唤醒控制台读者），这些地方原本只靠"调用者都关着中断"这条隐式契约；显式关一次的成本是一条指令 |
+| `heap_lock`（`kmalloc`/`kfree`） | **改成 irqsave** | 原本的注释是"没有中断处理程序分配，所以不必关"。这条不变量要靠每个新驱动自觉维持，而一旦破就是自旋死锁；一次 first-fit 只有十几条指令，比审计便宜 |
+| `fs_lock`（`ramdisk.c`） | 保持 lock-only | 临界区里真的有 20 ms 级的块擦除，关中断会把 tick 和输入一起停掉；`tty_poll()` 出现在块操作里正是为此。它在源码里已写明"holder always runs to the unlock and interrupts stay on" |
+| `glock`（线程组的 brk/fd 表） | 保持 lock-only | 调用者全是 syscall 处理函数（trap 里本来就关中断），中断上下文不碰 fd 表 |
+| `out_lock`（console） | 保持 trylock | 跨核等待会死锁，丢一行比挂住整个核好（原有注释）；写完一整行才放锁，关中断会拖 tick |
+| `screen` 面板锁 | 保持 lock-only | 只在控制台输出路径上（out_lock 之内，来自 syscall 或 tick），本来就已关中断；一个单元格要走 SPI，不宜再拉长 |
+
+`proc_lock`、`glock`、`screen`、`fs_lock` 的规则现在都写在各自的锁定义旁边，
+下一个人不必再推断。
+
+验证：十一个目标构建通过；QEMU `x86`/`rv32`/`arm` smoke 全 OK（`ps`、重定向、
+`ls /bin | wc`、`piperace`、`free`）；`rv32smp` 的 `smp -s 2 200` /
+`smp -t 4 2 200`（两种 worker 都跨到两个核）、`piperace`、管道与 `free` 全过；
+**C3 真机（COM4）`accept.py` 24/24**，另跑 `dd` 写 + 回读 `pattern verified`、
+`free`、`df`（8%）、`rm`、`wheap`（12 KiB 模式完整）、`mem`（64 KiB 堆 demo）。
+
+顺序上它们都排在"三块 PMP/MPU 代码稳定之后"，和段接口重构一起做最省事。
+
+调度/内存侧还有三条（`docs/NUTTX-COMPARE.md` §2.7、§2.8）：
+
+- **`spin_lock_irqsave(&lock, &flags)`**：把"取锁 + 关中断"并成一个原语。§23.3 的
+  自死锁就是两者分开写导致的，这个改动小、收益是消掉一类 bug；
+- **granule 分配器**：`win_alloc()` 的"按最大块对齐 + first-fit"正是它的形状
+  （granule = grain，对齐参数 = 最大块）。MAX_PROCS=16 时没必要换，等窗口数或
+  不连续窗口的需求出现再说；
+- **工作队列**：现在只有 USB 一个延迟用户，`g_idle_poll` 足够；出现第二个时再上
+  HP/LP 两级队列，别加第二个钩子。
+
+另一个可以顺手借的点：region 编号用位图分配（NuttX 的 `ffs(~mask)`），而不是现在
+写死的“entry 5 是 trap vector、0..14 是块”。Hazard3 上现在没问题，但如果以后有
+第二个 RV 平台从 bootloader 手里接管 PMP，就需要先跳过 `L` 位占用的条目。

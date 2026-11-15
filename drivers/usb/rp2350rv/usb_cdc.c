@@ -26,17 +26,80 @@
  * upstream port needs is in third_party/tinyusb/port_rp2 and tusb_shim.c.
  */
 
+/* Take the USB controller's interrupt on Hazard3 instead of polling it.
+ *
+ * Hazard3 has no NVIC: external lines arrive as mcause 11 (machine external)
+ * and the per-line enable/pending bits live in the XH3IRQ CSR arrays
+ * meiea/meipa (0xbe0/0xbe1; element 0 covers lines 0..31).  USBCTRL_IRQ is
+ * line 14 on the RP2350.  Off by default because the polled path is the one
+ * that has run on hardware; flip to 1 (or -DTOS_RV_USB_IRQ=1) to A/B it.
+ * The idle poll stays in place either way, so a missed interrupt degrades to
+ * the old behaviour instead of a dead console. */
+#ifndef TOS_RV_USB_IRQ
+#define TOS_RV_USB_IRQ 1
+#endif
+
 #include "platform.h"
 #include "board.h"
 #include "rp2350rv_memmap.h"
 #include "usb_cdc.h"
 
 #include "tusb.h"
+#include "device/usbd_pvt.h"
 #include "device/dcd.h"
 #include "hardware/structs/usb.h"
 #include "string.h"
 #include "console.h"
 #include "cpu.h"
+
+/* SIO hardware spinlock 30 (0xD0000000 + 0x100 + 4*30).  31 is reserved for
+ * the kernel's ARM spin gate; on the RV port the kernel uses LR/SC, so 30 is
+ * free either way.  The SIO block is shared between the two harts whatever
+ * the ISA, so this is the natural cross-core mutex.  Defined at the top
+ * because usb_cdc_init() force-releases it before anything else can take
+ * it - the SIO block survives a warm reboot and a previous run may have
+ * died holding the lock. */
+#define USB_SIO_SPINLOCK (*(volatile uint32_t *)(0xD0000000u + 0x100u + 4u * 30u))
+
+/* Cross-core USB critical section.  TinyUSB state was guarded only by
+ * per-hart interrupt masking (plat_irq_save), which stops re-entrancy on
+ * ONE hart; the other hart's producer (usb_cdc_putc feeds the ring, its
+ * tick drains it) raced this hart's tud_task()/write_flush across cores
+ * and could corrupt tu_fifo bookkeeping - the same failure that wedged
+ * rp2350smp's idle core forever inside tty_poll.  Hold times are bounded:
+ * tud_task() drains the event queue and returns; nothing inside waits on
+ * the other hart. */
+static uint32_t usb_critical_enter(void)
+{
+    uint32_t irq = plat_irq_save();
+
+    /* Non-zero = acquired.  RP2350 answers one-hot (bit 30 for lock 30); a
+     * bit-31 test reads that as "still held" and hangs the console path. */
+    while (USB_SIO_SPINLOCK == 0u)
+        ;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    return irq;
+}
+
+static void usb_critical_exit(uint32_t irq)
+{
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    USB_SIO_SPINLOCK = 0;
+    plat_irq_restore(irq);
+}
+
+/* TinyUSB declares this weak and only calls it when the symbol is non-NULL.
+ * An *undefined* weak symbol is not 0 everywhere: on RV32 with the medany
+ * code model the reference is PC-relative, lld hands back a non-zero address,
+ * the NULL test passes and the call jumps into nothing - which kept the
+ * RP2350 RISC-V image from booting unless the ROM had already brought USB up.
+ * A definition that reports "no application driver" gives the same answer on
+ * every target, and stays weak so an application can still replace it. */
+usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count)
+{
+    (void)driver_count;
+    return 0;
+}
 
 /* The port header defines this pair; the bring-up path uses both to
  * re-assert the pull-up after the pads come up. */
@@ -99,6 +162,117 @@ static volatile uint8_t  g_tx_ring[USB_TX_RING];
 static volatile uint32_t g_tx_head;
 static volatile uint32_t g_tx_tail;
 
+/* ---- no-host-reader backlog guard ---------------------------------------
+ *
+ * A configured CDC device whose bulk IN transfer is never completed means
+ * nobody on the host is draining the endpoint.  TinyUSB copes with that on
+ * its own: SET_CONTROL_LINE_STATE clears DTR and makes tx_ff overwritable
+ * (cdc_device.c:418), i.e. old bytes are discarded when the FIFO fills.
+ * Our 1024-byte ring defeated that: usb_tx_drain() used to stop as soon as
+ * write_available() hit zero, so a full FIFO parked *all* newer output in
+ * the ring, and every 1 ms poll re-attempted the same drain + flush against
+ * a permanently pending xfer.  On this port that work is CPU0-only and has
+ * no USB IRQ to share it, which is what made the two harts asymmetric.
+ *
+ * Rule: there is a reader if DTR is asserted or a bulk IN completed recently
+ * (the latter covers usbser.sys reading with DTR held low).  With no reader,
+ * output is dropped at the producer, except for one probe byte every
+ * CDC_PROBE_MS.  The probe is what lets a terminal that appears later bring
+ * the path back - without it the FIFO would stay empty forever and no
+ * completion could ever clear the state.  No ring is accumulated, so the
+ * endpoint never ends up with a permanently pending full xfer.
+ *
+ * Everything here lives on the producer side (usb_cdc_putc).  The 1 ms
+ * usb_cdc_poll()/usb_tx_drain() path is left alone: adding even a handful
+ * of instructions there changed smpbench by 0.15x in both directions
+ * during the A/B runs, which would fake any performance result.
+ *
+ * g_cdc_fix (kernel/procfs.c, flipped by /proc/cdcfix) is a run-time A/B
+ * switch so fix=0 and fix=1 can be compared within one firmware image. */
+#define CDC_AGE_MS      200u
+#define CDC_PROBE_MS    100u
+
+extern volatile uint32_t g_cdc_fix;
+extern volatile uint32_t g_cdc_diag[6];
+
+static volatile uint32_t g_tx_done_ms;    /* last bulk IN completion       */
+static volatile uint32_t g_putc_probe_ms; /* last probe byte admitted      */
+
+static uint32_t cdc_idle_ms(void)
+{
+    return (uint32_t)plat_uptime_ms() - g_tx_done_ms;
+}
+
+static int cdc_has_reader(void)
+{
+    return tud_cdc_connected() || (cdc_idle_ms() < CDC_AGE_MS);
+}
+
+/* TinyUSB weak callback: a completed IN transfer is the only reliable proof
+ * that the host is taking data (it works even when DTR is held low). */
+void tud_cdc_tx_complete_cb(uint8_t itf)
+{
+    (void)itf;
+    g_tx_done_ms = (uint32_t)plat_uptime_ms();
+}
+
+/* Real definitions for TinyUSB callbacks this port never overrides.
+ *
+ * On Cortex-M an undefined weak symbol links to 0 and the stack's own
+ * `if (cb)` guards skip the call.  Hazard3 has no relocations the ARM tool
+ * chain shares: under RV32 medany GNU ld resolves an undefined weak call to
+ * a thunk that jumps *to itself* (auipc x1,0; jalr x1,0(x1) with x1 set to
+ * the thunk), so the null check reads a non-zero garbage address and the
+ * call hangs CPU 0 forever - ticks keep firing and echoing keystrokes, but
+ * no process is ever scheduled again.  This was observed live: a physical
+ * RESET with VBUS held up makes Windows replay SET_CONTROL_LINE_STATE while
+ * re-enumerating, whose ACK stage calls tud_cdc_line_state_cb, and the
+ * shell then stopped responding to every keystroke.  Same root cause as
+ * usbd_app_driver_get_cb before it; every callback the stack can reach must
+ * therefore have a real definition. */
+void tud_cdc_rx_cb(uint8_t itf)
+{
+    (void)itf;
+}
+
+void tud_cdc_rx_wanted_cb(uint8_t itf, char wanted_char)
+{
+    (void)itf;
+    (void)wanted_char;
+}
+
+void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *p_line_coding)
+{
+    (void)itf;
+    (void)p_line_coding;
+}
+
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+    (void)itf;
+    (void)dtr;
+    (void)rts;
+}
+
+void tud_cdc_send_break_cb(uint8_t itf, uint16_t duration_ms)
+{
+    (void)itf;
+    (void)duration_ms;
+}
+
+/* dcd.h declares this weak and usbd.c calls it for ISO endpoints.  This
+ * port has no ISO endpoints and no implementation; return failure so the
+ * caller just marks the endpoint idle instead of jumping into a thunk. */
+bool dcd_edpt_xfer_fifo(uint8_t rhport, uint8_t ep_addr, tu_fifo_t *ff,
+                        uint16_t total_bytes)
+{
+    (void)rhport;
+    (void)ep_addr;
+    (void)ff;
+    (void)total_bytes;
+    return false;
+}
+
 /* ---- GPIO46/47 -> USB PHY ----------------------------------------------- */
 
 /* Two things have to happen, and only the muxing one is obvious:
@@ -140,6 +314,15 @@ static void usb_pads_setup(void)
      * value is now the SDK's rather than a guess. */
     mmio_write32(PADS_BANK0_BASE + 0xbcu, 0x156u);
     mmio_write32(PADS_BANK0_BASE + 0xc0u, 0x156u);
+}
+
+/* Bring-up breadcrumbs.  The USB controller hangs the bus the moment a
+ * register is touched while clk_usb is stopped, so a failure here leaves no
+ * output at all; these markers are the only way to see how far it got. */
+static void u_mark(const char *s)
+{
+    while (*s)
+        plat_console_putc(*s++);
 }
 
 /* ---- clock and reset bring-up ------------------------------------------- */
@@ -220,6 +403,12 @@ void usb_cdc_init(void)
 {
     g_hw_ready = 0;
     g_init_stage = 0;
+    u_mark("[u0]\r\n");
+
+    /* A warm boot can land with the cross-core USB spinlock still held by
+     * the previous run - the SIO block survives a hart reset.  This is the
+     * first touch, before either hart can take the lock again. */
+    USB_SIO_SPINLOCK = 0;
 
     /* Order matters: PLL and clk_usb first (the controller's reset-done bit
      * depends on the clock), then the pads, then TinyUSB - whose dcd_init()
@@ -227,8 +416,10 @@ void usb_cdc_init(void)
      * done before it. */
     if (usb_clock_init() != 0)
         return;
+    u_mark("[u1] clk\r\n");
 
     usb_pads_setup();
+    u_mark("[u2] pads\r\n");
 
     /* Mark ready before TinyUSB can raise an interrupt: the handler bails
      * out on !g_hw_ready, and an interrupt that is never drained keeps
@@ -239,6 +430,7 @@ void usb_cdc_init(void)
         g_hw_ready = 0;
         return;
     }
+    u_mark("[u3] tud\r\n");
 
     /* And again, now that TinyUSB's dcd_init() has reset the controller and
      * cleared MAIN_CTRL.PHY_ISO.  The same writes issued *before* that reset
@@ -261,6 +453,7 @@ void usb_cdc_init(void)
     for (volatile int i = 0; i < 20000; i++)
         ;
     g_ss_retrig = usb_hw->sie_status;
+    u_mark("[u4] pullup\r\n");
 }
 
 /* Open the interrupt gate.  The RISC-V port polls the controller instead:
@@ -270,6 +463,12 @@ void usb_cdc_init(void)
  * sequence reads the same as the ARM board. */
 void usb_cdc_irq_enable(void)
 {
+#if TOS_RV_USB_IRQ
+    /* meiea: enable line 14; mie.MEIE: let the core take cause 11 at all.
+     * mstatus.MIE is opened later by the scheduler. */
+    __asm__ volatile("csrs 0xbe0, %0" :: "r"(1u << 14u));
+    __asm__ volatile("csrs mie, %0"   :: "r"(1u << 11u));
+#endif
 }
 
 /* Wait (bounded) for the host to finish SET_CONFIGURATION so the boot banner
@@ -311,14 +510,13 @@ static volatile int g_in_task;
 
 static void usb_task_run(int from_isr)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = usb_critical_enter();
 
     if (g_in_task) {
-        plat_irq_restore(irq);
+        usb_critical_exit(irq);
         return;                     /* the outer call will drain the queue */
     }
     g_in_task = 1;
-    plat_irq_restore(irq);
 
     if (from_isr)
         tud_task_ext(0, true);
@@ -326,6 +524,7 @@ static void usb_task_run(int from_isr)
         tud_task();
 
     g_in_task = 0;
+    usb_critical_exit(irq);
 }
 
 /* IRQ 14, called from the shared vector table through g_usb_irq_handler.
@@ -336,6 +535,21 @@ void usb_cdc_irq_task(void)
 {
     if (!g_hw_ready)
         return;
+
+    /* Service the controller itself in the interrupt, not only its event
+     * queue: dcd_rp2040_irq() clears INTR/SIE_STATUS and queues the event.
+     * Running only the task here would leave SETUP_REQ|BUFF_STATUS asserted
+     * (a physical RESET with VBUS up keeps the host re-enumerating), the
+     * external line latched, and the trap re-entering forever.  This mirrors
+     * exactly what the ARM port's IRQ trampoline does before its own task
+     * run. */
+    if (usb_hw->ints) {
+        uint32_t irq = usb_critical_enter();
+
+        dcd_int_handler(0);
+        usb_critical_exit(irq);
+    }
+
     usb_task_run(1);
 }
 
@@ -348,14 +562,32 @@ static volatile int g_in_poll;
 static void usb_tx_drain(void)
 {
     uint32_t irq = plat_irq_save();
+    uint32_t usbpm;
 
     plat_spin_acquire(&g_tx_lock);
+    /* The ring bookkeeping is g_tx_lock's business; the CDC FIFO the loop
+     * feeds is TinyUSB state and races the other hart's tud_task() - so the
+     * fifo access sits inside the cross-core USB critical section.  Order
+     * is always g_tx_lock then the USB lock, and no g_tx_lock holder ever
+     * waits for the USB lock except this drain, so the two cannot cycle. */
+    usbpm = usb_critical_enter();
     while (g_tx_tail != g_tx_head && tud_cdc_write_available() != 0) {
         tud_cdc_write_char(g_tx_ring[g_tx_tail % USB_TX_RING]);
         g_tx_tail++;
     }
+    usb_critical_exit(usbpm);
     plat_spin_release(&g_tx_lock);
     plat_irq_restore(irq);
+}
+
+/* Move whatever the ring holds into the CDC FIFO.  Deliberately does not run
+ * tud_task(): this is called from the 1 ms tick, and the state machine must
+ * stay in thread context (see usb_cdc_poll).  Without this a program that
+ * never blocks cannot print more than the 1 KiB ring. */
+void usb_cdc_tx_kick(void)
+{
+    if (g_hw_ready)
+        usb_tx_drain();
 }
 
 void usb_cdc_poll(void)
@@ -373,15 +605,29 @@ void usb_cdc_poll(void)
     g_in_poll = 1;
     plat_irq_restore(irq);
 
+    /* Deliberately untouched by the no-reader fix: measurements showed that
+     * adding even a handful of instructions or volatile diagnostic writes to
+     * this CPU0-only 1 ms path changes smpbench by 0.15x.  Dropping stale
+     * output happens entirely on the producer side instead. */
+
     /* Polled controller: any pending SIE event is serviced here instead of
      * in an IRQ 14 handler (Hazard3 external lines need its CSR window). */
-    if (usb_hw->ints)
+    if (usb_hw->ints) {
+        uint32_t usbpm = usb_critical_enter();
+
         dcd_int_handler(0);
+        usb_critical_exit(usbpm);
+    }
 
     usb_task_run(0);
     usb_tx_drain();
-    if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
-        tud_cdc_write_flush();
+    {
+        uint32_t usbpm = usb_critical_enter();
+
+        if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
+            tud_cdc_write_flush();
+        usb_critical_exit(usbpm);
+    }
 
     g_in_poll = 0;
 }
@@ -392,9 +638,35 @@ void usb_cdc_putc(char c)
 {
     uint32_t irq;
     uint32_t next;
+    int drop = 0;
 
     if (!g_hw_ready || !tud_mounted())
         return;
+
+    /* Refreshed on every output character so /proc/cdcstat always sees a
+     * recent ring snapshot.  This is the producer side, never the 1 ms tick. */
+    g_cdc_diag[1] = g_tx_head - g_tx_tail;
+
+    if (g_cdc_fix && !cdc_has_reader()) {
+        uint32_t now = (uint32_t)plat_uptime_ms();
+
+        g_cdc_diag[0] = 1u;               /* no_reader                     */
+        g_cdc_diag[4] = cdc_idle_ms();     /* ms since last IN completion   */
+        g_cdc_diag[5] = tud_cdc_get_line_state();
+
+        /* Drop console output while no host is reading; the UART mirror has
+         * already been written by plat_console_putc().  Admit one byte per
+         * probe interval so a terminal that appears can complete an IN
+         * transfer and re-arm the path. */
+        if (now - g_putc_probe_ms < CDC_PROBE_MS)
+            drop = 1;
+        else {
+            g_putc_probe_ms = now;
+            g_cdc_diag[3]++;               /* probe bytes admitted          */
+        }
+    } else {
+        g_cdc_diag[0] = 0u;
+    }
 
     /* Enqueue only: the producer may be CPU 1, while TinyUSB's FIFO and
      * task loop belong to CPU 0.  The spin lock is held for a handful of
@@ -402,6 +674,20 @@ void usb_cdc_putc(char c)
      * re-enter this on the same core. */
     irq = plat_irq_save();
     plat_spin_acquire(&g_tx_lock);
+
+    if (drop) {
+        /* No reader: discard this byte AND any backlog left over from the
+         * reader that just went away.  Without this, 200+ bytes survive in
+         * the ring behind a FIFO that never drains.  TinyUSB's own tx_ff is
+         * left alone - it is overwritable when DTR is clear, and touching it
+         * from an arbitrary hart/context is not safe. */
+        g_cdc_diag[2] += (g_tx_head - g_tx_tail) + 1u;
+        g_tx_tail = g_tx_head;
+        plat_spin_release(&g_tx_lock);
+        plat_irq_restore(irq);
+        return;
+    }
+
     next = g_tx_head + 1;
     if (next - g_tx_tail <= USB_TX_RING) {
         g_tx_ring[g_tx_head % USB_TX_RING] = (uint8_t)c;
@@ -420,21 +706,30 @@ int usb_cdc_tx_room(void)
 
 void usb_cdc_flush(void)
 {
+    uint32_t usbpm;
+
     if (!g_hw_ready)
         return;
     /* Only CPU 0 owns the controller; a flush on the other hart just leaves
      * the bytes for the next poll. */
     if (plat_cpu_id() != 0)
         return;
+    usbpm = usb_critical_enter();
     usb_tx_drain();
     tud_cdc_write_flush();
+    usb_critical_exit(usbpm);
 }
 
 int usb_cdc_getchar(void)
 {
+    uint32_t usbpm;
+    int32_t c;
+
     if (!g_hw_ready)
         return -1;
-    int32_t c = tud_cdc_read_char();
+    usbpm = usb_critical_enter();
+    c = tud_cdc_read_char();
+    usb_critical_exit(usbpm);
     return (c < 0) ? -1 : (int)c;
 }
 

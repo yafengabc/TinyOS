@@ -1,0 +1,18 @@
+.program ws2812
+; One WS2812/SK6812 data line on GP4.  Bit cell is 10 SM cycles at 800 kHz:
+;   T0H 3, T1H 6, period 10  ->  SM clock 8 MHz, clkdiv 125/8 = 15.625
+; Each bit: out (3 cycles) + jmp !x (2 cycles) + one of the two 5-cycle arms.
+; Data: 24 bits per pixel, MSB first, autopull at 32 with shift-left, so the
+; sender writes pixel_grb << 8 into the TX FIFO.
+.side_set 1
+.pin 4 1
+.clkdiv 15 160
+.shiftctrl 0x00020000        ; AUTOPULL, PULL_THRESH 32, shift left
+.wrap_target
+bitloop:
+out x, 1        side 0 [2]   ; drive low, shift the next bit into x
+jmp !x, do_zero side 1 [1]   ; bit was 1: start the long high pulse
+jmp bitloop     side 1 [4]   ; finish it, 6 cycles high in total
+do_zero:
+nop             side 0 [4]   ; short pulse, 3 cycles high
+.wrap

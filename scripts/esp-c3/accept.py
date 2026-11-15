@@ -156,7 +156,7 @@ def main():
     # (rst:0x3 RTC_SW_SYS_RST), then the banner coming back on its own.
     out = b.cmd("reboot", timeout=25.0)
     check(results, "reboot resets the chip", out,
-          want=("rebooting...", "reboot requested by pid", "RTC_SW_SYS_RST",
+          want=("reboot: resetting the machine", "reboot requested by pid", "RTC_SW_SYS_RST",
                 "TinyOS - a tiny multi-platform operating system",
                 "TinyOS shell"))
     check(results, "the filesystem survives a reboot", b.cmd("cat accept.txt"),

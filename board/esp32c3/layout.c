@@ -34,14 +34,23 @@ const uint32_t PLAT_RAM_TOP    = 0x403DC710;
  * a single window. */
 
 /* Task windows are carved out of the rest of SRAM above __app_base, in
- * 16 KiB steps: a shell takes 32 KiB, the editor
- * 32, a 1 KiB tool 16, and the rest of the area stays usable by whatever
- * comes next.  The Python interpreter's 128 KiB window plus the shell's
+ * 4 KiB steps: msh stays at 16 KiB, `sh` takes 36 instead of 48, `py` 44
+ * instead of 48, and every program that lands just past a 16 KiB boundary
+ * pays 4 KiB of step instead of 16.
+ *
+ * What that costs: the rounding slack a 16 KiB grain leaves is what used to
+ * let an undeclared stack overflow double into the heap's tail.  With 4 KiB
+ * steps most windows are exactly image+guard+stack, so `deep` is killed at
+ * the fault instead of growing - safe, because this PMP faults, but it means
+ * depth has to be declared (TOS_STACK, see `stk` and `py`) rather than
+ * discovered.  The trade is deliberate: this board has 288 KiB of task area
+ * and plenty of windows, so a predictable 4 KiB step is worth more than an
+ * opportunistic doubling.  The guard hole and the TOR stack region stay.  The Python interpreter's 128 KiB window plus the shell's
  * 32 KiB still fit.  Stack at the top of every window, image below it,
  * guard hole between image and stack; see kernel/platform.h for the
  * constraints this grain has to satisfy. */
 const uint32_t PLAT_APP_MAX    = 0x403DC000;
-const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
+const uint32_t PLAT_APP_GRAIN  = 0x00001000;   /* 4 KiB per step  */
 /* Stack at the top of every task window, and the hole left under it.  See
  * kernel/platform.h for the four conditions this pair has to satisfy.
  *
@@ -57,7 +66,14 @@ const uint32_t PLAT_APP_GRAIN  = 0x00004000;   /* 16 KiB per step */
  * that runs off its bottom - the hole is simply not covered by any PMP
  * entry, so any store into it faults, and the write that overflows lands
  * there first unless a single frame is larger than the hole. */
-const uint32_t PLAT_STACK_BYTES = 8u * 1024u;
+/* 4 KiB, not 8.  With a 4 KiB grain a window is image + 4 guard + 4 stack
+ * (+ one 4 KiB growth step for a task that did not declare a stack), so a
+ * small tool stays at 16 KiB - the same as before - while the growth reserve
+ * is a 4 KiB step instead of an 8 KiB doubling.  That is what makes the
+ * reserve affordable: two steps cover what the old 8 KiB default did, one
+ * fault at a time, and only for programs that need it.  The shell already
+ * declares 4 KiB (user/msh/msh.c) and `sh` the same, so neither is affected. */
+const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
 

@@ -47,15 +47,23 @@ volatile uint32_t g_usb_irq_count;
 
 static void usb_irq_trampoline(void)
 {
+    uint32_t lk;
+
     g_usb_irq_count++;
-    /* Controller events only.  Running tud_task() here deadlocked the boot on
-     * the very first interrupt: the state machine needs the caller's stack and
-     * can format/enqueue much more than an ISR should, and arming it from the
-     * exception meant the main thread never got past plat_irq_enable().  The
-     * task now runs in thread context (console read path), which is where
-     * pico-sdk's own alarm-driven task effectively lives. */
+    /* Controller events only - tud_task() must NOT run here: it deadlocked
+     * the boot on the very first interrupt (the state machine needs the
+     * caller's stack and formats far more than an ISR should), so the task
+     * runs in thread context via usb_cdc_poll().  The controller handler
+     * touches the same SIE/endpoint state as
+     * usb_cdc_poll() and usb_cdc_putc() on the other core, so it runs
+     * inside the same cross-core USB critical section (SIO spinlock 30).
+     * The section masks PRIMASK first, so this ISR - priority 0, above
+     * SysTick - can never spin on a lock held by the thread it just
+     * pre-empted: a lock holder is always interrupt-masked. */
+    lk = usb_cdc_lock();
     if (s_usb_isr)
         s_usb_isr();
+    usb_cdc_unlock(lk);
 }
 
 void irq_add_shared_handler(uint num, void (*handler)(void), uint8_t order_priority)

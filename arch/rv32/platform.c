@@ -123,14 +123,21 @@ regs_t *trap_handler(regs_t *f)
          * instruction is retried - it faulted before writing, so there is
          * nothing to undo.  Everything else (and a growth that the port
          * cannot encode, or that the heap is in the way of) dies as before. */
+        /* Hazard3 hardwires mtval to zero (measured on the RP2350: every
+         * store fault reports 0), so the faulting address is unavailable.
+         * sp is the next best witness and is what the growth decision turns
+         * on: if sp left the stack the write is a candidate, and
+         * process_stack_grow() refuses it anyway when it did not. */
+        uint32_t fault_addr = f->mtval ? f->mtval : f->sp;
         if ((cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT) &&
-            process_stack_grow(f->mtval, f->sp))
+            process_stack_grow(fault_addr, f->sp))
             return f;
 
         /* A user program trapped: kill it and keep the system alive. */
         kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
                 cause_name(cause), f->mepc);
-        if (cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT)
+        if ((cause == RV_MCAUSE_LOAD_FAULT ||
+             cause == RV_MCAUSE_STORE_FAULT) && f->mtval)
             kprintf(" (address 0x%08x)", f->mtval);
         kprintf("\n");
         return process_exit(f, 139);
@@ -217,10 +224,16 @@ static void pmp_open_trap_vector(void)
 {
     uint32_t base = (uint32_t)(uintptr_t)trap_vectors;
     uint32_t addr = (base >> 2) | ((256u >> 3) - 1u);   /* NAPOT, 256 B */
-    uint32_t cfg = PMP_NAPOT | PMP_R | PMP_X;           /* entry 4 bits 7:0 */
+    uint32_t cfg1;
 
-    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(addr));
-    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg));
+    /* Entry 5, not 4: entry 4 is the task's stack region (see
+     * plat_task_protect) and is rewritten on every switch.  Address before
+     * config, while every A field is still OFF, so the NAPOT value keeps all
+     * of the low bits that encode the 256-byte region size. */
+    __asm__ volatile("csrw pmpaddr5, %0" : : "r"(addr));
+    __asm__ volatile("csrr %0, pmpcfg1" : "=r"(cfg1));
+    cfg1 = (cfg1 & ~0xff00u) | ((uint32_t)(PMP_NAPOT | PMP_R | PMP_X) << 8);
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg1));
 }
 
 /* ---- interrupts ------------------------------------------------------ */
@@ -251,8 +264,15 @@ void plat_irq_restore(uint32_t state)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
 }
 
+__attribute__((weak)) void plat_flash_park_poll(void)
+{
+}
+
 void plat_cpu_idle(void)
 {
+    /* A core parked in sched_idle() is already inside its timer trap, so the
+     * tick check can never see the park flag; poll here before sleeping. */
+    plat_flash_park_poll();
     __asm__ volatile("csrsi mstatus, 8; wfi");
 }
 
@@ -264,49 +284,79 @@ void plat_cpu_idle(void)
  * start at address 0, that is how a region below the window is denied:
  * entry 0 is off and holds nothing but the lower bound.
  *
- *   0  off    win_base                     lower bound only
- *   1  RX     [win_base, wx)               code
- *   2  RW     [wx, brk)                    data and heap
- *   3  RW     [stack_low, stack_top)       stack, NAPOT
- *   (4  RX     trap_vectors, 256 B          boot time, see below)
+ * A segment list maps onto this directly, and a gap needs no region of its
+ * own - only a boundary to end the piece below it:
  *
- * Nothing claims the hole between brk and stack_low, so a heap that runs
- * off its end and a stack that runs off its bottom both fault instead of
- * quietly eating the other.  The stack uses NAPOT because it is absolute:
- * a TOR entry there would have to start at brk and would fill that hole.
- * Entry 4 (vector table, see pmp_open_trap_vector) is boot-time only. */
+ *   0  off    segs[0].base              lower bound only
+ *   1  RX     [win_base, wx)            code
+ *   2  RW     [wx, brk)                 data and heap
+ *   3  off    stack_low                 guard hole, not covered
+ *   4  RW     [stack_low, stack_top)    stack
+ *   (5  RX     trap_vectors, 256 B      boot time, see below)
+ *
+ * TOR has no alignment or size rule, so this port follows the segments
+ * exactly; an empty segment costs no entry.  Nothing claims the hole between
+ * brk and stack_low, so a heap that runs off its end and a stack that runs
+ * off its bottom both fault instead of quietly eating the other.
+ * Entry 5 (vector table, see pmp_open_trap_vector) is boot-time only. */
 #define PMP_R     0x01u
 #define PMP_W     0x02u
 #define PMP_X     0x04u
 #define PMP_TOR   0x08u
 #define PMP_NAPOT 0x18u
+#define PMP_TOR_ENTRIES 5u          /* 0..4; 5 is the trap vector */
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
-    uint32_t size = stack_top - stack_low;
+    uint32_t addr[PMP_TOR_ENTRIES];
+    uint32_t cfg[PMP_TOR_ENTRIES];
+    uint32_t cfg0, cfg1;
+    int k = 0;
 
-    /* A board whose PMP cannot express the TOR layout (RP2350 Hazard3 has no
-     * TOR matching) programs its own regions. */
-    if (plat_board_task_protect(win_base, win_end, wx, brk, stack_low, stack_top))
+    /* A board whose PMP cannot express TOR (RP2350's Hazard3) programs its
+     * own regions from the same segment list. */
+    if (plat_board_task_protect(segs, n))
         return;
 
-    /* The window's end is implied by whichever region is highest (the
-       stack), so the TOR/NAPOT entries do not need it.  An ARM-style port
-       that describes the whole window would. */
-    (void)win_end;
+    for (unsigned i = 0; i < PMP_TOR_ENTRIES; i++)
+        addr[i] = cfg[i] = 0;
 
-    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(win_base >> 2));
-    __asm__ volatile("csrw pmpaddr1, %0" : : "r"((wx  & ~3u) >> 2));
-    __asm__ volatile("csrw pmpaddr2, %0" : : "r"((brk & ~3u) >> 2));
-    /* NAPOT: all ones above the size bit, so 32 KiB is (32K>>3)-1 = 0xFFF. */
-    __asm__ volatile("csrw pmpaddr3, %0" : :
-                     "r"((stack_low >> 2) | ((size >> 3) - 1u)));
+    if (n > 0) {
+        /* Entry 0 carries only the lower bound: a TOR region needs a start,
+         * and anything below it must stay unmatched. */
+        addr[0] = segs[0].base >> 2;
 
-    uint32_t cfg = ((PMP_TOR   | PMP_R | PMP_X) << 8)    /* entry 1 */
-                 | ((PMP_TOR   | PMP_R | PMP_W) << 16)   /* entry 2 */
-                 | ((PMP_NAPOT | PMP_R | PMP_W) << 24);  /* entry 3 */
-    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg));
+        for (int i = 0; i < n && k + 1 < (int)PMP_TOR_ENTRIES; i++) {
+            if (i > 0 && segs[i].base > segs[i - 1].top) {
+                /* A gap: close the piece below with a disabled entry whose
+                 * address is the next piece's base, so that piece starts
+                 * there and the hole stays uncovered. */
+                addr[++k] = segs[i].base >> 2;
+            }
+            addr[++k] = (segs[i].top & ~3u) >> 2;
+            cfg[k] = PMP_TOR | PMP_R |
+                     ((segs[i].attr == PLAT_SEG_CODE) ? PMP_X : PMP_W);
+        }
+    }
+
+    /* Entries 0..3 live in pmpcfg0; entry 4 shares pmpcfg1 with entry 5 (the
+     * trap vector), so that byte's neighbour has to be preserved. */
+    cfg0 = cfg[0] | (cfg[1] << 8) | (cfg[2] << 16) | (cfg[3] << 24);
+    __asm__ volatile("csrw pmpaddr0, %0" : : "r"(addr[0]));
+    __asm__ volatile("csrw pmpaddr1, %0" : : "r"(addr[1]));
+    __asm__ volatile("csrw pmpaddr2, %0" : : "r"(addr[2]));
+    __asm__ volatile("csrw pmpaddr3, %0" : : "r"(addr[3]));
+    __asm__ volatile("csrw pmpaddr4, %0" : : "r"(addr[4]));
+    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg0));
+    __asm__ volatile("csrr %0, pmpcfg1" : "=r"(cfg1));
+    cfg1 = (cfg1 & ~0xffu) | cfg[4];
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg1));
+}
+
+/* First argument of a user entry point: thread trampolines take one. */
+void plat_frame_set_arg(regs_t *frame, uint32_t arg)
+{
+    frame->a0 = arg;
 }
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
@@ -330,6 +380,11 @@ void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 
 void plat_frame_set_ret(regs_t *r, uint32_t val) { r->a0 = val; }
 uint32_t plat_frame_get_ret(const regs_t *r)    { return r->a0; }
+
+uint32_t plat_frame_get_user_sp(const regs_t *r)
+{
+    return r->sp;
+}
 
 int plat_fault_is_user(void *frame)
 {
@@ -369,15 +424,9 @@ __attribute__((weak)) void plat_board_panic_poll(void)
 {
 }
 
-__attribute__((weak)) int plat_board_task_protect(uint32_t win_base,
-                                                  uint32_t win_end,
-                                                  uint32_t wx,
-                                                  uint32_t brk,
-                                                  uint32_t stack_low,
-                                                  uint32_t stack_top)
+__attribute__((weak)) int plat_board_task_protect(const plat_seg_t *segs, int n)
 {
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    (void)segs; (void)n;
     return 0;
 }
 
@@ -406,6 +455,27 @@ void plat_spin_acquire(volatile int *v)
                          : "r"(1), "r"(v)
                          : "memory");
     } while (got != 0);
+}
+
+/* Non-blocking variant, and the one spin_lock() actually calls: it retries
+ * around plat_flash_park_poll() and the stuck-lock panic, so a lock wait can
+ * answer a flash park request.  It was missing here and the weak default in
+ * kernel/cpu.c - "one CPU, the lock is never contended, return 1" - was what
+ * every RV32 build linked.  On rp2350rvsmp that made proc_lock a no-op: both
+ * harts picked the same ST_READY process (the shell banner printed twice, and
+ * `[sched] cpu 0 idle: c0=1/1 c1=1/1` in the "no runnable process" panic),
+ * and the flash-park handshake raced against itself.  amoswap stores 1
+ * unconditionally, so a failed attempt leaves the lock exactly as it found it
+ * and only the returned value says whether this hart owns it now. */
+int plat_spin_try_acquire(volatile int *v)
+{
+    uint32_t got;
+
+    __asm__ volatile("amoswap.w.aq %0, %1, (%2)"
+                     : "=r"(got)
+                     : "r"(1), "r"(v)
+                     : "memory");
+    return got == 0;
 }
 
 void plat_spin_release(volatile int *v)

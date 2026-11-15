@@ -27,16 +27,21 @@ void plat_console_init(void)
 
 void plat_console_putc(char c)
 {
-    while (mmio_read32(ARM_UART0_STATE) & 1u)
-        ;                                  /* wait for the TX FIFO         */
+    /* Bounded per kernel/platform.h: the CMSDK holding register is either
+     * free or not, and a board that stops draining must cost a byte. */
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (!(mmio_read32(ARM_UART0_STATE) & 1u))
+            break;
+    }
     mmio_write32(ARM_UART0_DATA, (uint32_t)(uint8_t)c);
 }
 
 void plat_console_flush(void)
 {
-    while (mmio_read32(ARM_UART0_STATE) & 1u)
-        ;                                  /* FIFO empty: the last byte is
-                                              on its way to the host */
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (!(mmio_read32(ARM_UART0_STATE) & 1u))
+            break;      /* FIFO empty: the last byte is on its way to the host */
+    }
 }
 
 int plat_console_getchar(void)

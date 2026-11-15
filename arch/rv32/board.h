@@ -2,6 +2,7 @@
 #define TINYOS_RV32_BOARD_H
 
 #include "types.h"
+#include "platform.h"
 
 /* Contract between the generic RV32 layer (arch/rv32/platform.c) and the
  * board support package (board/<board>/platform.c).
@@ -28,11 +29,9 @@ void plat_timer_tick(void);
  * the PMP itself; the generic layer then leaves it alone.  It exists because
  * Hazard3 on the RP2350 supports NAPOT (and NA4) but not TOR: writing A=TOR
  * maps the region to OFF, so the generic TOR layout silently denies every
- * user fetch.  A board with that core describes the user area with
+ * user fetch.  A board with that core describes the same segments with
  * naturally-aligned power-of-two NAPOT regions instead. */
-int plat_board_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                            uint32_t brk, uint32_t stack_low,
-                            uint32_t stack_top);
+int plat_board_task_protect(const plat_seg_t *segs, int n);
 
 /* Board hook polled from plat_panic_halt().  A board whose console works
  * without interrupts (RP2350's UART0, for instance) can keep watching for a

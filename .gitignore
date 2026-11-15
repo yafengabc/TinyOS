@@ -34,8 +34,9 @@ __pycache__/
 # Host-side debugging harness for the interpreter (not a board program).
 /tmp/
 
-# Go build cache when a non-interactive bash run points GOCACHE here
+# Go build cache / GOPATH when a non-interactive bash run points them here
 /.gocache/
+/.gopath/
 
 # Vendor board material: a 124 MB copy of the ATK board's SDK examples and
 # datasheets, kept only for reference.  The distilled notes live in

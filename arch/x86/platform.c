@@ -251,6 +251,11 @@ void plat_set_kernel_stack(uint32_t top) { tss_set_kernel_stack(top); }
 
 /* Only a ring 3 frame may be switched away from: a trap taken in ring 0
  * has kernel call frames under it that cannot be resumed later. */
+uint32_t plat_frame_get_user_sp(const regs_t *r)
+{
+    return r->useresp;
+}
+
 int plat_fault_is_user(void *frame)
 {
     return (((const regs_t *)frame)->cs & 3) == 3;
@@ -260,11 +265,16 @@ int plat_fault_is_user(void *frame)
  * (docs/PLATFORM-DESIGN.md), and without it segments cannot express a
  * per-task boundary.  So nothing to program - the rv32 port is where
  * plat_task_protect does real work. */
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+/* Paging is off, so there is no fault to catch a stack that runs off its
+ * bottom: use the canary under the stack, like the RP2040 does. */
+int plat_user_stack_guard(void)
 {
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    return 1;
+}
+
+void plat_task_protect(const plat_seg_t *segs, int n)
+{
+    (void)segs; (void)n;
 }
 
 /* The trap frame layout belongs to the arch, so core hands us an opaque

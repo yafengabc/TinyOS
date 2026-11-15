@@ -235,6 +235,12 @@ static regs_t *dispatch(regs_t *r);
 
 regs_t *syscall_dispatch(regs_t *r)
 {
+    /* No-op unless the board has no faulting protection unit (the RP2040):
+     * there the guard word under the stack is the only way to notice that a
+     * task ran off its bottom, and this is the first point after the fact. */
+    if (!process_stack_guard(r))
+        return process_suspend(process_exit(r, 139));
+
     /* Whatever the syscall did - including waiting for a child, for the
        console or for a sleep - this is the last point at which the task's
        kernel stack is still needed, so a stop request lands here. */
@@ -253,6 +259,49 @@ static regs_t *dispatch(regs_t *r)
     switch (sc.nr) {
     case SYS_EXIT:
         return process_exit(r, (int)sc.a0);
+
+#ifdef TOS_KTHREADS
+    case SYS_THREAD_CREATE: {
+        int tid = process_thread_create(sc.a0, sc.a1, sc.a2);
+        plat_frame_set_ret(r, (uint32_t)tid);
+        return r;
+    }
+
+    case SYS_THREAD_EXIT:
+        return process_thread_exit(r, (int)sc.a0);
+
+    case SYS_THREAD_JOIN:
+        return process_thread_join(r, (int)sc.a0, sc.a1);
+#endif
+
+    case SYS_PIO: {
+        struct pio_req req;
+        const uint32_t up = sc.a1;
+        int rc = -1;
+
+        if (!process_user_ok(up, sizeof(req)))
+            break;
+        memcpy(&req, (const void *)up, sizeof(req));
+        if (req.buf) {
+            uint32_t bytes = (uint32_t)req.len;
+            bytes *= (req.op == PIO_LOAD) ? 2u : 4u;
+            if (req.len < 0 || !process_user_ok((uint32_t)req.buf, bytes))
+                break;
+        }
+        rc = plat_pio((int)sc.a0, &req, process_current_pid());
+        plat_frame_set_ret(r, (uint32_t)rc);
+        return r;
+    }
+
+    case SYS_SCHEDSTAT: {
+#ifdef TOS_KTHREADS
+        int rc = process_schedstat(sc.a0);
+#else
+        int rc = -1;            /* the counters exist only with kthreads */
+#endif
+        plat_frame_set_ret(r, (uint32_t)rc);
+        return r;
+    }
 
     case SYS_WRITE: {
         uint32_t fd = sc.a0, ptr = sc.a1, len = sc.a2;

@@ -300,9 +300,24 @@ void mutex_init(mutex_t *m);
 void mutex_lock(mutex_t *m);
 void mutex_unlock(mutex_t *m);
 #endif
+
+#ifdef TOS_KTHREADS
+/* Kernel threads (experimental, menuconfig: Kernel -> Kernel threads).  The
+ * kernel schedules them like tasks, so the tick preempts them and a blocking
+ * read()/sleep() parks only the calling thread.  They share the caller's
+ * window and heap; kthread_create() carves the stack out of the program heap
+ * with sbrk().  tid is a pid. */
+int  kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
+int  kthread_join(int tid, int *code);
+void kthread_exit(int code) __attribute__((noreturn));
+#endif
 int  wait(int pid);
 int  yield(void);
 int  ps(void);
+/* Scheduler counters, for benchmarks: one field each for "switched to
+ * another task", "scheduler ran but kept the same task", and timer ticks. */
+struct schedstat { unsigned switches, self, ticks; };
+int  schedstat(struct schedstat *st);
 /* 0 = highest, 2 = lowest; pid 0 means yourself.  A task cannot climb
  * above its own level, so a program cannot starve the shell. */
 int  setprio(int pid, int prio);

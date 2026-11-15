@@ -65,17 +65,32 @@ void plat_console_init(void)
 
 void plat_console_putc(char c)
 {
-    /* The FIFO is 128 deep; 100 leaves headroom for our own CRLF pairs. */
-    while (uart_tx_count() >= 100)
-        ;
+    uint32_t spins;
+
+    /* The FIFO is 128 deep; 100 leaves headroom for our own CRLF pairs.
+     * The wait is bounded on purpose (kernel/platform.h, console lower
+     * half): TX_COUNT is a hardware counter that a wedged UART pin, a
+     * stopped APB clock or an overflowing FIFO can hold at its limit, and
+     * an unbounded loop here runs with the console lock held - one dead
+     * transmitter would take the whole board's output with it.  Write
+     * anyway when the bound expires: a dropped byte is diagnosable, a
+     * silent board is not. */
+    for (spins = 0; spins < 100000u; spins++) {
+        if (uart_tx_count() < 100)
+            break;
+    }
     mmio_write32(UART0_BASE + UART_FIFO_REG, (uint8_t)c);
     usj_putc(c);
 }
 
 void plat_console_flush(void)
 {
-    while (uart_tx_count() > 0)
-        ;
+    uint32_t spins;
+
+    for (spins = 0; spins < 100000u; spins++) {
+        if (uart_tx_count() == 0)
+            break;
+    }
     usj_flush();
 }
 
@@ -1024,4 +1039,19 @@ uint32_t plat_cpu_hz(void)
 uint32_t c3_apb_hz(void)
 {
     return apb_hz;
+}
+
+/* This PMP has TOR matching (entry 1..4 in arch/rv32/platform.c), so the
+ * stack is its own region and a window may be any multiple of the page: the
+ * 4 KiB grain is what lets a 10 KiB image take 24 KiB instead of 32. */
+int plat_window_needs_stack_alignment(void)
+{
+    return 0;
+}
+
+/* 4 KiB grain: the rounding can never leave a 4 KiB step behind, so a task
+ * that did not declare a stack gets one explicitly (see process.c). */
+uint32_t plat_window_grow_reserve(void)
+{
+    return PLAT_STACK_BYTES;
 }

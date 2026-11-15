@@ -248,10 +248,51 @@ regs_t *arm_handle_fault(regs_t *f)
     return f;
 }
 
+#if TOS_DIAG
+/* Where each core is when a tick interrupts it.  The initiator of a flash
+ * write masks interrupts, so only the free core gets sampled - which is
+ * exactly the core whose whereabouts are unknown. */
+TOS_NOINIT volatile uint32_t g_tick_pc[2];
+TOS_NOINIT volatile uint32_t g_tick_lr[2];
+
+/* Every place that masks interrupts records which site it is, the caller's
+ * return address and a monotonically increasing sequence number, per core.
+ * When a core goes silent during a flash-park handshake the other core can
+ * then tell the difference between "wedged inside a masked section" (sequence
+ * frozen, site/LR pinned) and "still cycling through critical sections"
+ * (sequence advancing).  This is the question the tick sampler cannot answer:
+ * a masked core gets no ticks. */
+TOS_NOINIT volatile uint32_t g_mask_seq[2];
+TOS_NOINIT volatile uint32_t g_mask_lr[2];
+TOS_NOINIT volatile uint32_t g_mask_site[2];
+
+static void arm_mask_probe(uint32_t site, void *ra)
+{
+    uint32_t id = plat_cpu_id() & 1u;
+
+    g_mask_lr[id]   = (uint32_t)ra;
+    g_mask_site[id] = site;
+    g_mask_seq[id]++;
+    g_mask_in[id]   = 1;
+}
+#else
+#define arm_mask_probe(site, ra) do { } while (0)
+#endif
+
 /* Called from the SysTick stub. */
 regs_t *arm_handle_tick(regs_t *f)
 {
     int from_user = frame_is_user(f);
+
+#if TOS_DIAG
+    {
+        uint32_t id = plat_cpu_id() & 1u;
+
+        g_tick_pc[id] = f->pc;
+        g_tick_lr[id] = f->lr;
+        g_tick_ctr[id]++;                  /* heartbeat: freezing is the symptom */
+    }
+#endif
 
 #ifdef TOS_SYSCALL_TRACE
     sys_trace_note(from_user ? 0x54u : 0x48u);
@@ -310,7 +351,19 @@ int plat_cpu_id(void)
     return (int)plat_board_cpu_id();
 }
 
-void plat_init(void)
+/* Exception priorities and fault enables live in the SCB, and the SCB is
+ * per core: every core has its own SHPR1/2/3 and its own SHCSR.  Both cores
+ * have to run this, which is why it is a function rather than four writes
+ * inside plat_init().  A secondary core used to enter the scheduler with
+ * SHPR1/2/3 = 0 and SHCSR = 0, and the first MPU violation that landed on it
+ * escalated: with SHCSR.MEMFAULTENA clear the MemManage becomes a FORCED
+ * HardFault, so the report said "HardFault" with hfsr=0x40000000 and
+ * shcsr=0x00000004 instead of naming the access that was denied (measured on
+ * the RP2350 with msh scheduled on core 1; the identical test on core 0 gave
+ * the expected MemManage).  Its fault handler also sat at priority 0, above
+ * the tick - the deadlock described below, on the core least likely to be
+ * watched. */
+static void arm_exceptions_init(void)
 {
     /* SysTick must outrank SVCall.  A task that blocks inside a syscall
        idles in sched_idle() with SVCall still marked active (there is no
@@ -352,6 +405,19 @@ void plat_init(void)
                             ARM_SHCSR_BUSFAULTENA |
                             ARM_SHCSR_USGFAULTENA);
 #endif
+}
+
+/* A secondary core calls this from cpu_secondary_main() before it touches the
+ * scheduler, for the same reason it calls plat_timer_start_cpu(): these are
+ * per-core registers and nothing was inherited from core 0. */
+void plat_cpu_secondary_init(void)
+{
+    arm_exceptions_init();
+}
+
+void plat_init(void)
+{
+    arm_exceptions_init();
 
 #if !defined(TOS_ARM_M0P) && !defined(TOS_ARM_NO_MPU)
     /* Nothing here touches the MPU or its MAIR.  Both are programmed by the
@@ -397,10 +463,14 @@ void plat_irq_enable(void)
         plat_timer_irq_unmask();
     }
     __asm__ volatile("cpsie i" ::: "memory");
+#if TOS_DIAG
+    g_mask_in[id] = 0;
+#endif
 }
 
 void plat_irq_disable(void)
 {
+    arm_mask_probe(TOS_MASKSITE_IRQ_DISABLE, __builtin_return_address(0));
     __asm__ volatile("cpsid i" ::: "memory");
 }
 
@@ -411,6 +481,7 @@ uint32_t plat_irq_save(void)
 {
     uint32_t pm;
 
+    arm_mask_probe(TOS_MASKSITE_IRQ_SAVE, __builtin_return_address(0));
     __asm__ volatile("mrs %0, primask\n\t"
                      "cpsid i"
                      : "=r"(pm)
@@ -428,6 +499,16 @@ void plat_irq_restore(uint32_t state)
                      :
                      : "r"(state)
                      : "memory");
+#if TOS_DIAG
+    /* PRIMASK is one bit, so the previous value *is* the nesting state:
+     * restoring 1 means the caller is still inside an outer section. */
+    {
+        uint32_t id = plat_cpu_id() & 1u;
+
+        g_mask_seq[id]++;       /* the section ended */
+        g_mask_in[id] = state & 1u;
+    }
+#endif
 }
 
 __attribute__((weak)) void plat_flash_park_poll(void)
@@ -436,6 +517,9 @@ __attribute__((weak)) void plat_flash_park_poll(void)
 
 void plat_cpu_idle(void)
 {
+#if TOS_DIAG
+    g_cpu_idle[plat_cpu_id() & 1u]++;     /* liveness probe */
+#endif
     /* A secondary-core flash operation parks this core through its idle
      * loop as well as its tick: while a CPU sits in sched_idle() it is
      * already inside the SysTick exception, so no further tick can preempt
@@ -565,7 +649,9 @@ static void raw_putdec(uint32_t v)
 
 static inline int sio_gate_claim(void)
 {
-    return (int)(mmio_read32(SIO_SPINLOCK0 + 4u * TOS_SIO_GATE) >> 31);
+    /* Non-zero means "claimed".  RP2350 answers one-hot (bit 31 for the gate),
+     * RP2040 answers 1; testing "non-zero" is the only form true on both. */
+    return mmio_read32(SIO_SPINLOCK0 + 4u * TOS_SIO_GATE) != 0u;
 }
 
 static inline void sio_gate_free(void)
@@ -582,6 +668,40 @@ static inline uint32_t sio_gate_irq_save(void)
     return pm;
 }
 
+
+/* Bounded gate acquisition.  An unbounded spin here is the worst possible
+ * failure mode: interrupts are already masked, so the core stops ticking,
+ * prints nothing, and the board only recovers through the watchdog.  If the
+ * gate really is lost (its holder took a fault or was reset mid-window),
+ * saying so on the wire is worth more than another silent 2 s stall. */
+static int sio_gate_claim_bounded(void)
+{
+    for (uint32_t i = 0; ; i++) {
+        if (sio_gate_claim())
+            return 1;
+        if ((i & 0x3fffffu) == 0x3fffffu) {
+            raw_puts("\r\n[GATE!] cpu ");
+            raw_putdec((uint32_t)plat_cpu_id());
+#if TOS_DIAG
+            raw_puts(" msite=");
+            raw_putdec(g_mask_site[0]);
+            raw_puts("/");
+            raw_putdec(g_mask_site[1]);
+            raw_puts(" mlr=");
+            raw_puthex(g_mask_lr[0]);
+            raw_puts("/");
+            raw_puthex(g_mask_lr[1]);
+            raw_puts(" seq=");
+            raw_putdec(g_mask_seq[0]);
+            raw_puts("/");
+            raw_putdec(g_mask_seq[1]);
+#endif
+            raw_puts("\r\n");
+            plat_panic_halt();      /* let the watchdog take it from here */
+        }
+    }
+}
+
 static inline void sio_gate_irq_restore(uint32_t pm)
 {
     __asm__ volatile("msr primask, %0" :: "r"(pm) : "memory");
@@ -595,6 +715,14 @@ void plat_spin_acquire(volatile int *v)
 
     for (;;) {
         while (*v != 0) {
+            /* A flash park may be pending.  The core that asked for it is
+             * inside a ROM flash call and needs every other core off XIP; a
+             * core stuck in this loop never reaches a tick or an idle poll,
+             * so it cannot answer that request and the writer waits forever.
+             * This is the loop the "[spin] cpu 0 stuck on lock" freeze came
+             * from. */
+            plat_flash_park_poll();
+
             if (++spins == SPIN_LIMIT) {
                 /* The holder is not coming back.  A hung board that says which
                  * lock and which core is worth a hundred blind reboots; a panic
@@ -611,9 +739,12 @@ void plat_spin_acquire(volatile int *v)
         }
 #if defined(TOS_ARM_SIO_SPIN)
         {
-            uint32_t pm = sio_gate_irq_save();
+            uint32_t pm;
 
-            while (!sio_gate_claim()) { }
+            arm_mask_probe(TOS_MASKSITE_SPIN_GATE, __builtin_return_address(0));
+            pm = sio_gate_irq_save();
+
+            (void)sio_gate_claim_bounded();
             __asm__ volatile("dmb" ::: "memory");   /* order the gate vs *v */
             if (*v == 0) {
                 *v = 1;
@@ -641,9 +772,12 @@ void plat_spin_acquire(volatile int *v)
 int plat_spin_try_acquire(volatile int *v)
 {
 #if defined(TOS_ARM_SIO_SPIN)
-    uint32_t pm = sio_gate_irq_save();
+    uint32_t pm;
 
-    while (!sio_gate_claim()) { }
+    arm_mask_probe(TOS_MASKSITE_SPIN_TRY_GATE, __builtin_return_address(0));
+    pm = sio_gate_irq_save();
+
+    (void)sio_gate_claim_bounded();
     __asm__ volatile("dmb" ::: "memory");
     if (*v == 0) {
         *v = 1;
@@ -694,9 +828,9 @@ void plat_spin_release(volatile int *v)
 #if defined(TOS_ARM_MPU_V8)
 
 /* PMSAv8.  Region n: RBAR = base | AP | XN, RLAR = limit | AttrIndx << 1 |
- * enable.  base and limit are 32-byte granular, and a region still has to
- * be a power of two with base aligned to it - the limit form does not buy
- * arbitrary boundaries.
+ * enable.  RBAR/RLAR are a base and an inclusive limit at 32-byte
+ * granularity - there is NO power-of-two size rule here (that was the
+ * ARMv7-M RASR+SRD shape; see docs/NUTTX-COMPARE.md 2.2).
  *
  * AttrIndx 0 is SRAM: normal, non-cacheable.  The RP2350's M33 has no data
  * cache, and the LCD's DMA reads row buffers straight out of this memory,
@@ -711,6 +845,19 @@ void plat_spin_release(volatile int *v)
 #define MPU_ATTR_WINDOW  (1u << 1) | 1u   /* AP 01 RW both, XN              */
 #define MPU_ATTR_CODE    (3u << 1)        /* AP 11 RO both, executable      */
 #define MPU_ATTR_GUARD   (0u << 1) | 1u   /* AP 00 priv RW only, XN         */
+
+/* Top slice of the guard hole that user mode MAY write.  On Cortex-M an
+ * exception pushes its frame onto PSP, so a stack that has run past its
+ * bottom makes the exception entry itself fault (MSTKERR, cfsr=0x92) before
+ * any fault handler can look at it - and with the push refused, there is no
+ * frame to return to.  Letting the first few bytes below stack_low stay
+ * writable means the push succeeds; the task then reaches its next syscall,
+ * where process_stack_guard() sees sp outside the stack and grows it.
+ *
+ * 2560 B covers deep's 2 KiB frame plus a frame's prologue/push.  The rest
+ * of the 4 KiB hole stays MPU_ATTR_GUARD, which is what keeps prot heap
+ * (brk+64, near the bottom of the hole) and prot stack faulting. */
+#define ARM_STACK_LANDING 0xA00u
 
 static void mpu_region(uint32_t n, uint32_t base, uint32_t size, uint32_t attr)
 {
@@ -868,17 +1015,33 @@ static uint32_t mpu_blocks(uint32_t base, uint32_t end)
  * space reachable from user mode. */
 static int mpu_on[MAX_CPUS];
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
+    uint32_t win_base = n > 0 ? segs[0].base : 0;
+    uint32_t win_end = n > 0 ? segs[n - 1].top : 0;
+    uint32_t wx = win_base;
+    uint32_t brk, stack_low = win_end;
     uint32_t r;
     int cid = plat_cpu_id();
+    int i = 0;
     static int reported;
 
     if (cid < 0 || cid >= (int)MAX_CPUS)
         cid = 0;
 
-    (void)stack_top;
+    /* Read the pieces back out of the list, by position: code first, then
+     * the heap, then the stack - and any of them may be missing.  This port
+     * describes the task as code / data / stack anyway, so the list is not
+     * being reinterpreted, it is being named. */
+    if (i < n && segs[i].attr == PLAT_SEG_CODE)
+        wx = segs[i++].top;
+    brk = wx;
+    if (i < n - 1)                      /* a data piece that is not the stack */
+        brk = segs[i++].top;
+    if (i < n)
+        stack_low = segs[i].base;
+
+    (void)win_end;
 
     /* wx is 32-byte aligned by user.ld; round up defensively so a stale
        script cannot turn the tail of .text into non-executable memory. */
@@ -939,9 +1102,21 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
     /* A stack that grows past its bottom hits this block: user mode has no
        access, the kernel still does.  Its size is the hole process.c keeps
        between the break and the stack, so no legitimate heap write lands
-       here. */
+       here.
+       PMSAv8 splits that hole: the top ARM_STACK_LANDING bytes are left
+       writable so an exception taken just after sp ran off the bottom can
+       still push its frame (otherwise MSTKERR leaves no frame at all), and
+       the lower part stays MPU_ATTR_GUARD so prot heap / prot stack still
+       fault.  ARMv7-M and M0+ keep the whole hole denied. */
+#if defined(TOS_ARM_MPU_V8)
+    mpu_region(6, stack_low - ARM_STACK_LANDING, ARM_STACK_LANDING,
+               MPU_ATTR_WINDOW);
+    mpu_region(7, stack_low - PLAT_HEAP_GUARD,
+               PLAT_HEAP_GUARD - ARM_STACK_LANDING, MPU_ATTR_GUARD);
+#else
     mpu_region(7, stack_low - PLAT_HEAP_GUARD, PLAT_HEAP_GUARD,
                MPU_ATTR_GUARD);
+#endif
 
     if (!mpu_on[cid]) {
         mpu_on[cid] = 1;
@@ -974,14 +1149,22 @@ void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
 
 #else /* M0+ or TOS_ARM_NO_MPU: user tasks run unprivileged but unprotected. */
 
-void plat_task_protect(uint32_t win_base, uint32_t win_end, uint32_t wx,
-                       uint32_t brk, uint32_t stack_low, uint32_t stack_top)
+void plat_task_protect(const plat_seg_t *segs, int n)
 {
-    (void)win_base; (void)win_end; (void)wx; (void)brk;
-    (void)stack_low; (void)stack_top;
+    (void)segs; (void)n;
 }
 
 #endif
+
+/* First argument of a user entry point.  On ARM the core pops r0 from the
+ * hardware frame, so the value has to land there as well as in the regs_t
+ * view that a syscall would later read. */
+void plat_frame_set_arg(regs_t *frame, uint32_t arg)
+{
+    frame->r0 = arg;
+    if (frame->hw)
+        ((uint32_t *)(uintptr_t)frame->hw)[ARM_HW_R0] = arg;
+}
 
 void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
 {
@@ -1022,6 +1205,13 @@ void plat_frame_get_syscall(const regs_t *r, syscall_t *sc)
 
 void plat_frame_set_ret(regs_t *r, uint32_t val) { r->r0 = val; }
 uint32_t plat_frame_get_ret(const regs_t *r)    { return r->r0; }
+
+uint32_t plat_frame_get_user_sp(const regs_t *r)
+{
+    /* The core stacked the exception frame on the PSP, so the user sp before
+     * the trap is one frame above the copy start.S keeps. */
+    return r->hw + ARM_HW_SIZE;
+}
 
 int plat_fault_is_user(void *frame)
 {

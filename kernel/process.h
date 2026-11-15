@@ -21,6 +21,9 @@ void     process_start_shell(const char *path) __attribute__((noreturn));
 /* Trap entry points.  Both return the frame to resume: usually the one that
  * came in, but a switch (or a blocked syscall) hands back another task's. */
 regs_t  *syscall_dispatch(regs_t *r);
+
+/* Software stack guard for ports without an MPU; 0 means the task must die. */
+int process_stack_guard(const regs_t *r);
 regs_t  *process_exit(regs_t *r, int code);
 
 /* Called by the arch on every timer tick, with the interrupted frame. */
@@ -84,6 +87,13 @@ int      process_setprio(int pid, int prio);
 uint32_t process_sbrk(uint32_t bytes);
 int      process_dump(void);
 
+#ifdef TOS_KTHREADS
+/* Scheduler counters: fills {switches, self, ticks} at the user pointer.
+ * Used by benchmarks (threadbench) to attribute a phase's wall time; returns
+ * -1 when the pointer is outside the caller's window. */
+int      process_schedstat(uint32_t ptr);
+#endif
+
 /* Send `sig` to task `pid`.  SIGKILL terminates it, SIGSTOP parks it until
  * SIGCONT.  Returns 0, or -1 when there is no such task, the signal is not
  * one the kernel knows, or the task cannot act on it in its current state.
@@ -94,6 +104,17 @@ int      process_signal(int pid, int sig);
 /* Called on the way out of a trap: parks the current task if SIGSTOP
  * arrived while it was running.  Every port's trap exit must call it. */
 regs_t  *process_suspend(regs_t *r);
+
+#ifdef TOS_KTHREADS
+/* Kernel threads (experiment): a thread is a process-table slot that shares
+ * the caller's window and heap.  `ustack` is the top of a stack the caller
+ * allocated inside its own window; create returns the tid (a pid), join
+ * blocks until that thread exits and stores its code through `codeptr`
+ * (a user pointer, may be 0), and exit does not return. */
+int      process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack);
+regs_t  *process_thread_join(regs_t *r, int tid, uint32_t codeptr);
+regs_t  *process_thread_exit(regs_t *r, int code);
+#endif
 
 /* pid of the task blocked reading the console, or 0 when none is.  That is
  * the foreground task as far as the terminal is concerned. */

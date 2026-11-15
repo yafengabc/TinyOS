@@ -25,7 +25,13 @@
  *
  * Concurrency: one lock covers the buffer and the panel.  The mirror runs
  * inside console output (out_lock held in console.c), so nothing here may
- * call back into the console - it never prints, it never panics. */
+ * call back into the console - it never prints, it never panics.
+ *
+ * That path also means every acquisition already happens with interrupts
+ * masked: console writes come from a syscall (a trap, MIE off) or from the
+ * tick.  So this lock stays a plain spin_lock() on purpose - masking a cell
+ * repaint would be redundant, and paint_cell() can push a whole cell over
+ * SPI, which is not a section to lengthen. */
 
 #define SCREEN_MAX_COLS 48
 #define SCREEN_MAX_ROWS 20

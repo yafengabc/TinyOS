@@ -58,6 +58,44 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 
 `[user] exclude` 里的程序需要 `/dev/wifi` 或 `/dev/net`，非 WiFi 配置会把它们排除。
 
+## WiFi 开/关的资源对比
+
+同一块 C3 上 `configs/esp32c3.conf`（关）与 `configs/esp32c3-wifi.conf`（开）：
+
+| 指标 | WiFi 关 | WiFi 开 | 无 WiFi + 16 KiB 堆（16 槽） |
+| --- | ---: | ---: | ---: |
+| 内核 flash（`.text`+`.rodata`） | 75.6 KiB | 357.9 KiB | 75.6 KiB |
+| 内核 RAM（`.data`+`.bss`） | 121.3 KiB | 187.2 KiB | 64.0 KiB |
+| 其中内核堆 arena（`heap=`） | 80 KiB | 80 KiB | **16 KiB** |
+| 内核 RAM 结束地址 | `0x4039e520` | `0x403aece0` | `0x4038ffe0` |
+| 任务区（16 KiB 对齐到 `0x403DC000`） | 240 KiB | 176 KiB | **304 KiB** |
+| 16 KiB 窗口数 | 15 | 11 | **19** |
+| 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 | 9 |
+| 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） | 2（余 48 KiB） |
+| 进程槽（`max_procs`） | 8 | 8 | **16** |
+| `esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
+
+- 前两列的内核堆都是 target 默认的 **80 KiB**（`[build] heap=` 可覆盖）；WiFi 吃掉的是
+  它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。
+- 第三列是 `configs/esp32c3-16k.conf`：堆降到 16 KiB（实测峰值 1.5 KiB）并把进程槽
+  提到 16。任务区因此回到 304 KiB / 19 个窗口；代价是内核结束地址只剩 32 B 余量，
+  内核再长一点就会掉一个窗口。
+- flash 的大头是 WiFi blob（XIP 常驻）。WiFi 开后内核结束在 `0x7B6A8`，离 littlefs
+  的 `0x80000` 只剩约 21 KiB——再加驱动就要先腾空间。
+- 窗口按 16 KiB 粒度分配，默认栈 4 KiB、栈下护栏 4 KiB。`py` 的 128 KiB 窗口两边
+  都放得下，但 WiFi 开后只剩 48 KiB 给别的任务同时跑。
+
+**内核堆可以降**：无 WiFi 时 `heap = 16384` 实测启动后峰值 768 B，跑完
+`py pytest.py`（54 项）加 320 KiB 的 `dd` 写读后峰值 1.5 KiB；任务区因此从
+240 KiB 增到 **304 KiB**（15 → 19 个窗口），内核 RAM 降到 57 KiB。
+
+同时能跑多少任务受 `max_procs` 限制，不是窗口数：C3 默认 8 槽，即使有 19 个窗口
+也只能同时存在 8 个任务。`configs/esp32c3-16k.conf` 里把它提到 16（多 6.8 KiB
+`.bss`），实测 **12 个后台 `sleep` 任务 + shell** 同时在线；任务区仍是 304 KiB，
+但内核结束地址刚好落在 16 KiB 边界下方 32 B——内核再长一点就会少一个窗口。
+
+WiFi 构建不要照做。
+
 ## 外设与用户命令
 
 三个外设默认编译进镜像（menuconfig 里关掉任意一个，驱动和命令一起消失）：
@@ -80,6 +118,51 @@ i2c write 0 0x3c 0x00 0xff   # 写寄存器 0x00 = 0xff
 - **I2C**：**软件位翻转**（开漏 + 内部上拉），100–400 kHz。硬件 I2C0 控制器的命令 FIFO
   （op_code/ack/byte_num）还没接，`i2c` 命令和 `plat_i2c_xfer()` 的语义与 RP2040 完全一致，
   以后换硬件控制器不影响用户程序。
+
+## 线程实验（kthreads）
+
+分支 `threads-preemptive` 在 C3 上做内核线程原型（评估材料见
+`docs/REAL-THREADS.md`）。构建与运行：
+
+```bash
+go run ./cmd/tos build -config configs/c3-kthreads.conf
+python scripts/esp-c3/flash.py
+```
+
+```sh
+tos> threadbench
+threadbench: thread 1 done (sum ...)
+threadbench: 3 threads, 300000 iters each: <ms>
+threadbench: same work inline:        <ms>
+threadbench: sleep() in main, sibling kept running
+```
+
+边界情况用 `kthreadtest`（17 项检查：槽耗尽、重复 join、僵尸槽、组长带活线程退出、
+阻塞重叠、fd 共享）：
+
+```sh
+tos> kthreadtest
+tos> kthreadtest leave    # 之后 ps 不应再看到那个线程
+```
+
+阻塞并发的验收是 `prodcons`（一个线程读管道、主线程写，互相唤醒）：
+
+```sh
+tos> prodcons
+prodcons: 32768 bytes through a 512-byte pipe in 25 ms
+```
+
+线程由内核调度：tick 可以抢占，一个线程 `read()/sleep()` 只挂起它自己；它们共享
+进程的窗口和堆（栈由 `kthread_create()` 用 `sbrk` 从堆里切）。C3 是单核，所以
+`threadbench` 的期望结果是**总时间与单线程串行相近**（ratio ≈ 100%），但三个线程
+都完成、`join` 正常回收、阻塞按线程生效——这三点才是"真线程"与协作线程的分界。
+fd 表是进程级共享的（一个线程 `open/close` 对全组可见），信号/`^C` 也按组生效；
+`exec` 在线程里调用会失败。
+
+C3 实测（160 MHz）：`threadbench` 三段同样 90 万次迭代——3 线程 35 ms、单线程
+34 ms、caller 顺序 35 ms，ratio 100%；38 次真切换 × 12.6 µs ≈ 0.48 ms（1.4%）。
+早先报的 171% 是基准程序的编译器差异（inline 用编译期常量上界被展开），不是
+线程开销；`swcost`：`getpid` 3.3 µs、`yield` 12.6 µs。见 `docs/REAL-THREADS.md` §4.5。
 
 ## 移植进度
 

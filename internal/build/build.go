@@ -116,9 +116,9 @@ type Target struct {
 
 var (
 	esp32c3Drivers  = []string{"drivers/gpio/esp32c3", "drivers/serial/esp32c3"}
-	rp2040Drivers   = []string{"drivers/gpio/rp2040", "drivers/usb/rp2040"}
-	rp2350Drivers   = []string{"drivers/gpio/rp2350", "drivers/spi/rp2350", "drivers/display/st7789/rp2350", "drivers/usb/rp2350"}
-	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv"}
+	rp2040Drivers   = []string{"drivers/gpio/rp2040", "drivers/usb/rp2040", "drivers/pio/rp2"}
+	rp2350Drivers   = []string{"drivers/gpio/rp2350", "drivers/spi/rp2350", "drivers/display/st7789/rp2350", "drivers/usb/rp2350", "drivers/pio/rp2"}
+	rp2350rvDrivers = []string{"drivers/gpio/rp2350rv", "drivers/spi/rp2350rv", "drivers/display/st7789/rp2350rv", "drivers/usb/rp2350rv", "drivers/pio/rp2"}
 
 	// Neither RP2 board has WiFi hardware: the ESP32-C3 WiFi/net programs
 	// are built from the same user tree, so exclude them by default instead
@@ -134,7 +134,12 @@ var (
 	// RP2040 drivers that are on by default but can be trimmed in
 	// menuconfig.  The code behind each is a TOS_<NAME> define, so turning
 	// one off removes the driver, not just its /dev entry.
-	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma"}
+	rp2040Features = []string{"pwm", "uart1", "spi", "i2c", "dma", "pio"}
+
+	// RP2350 default features.  PIO is the same driver as the RP2040's
+	// (drivers/pio/rp2) with three blocks instead of two; without it the
+	// `pio` command and the /pio/*.pio examples are not worth the ramdisk.
+	rp2350Features = []string{"pio"}
 
 	// ESP32-C3: LEDC PWM, the SPI2 master and the I2C master.  No DMA yet
 	// (the GDMA channel/link descriptors are a separate piece of work), and
@@ -179,14 +184,14 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// littlefs partition at 0x80000, instead of the old 256 KiB.
 	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", Triple: "riscv32-unknown-elf", March: "rv32imc", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 80 * 1024, MaxProcs: 8, XipFlashBase: 0x10000, Drivers: esp32c3Drivers, DefaultFeatures: esp32c3Features},
 	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", Triple: "thumbv7m-none-eabi", Machine: "cortex-m3", FSBacking: "embedded", RamdiskSectors: 1200, HeapBytes: 128 * 1024},
-	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
+	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 8 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
 	// rp2040smp: both Cortex-M0+ cores.  Core 1 sits in the boot ROM's
 	// wait-for-FIFO loop, not at our reset vector, so the board's
 	// plat_start_cpu() pushes the pico-sdk handshake (VTOR/SP/entry) and
 	// start.S joins the scheduler from arm_core1_entry.  The second 16 KiB
 	// kernel stack comes out of .bss, which shrinks the task area; the
 	// kernel image and the 1.5 MiB littlefs partition are unchanged.
-	"rp2040smp": {Name: "rp2040smp", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", CPUs: 2, FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 16 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
+	"rp2040smp": {Name: "rp2040smp", Arch: "arm", Board: "rp2040", Triple: "armv6m-none-eabi", Machine: "cortex-m0plus", CPUs: 2, FSBacking: "flash", RamdiskSectors: 1200, HeapBytes: 8 * 1024, MaxProcs: 8, KStack: 8 * 1024, Drivers: rp2040Drivers, UserExclude: rp2040Users, DefaultFeatures: rp2040Features},
 	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
 	// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
 	// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
@@ -200,7 +205,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// one.  The link places __app_base after whatever .bss turns out to be, so
 	// the panel's DMA row buffer (3.8 KiB in lcd_st7789.c) no longer has to fit
 	// a fixed 128 KiB line.
-	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers},
+	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 704, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// rp2350rv: the same physical board with its Hazard3 RISC-V cores
 	// instead of the Cortex-M33 pair.  RP2350 boots either architecture,
@@ -216,7 +221,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	//
 	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
 	// spin lock will need later, and it costs nothing on this core.
-	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers},
+	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 704, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// rp2350rvsmp: both Hazard3 cores.  Core 1 is parked in the boot ROM's
 	// SIO-FIFO launch loop, not at our reset vector, so the board pushes the
@@ -225,7 +230,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// core-local (pico-sdk riscv_platform_timer.h), so each hart gets its own
 	// tick.  The second 16 KiB kernel stack comes out of .bss; the heap arena
 	// drops to the same 32 KiB the single-core image uses.
-	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers},
+	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", Triple: "riscv32-unknown-elf", March: "rv32imac", FSBacking: "flash", RamdiskSectors: 704, CPUs: 2, HeapBytes: 32 * 1024, Drivers: rp2350rvDrivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
 	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
@@ -234,7 +239,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// stack drops to 16 KiB (KSTACK_BYTES in kernel/cpu.h is per arch), so
 	// two cores still reserve the 32 KiB the single-core image did and the
 	// 60 KiB exec arena is untouched.
-	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 600, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers},
+	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", Triple: "thumbv8m.main-none-eabi", Machine: "cortex-m33", FSBacking: "flash", RamdiskSectors: 704, CPUs: 2, HeapBytes: 60 * 1024, Drivers: rp2350Drivers, UserExclude: rpNoWifiUsers, DefaultFeatures: rp2350Features},
 
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what
@@ -574,7 +579,6 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// window must be one naturally aligned power-of-two region.  The
 		// window allocator rounds sizes up and aligns the base to the
 		// size; see kernel/process.c and plat_board_task_protect().
-		archFlags = append(archFlags, "-DTOS_PMP_POW2_WINDOWS=1")
 	}
 
 	// How many harts.  Left undefined for a uniprocessor so that every
@@ -1356,6 +1360,14 @@ func (b *Builder) buildUser() ([]string, error) {
 		common = append(common, "thread.c", "thread_switch.S")
 	}
 
+	// Kernel threads are an experimental kernel feature with a small
+	// user-space shim (kthread.c).  featureDefines() supplies TOS_KTHREADS
+	// to both the kernel and every program, so the API exists exactly when
+	// the kernel can honour it.
+	if b.feature("kthreads") {
+		common = append(common, "kthread.c")
+	}
+
 	// The numeric runtimes are size-sensitive and not on any hot kernel path;
 	// -Oz saves ~20% over the tree default (-O2) without changing semantics.
 	sizeOpt := map[string]bool{
@@ -1409,7 +1421,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
 			name == "softfloat32.c" || name == "fix16.c" ||
 			name == "floatprint.c" || name == "faeabi.c" ||
-			name == "thread.c" {
+			name == "thread.c" || name == "kthread.c" {
 			continue
 		}
 		/* The thread demo needs the feature it demonstrates; leaving it in
@@ -1419,6 +1431,15 @@ func (b *Builder) buildUser() ([]string, error) {
 			continue
 		}
 		if name == "mailtest.c" && !b.Mailbox {
+			continue
+		}
+		if name == "threadbench.c" && !b.feature("kthreads") {
+			continue
+		}
+		if name == "kthreadtest.c" && !b.feature("kthreads") {
+			continue
+		}
+		if name == "prodcons.c" && !b.feature("kthreads") {
 			continue
 		}
 		/* A driver's command is useless without the driver, and leaving it
@@ -1442,6 +1463,10 @@ func (b *Builder) buildUser() ([]string, error) {
 			}
 		case "dma":
 			if !b.feature("dma") {
+				continue
+			}
+		case "pio":
+			if !b.feature("pio") {
 				continue
 			}
 		}
@@ -1560,6 +1585,18 @@ func (b *Builder) buildFSImage(bins []string) error {
 	extra, err := collectFiles(b.Root)
 	if err != nil {
 		return err
+	}
+	// The PIO examples are only useful (and only fit) on builds with the PIO
+	// feature; the x86 image is already near its 300 KiB ramdisk limit.
+	if !b.feature("pio") {
+		kept := extra[:0]
+		for _, f := range extra {
+			if strings.HasPrefix(f.Name, "pio/") {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		extra = kept
 	}
 	files = append(files, extra...)
 

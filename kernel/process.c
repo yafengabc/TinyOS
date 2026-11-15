@@ -62,9 +62,6 @@ static uint32_t stack_used(const struct proc *p);
  * one NAPOT entry isolates the task from the kernel and from every other
  * task.  The cost is that the code/data/guard split inside the window is
  * not enforced there; the build defines this for rp2350rv only. */
-#ifndef TOS_PMP_POW2_WINDOWS
-#define TOS_PMP_POW2_WINDOWS 0
-#endif
 
 /* Ticks a task may run before the timer takes the CPU away.  One tick at
    1000 Hz (main.c) makes a slice 1 ms.
@@ -112,6 +109,11 @@ enum {
     ST_WAIT_INPUT,
     ST_WAIT_SLEEP,
     ST_WAIT_PIPE,
+#ifdef TOS_KTHREADS
+    ST_WAIT_THREAD, /* a join() waiting for a sibling                */
+    ST_THREAD_ZOMBIE,/* exited, code kept until join                  */
+    ST_DYING,       /* leader exited; threads are still winding down */
+#endif
     ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
      * exist as a state of its own: on SMP two exec()s can be building two
@@ -198,6 +200,19 @@ typedef struct proc {
 
     char     name[10];
     struct proc *parent;
+
+    /* Kernel threads (TOS_KTHREADS): a thread is a proc_t slot that points
+     * at its process leader and owns no window.  Code, data, heap, fds and
+     * cwd belong to the group; the slot carries only the thread's saved
+     * frame, its user stack and its scheduling state.  A leader has
+     * leader == NULL, which is also what makes it a window owner. */
+#ifdef TOS_KTHREADS
+    struct proc *leader;
+    int      tgid;          /* thread group id: the leader's pid */
+    int      exit_code;     /* ST_THREAD_ZOMBIE: value for join() */
+    int      live_threads;  /* threads that have not exited yet        */
+    spin_t   glock;         /* protects brk and the fd table below     */
+#endif
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
     int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
     int      kill_pending;  /* SIGKILL aimed at the task on the CPU: die at
@@ -290,7 +305,16 @@ extern void ktask_start_stub(void);
  *
  * Lock order, the only one in the kernel: proc_lock, then nothing.  Nothing
  * that blocks (console, pipe, timer wait) is ever called while holding it -
- * the scheduler hands the lock back before it idles. */
+ * the scheduler hands the lock back before it idles.
+ *
+ * Every acquisition masks interrupts, because the timer tick takes this lock
+ * itself (it reaps, it wakes console readers).  A section taken with them on
+ * would be a self-deadlock the moment a tick landed inside it, so use
+ * plat_spin_lock_irqsave()/plat_spin_unlock_irqrestore() unless the site says
+ * in a comment why it cannot - the three that do are sched_switch(), which has
+ * to keep the lock and the mask as separate lifetimes, cpu_take_task() and
+ * process_ktask_create(), both of which are entered with interrupts already
+ * off. */
 static spin_t proc_lock = SPIN_INIT;
 
 /* The machine is on its way down: init has exited and the boot CPU is in
@@ -373,19 +397,6 @@ static int align_up_ok(uint32_t v, uint32_t a, uint32_t *out)
     return 0;
 }
 
-#if TOS_PMP_POW2_WINDOWS
-/* Smallest power of two >= v, never below one grain.  A window must be a
- * power of two so a single NAPOT PMP entry covers it and nothing else; see
- * TOS_PMP_POW2_WINDOWS at the top of this file. */
-static uint32_t win_pow2(uint32_t v)
-{
-    uint32_t p = PLAT_APP_GRAIN;
-
-    while (p < v && p < PLAT_APP_MAX - PLAT_APP_BASE)
-        p <<= 1;
-    return p;
-}
-#endif
 
 /* Look a task up by pid.  Out of line on purpose: -O2 turns a sixteen-step
  * loop over a static array into ~300 bytes of unrolled code, and there are
@@ -407,13 +418,11 @@ static proc_t *proc_by_pid(int pid)
 
 int process_pid_exists(int pid)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_t *p;
 
-    spin_lock(&proc_lock);
     p = proc_by_pid(pid);
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return p != NULL;
 }
 
@@ -428,6 +437,7 @@ static void preempt_if_higher(proc_t *p)
         need_resched = 1;
 }
 
+
 /* Hand a blocked task its result and make it runnable.  `val` lands in the
  * saved frame, so the task resumes straight in user mode with that return
  * value - nothing is replayed.
@@ -441,14 +451,12 @@ static void make_ready(proc_t *p, int32_t val)
     /* Interrupts off, not just the lock: a waker in system-call context has
      * them on, and a tick landing between the acquire and the release calls
      * this again on the same CPU, spinning on a lock it already holds. */
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
 
     plat_frame_set_ret(frame, (uint32_t)val);
-    spin_lock(&proc_lock);
     p->state = ST_READY;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     preempt_if_higher(p);
 }
 
@@ -482,7 +490,11 @@ static int proc_waiting(void)
     for (int i = 0; i < MAX_PROCS; i++) {
         int st = procs[i].state;
         if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP ||
-            st == ST_WAIT_PIPE || st == ST_KT_WAIT)
+            st == ST_WAIT_PIPE
+#ifdef TOS_KTHREADS
+            || st == ST_WAIT_THREAD
+#endif
+            || st == ST_KT_WAIT)
             return 1;
     }
     return 0;
@@ -526,15 +538,43 @@ static int other_cpu_busy(void)
  * which came out as `ps` arriving as "sp" plus a stray "p" and ended in a
  * "no runnable process" panic.  Handing the finished line over happens with
  * interrupts back on - it takes only the process lock. */
+
+/* Boards may pump a device state machine here.  It runs in thread context
+ * with interrupts on, which is where a polled controller belongs: a stuck
+ * poll then costs a slice, not the console lock the tick holds.
+ * A plain pointer, not a weak symbol: an undefined weak symbol on RV32 with
+ * the medany code model links to a non-zero address, so "if (hook)" is true
+ * and the call jumps into nothing (same trap as TinyUSB's
+ * usbd_app_driver_get_cb). */
+void (*g_idle_poll)(void);
+
 static void sched_idle(void)
 {
     plat_irq_enable();
+    if (g_idle_poll)
+        g_idle_poll();
 
     if (cpu_id() == 0) {
+        /* This block runs masked, so a core that wedges between here and
+         * plat_irq_enable() stops ticking and can never answer the flash
+         * park handshake.  TOS_DIAG makes g_idle_site name the step it never
+         * left (see kernel/diag.h). */
         plat_irq_disable();
+#if TOS_DIAG
+        g_idle_site = 1;
+#endif
         tty_poll();
+#if TOS_DIAG
+        g_idle_site = 2;
+#endif
         console_echo_tick();
+#if TOS_DIAG
+        g_idle_site = 3;
+#endif
         plat_irq_enable();
+#if TOS_DIAG
+        g_idle_site = 0;
+#endif
         process_console_kick();
     }
     plat_cpu_idle();
@@ -542,11 +582,91 @@ static void sched_idle(void)
 
 /* Hand the hardware the current shape of a task's window.  Called on every
  * switch (protection belongs to whoever is on the CPU) and again when sbrk
- * moves the heap bound. */
+ * moves the heap bound.
+ *
+ * A thread shares its leader's window and has none of its own, so the group
+ * leader is what gets programmed.  Thread stacks live inside the group's
+ * heap/data range (they are allocated with sbrk by the thread library), so
+ * they are covered by the same data region and need no fourth PMP entry. */
+#ifdef TOS_KTHREADS
+#define PROC_GROUP(p) ((p)->leader ? (p)->leader : (p))
+#else
+#define PROC_GROUP(p) (p)
+#endif
+
+/* Descriptors are process state, not thread state: every thread of a group
+ * sees the same open files and pipes, and a close() in one is a close() for
+ * all of them (POSIX).  With the feature off, PROC_GROUP(p) is just p. */
+#define PFD(p) (PROC_GROUP(p)->fds)
+
+/* Serialises the group's mutable state: the heap break and the descriptor
+ * table.  On a uniprocessor spin_lock()/spin_unlock() compile to nothing, so
+ * this costs the single-core build exactly zero; on SMP it is what keeps two
+ * threads from handing out the same address or descriptor slot.
+ *
+ * Plain spin_lock(), unlike proc_lock: every caller is a syscall handler, so
+ * interrupts are already masked, and nothing in interrupt context touches a
+ * descriptor table or a heap break.  If one ever does, this becomes the
+ * irqsave pair too. */
+#ifdef TOS_KTHREADS
+static void group_lock(proc_t *p)   { spin_lock(&PROC_GROUP(p)->glock); }
+static void group_unlock(proc_t *p) { spin_unlock(&PROC_GROUP(p)->glock); }
+
+/* Defined with the thread code further down; process_exit() and task_kill()
+ * need it earlier. */
+static void begin_group_exit_locked(proc_t *leader, int code);
+#else
+#define group_lock(p)   ((void)0)
+#define group_unlock(p) ((void)0)
+#endif
+
+/* Scheduler accounting exposed by SYS_SCHEDSTAT, so a benchmark can ask
+ * "how many switches did that phase actually cost" instead of assuming one
+ * per tick.  Uniprocessor counters; on SMP they still add up, which is what
+ * a whole-machine measurement wants.  Compiled in with the thread feature
+ * so a build without it pays neither the counters nor the syscall. */
+#ifdef TOS_KTHREADS
+static volatile uint32_t sched_switches;  /* picked a different task */
+static volatile uint32_t sched_self;      /* scheduler ran, same task   */
+static volatile uint32_t sched_ticks;     /* timer ticks seen           */
+#endif
+
 static void apply_protection(proc_t *p)
 {
-    plat_task_protect(p->win_base, p->win_base + p->win_size, p->wx_start,
-                      p->brk, p->stack_top - p->stack_size, p->stack_top);
+    proc_t *g = PROC_GROUP(p);
+    plat_seg_t segs[PLAT_SEG_MAX];
+    uint32_t win_base = g->win_base;
+    uint32_t win_end = win_base + g->win_size;
+    uint32_t stack_low = g->stack_top - g->stack_size;
+    uint32_t brk = g->brk;
+    int n = 0;
+
+    /* Three pieces, in address order, and any of them may be empty.  The gap
+     * between the break and stack_low is left out on purpose - it is the hole
+     * `prot heap` and `prot stack` probe - so the pieces are not a partition
+     * of the window, and a port must not join them. */
+    if (g->wx_start > win_base) {
+        segs[n].base = win_base;
+        segs[n].top  = g->wx_start;
+        segs[n].attr = PLAT_SEG_CODE;
+        n++;
+    }
+    if (brk > stack_low)
+        brk = stack_low;                /* stale break: never overlap the stack */
+    if (brk > g->wx_start) {
+        segs[n].base = g->wx_start;
+        segs[n].top  = brk;
+        segs[n].attr = PLAT_SEG_DATA;
+        n++;
+    }
+    if (stack_low < win_end) {
+        segs[n].base = stack_low;
+        segs[n].top  = win_end;         /* stack_top: they are the same value */
+        segs[n].attr = PLAT_SEG_DATA;
+        n++;
+    }
+
+    plat_task_protect(segs, n);
 }
 
 /* Save the outgoing frame and return the frame to resume.  Callers hold the
@@ -556,6 +676,7 @@ static regs_t *sched_switch(regs_t *r)
 {
     proc_t *prev = current;
     int first = 1;
+    int requeued = 0;
 
     /* Somebody asked for this switch; whoever asked (a wake-up, a syscall)
        does not need to ask again once we are here. */
@@ -611,6 +732,7 @@ static regs_t *sched_switch(regs_t *r)
                 prev->kframe = r;
                 prev->state = ST_READY;
                 prev->cpu = -1;
+                requeued = 1;
 
                 /* Hand it to the other core if that core has nothing to do.
                  * Without this an idle CPU never sees a READY task at all:
@@ -628,12 +750,45 @@ static regs_t *sched_switch(regs_t *r)
                     plat_wake_cpu();
                     spin_lock(&proc_lock);
                 }
+            } else if (!requeued && prev && prev->state == ST_READY &&
+                       prev->cpu < 0) {
+                /* Woken in the window between block_locked() clearing `cpu`
+                 * and this switch.  The waker already stamped its result into
+                 * prev->saved, so the task is runnable again - and NOT yet
+                 * owned by anyone, which is exactly what a secondary CPU's
+                 * idle loop looks for.  Scanning for a successor here then
+                 * picks the same task, on this core, while the other core
+                 * may be picking it too: both cores ran the same shell on two
+                 * kernel stacks and the console line went to the copy that
+                 * lost (measured on rp2350rvsmp: `cur0=1 cur1=1`, the slot
+                 * stuck in WAIT_INPUT, and every command of 16+ characters
+                 * silently swallowed).
+                 *
+                 * Claim it back and resume it here instead of going through
+                 * sched_pick(): one owner, and the frame is the one the waker
+                 * patched, not the live trap frame whose r0 still holds the
+                 * syscall number. */
+                prev->state = ST_RUNNING;
+                prev->cpu = cpu_id();
+                current = prev;
+                ktask_running = prev->is_ktask ? 1 : 0;
+                quantum = QUANTUM;
+                spin_unlock(&proc_lock);
+                apply_protection(prev);
+                return prev->is_ktask ? (prev->kframe ? prev->kframe : &prev->saved)
+                                      : &prev->saved;
             }
         }
 
         next = sched_pick();
         waiting = proc_waiting() || other_cpu_busy();
         if (next) {
+#ifdef TOS_KTHREADS
+            if (next == prev)
+                sched_self++;
+            else
+                sched_switches++;
+#endif
             next->state = ST_RUNNING;
             next->cpu = cpu_id();
             current = next;
@@ -668,6 +823,26 @@ static regs_t *sched_switch(regs_t *r)
                 sched_idle();
                 continue;
             }
+            /* "Nothing runnable" on an SMP kernel is only a bug when the
+             * neighbour is not busy with the task this core wants - so say
+             * what both cores' current process is before dying.  A panic
+             * that names the state it died in saves a reflash per guess. */
+            {
+                int p0 = -1, s0 = -1, p1 = -1, s1 = -1;
+
+                if (cpus[0].cur) {
+                    p0 = cpus[0].cur->pid;
+                    s0 = (int)cpus[0].cur->state;
+                }
+#if MAX_CPUS > 1
+                if (cpus[1].cur) {
+                    p1 = cpus[1].cur->pid;
+                    s1 = (int)cpus[1].cur->state;
+                }
+#endif
+                kprintf("[sched] cpu %u idle: c0=%d/%d c1=%d/%d\n",
+                        (unsigned)cpu_id(), p0, s0, p1, s1);
+            }
             panic("no runnable process");
         }
         sched_idle();       /* interrupts on; poll until the next tick */
@@ -690,8 +865,7 @@ static regs_t *block_locked(regs_t *r, int st, uint32_t irq)
     plat_frame_set_ret(&p->saved, (uint32_t)-1);
     p->state = st;
     p->cpu = -1;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     return sched_switch(r);
 }
@@ -703,9 +877,8 @@ static regs_t *block_locked(regs_t *r, int st, uint32_t irq)
  * or the wake-up can be spent before this task is sleepable. */
 static regs_t *block(regs_t *r, int st)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-    spin_lock(&proc_lock);
     return block_locked(r, st, irq);
 }
 
@@ -756,6 +929,10 @@ void process_console_kick(void)
 void process_tick(regs_t *r)
 {
     uint64_t now;
+
+#ifdef TOS_KTHREADS
+    sched_ticks++;
+#endif
 
     /* Cheapest moment to notice a blown kernel stack: the tick runs no
        matter what the task is doing, and r points at the trap frame on
@@ -906,6 +1083,16 @@ regs_t *process_suspend(regs_t *r)
  * checks the *default* stack; a program that asks for its own (TOS_STACK)
  * is checked against the same rules in exec(), because one bad image must
  * not be able to boot-loosen the board. */
+/* Whether a window has to be a whole multiple of the stack size.  True when a
+ * single NAPOT PMP entry (or one MPU region) describes the stack, because the
+ * region's base then has to be aligned to its size.  A board whose PMP has
+ * TOR matching - which has no alignment rule - can size the image region to
+ * the page and give the stack its own region instead, and says so here. */
+__attribute__((weak)) int plat_window_needs_stack_alignment(void)
+{
+    return 1;
+}
+
 static void layout_check(void)
 {
     uint32_t grain = PLAT_APP_GRAIN;
@@ -916,7 +1103,7 @@ static void layout_check(void)
 
     if (stk == 0 || (stk & (stk - 1)) != 0)
         panic("task layout: stack is %u bytes, which is not a power of two", stk);
-    if (grain % stk != 0)
+    if (plat_window_needs_stack_alignment() && grain % stk != 0)
         panic("task layout: the %u KiB grain is not a multiple of the %u KiB stack, "
               "so stack_low would drift off its own alignment",
               grain / 1024u, stk / 1024u);
@@ -1050,11 +1237,13 @@ int process_user_ok(uint32_t addr, uint32_t len)
         return 0;
     if (len == 0)
         return 1;
-    if (addr < current->win_base)
+    /* A thread has no window of its own: its addresses are the group's. */
+    proc_t *g = PROC_GROUP(current);
+    if (addr < g->win_base)
         return 0;
     if (addr + len < addr)
         return 0;
-    return addr + len <= current->win_base + current->win_size;
+    return addr + len <= g->win_base + g->win_size;
 }
 
 /* ---- windows ---------------------------------------------------------
@@ -1080,18 +1269,24 @@ static int win_alloc(proc_t *p, uint32_t bytes)
 {
     uint32_t cand = PLAT_APP_BASE;
     uint32_t end = PLAT_APP_MAX;
+    uint32_t align;
     int ok = 0;
 
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
         uint32_t next = end;
 
-#if TOS_PMP_POW2_WINDOWS
-        /* A NAPOT region must start at a multiple of its own size. */
-        cand = align_up(cand, bytes);
+        /* A window is made of power-of-two blocks, so its base has to be
+         * aligned to the largest one: two 16 KiB blocks, as a 20 KiB window
+         * needs, start on a 16 KiB boundary.  Aligning to the whole window
+         * instead would put every non-power-of-two size on a boundary no
+         * allocator can reach. */
+        align = 1u;
+        while (align * 2u <= bytes && align * 2u <= end - PLAT_APP_BASE)
+            align *= 2u;
+        cand = align_up(cand, align);
         if (cand >= end)
             break;
-#endif
 
         /* The nearest window at or above `cand` bounds the gap we are
            standing in. */
@@ -1119,7 +1314,7 @@ static int win_alloc(proc_t *p, uint32_t bytes)
         if (cand >= end)
             break;
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return ok ? 0 : -1;
 }
 
@@ -1132,7 +1327,7 @@ static uint32_t win_largest_free(void)
     uint32_t end = PLAT_APP_MAX;
     uint32_t best = 0;
 
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
         uint32_t next = end;
 
@@ -1154,7 +1349,7 @@ static uint32_t win_largest_free(void)
         if (cand >= end)
             break;
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return best;
 }
 
@@ -1169,7 +1364,7 @@ static proc_t *proc_alloc(void)
      * the slot owned, and ST_NEW says "owned, not runnable". */
     proc_t *p = NULL;
 
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (int i = 0; i < MAX_PROCS; i++) {
         if (procs[i].state == ST_FREE) {
             p = &procs[i];
@@ -1182,7 +1377,7 @@ static proc_t *proc_alloc(void)
             break;
         }
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return p;
 }
 
@@ -1199,6 +1394,10 @@ static void proc_retire_locked(proc_t *p)
     p->state = ST_FREE;
     p->pid = 0;
     p->parent = NULL;
+#ifdef TOS_KTHREADS
+    p->leader = NULL;
+    p->tgid = 0;
+#endif
     p->cpu = -1;
     p->win_base = 0;
     p->win_size = 0;
@@ -1213,9 +1412,9 @@ static void proc_retire(proc_t *p)
      * pipe nobody will ever close. */
     for (int i = 0; i < MAX_FDS; i++)
         fd_close_in(p, i);
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_retire_locked(p);
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 }
 
 /* Where the initial [argc][argv..][NULL] block would start for argc
@@ -1349,6 +1548,12 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     if (stack_bytes == 0 || stack_bytes > KTASK_STACK_BYTES)
         stack_bytes = KTASK_STACK_BYTES;
 
+    /* Plain interrupt masking, not plat_spin_lock_irqsave(): the lock that
+     * guards the process table is *not* held across this region.  proc_alloc()
+     * takes it itself, and holding it here (which is what a single
+     * lock+mask primitive would mean) would deadlock.  What this section
+     * actually protects is the ktask stack bitmap; proc_lock is taken for the
+     * two fields at the end, which is all the rest of the kernel reads. */
     uint32_t irq = plat_irq_save();
     for (int i = 0; i < KTASK_SLOTS; i++) {
         if (!(ktask_stack_used & (1u << i))) {
@@ -1436,15 +1641,13 @@ regs_t *process_ktask_syscall(regs_t *r)
         return sched_switch(r);
 
     case SYS_KTASK_EXIT: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
         ktask_stack_used &= ~(1u << p->kstack_slot);
         p->is_ktask = 0;
         p->kstack_slot = 0;
-        spin_lock(&proc_lock);
         proc_retire_locked(p);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         current = NULL;
         return sched_switch(r);
     }
@@ -1460,10 +1663,54 @@ regs_t *process_ktask_syscall(regs_t *r)
    has to be one the protection unit can describe and the window grain can
    hold.  Both paths use this so a hint cannot bypass the check the ELF note
    has always had. */
+/* ---- software stack guard (ports without an MPU) ----------------------- */
+
+/* A port whose PMP/MPU faults on the guard hole does not need this: the
+ * hardware stops the store itself.  One that has neither - the RP2040 - gets
+ * a canary word at the top of the hole instead, planted when the window is
+ * created.  A store that runs off the bottom of the stack clobbers it, and
+ * the next entry into the kernel notices: the stack is grown one step into
+ * the heap's tail, or the task is killed, instead of the writes continuing
+ * quietly down into the image.  Nothing is checked on the way out, so a tight
+ * recursion with no syscalls is only caught at its next call. */
+#define USER_STACK_GUARD 0x5354414Bu               /* "STAK" */
+
+__attribute__((weak)) int plat_user_stack_guard(void)
+{
+    return 0;
+}
+
+/* Slack reserved under the stack of a task that did not declare one, so the
+ * first unexpected recursion can double the stack instead of dying.
+ *
+ * A task that carries TOS_STACK() has said how deep it goes: its window is
+ * then exact, which is what keeps a resident program (the shell) at one grain
+ * instead of paying for a step it will never take.
+ *
+ * A board with no faulting protection unit has nothing to grow from - the
+ * overflow is a silent write through the heap instead of a fault - so it
+ * answers 0 and keeps the windows tight. */
+__attribute__((weak)) uint32_t plat_window_grow_reserve(void)
+{
+    /* Opt-in, because on a coarse grain the reserve is not free: with a 16 KiB
+     * step, a program whose need is an exact multiple of it (hello world:
+     * 4 image + 4 guard + 8 stack) jumps a whole grain the moment anything is
+     * added.  Boards whose rounding already leaves a stack of slack therefore
+     * keep 0 and grow opportunistically; the 4 KiB-step boards, where the
+     * rounding can never leave 4 KiB, override this with their stack size. */
+    return 0;
+}
+
 static int stack_request_ok(uint32_t v)
 {
-    return (v & (v - 1u)) == 0 && v >= PLAT_PAGE_SIZE &&
-           PLAT_APP_GRAIN % v == 0;
+    if ((v & (v - 1u)) != 0 || v < PLAT_PAGE_SIZE)
+        return 0;
+    /* Where the stack is its own TOR region it does not have to divide the
+     * grain; it only has to be able to fit in a window. */
+    if (!plat_window_needs_stack_alignment())
+        return v <= PLAT_APP_MAX - PLAT_APP_BASE - PLAT_HEAP_GUARD -
+                    PLAT_PAGE_SIZE;
+    return PLAT_APP_GRAIN % v == 0;
 }
 
 /* ---- streaming exec ----------------------------------------------------
@@ -1582,7 +1829,9 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     uint32_t img = hint.span > raw_size ? hint.span : raw_size;
     uint32_t win_need = img;
     uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
+    uint32_t grow = hint.stack_ask ? 0 : plat_window_grow_reserve();
     if (add_u32_ok(win_need, stk, &win_need) < 0 ||
+        add_u32_ok(win_need, grow, &win_need) < 0 ||
         add_u32_ok(win_need, hint.heap_ask, &win_need) < 0 ||
         add_u32_ok(win_need, HEAP_GUARD, &win_need) < 0) {
         kprintf("exec: '%s' window size overflows\n", path);
@@ -1603,15 +1852,6 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     }
     if (win < PLAT_APP_GRAIN)
         win = PLAT_APP_GRAIN;
-#if TOS_PMP_POW2_WINDOWS
-    win = win_pow2(win);
-    if (win > app_total) {
-        kprintf("exec: '%s' needs a %u KiB window, the largest power-of-two "
-                "window is %u KiB\n", path, win / 1024u, app_total / 1024u);
-        proc_retire(p);
-        return NULL;
-    }
-#endif
     if (win_alloc(p, win) != 0) {
         kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
                 path, win / 1024u, win_largest_free() / 1024u);
@@ -1713,9 +1953,9 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     /* Pid allocation is under the table lock for the same reason the window
      * is: two exec()s on two CPUs would otherwise hand out the same number,
      * and `wait(pid)` would then reap the wrong task. */
-    spin_lock(&proc_lock);
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     p->pid = next_pid++;
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     /* Descriptors.  0/1/2 are the console by default; everything else is
      * inherited from the parent, which is the whole reason `a | b` works:
@@ -1724,21 +1964,21 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
      * `echo hi > file` work - by the time the child starts, the shell's fd 1
      * is a file, and the child inherits it. */
     for (int i = 0; i < MAX_FDS; i++)
-        p->fds[i].type = FD_NONE;
+        PFD(p)[i].type = FD_NONE;
     if (current) {
         for (int i = 0; i < MAX_FDS; i++) {
             /* Console and pipes were always inherited; files and devices
              * joined them when redirection started crossing exec().  The
              * rules live in fd_clone() so dup2() cannot drift from this. */
-            if (current->fds[i].type == FD_NONE)
+            if (PFD(current)[i].type == FD_NONE)
                 continue;
-            if (fd_clone(&p->fds[i], &current->fds[i]) < 0)
-                p->fds[i].type = FD_NONE;
+            if (fd_clone(&PFD(p)[i], &PFD(current)[i]) < 0)
+                PFD(p)[i].type = FD_NONE;
         }
     }
     for (int i = 0; i < 3; i++)
-        if (p->fds[i].type == FD_NONE)
-            p->fds[i].type = FD_CONSOLE;
+        if (PFD(p)[i].type == FD_NONE)
+            PFD(p)[i].type = FD_CONSOLE;
 
     /* Children inherit: a task cannot spawn something more important than
        itself, which is what keeps a program from locking the console out.
@@ -1760,6 +2000,8 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     p->stack_size = stk;
     p->heap_base = base + span;
     p->heap_end = p->stack_top - stk - HEAP_GUARD;
+    if (plat_user_stack_guard())
+        *((uint32_t *)(p->stack_top - stk) - 1) = USER_STACK_GUARD;
 
     /* Fill the stack with a poison byte before anything uses it, so the
        deepest address the program ever wrote to can be recovered later: the
@@ -1820,14 +2062,14 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        window is not theoretical - with core 1 up, `starting /bin/msh` is
        followed by a boot that dies in the shell roughly one time in three,
        because both cores end up running it on different stacks. */
-    spin_lock(&proc_lock);
+    irq = plat_spin_lock_irqsave(&proc_lock);
     p->state = claim ? ST_RUNNING : ST_READY;
     if (claim) {
         p->cpu = cpu_id();
         current = p;
         quantum = QUANTUM;
     }
-    spin_unlock(&proc_lock);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return p;
 }
 
@@ -1840,6 +2082,15 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
 {
     if (!current)
         return -1;
+
+#ifdef TOS_KTHREADS
+    /* exec() replaces the address space, so it cannot be called by a thread
+     * that shares one with its siblings: the new image would pull the window
+     * out from under them.  POSIX solves this by killing the other threads;
+     * for now the call simply fails. */
+    if (current->leader)
+        return -1;
+#endif
 
     proc_t *p = proc_create(path, argv, argc);
     if (!p)
@@ -1919,6 +2170,13 @@ uint32_t process_stack_peak(char *name, uint32_t cap)
  * else). */
 static void task_release(proc_t *p)
 {
+#ifdef TOS_KTHREADS
+    /* A thread owns no window, no children and (for now) only console fds.
+     * The group leader does the real teardown. */
+    if (p->leader)
+        return;
+#endif
+
     uint32_t used = stack_used(p);
 
     if (used > stack_peak.bytes) {
@@ -1939,6 +2197,11 @@ static void task_release(proc_t *p)
     if (tty_is_raw())
         tty_set_raw(0);
     /* The window goes back with the table entry, in proc_retire(). */
+#ifdef TOS_PIO
+    /* A PIO state machine is system hardware: stop the ones this task owns
+     * and put the pins back, or the next task inherits a running SM. */
+    plat_pio_release(p->pid);
+#endif
 }
 
 /* Remember a child's exit code for a wait() that has not happened yet.
@@ -2009,14 +2272,19 @@ static proc_t *reap_into_parent_locked(proc_t *p, int code)
  * forever on a result that had already been recorded. */
 static void retire_and_reap(proc_t *p, int code)
 {
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_t *woke;
 
-    spin_lock(&proc_lock);
+#ifdef TOS_KTHREADS
+    /* A process leader takes its threads with it: they share the window that
+     * is about to disappear. */
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (procs[i].leader == p)
+            proc_retire_locked(&procs[i]);
+#endif
     woke = reap_into_parent_locked(p, code);
     proc_retire_locked(p);
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     if (woke)
         preempt_if_higher(woke);
@@ -2027,6 +2295,21 @@ static void retire_and_reap(proc_t *p, int code)
  * cannot be retired this way (it is what shuts the machine down). */
 static void task_kill(proc_t *p, int code)
 {
+#ifdef TOS_KTHREADS
+    /* A thread dies at its own trap exit so the live_threads accounting and
+     * the group finalisation run in one place; a leader with live threads
+     * follows the same deferred path process_exit() uses. */
+    if (p->leader || p->live_threads > 0) {
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+
+        if (p->leader)
+            p->kill_pending = 1;
+        else
+            begin_group_exit_locked(p, code);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return;
+    }
+#endif
     task_release(p);
     retire_and_reap(p, code);
 }
@@ -2036,6 +2319,27 @@ regs_t *process_exit(regs_t *r, int code)
     proc_t *p = current;
     if (!p)
         panic("no current process");
+
+#ifdef TOS_KTHREADS
+    /* exit() from a thread ends that thread, not the process: the window and
+     * the descriptors are shared with siblings that must keep running. */
+    if (p->leader)
+        return process_thread_exit(r, code);
+
+    /* A leader whose threads are still alive cannot close the fd table or
+     * free the window yet: mark the group dying and let the last thread
+     * finish the reap.  This is also the only safe order on SMP, where a
+     * sibling may be running on the other core at this instant. */
+    if (p->live_threads > 0) {
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+
+        begin_group_exit_locked(p, code);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+        mailbox_drop(p->pid);
+        return sched_switch(r);
+    }
+#endif
 
     task_release(p);
 
@@ -2050,15 +2354,18 @@ regs_t *process_exit(regs_t *r, int code)
          * way to guarantee that without a shared clock is to make the flag
          * visible first.  Folding the reap in lets it share the lock, and
          * keeps the flag ahead of the slot as before. */
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke;
 
-        spin_lock(&proc_lock);
         sys_down = 1;
+#ifdef TOS_KTHREADS
+        for (int i = 0; i < MAX_PROCS; i++)
+            if (procs[i].leader == p)
+                proc_retire_locked(&procs[i]);
+#endif
         woke = reap_into_parent_locked(p, code);
         proc_retire_locked(p);
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (woke)
             preempt_if_higher(woke);
@@ -2080,7 +2387,7 @@ regs_t *process_exit(regs_t *r, int code)
 regs_t *process_wait(regs_t *r, int pid)
 {
     proc_t *p = current;
-    uint32_t irq = plat_irq_save();
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     int code;
 
     /* The scan and the sleep are one critical section.  A child exiting on
@@ -2094,14 +2401,12 @@ regs_t *process_wait(regs_t *r, int pid)
      *
      * The old code scanned outside the lock and slept afterwards, which left
      * a third order: recorded, then we sleep, then nobody ever wakes us. */
-    spin_lock(&proc_lock);
     /* A child that has already gone is in the lag list, and taking it first
      * is what keeps the codes straight: several children can exit between
      * two wait() calls, and the one asked about is not necessarily the last
      * to go. */
     if (lag_take(p, pid, &code)) {
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         return done(r, code);
     }
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -2116,8 +2421,7 @@ regs_t *process_wait(regs_t *r, int pid)
 
     /* No live child by that pid, and no remembered code either: it never
        existed (or it is one of the exits that did not fit in lag_pid). */
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return done(r, -1);
 }
 
@@ -2145,6 +2449,15 @@ int process_signal(int pid, int sig)
 
     if (!victim || victim == init_proc)
         return -1;
+
+#ifdef TOS_KTHREADS
+    /* A signal aimed at a thread acts on its group - that is what ^C and a
+     * shell `kill <pid>` mean for a multithreaded program.  The exception is
+     * the caller's own group: retiring the slot this CPU is running would
+     * leave the scheduler with a task that no longer exists. */
+    if (victim->leader && PROC_GROUP(current) != victim->leader)
+        victim = victim->leader;
+#endif
 
     /* "Same as current" only means "on this CPU" while it is actually
      * running.  sched_switch() idles without clearing `current`, so a task
@@ -2227,22 +2540,266 @@ regs_t *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len)
     return block(r, ST_WAIT_INPUT);
 }
 
+/* ---- kernel threads (TOS_KTHREADS) ---------------------------------- */
+
+#ifdef TOS_KTHREADS
+
+#if !defined(__riscv) && !defined(__arm__)
+#error "TOS_KTHREADS is implemented for RV32 and ARM: it needs plat_frame_set_arg() and a preemptive trap frame.  See docs/REAL-THREADS.md."
+#endif
+
+/* User pointers are checked against the *group* window: a thread slot has no
+ * window of its own, so process_user_ok(current, ...) would reject every
+ * address the thread legitimately owns. */
+static int group_user_ok(proc_t *g, uint32_t addr, uint32_t len)
+{
+    uint32_t end;
+
+    if (len == 0)
+        return 1;
+    end = addr + len;
+    if (end < addr)
+        return 0;
+    return addr >= g->win_base && end <= g->win_base + g->win_size;
+}
+
+/* Called with proc_lock held.  Hands `code` to a sibling blocked in join()
+ * and makes it runnable; returns it so the caller can preempt outside the
+ * lock. */
+static proc_t *wake_joiner_locked(proc_t *tid_task, int code)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q->state != ST_WAIT_THREAD || q->wait_pid != tid_task->pid)
+            continue;
+        if (q->wbuf && group_user_ok(PROC_GROUP(q), q->wbuf, sizeof(int)))
+            *(int *)q->wbuf = code;
+        plat_frame_set_ret(&q->saved, 0);
+        q->state = ST_READY;
+        q->cpu = -1;
+        return q;
+    }
+    return NULL;
+}
+
+int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
+{
+    proc_t *leader = current ? PROC_GROUP(current) : NULL;
+    proc_t *p;
+    uint32_t irq;
+    int pid;
+
+    if (!leader || leader->is_ktask || leader->win_size == 0)
+        return -1;
+    if (entry == 0 || (ustack & 3u))
+        return -1;
+    if (ustack <= leader->win_base ||
+        ustack > leader->win_base + leader->win_size)
+        return -1;
+
+    p = proc_alloc();
+    if (!p)
+        return -1;
+
+    p->leader = leader;
+    p->tgid = leader->tgid;
+    p->prio = current->prio;
+    p->parent = leader;
+    p->stack_top = ustack;
+    p->stack_size = 0;              /* protection comes from the group */
+    p->heap_base = leader->heap_base;
+    p->heap_end = leader->heap_end;
+    p->brk = leader->brk;
+    memcpy(p->cwd, leader->cwd, sizeof(p->cwd));
+    p->start_ns = plat_now_ns();
+
+    /* Descriptors are shared through PROC_GROUP(): the slot keeps no copy,
+     * and a close() in any thread closes it for the whole group. */
+
+    plat_prepare_user_frame(&p->saved, entry, ustack);
+    plat_frame_set_arg(&p->saved, arg);
+
+    irq = plat_spin_lock_irqsave(&proc_lock);
+    pid = next_pid++;
+    p->pid = pid;
+    p->name[0] = 't';
+    p->name[1] = 'h';
+    p->name[2] = 'r';
+    p->name[3] = (char)('0' + (pid % 10));
+    p->name[4] = '\0';
+    p->state = ST_READY;
+    p->cpu = -1;
+    leader->live_threads++;
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    return pid;
+}
+
+/* Called with proc_lock held.  Closes the group's descriptors (the threads
+ * are gone by now) and hands the leader's exit code to its parent. */
+static proc_t *finish_group_locked(proc_t *leader)
+{
+    proc_t *woke;
+
+    /* Zombie thread slots still point at this group and hold a pid; the group
+     * is going away, so they go with it (only the leader's window is real). */
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q != leader && q->leader == leader)
+            proc_retire_locked(q);
+    }
+
+    task_release(leader);
+    woke = reap_into_parent_locked(leader, leader->exit_code);
+    proc_retire_locked(leader);
+    return woke;
+}
+
+/* Called with proc_lock held.  The leader is leaving but threads share its
+ * window: mark it dying, forbid scheduling it, and make every sibling exit.
+ * A blocked sibling is woken with -1 so it reaches a trap exit; one running
+ * on another CPU is killed by kill_pending at its next trap (the tick
+ * guarantees that happens within a millisecond).  The last one to leave calls
+ * finish_group_locked(). */
+static void begin_group_exit_locked(proc_t *leader, int code)
+{
+    leader->exit_code = code;
+    leader->state = ST_DYING;
+    leader->cpu = -1;
+
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q->leader != leader || q->state == ST_FREE)
+            continue;
+        q->kill_pending = 1;
+        if (q->state == ST_WAIT_CHILD || q->state == ST_WAIT_INPUT ||
+            q->state == ST_WAIT_SLEEP || q->state == ST_WAIT_PIPE ||
+            q->state == ST_WAIT_THREAD) {
+            plat_frame_set_ret(&q->saved, (uint32_t)-1);
+            q->state = ST_READY;
+            q->cpu = -1;
+        }
+    }
+}
+
+regs_t *process_thread_exit(regs_t *r, int code)
+{
+    proc_t *p = current;
+    proc_t *leader;
+    proc_t *woke = NULL;
+    proc_t *woke_leader = NULL;
+    uint32_t irq;
+
+    if (!p || !p->leader)
+        return process_exit(r, code);
+
+    leader = p->leader;
+    irq = plat_spin_lock_irqsave(&proc_lock);
+    p->exit_code = code;
+    woke = wake_joiner_locked(p, code);
+    if (woke) {
+        /* The waiter has the code in its frame and its user buffer, so the
+         * slot can go right away. */
+        proc_retire_locked(p);
+    } else {
+        /* No joiner yet: keep the slot (and the code) until join() takes it,
+         * or until the leader exits and retires the whole group.  A thread
+         * nobody ever joins therefore holds one table slot - the same cost a
+         * zombie child has in POSIX until wait(). */
+        p->state = ST_THREAD_ZOMBIE;
+        p->cpu = -1;
+    }
+
+    if (leader->live_threads > 0)
+        leader->live_threads--;
+    if (leader->state == ST_DYING && leader->live_threads == 0)
+        woke_leader = finish_group_locked(leader);
+
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    if (woke_leader)
+        preempt_if_higher(woke_leader);
+    if (woke)
+        preempt_if_higher(woke);
+    return sched_switch(r);
+}
+
+regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
+{
+    proc_t *me = current;
+    proc_t *g = me ? PROC_GROUP(me) : NULL;
+    proc_t *t = NULL;
+    uint32_t irq;
+    int code;
+
+    if (!g || (codeptr && !group_user_ok(g, codeptr, sizeof(int))))
+        return done(r, -1);
+
+    irq = plat_spin_lock_irqsave(&proc_lock);
+
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (procs[i].state != ST_FREE && procs[i].pid == tid) {
+            t = &procs[i];
+            break;
+        }
+    if (!t || t->leader != g || t == me) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return done(r, -1);
+    }
+
+    if (t->state == ST_THREAD_ZOMBIE) {
+        code = t->exit_code;
+        proc_retire_locked(t);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        if (codeptr)
+            *(int *)codeptr = code;
+        return done(r, 0);
+    }
+
+    me->wait_pid = tid;
+    me->wbuf = codeptr;
+    return block_locked(r, ST_WAIT_THREAD, irq);
+}
+
+#endif /* TOS_KTHREADS */
+
 /* ---- misc ------------------------------------------------------------ */
+
+#ifdef TOS_KTHREADS
+int process_schedstat(uint32_t ptr)
+{
+    struct { uint32_t sw, self, ticks; } st;
+
+    if (!process_user_ok(ptr, sizeof(st)))
+        return -1;
+    st.sw = sched_switches;
+    st.self = sched_self;
+    st.ticks = sched_ticks;
+    memcpy((void *)ptr, &st, sizeof(st));
+    return 0;
+}
+#endif
 
 uint32_t process_sbrk(uint32_t bytes)
 {
     if (!current)
         return 0;
 
-    uint32_t old = current->brk;
+    uint32_t old = PROC_GROUP(current)->brk;
     if (bytes == 0)
         return old;
 
     uint32_t newbrk = old + bytes;
-    if (newbrk < current->heap_base || newbrk > current->heap_end)
+    if (newbrk < PROC_GROUP(current)->heap_base ||
+        newbrk > PROC_GROUP(current)->heap_end)
         return 0;
 
-    current->brk = newbrk;
+    /* Threads share the leader's heap: an allocation in one has to move the
+     * break for all of them, or two threads hand out the same bytes. */
+    PROC_GROUP(current)->brk = newbrk;
     /* The heap bound is part of the protection: without this the new pages
        would stay unreachable for the task that just asked for them. */
     apply_protection(current);
@@ -2263,7 +2820,10 @@ uint32_t process_sbrk(uint32_t bytes)
  *     describe a power of two aligned to itself, so the sizes reachable from
  *     here are 2x, and only while stack_top is a multiple of it.  That is
  *     what keeps the rule count at four and lets an 8 KiB task and a 16 KiB
- *     task share the machine.
+ *     task share the machine.  A TOR PMP (the C3) has no alignment rule, so
+ *     a board that says so can double any window's stack, however its top
+ *     happens to be aligned - which is why the C3 can also keep 4 KiB
+ *     windows without losing this.
  *   - the heap must not be in the way: brk + guard has to stay below the new
  *     low, so the hole that turns the *next* overflow into a fault instead of
  *     a silent overwrite keeps its board size.
@@ -2271,10 +2831,43 @@ uint32_t process_sbrk(uint32_t bytes)
  * Returning 1 means the faulting instruction can be re-executed unchanged:
  * it was refused before it wrote anything.  0 leaves the decision to the
  * caller, which kills the task exactly as it always did. */
+/* Called on every syscall from user mode when the board has no faulting
+ * protection unit.  1 = the stack is intact (or was grown); 0 = the task has
+ * run out and could not be grown, and the caller must kill it. */
+int process_stack_guard(const regs_t *r)
+{
+    proc_t *p = current;
+    uint32_t low, sp, *gw;
+
+    if (!plat_user_stack_guard())
+        return 1;
+    if (!p || p->win_size == 0 || p->stack_size == 0)
+        return 1;
+
+    low = p->stack_top - p->stack_size;
+    sp = r ? plat_frame_get_user_sp(r) : low;
+    gw = (uint32_t *)low - 1;
+
+    /* Two independent witnesses: the sp this call was made with (exact, and
+     * the usual case - a recursion that ran out then called something), and
+     * the canary (a write past the bottom without sp following it). */
+    if (sp >= low && sp < p->stack_top && *gw == USER_STACK_GUARD)
+        return 1;
+
+    kprintf("\n[pid %d] stack overflow (sp 0x%08x, stack 0x%08x..0x%08x)\n",
+            p->pid, sp, low, p->stack_top);
+    *gw = USER_STACK_GUARD;          /* re-arm before the growth decision */
+    if (!process_stack_grow(sp < low ? sp : low - 4u, sp)) {
+        kprintf("[pid %d] no room to grow it; killing\n", p->pid);
+        return 0;
+    }
+    return 1;
+}
+
 int process_stack_grow(uint32_t addr, uint32_t sp)
 {
     proc_t *p = current;
-    uint32_t old, want, low;
+    uint32_t old, want, low, poison_end;
 
     if (!p || p->win_size == 0 || p->stack_size == 0)
         return 0;
@@ -2292,23 +2885,42 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     if (sp >= p->stack_top - old)
         return 0;
 
-    if ((p->stack_top % want) != 0)
+    if (plat_window_needs_stack_alignment() && (p->stack_top % want) != 0)
         return 0;                            /* the port cannot describe it */
 
     low = p->stack_top - want;
-    if (addr < low)
-        return 0;                            /* deeper than one step reaches */
-
-    if (p->brk + HEAP_GUARD > low)
-        return 0;                            /* the heap is in the way */
+    if (addr < low || p->brk + HEAP_GUARD > low) {
+        /* Refused for want of room, not because the program is buggy: say
+         * which knob turns, since the fault message alone only says "access
+         * fault".  addr < low means the write jumped further than one step;
+         * brk in the way means the heap got the slack first. */
+        kprintf("\n[pid %d] %u KiB stack and no room to double it; "
+                "declare TOS_STACK() for the depth you need\n",
+                p->pid, old / 1024u);
+        return 0;
+    }
 
     /* Poison the new strip before it becomes writable: stack_used() scans up
      * from the bottom and would otherwise report the heap's leftovers as
-     * stack the program had used. */
-    memset((void *)low, STACK_POISON, p->stack_top - old - low);
+     * stack the program had used.
+     *
+     * A board with a software stack guard reaches here with sp ALREADY below
+     * the old stack_low: the live frames between sp and old_stack_low were
+     * written before the growth and must survive.  Poisoning all of them
+     * turns the next function return into a jump to 0xcccccccc (measured on
+     * the RP2350 M33: deep 3 printed "stack grown to 8 KiB" and immediately
+     * HardFaulted).  Fault-driven growth never has this problem: the refused
+     * store left nothing in that strip, and sp is still inside the old stack,
+     * so poison_end stays at old_stack_low and the behaviour is unchanged. */
+    poison_end = p->stack_top - old;
+    if (sp >= low && sp < poison_end)
+        poison_end = sp;
+    memset((void *)low, STACK_POISON, poison_end - low);
 
     p->stack_size = want;
     p->heap_end = low - HEAP_GUARD;
+    if (plat_user_stack_guard())
+        *((uint32_t *)low - 1) = USER_STACK_GUARD;
     apply_protection(p);
 
     kprintf("\n[pid %d] stack grown to %u KiB, heap ceiling %u KiB\n",
@@ -2329,6 +2941,11 @@ static const char *state_name(int st)
     case ST_WAIT_SLEEP: return "sleep";
     case ST_WAIT_PIPE:  return "pipe ";
     case ST_KT_WAIT:    return "ktwait";
+#ifdef TOS_KTHREADS
+    case ST_WAIT_THREAD:   return "join ";
+    case ST_THREAD_ZOMBIE: return "zombi";
+    case ST_DYING:         return "dying";
+#endif
     case ST_NEW:        return "new  ";
     default:            return "free ";
     }
@@ -2474,7 +3091,7 @@ static file_t *fd_slot(proc_t *p, int fd)
 {
     if (!p || fd < 0 || fd >= MAX_FDS)
         return NULL;
-    return &p->fds[fd];
+    return &PFD(p)[fd];
 }
 
 /* The descriptor number *is* the table index.  open() starts at 3: 0/1/2
@@ -2483,7 +3100,7 @@ static file_t *fd_slot(proc_t *p, int fd)
 static int fd_alloc(proc_t *p)
 {
     for (int i = 3; i < MAX_FDS; i++)
-        if (p->fds[i].type == FD_NONE)
+        if (PFD(p)[i].type == FD_NONE)
             return i;
     return -1;
 }
@@ -2594,19 +3211,24 @@ int process_fd_open(const char *path)
     if (d) {
         void *priv = d->priv;
 
+        group_lock(current);
         fd = fd_alloc(current);
-        if (fd < 0)
-            return -1;
-        if (d->ops->open && d->ops->open(d, &priv) < 0) {
-            current->fds[fd].type = FD_NONE;
+        if (fd < 0) {
+            group_unlock(current);
             return -1;
         }
-        f = &current->fds[fd];
+        if (d->ops->open && d->ops->open(d, &priv) < 0) {
+            PFD(current)[fd].type = FD_NONE;
+            group_unlock(current);
+            return -1;
+        }
+        f = &PFD(current)[fd];
         f->type    = FD_CHRDEV;
         f->dev     = d;
         f->devpriv = priv;
         f->pos     = 0;
         f->size    = 0;
+        group_unlock(current);
         return fd;
     }
 
@@ -2614,17 +3236,20 @@ int process_fd_open(const char *path)
     if (h < 0)
         return -1;
 
+    group_lock(current);
     fd = fd_alloc(current);
     if (fd < 0) {
+        group_unlock(current);
         ramdisk_close(h);
         return -1;
     }
-    f = &current->fds[fd];
+    f = &PFD(current)[fd];
     f->type = FD_FILE;
     f->fh   = h;
     f->size = ramdisk_size(h);
     f->pos  = 0;
     f->path = kstrdup(path);
+    group_unlock(current);
     return fd;
 }
 
@@ -2645,18 +3270,21 @@ int process_fd_create(const char *path)
     if (h < 0)
         return -1;
 
+    group_lock(current);
     fd = fd_alloc(current);
     if (fd < 0) {
+        group_unlock(current);
         ramdisk_close(h);
         return -1;
     }
-    f = &current->fds[fd];
+    f = &PFD(current)[fd];
     f->type = FD_FILE;
     f->fh   = h;
     f->size = ramdisk_size(h);
     f->pos  = 0;
     f->path = kstrdup(path);
     f->writable = 1;            /* a child inheriting this must be able to write */
+    group_unlock(current);
     return fd;
 }
 
@@ -2728,8 +3356,7 @@ static regs_t *block_on_pipe_locked(regs_t *r, struct pipe *p, int dir,
     me->wlen  = len;
     me->state = ST_WAIT_PIPE;
     me->cpu   = -1;
-    spin_unlock(&proc_lock);
-    plat_irq_restore(irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     return sched_switch(r);
 }
@@ -2750,8 +3377,9 @@ static regs_t *console_read(regs_t *r, uint32_t ptr, uint32_t len)
     }
 
     uint32_t room = len < TTY_LINE_MAX ? len : TTY_LINE_MAX;
-    if (!tty_line_ready())
+    if (!tty_line_ready()) {
         return process_block_read(r, ptr, room);
+    }
     return done(r, (uint32_t)tty_take_line((char *)ptr, (int)room));
 }
 
@@ -2815,18 +3443,16 @@ regs_t *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
          * other CPU runs pipe_write and pipe_wake_locked inside this same
          * lock, so it either sees ST_WAIT_PIPE and delivers, or it ran
          * first and the read above would have returned the data. */
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke;
         int n;
 
-        spin_lock(&proc_lock);
         n = pipe_read(f->pipe, (void *)ubuf, len);
         if (n == PIPE_EAGAIN)
             return block_on_pipe_locked(r, f->pipe, 0, ubuf, len, irq);
         /* Room appeared: writers may be parked waiting for it. */
         woke = n > 0 ? pipe_wake_locked(f->pipe, 1) : NULL;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (woke)
             preempt_if_higher(woke);
         return done(r, (uint32_t)n);
@@ -2881,19 +3507,17 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
     }
 
     case FD_PIPE_W: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke;
         int n;
 
-        spin_lock(&proc_lock);
         n = pipe_write(f->pipe, (const void *)ubuf, len);
         if (n == PIPE_EAGAIN)
             return block_on_pipe_locked(r, f->pipe, 1, ubuf, len, irq);
         /* Data for a sleeping reader - delivered before the lock goes, so
          * nobody can drain it in between and leave the reader parked. */
         woke = n > 0 ? pipe_wake_locked(f->pipe, 0) : NULL;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (woke)
             preempt_if_higher(woke);
         return done(r, (uint32_t)(n == PIPE_EPIPE ? -1 : n));
@@ -2927,7 +3551,7 @@ static void fd_close_in(proc_t *p, int fd)
 
     case FD_PIPE_R: {
         struct pipe *pp = f->pipe;
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke = NULL;
         int last;
 
@@ -2936,12 +3560,10 @@ static void fd_close_in(proc_t *p, int fd)
          * "no data will ever arrive", and a writer that checks in between
          * would miss it.  The free is safe because a pipe with no
          * references has no descriptor and therefore no task inside it. */
-        spin_lock(&proc_lock);
         last = pipe_drop_reader(pp);
         if (!last && pipe_readers(pp) == 0)
             woke = pipe_wake_locked(pp, 1);     /* writers have nobody to write to */
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (last)
             kfree(pp);              /* no references left at all */
@@ -2952,16 +3574,14 @@ static void fd_close_in(proc_t *p, int fd)
 
     case FD_PIPE_W: {
         struct pipe *pp = f->pipe;
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke = NULL;
         int last;
 
-        spin_lock(&proc_lock);
         last = pipe_drop_writer(pp);
         if (!last && pipe_writers(pp) == 0)
             woke = pipe_wake_locked(pp, 0);     /* readers must see EOF */
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (last)
             kfree(pp);
@@ -2988,7 +3608,9 @@ int process_fd_close(int fd)
         return -1;
     if (fd < 0 || fd >= MAX_FDS)
         return -1;
+    group_lock(current);
     fd_close_in(current, fd);
+    group_unlock(current);
     return 0;
 }
 
@@ -3021,24 +3643,28 @@ int process_pipe(int *fds)
     if (!p)
         return -1;
 
+    group_lock(me);
     r = fd_alloc(me);
     if (r < 0) {
+        group_unlock(me);
         kfree(p);
         return -1;
     }
-    me->fds[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
-    me->fds[r].pipe = p;
+    PFD(me)[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
+    PFD(me)[r].pipe = p;
     pipe_ref_reader(p);
 
     w = fd_alloc(me);
     if (w < 0) {
-        me->fds[r].type = FD_NONE;
+        PFD(me)[r].type = FD_NONE;
+        group_unlock(me);
         kfree(p);
         return -1;
     }
-    me->fds[w].type = FD_PIPE_W;
-    me->fds[w].pipe = p;
+    PFD(me)[w].type = FD_PIPE_W;
+    PFD(me)[w].pipe = p;
     pipe_ref_writer(p);
+    group_unlock(me);
 
     fds[0] = r;
     fds[1] = w;
@@ -3052,22 +3678,31 @@ int process_dup2(int oldfd, int newfd)
 
     if (!me)
         return -1;
+
+    group_lock(me);
     o = fd_slot(me, oldfd);
     n = fd_slot(me, newfd);
-    if (!o || !n || o->type == FD_NONE)
+    if (!o || !n || o->type == FD_NONE) {
+        group_unlock(me);
         return -1;
-    if (oldfd == newfd)
+    }
+    if (oldfd == newfd) {
+        group_unlock(me);
         return newfd;
+    }
 
     /* Build the copy first: if it fails (no descriptors, no heap) the target
      * must be left alone rather than closed for nothing.  What "copy" means
      * per type is fd_clone()'s business - the same rules a child inherits
      * by. */
-    if (fd_clone(&tmp, o) < 0)
+    if (fd_clone(&tmp, o) < 0) {
+        group_unlock(me);
         return -1;
+    }
 
     fd_close_in(me, newfd);
     *n = tmp;
+    group_unlock(me);
     return newfd;
 }
 
@@ -3076,18 +3711,29 @@ int process_dup2(int oldfd, int newfd)
 int process_dup(int fd)
 {
     proc_t *me = current;
-    file_t *src = fd_slot(me, fd);
+    file_t *src;
     int nfd;
 
-    if (!src || src->type == FD_NONE)
+    if (!me)
         return -1;
+    group_lock(me);
+    src = fd_slot(me, fd);
+    if (!src || src->type == FD_NONE) {
+        group_unlock(me);
+        return -1;
+    }
     nfd = fd_alloc(me);
-    if (nfd < 0)
+    if (nfd < 0) {
+        group_unlock(me);
         return -1;
+    }
     /* fd_clone() zeroes the slot before it fills it and leaves it empty when
      * it fails, so a failure needs no cleanup here. */
-    if (fd_clone(&me->fds[nfd], src) < 0)
+    if (fd_clone(&PFD(me)[nfd], src) < 0) {
+        group_unlock(me);
         return -1;
+    }
+    group_unlock(me);
     return nfd;
 }
 
@@ -3174,24 +3820,20 @@ short process_poll(int fd, short events)
         break;
 
     case FD_PIPE_R: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        spin_lock(&proc_lock);
         if (pipe_readable(f->pipe))
             rev |= TOS_POLLIN;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         break;
     }
 
     case FD_PIPE_W: {
-        uint32_t irq = plat_irq_save();
+        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        spin_lock(&proc_lock);
         if (pipe_writable(f->pipe))
             rev |= TOS_POLLOUT;
-        spin_unlock(&proc_lock);
-        plat_irq_restore(irq);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         break;
     }
 

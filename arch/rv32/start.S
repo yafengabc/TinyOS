@@ -393,6 +393,16 @@ ktask_start_stub:
 
     .globl rv32_enter_user
 rv32_enter_user:
+    /* Mask first, move sp second.  Between those two instructions sp already
+     * points at a frame that lives in the process table, while mstatus.MPP
+     * still says "came from M-mode" - a tick landing there pushes its frame
+     * on top of that table entry, and process_tick() sees a kernel stack
+     * pointer outside the kernel stack ("kstack oob sp=8009daa4", pid 1,
+     * at boot and at every first exec of a fresh program).  Widening the
+     * window to 400k iterations reproduced it three times out of three;
+     * with this instruction the same window is silent.  mret takes MIE from
+     * the frame, so nothing here survives the mret that ends .Lrestore. */
+    csrci   mstatus, 8
     mv      sp, a0
     /* fall through */
 

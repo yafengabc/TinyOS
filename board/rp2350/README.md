@@ -59,6 +59,27 @@ screen
 echo hello > /dev/lcd0
 ```
 
+## 线程实验（kthreads）
+
+分支 `threads-preemptive` 的内核线程在 RP2350 的两个架构上都能构建：
+
+```bash
+go run ./cmd/tos build -config configs/rp2350smp-kthreads.conf    # Cortex-M33 x2
+go run ./cmd/tos build -config configs/rp2350rvsmp-kthreads.conf  # Hazard3 x2
+python scripts/rp2350/flash.py --uf2 build/rp2350smp.uf2 --smoke  # 或 ...rvsmp.uf2
+```
+
+```sh
+tos> threadbench     # 3 线程 vs 顺序；双核上 ratio 应明显低于 100%
+tos> kthreadtest     # 17 项边界检查（join、僵尸槽、槽耗尽、fd 共享、重叠睡眠）
+tos> prodcons        # 管道阻塞并发，校验和必须一致
+```
+
+线程共享窗口、堆和 fd 表；SMP 下 `brk` 和 fd 表有 per-group 自旋锁，组长退出是
+延迟回收（等所有线程离开才释放窗口）。设计与已知边界见 `docs/REAL-THREADS.md`。
+ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 sp 下方，所以线程的
+启动记录放在堆里，不能放栈顶。
+
 ## 移植进度
 
 | 功能 | 状态 | 说明 |
@@ -70,12 +91,20 @@ echo hello > /dev/lcd0
 | PMSAv8 MPU 每任务四区域 | ✅ 实机 | `prot rodata/heap/stack/null` 四条全部当场拦下 |
 | 双核 SMP（`rp2350smp`） | ✅ 实机 | SIO FIFO 握手、per-core 内核栈、`smpbench` 1.89–2.01x |
 | ST7789 屏 / 按键 / LED / `/proc/dev` | ✅ 实机 | 屏是控制台镜像 |
+| PIO（3 块 / 12 个 SM + 用户态汇编器） | ✅ 实机 | 回环四字往返、`blink3` 装入、`ws2812` 编码核对：`pio_accept.py` 17/17（见 `docs/PIO.md`） |
 | 线程、邮箱、`poll`、管道、`py`、CoreMark | ✅ | 与其它目标同源 |
 | `reboot` | ✅ | AIRCR.SYSRESETREQ，ROM 正常重启 |
 | WiFi | — | 板上没有 WiFi 硬件，相关命令默认排除 |
 
 ## 已知限制
 
+- **写完 flash 要走 bootram 里的 XIP 设置例程，不能调 `flash_enter_cmd_xip`**。
+  ROM 在 bootram（`0x400e0000`）留了 256 字节的 XIP 设置代码，就是它扫 flash 时
+  找到的快读模式；pico-sdk 的 `flash_range_*` 把它拷到 RAM、在 `flash_flush_cache`
+  之后调用。`flash_enter_cmd_xip` 装的是 ROM 自己的基本模式（03h 串读、CLKDIV=12），
+  读延迟按 clk_sys 周期计，150 MHz 时短了 12.5 倍——写完之后取的第一条指令在 flash
+  还没驱动数据时就被采样，核当场死；12 MHz 下同一模式仍工作，所以症状看起来像
+  「跟时钟有关」。`plat_block_erase/write` 现在走 `flash_enable_xip_via_boot2`。
 - 512 KiB 里 128 KiB 固定给内核；屏的 DMA 行缓冲（~3.8 KiB）也在内核 `.bss`。
 - littlefs 分区从 `0x80000` 到 flash 末尾，内核必须留在前 512 KiB。
 - `rp2350` / `rp2350smp` 的堆仍是 60 KiB（历史上按"exec 同时持有压缩+解压缓冲"定的），

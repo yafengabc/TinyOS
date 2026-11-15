@@ -2,6 +2,7 @@
 #define TINYOS_CPU_H
 
 #include "types.h"
+#include "diag.h"
 
 /* Per-CPU state and the locks that make sharing it safe.
  *
@@ -121,6 +122,22 @@ int  spin_trylock(spin_t *s);
  * or the RP2040's SIO spinlock block). */
 void plat_spin_acquire(volatile int *v);
 void plat_spin_release(volatile int *v);
+
+/* Take a spin lock with interrupts masked, as one step.
+ *
+ * The two halves must not be written separately: masking after acquiring
+ * leaves a window in which a tick can re-enter the same lock on this CPU and
+ * spin to the limit (OPEN-ITEMS 23.3).  The return value goes back to the
+ * matching unlock, so an interrupt state that was already masked on entry
+ * stays masked on exit. */
+uint32_t plat_spin_lock_irqsave(spin_t *s);
+void     plat_spin_unlock_irqrestore(spin_t *s, uint32_t state);
+
+/* Called from a core's idle loop and timer tick so that another core can park
+ * it out of XIP for a ROM flash operation (XIP is in direct mode then, and an
+ * instruction fetch from it is a bus fault).  Weak no-op by default; boards
+ * with flash programming override it. */
+void plat_flash_park_poll(void);
 
 /* Wake a CPU that is parked in plat_cpu_idle().  Weak no-op by default; a
  * port whose idle is wfi and whose wake-up is sev (ARM) overrides it. */

@@ -59,6 +59,18 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
+    /* Survives a reset: _start clears only [__bss_start, __bss_end), so the
+       crash record a wedge leaves behind is still readable on the next boot.
+       Zero-initialised here at link time for the first power-on, where the
+       section is not written by anyone but still holds SRAM garbage. */
+    .noinit (NOLOAD) : {
+        __noinit_start = .;
+        *(.noinit)
+        *(.noinit.*)
+        . = ALIGN(16);
+        __noinit_end = .;
+    } > RAM
+
     __kernel_end = .;
 
     ASSERT(__image_def_end - ORIGIN(FLASH) <= 4096,
