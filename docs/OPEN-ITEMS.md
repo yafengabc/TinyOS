@@ -65,12 +65,25 @@ build/ramdisk-esp32c3.bin` 直接起到 `tos>`；`tostest emu test` 报
 `boot: 0.040 s / filesystem: ok / SMOKE TEST OK`。两个注意：
 
 - 上面这些都是 **RV32EMU-C**（`build/rv32emu-c.exe`）的结果。**Go 版的 RV32EMU**
-  （`yafengabc/RV32EMU`）也能起这个固件、能跑 `uptime` / `ls /`，但它的 `RunHot`
-  块缓存有一个可复现的 bug：**同一窗口先后跑两个用户程序时，第二个会执行到前一个
-  解码出的旧块**（`uptime` → `ls /` 必现 `illegal instruction at 0x40390092`，
-  3/3；换 `Step()` 路径即正常，硬件和 RV32EMU-C 也正常）。已报
-  [RV32EMU#1](https://github.com/yafengabc/RV32EMU/issues/1)；修好之前 TinyOS 的
-  冒烟仍用 C 版。
+  （`yafengabc/RV32EMU`）同样能起这个固件；它的 `RunHot` 块缓存曾经有一个 bug：
+  同一窗口先后跑两个用户程序时，第二个会执行到前一个解码出的旧块（`uptime` →
+  `ls /` 必现 `illegal instruction at 0x40390092`）。根因是**慢路径 `CPU.store()`
+  直写平铺区时没有让该页的块失效**（RunHot 的快速写路径有 `touchCode()`，慢路径
+  漏了），内核用 memcpy 装载下一个程序正好走慢路径。已修（`RV32EMU 8943bc5`，
+  附带 `TestBlockCacheSeesStoreSlowPath`），issue #1 可关。
+
+**两台模拟器现在都能直接跑"刷机一体固件"**（`build/esp32c3-full.bin`）：
+
+```sh
+build\rv32emu-c.exe -flashimg build\esp32c3-full.bin      # RV32EMU-C
+tmp\RV32EMU\rv32emu.exe -flashimg build\esp32c3-full.bin  # RV32EMU（Go）
+```
+
+两者的 flash 镜像加载器原来只认 0x8000 处的分区表（IDF/MicroPython）；现在
+**没有分区表、但 0x0 处是合法的 ESP 镜像头（0xE9）时，按"直接启动 app"处理**
+——这正是 C3 ROM 对这种布局的行为，也是我们一次 `esptool write-flash 0x0`
+刷进去的那个文件。分区表镜像的路径不变。改动分别在
+`RV32EMU 8943bc5`（Go）与 `RV32EMU-C c9248df`（C）。
 
 - **手工起模拟器要带 `-rxdelay 5000000 -rxrate 64 -rxperiod 20000`**（`startEmulator()`
   就是这么传的）。不带这三个参数时，内核每 tick 轮询控制台的代价会被放大，同一次启动
