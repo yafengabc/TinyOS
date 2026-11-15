@@ -871,8 +871,17 @@ int main(int argc, char *argv[])
             puts("pio: cannot read the state machine\n");
             return 1;
         }
-        for (int i = 0; i < n; i++)
-            printf("  %-10s %08x\n", name[i], w[i]);
+        /* printf here has no %-10s (same note as user/free.c): pad by hand
+         * or the format string itself gets printed. */
+        for (int i = 0; i < n; i++) {
+            int pad = 12 - (int)strlen(name[i]);
+
+            puts("  ");
+            puts(name[i]);
+            while (pad-- > 0)
+                putchar(' ');
+            printf("%08x\n", w[i]);
+        }
 
         /* The decoded half: the pin is what every PIO question ends up
          * being about, and these four fields say whether the pad is even
