@@ -77,7 +77,13 @@ TinyOS。
 
 ## 构建细节
 
-- 运行环境：`ubuntu-24.04` + `clang` + `ld.lld` + Go stable。
+- 运行环境：`ubuntu-24.04` + **`apt.llvm.org` 上最新的 clang/ld.lld**（优先 23，往下
+  到 19）+ Go stable。**编译器版本是有意义的**：`user/msh/msh.c` 在 clang 23 的 `-Oz`
+  下是 8132 B（离 8 KiB 预算 60 B），而发行版自带的 clang 18 编出来是 12 KiB——
+  `TOS_ONE_GRAIN()` 会把它从 16 KiB 窗口推到 32 KiB，`rp2040`/`rp2040smp` 直接构建
+  失败。镜像要是"硬件上量过的那一份"，就得用同一档编译器；装不上时 workflow 会
+  打 `::warning::` 并退回流发行版 clang，失败点会落在体积检查上。
+- 每个 job 结束前会打印 `wc -c build/user/bin/msh`，编译器漂移在日志里就看得见。
 - 每个目标在独立的 matrix job 里执行 `go run ./cmd/tos build -target <target>`。
 - `mklfs` 是构建期 host 工具，由同一个 clang 编译。
 - 官方镜像里的用户程序使用 clang 构建；`goc32` 是独立的用户态 C 编译器实验，
