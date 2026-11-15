@@ -64,6 +64,14 @@ XOSC/CLOCKS/PLL/FC0/TICKS/RESETS 一组外设桩——那是另一台机器。
 build/ramdisk-esp32c3.bin` 直接起到 `tos>`；`tostest emu test` 报
 `boot: 0.040 s / filesystem: ok / SMOKE TEST OK`。两个注意：
 
+- 上面这些都是 **RV32EMU-C**（`build/rv32emu-c.exe`）的结果。**Go 版的 RV32EMU**
+  （`yafengabc/RV32EMU`）也能起这个固件、能跑 `uptime` / `ls /`，但它的 `RunHot`
+  块缓存有一个可复现的 bug：**同一窗口先后跑两个用户程序时，第二个会执行到前一个
+  解码出的旧块**（`uptime` → `ls /` 必现 `illegal instruction at 0x40390092`，
+  3/3；换 `Step()` 路径即正常，硬件和 RV32EMU-C 也正常）。已报
+  [RV32EMU#1](https://github.com/yafengabc/RV32EMU/issues/1)；修好之前 TinyOS 的
+  冒烟仍用 C 版。
+
 - **手工起模拟器要带 `-rxdelay 5000000 -rxrate 64 -rxperiod 20000`**（`startEmulator()`
   就是这么传的）。不带这三个参数时，内核每 tick 轮询控制台的代价会被放大，同一次启动
   的墙钟时间从 0.3 s 变成 15–20 s，看起来像"卡在 tick self-check"；带上是 0.04 s 到
