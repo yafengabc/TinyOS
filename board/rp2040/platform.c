@@ -248,29 +248,6 @@ typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 #define PSM_WDSEL_REG   (*(volatile uint32_t *)(0x40010000u + 0x08u))
 #define BOOTSEL_SCRATCH_MAGIC 0x544f5342u   /* "TOSB"                    */
 
-/* Reset-surviving breadcrumb for the flash path.  Scratch 1..3 are unused
- * (0 is the BOOTSEL handover above, 4..7 are the ROM's reboot vector), and a
- * watchdog/RESET clears neither them nor anything else that would tell us
- * where a wedged flash write died.  So: stamp the op, address and length just
- * before the ROM call, clear them after it returns.  After a hang, press
- * RESET and the next boot prints what was in flight. */
-#define FLASH_MARK_MAGIC 0x464c0000u        /* "FL" in the high half      */
-#define FLASH_MARK_ERASE 1u
-#define FLASH_MARK_PROG  2u
-
-static void flash_mark(uint32_t op, uint32_t addr, uint32_t len)
-{
-    WD_SCRATCH(2) = addr;
-    WD_SCRATCH(3) = len;
-    __asm__ volatile("dmb" ::: "memory");
-    WD_SCRATCH(1) = FLASH_MARK_MAGIC | op;
-}
-
-static void flash_mark_clear(void)
-{
-    WD_SCRATCH(1) = 0u;
-}
-
 static volatile int g_replug_req, g_trace_req;
 static volatile int g_bootsel_req;
 static volatile int g_bootsel_rom_req;
@@ -1056,9 +1033,7 @@ int plat_block_erase(uint32_t lba, uint32_t count)
      * restore the prior interrupt state afterwards. */
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
-    flash_mark(FLASH_MARK_ERASE, addr, end - addr);
     int rc = rp_flash_op(addr, NULL, end - addr, 1);
-    flash_mark_clear();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return rc;
@@ -1079,9 +1054,7 @@ int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
-    flash_mark(FLASH_MARK_PROG, addr, count * 512u);
     int rc = rp_flash_op(addr, (const uint8_t *)buf, count * 512u, 0);
-    flash_mark_clear();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return rc;
@@ -1153,18 +1126,6 @@ void plat_board_early(void)
     dbg_uart_puts(g_cpu_hz == RP2040_SYS_CLK_HZ
                       ? "\n[rp2040] boot clk=125MHz\n"
                       : "\n[rp2040] boot clk=12MHz (PLL_SYS failed)\n");
-
-    if ((WD_SCRATCH(1) & 0xffff0000u) == FLASH_MARK_MAGIC) {
-        dbg_uart_puts("[flash] previous boot stopped in ");
-        dbg_uart_puts((WD_SCRATCH(1) & 0xffu) == FLASH_MARK_ERASE
-                          ? "erase" : "program");
-        dbg_uart_puts(" addr=0x");
-        dbg_uart_hex(WD_SCRATCH(2));
-        dbg_uart_puts(" len=0x");
-        dbg_uart_hex(WD_SCRATCH(3));
-        dbg_uart_puts("\n");
-        WD_SCRATCH(1) = WD_SCRATCH(2) = WD_SCRATCH(3) = 0u;
-    }
 
     /* A Ctrl-D left a magic in the watchdog scratch register and triggered a
      * watchdog reset.  Hand over to the ROM now, in thread mode with a live
