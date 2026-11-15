@@ -102,6 +102,7 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
+| **当前镜像（`threads-preemptive` 合并进 main 的版本）** | **❌ 2026-11-15 报"跑不起来"，今晚定位** | 这是 4 KiB 窗口 + 软件栈守卫那一版第一次上板。先按下面"排障"确认是镜像层还是 OS 层，再看启动探针停在哪一段 |
 | boot2 + UF2 + XIP 启动 | ✅ | ROM CRC、family、向量位、MSP 都在构建期校验 |
 | 125 MHz 时钟、SysTick、UART0 分频 | ✅ | 启动探针逐段打印，卡住能定位 |
 | UART0 控制台 + shell | ✅ 实机 | 启动探针、提示符都从 GP0/GP1 出；`scripts/rp2040/autoflash.py --probe/--accept` 就是按"能到 shell"写的 |
@@ -116,8 +117,20 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 
 ### 排障：先确认"我们的 UF2 能不能跑"
 
+**2026-11-15 晚的顺序**（合并后第一次上板，先用 UART0 的 GP0/GP1，不要用 USB：
+`USB CDC` 那一行还是 ◐）：
+
+1. 烧 `build/rp2040-blink.uf2`（432 B，不碰 USB/UART/littlefs）：GP0 闪 → boot2/向量/
+   链接都对，问题在 OS；不闪 → 先查镜像层，别往下看；
+2. 烧 `build/rp2040.uf2`，看启动探针停在哪一段：一个字符都没有 = 镜像/启动层；
+   停在 `[B]`/`[C]` = 时钟或向量；到了 `[D]` 但没有 shell = 第一次 `exec("/bin/msh")`
+   出问题（这一版改了 4 KiB 窗口和栈守卫，先看 `heap`/`alloc` 的打印）；
+3. 有 shell 但命令不灵 = 文件系统：这一版的 `PLAT_LFS_BLOCKS = 384`（1.5 MiB）而映像
+   只有 600 KiB，所以首次挂载会走 `lfs_fs_grow()`——串口日志里有
+   `[ramdisk] ... grow ... failed` 就说明卡在这里。
+
 `scripts/rp2040-blink/` 是一个 432 字节的独立闪灯固件（不碰 USB/UART/littlefs），
-复用一份已知能启动的 boot2 打包，用来把"镜像/启动层"和"TinyOS 代码"分开：
+复用一份已知能启动的 boot2，用来把"镜像/启动层"和"TinyOS 代码"分开：
 
 ```bash
 python scripts/rp2040-blink/build.py \
