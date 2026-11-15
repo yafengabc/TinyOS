@@ -91,6 +91,7 @@ ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 
 | PMSAv8 MPU 每任务四区域 | ✅ 实机 | `prot rodata/heap/stack/null` 四条全部当场拦下 |
 | 双核 SMP（`rp2350smp`） | ✅ 实机 | SIO FIFO 握手、per-core 内核栈、`smpbench` 1.89–2.01x |
 | ST7789 屏 / 按键 / LED / `/proc/dev` | ✅ 实机 | 屏是控制台镜像 |
+| PIO（3 块 / 12 个 SM + 用户态汇编器） | ✅ 实机 | 回环四字往返、`blink3` 装入、`ws2812` 编码核对：`pio_accept.py` 17/17（见 `docs/PIO.md`） |
 | 线程、邮箱、`poll`、管道、`py`、CoreMark | ✅ | 与其它目标同源 |
 | `reboot` | ✅ | AIRCR.SYSRESETREQ，ROM 正常重启 |
 | WiFi | — | 板上没有 WiFi 硬件，相关命令默认排除 |

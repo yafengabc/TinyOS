@@ -2734,7 +2734,8 @@ blocks than the budget`，该任务访问未覆盖区域会 fault —— 响的�
 
 `pmp_cover()` 那套分块逻辑只在 `rp2350rv`（NAPOT）需要，ARM 不复制。
 
-## 32. PIO 从未上过真机（2026-11-14 起等验收；**先打 RP2350**）
+## 32. PIO 三关（2026-11-15 真机通过：`rp2350` 17/17、`rp2350rvsmp` 17/17；
+`rp2040` 未做）
 
 > 跟踪：[issue #1](https://github.com/yafengabc/TinyOS/issues/1)（和 §30.3 共用）。
 > 2026-11-15 起顺序改为**先 RP2350**：板子在对方手上、`pio` 特性在四个 RP2350
@@ -2770,16 +2771,24 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 
 1. **回环**（不用接线）：`pio asm /pio/loopback.pio 0 0` 期望字表
    `e081 80a0 6001 4001 8020`，`start` → `tx 0 0 1 0 1 1` → `rx 0 0 4`
-   读回 `00000001 00000000 00000001 00000001`；
+   读回 `80000000 00000000 80000000 80000000`（一位的 `in pins` 落在 ISR 的
+   bit31，不是 bit0——见 32.2）；
 2. **板载 LED**：`pio asm /pio/blink.pio 0 0` + `start`，GP25 约 2 Hz；
 3. **WS2812**（需灯带接 GP4）：`pio asm /pio/ws2812.pio 0 0` 期望
    `6221 1123 1400 a442`，`tx 0 0 0x00ff0000` 应亮红。
 
-失败时优先怀疑的地方（按顺序）：
+失败时优先怀疑的地方（按顺序，前三条都是真机上踩过的）：
 
-- `pio: assembled, but not loaded` → feature 没开或 SM owner 冲突；
-- 字对但引脚不动 → 引脚窗口/PINCTRL，或（RP2350）pad 的 ISO 没清；
-- 回环读回全 0 → OUT 的 base 与 IN 的 base 不一致（`.pin` 只给了一个窗口）；
+- **回环读回全 0，但 `pio tx` 报 `wrote 4`** → 先看 `SHIFTCTRL`：复位值是
+  `0x000c0000`（IN/OUT 都向右移），驱动若用调用者的位直接覆盖就变成**左移**，
+  `out pins,1` 出的是 MSB，`tx 1` 出去是 0。`pio regs` 里 `shiftctrl` 没有
+  `000c0000` 就是它；
+- **换了数据位型结果不成比例（全 1 能通、`1 0 1 1` 全 0）** → 同上，左移/右移；
+- **清了 FIFO 却没清掉**（`tx` 报 `wrote 0`，`regs` 里 `fifo tx0=4`）→ `FJOIN_RX`
+  的位置：RP2040 bit 15/14，**RP2350 bit 31**。改这一位才会清 FIFO；
+- 字对但引脚不动 → 引脚窗口/PINCTRL，或（RP2350）pad 的 ISO 没清。用
+  `pio exec 0 0 0xe081`（`set pindirs,1`）+ `pio exec 0 0 0xe001`（`set pins,1`）
+  直接驱动一次，能把"机器不跑"和"引脚没接上"分开；
 - 只有 RP2350 的第三块不对 → `PIO2` 的 FUNCSEL 8 与 RESETS 位。
 
 ### 32.1 2026-11-15 真机第一轮（`rp2350`，COM14）：7/17 → 16/17，剩回环一项
@@ -2792,36 +2801,62 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 | 1 | `drivers/pio/rp2/pio.c` `plat_pio()` | `asm` 打印 `loaded into pio0 sm0`，之后 `start`/`tx`/`rx`/`stop`/`rel` 全报 `failed (not owner, or no PIO)` | shell 每条命令一个进程，`pio_owner[block][sm] = pid` 是 `asm` 那个进程的 pid，后续命令必然不等。改成"空位可认领"（`claim_sm()`），与 `pio_load()` 原有的语义一致 |
 | 2 | 同上 `plat_pio_release()` | 同上，且 `blink` 那种"启动后一直闪"不可能工作 | 进程退出时它调 `release_sm()` → `stop_sm()`，`pio start` 一退出就把 ENABLE 清了。改成只放弃所有权、不停机不还引脚；释放硬件仍由 `pio rel` 显式完成 |
 | 3 | `files/pio/{loopback,blink,blink3}.pio` | `set pindirs, 1` 写了但引脚不驱动 | `SM_RESTART` 把 PC 设到 **`wrap_bottom`**，而这条初始化写在 `.wrap_target` **之前**，从不执行 → GP4 一直是输入。移到 wrap 窗口内（字表不变，`wrap` 由 `4..1`/`10..1` 变 `4..0`/`10..0`） |
-| 4 | 同上 `SM_EXECCTRL` 编码 | wrap 从来没生效，SM 在 `wrap 0..0` 里空转 | `exec = (top << 12) \| (bottom << 7)` 位域错了：pico-sdk 是 `WRAP_BOTTOM [4:0]`、`WRAP_TOP [11:7]`，bit12 是 `SIDE_EN`；`EXEC_SIDE_EN/PINDIR` 还写成了 bit30/29（应为 bit12/13）。改成 `EXEC_WRAP_TOP/BOTTOM` |
+| 4 | 同上 `SM_EXECCTRL` 编码 | （**事后证明是误判，见 32.2**）以为 wrap 从来没生效 | 当时按"相邻寄存器"的直觉认为 `WRAP_BOTTOM [4:0]`/`WRAP_TOP [11:7]`，于是把 `top << 12 \| bottom << 7` 当成错的，改成 `top << 7 \| bottom << 12`。**这正好改反了**：pico-sdk 的头文件里 RP2040 和 RP2350 都是 `WRAP_TOP [16:12]`、`WRAP_BOTTOM [11:7]`、`SIDE_EN bit30`、`SIDE_PINDIR bit29`，原本那版是对的 |
 
 脚本本身的两处笔误也一并修了：`WORDS["blink"]` 里第 5/10 字写成 `0x1f43`/`0x1f48`
 （`jmp x--` 没有延迟，正确是 `0x0043`/`0x0048`），以及 pin window 检查写成
 `gp4..gp4`（`pio asm` 打印的是 `gp4..4`）。
 
-**仍然 FAIL 的一项：回环读回 0。** 现状与证据：
+**仍然 FAIL 的一项：回环读回 0**（当时没查出来，第二轮才结案，见 32.2）。
 
-- `asm` 三个程序的字表全对（`loopback` 5 字、`blink3` 11 字、`ws2812` 4 字，
-  含 `6221 1123 1400 a442`），`start`/`tx`/`stop`/`rel` 全部 `pio: ok`；
-- `pio tx 0 0 1 0 1 1` 报 `wrote 4`，但 `pio rx 0 0 4` 读回全 `0`
-  （修 EXECCTRL 前连一个字都读不到，之后能读到 4 个 0 —— 说明 wrap 修对了、
-  SM 确实在 pull/out/in/push，是 `in pins` 这一侧读不到）；
-- **线路本身没问题**：`gpio dev mode 4 out` + `gpio dev 4 1` + `gpio dev 4` 读到
-  `1`，写 `0` 读到 `0`，`mode up` 读到 `1` —— SIO 路径完全正常，所以不是悬空/短路；
-- `pin_to_pio()` 已设 IE、清 OD 与 ISO（RP2350 的 pad 复位时 ISO=1），FUNCSEL=6。
+### 32.2 2026-11-15 第二轮：回环通了，17/17
 
-所以还差的是 PIO 输出到 pad / pad 回读到 `pins` 总线这一环，下一步要看
-`PINCTRL.OUT_BASE/IN_BASE` 之外的 `EXECCTRL.OUT_STICKY`、`GWSTATUS`，或者直接
-用 `pio tx` 后 `gpio dev 4` 观测 pad 是否真被拉高（这一步还没做，因为 `gpio dev`
-会重新配置 FUNCSEL）。
+两个镜像都是 **17/17**：`rp2350`（ARM）与 `rp2350rvsmp`（RV32）。真 bug 有两条，
+另外第一条是**把上一轮的"修复"退回去**：
 
-另外**期望值本身可能也需要改**：`in pins` 读的是经两级同步的 `pins` 总线，
-`out pins` 之后紧跟 `in pins` 只隔一个 SM 周期，硬件上读到的是**上一拍**的电平。
-`1 0 1 1` 在真机上更可能得到 `0 1 0 1`，而不是 issue 里写的 `1 0 0... 1`。这一点
-等回环通了再用实测值定。
+| # | 位置 | 症状 | 根因 |
+| --- | --- | --- | --- |
+| 1 | `drivers/pio/rp2/pio.c` `EXEC_WRAP_TOP/BOTTOM` | `start` 报 ok，`addr` 读 `0x0e`/`0x10`（都在 5 字程序之外），`tx` 的 4 个字永远不被拉走，引脚不动 | 上一轮把 wrap 字段当成"写错了位置"改到 `[11:7]`/`[4:0]`，**改反了**。pico-sdk 的头文件里 RP2040 与 RP2350 一致：`WRAP_TOP [16:12]`、`WRAP_BOTTOM [11:7]`、`SIDE_EN bit30`、`SIDE_PINDIR bit29`。恢复后立刻回到"`tx` 报 wrote 4、`rx` 读回 4 个 0"——也就是 32.1 的原症状，这才是能继续往下查的状态 |
+| 2 | `SM_SHIFTCTRL` 赋值 | `out pins, 1` 出的是**字的 MSB**：`tx 0xffffffff` 回读全是 1，`tx 1 0 1 1` 回读全是 0 | 驱动用调用者的 `q->shiftctrl`（=0）直接覆盖寄存器，而复位值是 `0x000c0000`（`IN_SHIFTDIR`/`OUT_SHIFTDIR` 都是 1=向右）。写 0 就把两个移位器都变成左移。改成 `q->shiftctrl \| 0x000c0000` |
+| 3 | `clear_fifos()` 的 `FJOIN_RX` 位 | 重新 `pio asm` 后 `pio tx` 报 `wrote 0`（FIFO 满），`regs` 显示 `fifo tx0=4` | 清 FIFO 靠翻 `FJOIN_RX`：RP2040 是 bit 15/14，**RP2350 是 bit 31**（两个阈值搬到中间去了）。按 RP2040 的 bit14 翻，在 RP2350 上根本没清，反而动了 `FJOIN_RX_GET`。位上移到板级 memmap 的 `RP_PIO_FJOIN_RX_BIT` |
 
-真机通过后要回来改三处状态：`board/rp2040/README.md` 的 PIO 行（◐ → ✅）、
-`board/rp2350/README.md` 与 `board/rp2350rv/README.md` 补一行 PIO、`docs/PIO.md`
-的"验证"小节。
+三条一起修完之后：`tx 0 0 1 0 1 1` → `rx` 读回 `80000000 00000000 80000000 80000000`，
+`gpio dev 4` 读 `1`；`tx 0 0 0 1 0 1` → `00000000 80000000 00000000 80000000`。
+
+**这轮学到的四条硬件事实（都别忘）**
+
+1. **`INSTR_MEM0..31` 是只写的**（四个读口全给状态机）。回读永远 0，看起来和"程序
+   没装进去"一模一样——为这条绕了一个小时。要验程序内容只能让它跑：`pio exec`
+   注入 `jmp N` 再读引脚。
+2. **`SMx_INSTR` 能带外执行一条指令**，机器 enabled 或 disabled 都吃。用它
+   `set pindirs,1` + `set pins,1` 能直接驱动引脚，从而把"机器不跑"和"引脚没接上"
+   彻底分开——这一步是这次定位的分水岭。
+3. `in pins, 1` 读进来的位落在 **ISR 的 bit31**（右移），不是 bit0；而且
+   **没有一拍延迟**：`out pins` 之后紧跟的 `in pins` 读到的是同一拍驱动上去的电平，
+   32.1 里"读到上一拍"的猜测是错的。
+4. `FSTAT` 的 TXFULL 在 `[19:16]`、RXEMPTY 在 `[11:8]`，驱动原来就是这么用的，是对的；
+   `FLEVEL` 是 `[3:0]=TX0`、`[7:4]=RX0`。两者可以互相当校验。
+
+**新增的诊断面**（对面提议的 `pio regs` 已在 `3fa4b9a` 落地，这里在它上面扩了）：
+
+- `pio regs <block> <sm>` 现在是 11 个字：`ctrl fstat execctrl shiftctrl pinctrl
+  clkdiv addr owner gpio_ctrl pad flevel`，另加一行解码后的 `pin gp4 funcsel=6
+  ie=1 od=0 iso=0` 和一行 `fifo tx0=.. rx0=..`。加后三个的原因是"引脚"本来就是
+  PIO 问题的一半：FUNCSEL/IE/OD/ISO 和 FIFO 层数能直接回答"机器没驱动"还是
+  "驱动了但没人读"。
+- `pio exec <block> <sm> <word>`（新动词，`PIO_EXEC`）：把一条指令写进 `SMx_INSTR`
+  立即执行。没有它这轮得多刷五次固件。
+
+**验证矩阵与未覆盖项**
+
+| 镜像 | 结果 | 说明 |
+| --- | --- | --- |
+| `rp2350`（ARM） | **17/17** | 刷写路径 + 三个程序字表 + 回环四字往返 |
+| `rp2350rvsmp`（RV32） | **17/17** | 同一驱动、另一套 memmap，`pio_fence()` 走 `fence` |
+| `rp2040` | — | 本机无板；`FJOIN_RX` 位与 wrap 布局都已按 2040 写进 memmap，未上机 |
+
+`blink`（GP3 约 2 Hz）与 `ws2812`（灯带首像素亮红）仍是**需要眼睛**的两项，
+`--visual` 才问；这一轮只判到"汇编字对 + 装入成功"。灯带也没接。
 
 ## 33. 待真机清单（2026-11-14 汇总）
 
@@ -2849,7 +2884,8 @@ python scripts/rp2350/accept33.py --image rp2350rv --replay <日志>  # 只跑�
 | 3 | `rp2350smp` / `rp2350rvsmp` | §29.1 的 `dd`+`rm` 200 轮 | 见 §29.1 | **PASS**（两端口各 200 轮） |
 | 4 | `rp2350rv` / `rp2350rvsmp` | §29.2 的 USB 中断版枚举 | 见 §29.2 | 设备侧 PASS；主机侧须 **DTR=1** |
 | 5 | `rp2040` | §30.3 的 4 KiB 窗口 + 软件栈守卫 | 见 §30.3 | 未做（无板） |
-| 6 | `rp2040` / `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 | 未做（无接线） |
+| 6 | `rp2350` / `rp2350rv` | §32 的 PIO 三关（回环 / blink / ws2812） | 见 §32 | **PASS**（`rp2350` 17/17、`rp2350rvsmp` 17/17；blink/ws2812 仅判到装入） |
+| 7 | `rp2040` | 同上 | 见 §32 | 未做（无板） |
 
 **为什么第 3 项和第 2 项里的 `smpbench` 这次是回归、不只是验收**：
 `f37e58d` / `84009e7` / `537df98` 三条锁语义改动（`spin_lock_irqsave`、`pipe`/`mailbox`

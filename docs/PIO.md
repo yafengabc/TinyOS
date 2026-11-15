@@ -28,7 +28,10 @@ pio rel 0 0                     # 停 SM 并把引脚交回 GPIO
 pio regs 0 0                    # 读回 SM 寄存器（诊断用，只读）
 ```
 
-`pio regs` 打印 `ctrl / fstat / execctrl / shiftctrl / pinctrl / clkdiv / addr / owner`
+`pio regs` 打印 11 个字 `ctrl / fstat / execctrl / shiftctrl / pinctrl / clkdiv /
+addr / owner / gpio_ctrl / pad / flevel`，再加一行解码后的引脚状态
+（`funcsel/ie/od/iso`）和一行 FIFO 层数；`pio exec <block> <sm> <word>` 把一条
+指令直接写进 `SMx_INSTR` 立即执行，用来在没有程序的情况下验证引脚通路。
 八个字。装载器的"意图"和寄存器里的内容是两件事——位域写偏了会写到一个看起来也
 合理的值上，只有读回来才能和手册对上；`addr` 还能看出 SM 是不是卡在 `pull`。
 
@@ -113,16 +116,27 @@ struct pio_req {
   负责不重叠。
 - 没有把 PIO IRQ 接到内核中断，`irq` 指令只改 PIO 的 IRQ 标志；需要时在用户态
   轮询 `irq` 或后续加中断。
-- `INSTR_MEM` 是只写的，`pio` 命令不能回读已装入的程序；要看当前执行位置得
-  读 `SM_ADDR`（还没暴露）。
+- `INSTR_MEM0..31` 是只写的（四个读口全给状态机），`pio` 回读永远 0，看起来和
+  "没装进去"一样；要确认程序内容只能靠执行（`pio exec` 注入 `jmp N` 再读引脚）。
+  当前执行位置看 `pio regs` 的 `addr`。
+- `SHIFTCTRL` 的两个移位方向位默认是"向右"（复位值 `0x000c0000`），驱动会保留它们；
+  写 0 会让 `out pins` 变成先出 MSB。
 - autopull/autopush 目前用 `.shiftctrl` 的原始位配置，没有 `.autopull 32` 这类糖。
 
 ## 验证
 
-真机验收按 `docs/HW-ACCEPTANCE.md` 的关卡 B–D 走，结果回填到这里的"验证"和
-`board/rp2040/README.md` 的进度表。
+真机验收按 `docs/HW-ACCEPTANCE.md` 的关卡 B–D 走，`scripts/rp2350/pio_accept.py`
+一条命令跑完；详细记录在 `docs/OPEN-ITEMS.md` §32。
 
-- `loopback.pio`：`pio asm`、`start`、`tx 1 0 1 1`、`rx 4`，读回应逐位一致；
-- `blink.pio`：GP25 约 2 Hz，示波器看；
+- **`rp2350`（ARM）17/17、`rp2350rvsmp`（RV32）17/17**（2026-11-15）；
+- `loopback.pio`：`pio asm` → `start` → `tx 0 0 1 0 1 1` → `rx 0 0 4`，读回
+  `80000000 00000000 80000000 80000000`——一位的 `in pins` 落在 ISR 的 bit31
+  （右移），而且紧跟 `out pins` 之后读到的就是同一拍的电平，没有延迟；
+- `blink.pio` / `blink3.pio`：GP3（本板 LED）约 2 Hz，只判到"装入成功"，看灯要
+  `--visual`；
 - `ws2812.pio`：编码与 pico-sdk `pioasm` 生成的 `ws2812.pio.h` 逐字一致
   （`6221 1123 1400 a442`）；实机接一条灯带，`pio tx` 写 `pixel_grb << 8` 看颜色。
+
+真机上踩过、以后改驱动前先看的三条：`SHIFTCTRL` 别写 0（会变成左移，`out pins`
+出 MSB）；清 FIFO 的 `FJOIN_RX` 位在 RP2350 是 bit31、RP2040 是 bit14；
+`SM_EXECCTRL` 的 wrap 字段在两颗芯片上都是 `[16:12]`/`[11:7]`。

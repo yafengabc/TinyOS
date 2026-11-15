@@ -108,7 +108,7 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 | littlefs @ flash 0x80000（ROM flash API） | ✅ 挂载 / ◐ 写 | shell 能启动说明根文件系统挂上了；写/擦路径要用 `dd` 再验 |
 | USB CDC（TinyUSB，IRQ 5） | ◐ 调试中 | 目前 trace 是 BUS_RESET + DEV_SUSPEND、没有 SETUP_REQ；已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B |
 | PWM / UART1 / SPI0-1 / I2C0-1 / DMA | ◐ | 驱动 + 用户命令已接，menuconfig 可裁；实机覆盖以自测为准 |
-| PIO（2 块 / 8 个 SM + 用户态汇编器） | ◐ | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel`；汇编器已在 x86 上核对编码，Pico 实机待测（见 `docs/PIO.md`） |
+| PIO（2 块 / 8 个 SM + 用户态汇编器） | ◐ | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；**RP2350 上已 17/17**（同一份 `drivers/pio/rp2`，只是 `RP_PIO_*` 常量不同），Pico 实机仍待测；清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
 | `rp2040smp`（core 1） | ◐ | 目标可构建，握手走 SIO FIFO；未做完整验收 |
 | BOOTSEL 回退（Ctrl-D） | ◐ | ROM 调用路径已实现，含看门狗 scratch 标记 |
 | 内存保护 | ☐ | 硬件没有，`prot` 在本板会真的写穿；默认不打包 |

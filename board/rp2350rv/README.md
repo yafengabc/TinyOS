@@ -56,6 +56,7 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
 | 单 hart `rp2350rv` | ✅ 实机 | 46 个文件、`py pytest.py` 54 项全过 |
 | 双 hart `rp2350rvsmp` | ✅ 实机 | `[smp] 2 of 2 CPU(s) online`、`smpbench` 1.89–2.01x |
 | 管道、`sleep`、`reboot`、`piperace` | ✅ 实机 | 见 `docs/OPEN-ITEMS.md` §25 验收表 |
+| PIO（同一驱动，RV32 侧） | ✅ 实机 | `pio_accept.py --image rp2350rvsmp` 17/17，回环四字往返与 ARM 侧一致 |
 | 分区拉伸到 3.5 MiB | ☐ | 现在固定 75 块，拉伸是后续工作 |
 
 ## 已知限制
