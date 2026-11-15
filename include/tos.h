@@ -78,7 +78,19 @@
 #define PIO_TX       3   /* req.buf = u32 words, req.len = count          */
 #define PIO_RX       4
 #define PIO_RELEASE  5
-#define PIO_STATE    6   /* req.buf = u32[8]: SM registers read back      */
+#define PIO_STATE    6   /* req.buf = u32[PIO_STATE_WORDS]: SM registers  */
+/* Execute one instruction immediately through SMx_INSTR (req.len = opcode).
+ * This is the probe that separated "the machine is not running" from "the
+ * machine runs and the pin does not move": `pio exec 0 0 0xe081` (set
+ * pindirs,1) followed by `pio exec 0 0 0xe001` (set pins,1) drives the pad
+ * directly, with no program and no FIFO in the way. */
+#define PIO_EXEC     7
+
+/* ctrl, fstat, execctrl, shiftctrl, pinctrl, clkdiv, addr, owner,
+ * gpio_ctrl, pad, flevel.  The last three exist because the pin is half of
+ * every PIO question: FUNCSEL, IE/OD/ISO and the FIFO levels are what tell
+ * "the machine never drove it" from "it drove it and nothing read it". */
+#define PIO_STATE_WORDS 11
 
 #define PIO_F_SIDE_OPT     0x01   /* .side_set N opt                    */
 #define PIO_F_SIDE_PINDIR  0x02   /* .side_set N pindirs                */

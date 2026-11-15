@@ -35,6 +35,7 @@
 #define PIO_CTRL           0x000u
 #define PIO_FSTAT          0x004u
 #define PIO_FDEBUG         0x008u
+#define PIO_FLEVEL         0x00cu
 #define PIO_TXF(n)         (0x010u + 4u * (uint32_t)(n))
 #define PIO_RXF(n)         (0x020u + 4u * (uint32_t)(n))
 #define PIO_INSTR_MEM(i)   (0x048u + 4u * (uint32_t)(i))
@@ -53,17 +54,35 @@
 #define FSTAT_TXFULL(sm)   (1u << (16 + (sm)))
 #define FSTAT_RXEMPTY(sm)  (1u << (8 + (sm)))
 
-/* SMx_EXECCTRL bit layout (pico-sdk PIO_SM0_EXECCTRL_*): WRAP_BOTTOM [4:0],
- * WRAP_TOP [11:7], SIDE_EN [12], SIDE_PINDIR [13].  These two flags used to be
- * written as bits 30/29, which is 18 positions too high - and `exec` built
- * the wrap fields at bits 12/7, so WRAP_TOP landed on SIDE_EN and both wrap
- * fields were zero.  A machine in wrap 0..0 executes instruction 0 forever:
- * it never pulls, so `pio tx` fills a FIFO nothing drains and `pio rx` returns
- * zero words (measured on the RP2350). */
-#define EXEC_WRAP_BOTTOM(b) ((uint32_t)((b) & 0x1fu))
-#define EXEC_WRAP_TOP(t)    ((uint32_t)((t) & 0x1fu) << 7)
-#define EXEC_SIDE_EN       (1u << 12)   /* `.side_set N opt`            */
-#define EXEC_SIDE_PINDIR   (1u << 13)
+/* SMx_SHIFTCTRL: FJOIN_RX [15:14] (bits 13/14 shared with FJOIN_TX), i.e.
+ * 1 = both FIFOs as TX, 2 = both as RX, 3 = one 8-deep RX.  Toggling bit 14
+ * is the flush (see clear_fifos). */
+#define SHIFTCTRL_FJOIN_RX RP_PIO_FJOIN_RX_BIT
+
+/* SHIFTCTRL's reset value is 0x000c0000: IN_SHIFTDIR and OUT_SHIFTDIR both
+ * mean "shift right".  A driver that programs SHIFTCTRL with the caller's
+ * bits alone therefore flips both shifters to shift *left*, and `out pins`
+ * starts emitting the MSB of the word instead of the LSB - which looks like
+ * a dead pin: four words of 0x00000001 came back as 00000000 and only an
+ * all-ones pattern (0xffffffff) echoed correctly (measured on the RP2350).
+ * Keep the two direction bits unless the caller asks otherwise. */
+#define SHIFTCTRL_RIGHT_BOTH 0x000c0000u
+
+/* SMx_EXECCTRL bit layout, from pico-sdk's hardware/regs/pio.h (identical on
+ * the RP2040 and the RP2350): WRAP_TOP [16:12], WRAP_BOTTOM [11:7],
+ * SIDE_EN bit 30, SIDE_PINDIR bit 29.
+ *
+ * This got "fixed" the wrong way once already.  The fields looked like they
+ * belonged at [11:7]/[4:0] the way PINCTRL's do, so a rebuild moved them
+ * there - and every PIO program on the board then ran in a wrap window
+ * nobody had asked for: `pio start` reported ok, the machine sat on an
+ * address past the end of the program, `tx` filled a FIFO nothing drained
+ * and the pin never moved.  Check the register header before touching these,
+ * not the neighbouring register's layout. */
+#define EXEC_WRAP_TOP(t)    ((uint32_t)((t) & 0x1fu) << 12)
+#define EXEC_WRAP_BOTTOM(b) ((uint32_t)((b) & 0x1fu) << 7)
+#define EXEC_SIDE_EN       (1u << 30)   /* `.side_set N opt`            */
+#define EXEC_SIDE_PINDIR   (1u << 29)
 
 #define PINCTRL_SIDESET_CNT(n)  ((uint32_t)(n) << 29)
 #define PINCTRL_SET_CNT(n)      ((uint32_t)(n) << 26)
@@ -82,6 +101,21 @@ static int     pio_inited;
 static int block_ok(int b)
 {
     return b >= 0 && b < RP_PIO_BLOCKS;
+}
+
+/* PIO hangs off the RP2350 fast bus, where a store is acknowledged before it
+ * reaches the peripheral; two stores from the same function are not ordered
+ * with respect to each other without a barrier.  This bit the driver hard:
+ * the jmp that sets the PC could land *before* the CTRL.ENABLE next to it,
+ * so the machine was enabled on top of a PC nobody had set yet.  pico-sdk
+ * gets away with compiler barriers only because its stores are spaced out. */
+static void pio_fence(void)
+{
+#if defined(__arm__)
+    __asm__ volatile ("dsb" ::: "memory");
+#else
+    __asm__ volatile ("fence iorw, iorw" ::: "memory");
+#endif
 }
 
 static void pio_init_once(void)
@@ -125,6 +159,25 @@ static void stop_sm(int block, int sm)
 
     mmio_write32(base + PIO_CTRL,
                  mmio_read32(base + PIO_CTRL) & ~CTRL_ENABLE(sm));
+}
+
+/* Empty both FIFOs.
+ *
+ * SM_RESTART resets the shift registers and the PC, but the four words of
+ * FIFO storage survive it, so a reload inherits whatever the previous user
+ * left behind.  That is what made `pio tx` answer "wrote 0 word(s)" on a
+ * freshly loaded machine (measured on the RP2350): the TX FIFO still held
+ * four stale words from an earlier program, and FSTAT reported it full.
+ * Toggling FJOIN_RX twice is the documented flush - changing the join state
+ * reallocates the FIFO storage - and it is what pico-sdk's
+ * pio_sm_clear_fifos() does. */
+static void clear_fifos(int block, int sm)
+{
+    uint32_t base = RP_PIO_BASE(block);
+    uint32_t sc = mmio_read32(base + PIO_SM(sm, SM_SHIFTCTRL));
+
+    mmio_write32(base + PIO_SM(sm, SM_SHIFTCTRL), sc ^ SHIFTCTRL_FJOIN_RX);
+    mmio_write32(base + PIO_SM(sm, SM_SHIFTCTRL), sc);
 }
 
 static void release_sm(int block, int sm)
@@ -206,11 +259,17 @@ static int pio_load(struct pio_req *q, int pid)
 
     base = RP_PIO_BASE(b);
 
-    /* Stop, clear internal state and both FIFOs, then load the words. */
+    /* Same order pico-sdk's pio_sm_init() uses: stop, flush the FIFOs through
+     * SHIFTCTRL, restart, then program the configuration.  Doing the restart
+     * first and the flush second left the machine holding FIFO state that
+     * disagreed with FSTAT (measured on the RP2350: `tx` reported four words
+     * queued, FLEVEL agreed, and the machine's pull never saw them). */
     stop_sm(b, sm);
+    clear_fifos(b, sm);
     mmio_write32(base + PIO_CTRL,
                  mmio_read32(base + PIO_CTRL) | CTRL_RESTART(sm));
     mmio_write32(base + PIO_FDEBUG, 0x0f0f0f0fu);
+    pio_fence();
 
     {
         const uint16_t *w = (const uint16_t *)q->buf;
@@ -218,6 +277,7 @@ static int pio_load(struct pio_req *q, int pid)
         for (int i = 0; i < q->len; i++)
             mmio_write32(base + PIO_INSTR_MEM(q->origin + i), w[i]);
     }
+    pio_fence();
 
     /* Clock divider: INT [31:16], FRAC [15:8]; 0 would mean /65536. */
     {
@@ -237,7 +297,8 @@ static int pio_load(struct pio_req *q, int pid)
         exec |= EXEC_SIDE_PINDIR;
     mmio_write32(base + PIO_SM(sm, SM_EXECCTRL), exec);
 
-    mmio_write32(base + PIO_SM(sm, SM_SHIFTCTRL), (uint32_t)q->shiftctrl);
+    mmio_write32(base + PIO_SM(sm, SM_SHIFTCTRL),
+                 (uint32_t)q->shiftctrl | SHIFTCTRL_RIGHT_BOTH);
 
     pinctrl = PINCTRL_SIDESET_CNT(q->side_set);
     if (q->pin_base >= 0) {
@@ -318,12 +379,11 @@ static int claim_sm(int block, int sm, int pid)
  * offset writes a plausible-looking value somewhere else, and no amount of
  * reading the driver tells you which.  Eight words: CTRL, FSTAT, EXECCTRL,
  * SHIFTCTRL, PINCTRL, CLKDIV, ADDR, owner pid. */
-#define PIO_STATE_WORDS 8
-
 static int pio_state(struct pio_req *q)
 {
     uint32_t *w = (uint32_t *)q->buf;
     uint32_t base;
+    int base_pin = pio_pinbase[q->block][q->sm];
 
     if (!w || q->len < PIO_STATE_WORDS)
         return -1;
@@ -336,6 +396,15 @@ static int pio_state(struct pio_req *q)
     w[5] = mmio_read32(base + PIO_SM(q->sm, SM_CLKDIV));
     w[6] = mmio_read32(base + PIO_SM(q->sm, SM_ADDR));
     w[7] = (uint32_t)pio_owner[q->block][q->sm];   /* 0 = unowned */
+    /* The pin side, because half of every PIO question is "did the pad move
+     * and did anything read it": FUNCSEL, IE/OD/ISO and the FIFO levels
+     * answer that without a scope.  No instruction-memory dump: INSTR_MEM0..31
+     * are write-only on both parts, so a read returns zero and looks exactly
+     * like a program that failed to load.  `pio exec` probes the program
+     * instead. */
+    w[8] = base_pin >= 0 ? mmio_read32(RP_GPIO_CTRL(base_pin)) : 0xffffffffu;
+    w[9] = base_pin >= 0 ? mmio_read32(RP_GPIO_PAD(base_pin)) : 0xffffffffu;
+    w[10] = mmio_read32(base + PIO_FLEVEL);
     return PIO_STATE_WORDS;
 }
 
@@ -358,6 +427,7 @@ int plat_pio(int op, struct pio_req *req, int pid)
         base = RP_PIO_BASE(req->block);
         mmio_write32(base + PIO_CTRL,
                      mmio_read32(base + PIO_CTRL) | CTRL_ENABLE(req->sm));
+        pio_fence();
         return 0;
 
     case PIO_STOP:
@@ -396,6 +466,21 @@ int plat_pio(int op, struct pio_req *req, int pid)
         if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
             return -1;
         return pio_state(req);
+
+    case PIO_EXEC:
+        if (!block_ok(req->block) || req->sm < 0 || req->sm > 3)
+            return -1;
+        /* Writing SMx_INSTR hands the instruction to the machine.  With the
+         * machine running the write is taken at the next instruction
+         * boundary; with it disabled it takes effect too - which is how
+         * `jmp 0` moves a PC that SM_RESTART did not put where we wanted.
+         * If the machine is stalled on a pull or a push the write blocks,
+         * so it is not something to fire blindly at a live machine. */
+        base = RP_PIO_BASE(req->block);
+        mmio_write32(base + PIO_SM(req->sm, SM_INSTR),
+                     (uint32_t)req->len & 0xffffu);
+        pio_fence();
+        return 0;
     }
     return -1;
 }

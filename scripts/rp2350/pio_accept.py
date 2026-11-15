@@ -55,8 +55,15 @@ WORDS = {
     "ws2812": [0x6221, 0x1123, 0x1400, 0xA442],
 }
 
-# What the loopback SM must hand back after `pio tx 0 0 1 0 1 1`.
-RX_WORDS = [0x00000001, 0x00000000, 0x00000001, 0x00000001]
+# What the loopback SM hands back after `pio tx 0 0 1 0 1 1`: the same four
+# bits, in the same order, one bit per word.  A one-bit `in pins` shifts into
+# the top of the ISR (IN_SHIFTDIR = right, which is the reset value), so a
+# high level arrives as 0x80000000 and not as 0x00000001.  Measured on the
+# RP2350 once `out pins` was finally emitting the LSB: tx 1 0 1 1 gave
+# 80000000 00000000 80000000 80000000, and tx 0 1 0 1 gave the matching
+# 00000000 80000000 00000000 80000000.  There is no one-cycle lag: the
+# synchronised pin is already the level `out pins` drove in the same pass.
+RX_WORDS = [0x80000000, 0x00000000, 0x80000000, 0x80000000]
 
 WORD_LINE = re.compile(r"^\s+([0-9a-fA-F]{4}): ([0-9a-fA-F]{4})\s*$", re.M)
 RX_LINE = re.compile(r"pio: read (\d+) word\(s\):((?:\s+[0-9a-fA-F]+)+)")

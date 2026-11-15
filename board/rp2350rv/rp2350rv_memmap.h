@@ -145,6 +145,10 @@
 #define RP_PIO_BASE(b)      (0x50200000u + 0x100000u * (uint32_t)(b))
 #define RP_PIO_RESET_BIT(b) (1u << (11 + (b)))
 #define RP_PIO_FUNCSEL(b)   (6u + (uint32_t)(b))
+/* SHIFTCTRL.FJOIN_RX: bit 15 on the RP2040 (bits [15:14]), bit 31 on the
+ * RP2350, which grew the two thresholds into the space between.  Changing
+ * it is what flushes a FIFO, so the bit has to be right. */
+#define RP_PIO_FJOIN_RX_BIT (1u << 31)
 
 /* SIO GPIO.  RP2350 words are 8 bytes apart (64-bit GPIO for the B part),
  * but the low 32 bits still cover GPIO0..31. */

@@ -40,6 +40,7 @@
 #define RP_PIO_BASE(b)      (0x50200000u + 0x100000u * (uint32_t)(b))
 #define RP_PIO_RESET_BIT(b) (1u << (10 + (b)))
 #define RP_PIO_FUNCSEL(b)   (6u + (uint32_t)(b))
+#define RP_PIO_FJOIN_RX_BIT (1u << 14)
 
 /* GPIO mux and pad registers (PIO pin muxing needs them directly). */
 #define RP_GPIO_CTRL(n) (IO_BANK0_BASE + 0x04u + 8u * (uint32_t)(n))

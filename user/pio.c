@@ -6,6 +6,8 @@
  *   pio rel   <block> <sm>        stop and hand the pins back
  *   pio tx    <block> <sm> <word>...
  *   pio rx    <block> <sm> <count>
+ *   pio regs  <block> <sm>        registers, pin mux and FIFO levels
+ *   pio exec  <block> <sm> <word> execute one instruction through SMx_INSTR
  *
  * The assembler is deliberately on the device: a PIO program is 32 words at
  * most, so editing a file with `edit`, running `pio asm`, and watching a
@@ -804,7 +806,9 @@ static void usage(void)
     puts("usage: pio asm <file> [block] [sm]\n"
          "       pio start|stop|rel <block> <sm>\n"
          "       pio tx <block> <sm> <word>...   (hex or decimal)\n"
-         "       pio rx <block> <sm> <count>\n");
+         "       pio rx <block> <sm> <count>\n"
+         "       pio regs <block> <sm>          register and pin readback\n"
+         "       pio exec <block> <sm> <word>   run one instruction now\n");
 }
 
 int main(int argc, char *argv[])
@@ -853,15 +857,15 @@ int main(int argc, char *argv[])
     }
 
     if (!strcmp(argv[1], "regs")) {
-        static const char *name[8] = {
-            "ctrl", "fstat", "execctrl", "shiftctrl",
-            "pinctrl", "clkdiv", "addr", "owner",
+        static const char *name[PIO_STATE_WORDS] = {
+            "ctrl", "fstat", "execctrl", "shiftctrl", "pinctrl",
+            "clkdiv", "addr", "owner", "gpio_ctrl", "pad", "flevel",
         };
-        uint32_t w[8];
-        int n;
+        uint32_t w[PIO_STATE_WORDS];
+        int n, base_pin;
 
         q.buf = w;
-        q.len = 8;
+        q.len = PIO_STATE_WORDS;
         n = pio_call(PIO_STATE, &q);
         if (n < 0) {
             puts("pio: cannot read the state machine\n");
@@ -869,6 +873,19 @@ int main(int argc, char *argv[])
         }
         for (int i = 0; i < n; i++)
             printf("  %-10s %08x\n", name[i], w[i]);
+
+        /* The decoded half: the pin is what every PIO question ends up
+         * being about, and these four fields say whether the pad is even
+         * connected to this block.  fifo counts come from FLEVEL, which is
+         * the only place that says "the machine never pulled" without a
+         * guess. */
+        base_pin = (int)(w[4] & 0x1fu);        /* PINCTRL OUT_BASE */
+        if (w[8] != 0xffffffffu)
+            printf("  pin        gp%d funcsel=%u ie=%d od=%d iso=%d\n",
+                   base_pin, w[8] & 0x1fu, (int)((w[9] >> 6) & 1u),
+                   (int)((w[9] >> 7) & 1u), (int)((w[9] >> 8) & 1u));
+        printf("  fifo       tx0=%u rx0=%u\n",
+               (unsigned)(w[10] & 0x0fu), (unsigned)((w[10] >> 4) & 0x0fu));
         return 0;
     }
 
@@ -913,6 +930,24 @@ int main(int argc, char *argv[])
         for (int i = 0; i < v; i++)
             printf(" %08x", w[i]);
         putchar('\n');
+        return 0;
+    }
+
+    if (!strcmp(argv[1], "exec")) {
+        int op;
+
+        if (argc < 5 || number(argv[4], &op) < 0) {
+            puts("usage: pio exec <block> <sm> <word>\n");
+            return 1;
+        }
+        q.len = op;
+        if (pio_call(PIO_EXEC, &q) < 0) {
+            puts("pio: exec failed\n");
+            return 1;
+        }
+        /* Nothing to print beyond the echo: the instruction did or did not
+         * move the pin, and `gpio`/`pio regs` are what show that. */
+        printf("pio: executed %04x\n", (unsigned)(op & 0xffff));
         return 0;
     }
 
