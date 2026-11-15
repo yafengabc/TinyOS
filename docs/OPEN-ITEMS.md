@@ -2994,14 +2994,31 @@ ROM 前后 `cpsid i`/恢复、`rp2040smp` 还会先把另一个核停进
 这类经典坑已经堵住了，剩下的可疑面是：littlefs 自身的分配扫描、USB/控制台路径在
 块操作之间的 `tty_poll()`、以及"卡"到底有没有伴随复位。
 
-**新加的诊断（`2ca645e` 之后，随下一次构建生效）**：每次 ROM 调用前往 watchdog
-scratch 写一条面包屑（`scratch[1]` = 魔数|op，`scratch[2]` = 地址，`scratch[3]` =
-长度），返回后清掉。这些 scratch 跨复位保留，所以：
+**这块板没有 RESET 键，只能拔电**，所以"跨复位保留"的 watchdog scratch 在它身上
+等于没有——拔电就全清了。真正能用的记录只有**线上还在的那行字**：
 
-- **卡死之后按一下 RESET**，启动横幅里会出现
-  `[flash] previous boot stopped in erase addr=0x… len=0x…`（或 `program`）——
-  说明死的是 ROM 的擦/写，还是调用之后（面包屑已被清掉，那就是 littlefs 或控制台）；
-- 对应的 flash 偏移可以换算成 littlefs 的块：`addr - 0x80000` 除以 4096。
+**实时 flash 追踪（Ctrl-L 开关，默认关）**：`board/rp2040/platform.c` 里每次
+`plat_block_erase/write` 在进 ROM 之前打印
+
+```
+[flash] erase 0x000A0000+0x00001000
+[flash] erase ok 0x000A0000+0x00001000
+[flash] program 0x000A0000+0x00001000
+[flash] program ok 0x000A0000+0x00001000
+```
+
+打印在关中断窗口里做（调试 UART 是轮询的，不依赖中断），并且会等发送 FIFO 排空再进
+ROM 调用——所以**卡死时串口上最后一行就是现场**：
+
+- 停在 `[flash] erase …` 而没有 `ok` → 死在这颗扇区的 ROM 擦除里；
+- 停在 `program …` 同理；
+- **一行 `[flash]` 都没有** → 根本没进块层，问题在 littlefs 或它前面。
+
+开关：UART 上按 **Ctrl-L**（`0x0C`）切换，会回一行 `[flash] op trace ON/OFF`。
+
+（watchdog scratch 的面包屑仍然保留，只对**有 RESET 键**的板子有意义：那种板上
+复位后启动横幅会打 `[flash] previous boot stopped in <erase|program> addr=…`。
+拔电复位会把它清掉，别指望。）
 
 **上板时请顺手记这四条**（每条都能砍掉一半可能性）：
 

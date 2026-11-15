@@ -240,6 +240,7 @@ typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 #define E15_CHAR                0x05u   /* Ctrl-E: E15 workaround ON      */
 #define E15_OFF_CHAR            0x17u   /* Ctrl-W: E15 workaround OFF     */
 #define BOOTSEL_ROM_CHAR        0x02u   /* Ctrl-B: test ROM call directly */
+#define FLASH_TRACE_CHAR        0x0cu   /* Ctrl-L: trace every flash op  */
 
 #define WD_BASE         0x40058000u
 #define WD_CTRL_REG     (*(volatile uint32_t *)(WD_BASE + 0x00u))
@@ -257,6 +258,35 @@ typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 #define FLASH_MARK_MAGIC 0x464c0000u        /* "FL" in the high half      */
 #define FLASH_MARK_ERASE 1u
 #define FLASH_MARK_PROG  2u
+
+/* When on, every erase/program prints its address and length before it starts
+ * and "ok" after.  This exists because this board has no RESET button: the
+ * watchdog-scratch breadcrumb below only survives a reset, and recovery here
+ * is a power cycle, which clears the scratch.  A live line on the wire is the
+ * only record that survives a hang. */
+static volatile int g_flash_trace;
+
+/* Interrupts are already off when this runs; the debug UART is polled, so a
+ * line written here reaches the host before the ROM call takes XIP away.  The
+ * transmit FIFO needs to be empty first, otherwise the last bytes are still
+ * in it when the SSI goes into serial command mode. */
+static void flash_trace(const char *what, uint32_t addr, uint32_t len)
+{
+    if (!g_flash_trace)
+        return;
+    dbg_uart_puts("[flash] ");
+    dbg_uart_puts(what);
+    dbg_uart_puts(" 0x");
+    dbg_uart_hex(addr);
+    dbg_uart_puts("+0x");
+    dbg_uart_hex(len);
+    dbg_uart_puts("\n");
+    for (uint32_t i = 0; i < 300000u; i++) {
+        uint32_t fr = mmio_read32(RP_UART_FR);
+        if ((fr & RP_UART_FR_TXFE) && !(fr & RP_UART_FR_BUSY))
+            break;
+    }
+}
 
 static void flash_mark(uint32_t op, uint32_t addr, uint32_t len)
 {
@@ -540,6 +570,12 @@ static void bootsel_poll_uart(void)
         return;
     case REPLUG_CHAR: g_replug_req = 1; return;
     case TRACE_CHAR:  g_trace_req  = 1; return;
+    case FLASH_TRACE_CHAR:
+        g_flash_trace = !g_flash_trace;
+        dbg_uart_puts(g_flash_trace
+                          ? "[flash] op trace ON (Ctrl-L again to stop)\n"
+                          : "[flash] op trace OFF\n");
+        return;
     case E15_CHAR:
         usb_cdc_set_e15(1);
         dbg_uart_puts("[usb] E15 forced-J workaround ON\n");
@@ -1057,7 +1093,9 @@ int plat_block_erase(uint32_t lba, uint32_t count)
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
     flash_mark(FLASH_MARK_ERASE, addr, end - addr);
+    flash_trace("erase", addr, end - addr);
     int rc = rp_flash_op(addr, NULL, end - addr, 1);
+    flash_trace("erase ok", addr, end - addr);
     flash_mark_clear();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
@@ -1080,7 +1118,9 @@ int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
     __asm__ volatile("cpsid i" ::: "memory");
     flash_mark(FLASH_MARK_PROG, addr, count * 512u);
+    flash_trace("program", addr, count * 512u);
     int rc = rp_flash_op(addr, (const uint8_t *)buf, count * 512u, 0);
+    flash_trace("program ok", addr, count * 512u);
     flash_mark_clear();
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
