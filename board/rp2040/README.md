@@ -107,7 +107,7 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 | 125 MHz 时钟、SysTick、UART0 分频 | ✅ | 启动探针逐段打印，卡住能定位 |
 | UART0 控制台 + shell | ✅ 实机 | 启动探针、提示符都从 GP0/GP1 出；`scripts/rp2040/autoflash.py --probe/--accept` 就是按"能到 shell"写的 |
 | littlefs @ flash 0x80000（ROM flash API） | ✅ 挂载 / ◐ 写 | shell 能启动说明根文件系统挂上了；写/擦路径要用 `dd` 再验 |
-| USB CDC（TinyUSB，IRQ 5） | ◐ 调试中 | 目前 trace 是 BUS_RESET + DEV_SUSPEND、没有 SETUP_REQ；已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B |
+| USB CDC（TinyUSB，IRQ 5） | ◐ 调试中 | 目前 trace 是 BUS_RESET + DEV_SUSPEND、没有 SETUP_REQ；已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B。**启动快照默认关**（`TOS_USB_BOOT_SNAPSHOT=1` 才在 1 s/3 s 自动 dump），平时按 trace 键取同一份；Ctrl-D 在本板是**故意禁用**的（ROM 的 `reset_usb_boot()` 不可靠，用 BOOTSEL 按钮） |
 | PWM / UART1 / SPI0-1 / I2C0-1 / DMA | ◐ | 驱动 + 用户命令已接，menuconfig 可裁；实机覆盖以自测为准 |
 | PIO（2 块 / 8 个 SM + 用户态汇编器） | ◐ | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；**RP2350 上已 17/17**（同一份 `drivers/pio/rp2`，只是 `RP_PIO_*` 常量不同），Pico 实机仍待测；清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
 | `rp2040smp`（core 1） | ◐ | 目标可构建，握手走 SIO FIFO；未做完整验收 |

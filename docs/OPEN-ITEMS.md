@@ -2934,6 +2934,54 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 
 `pio_accept.py` 把这项记成"已装入"是对的：它判的是 pad，不是灯。
 
+### 32.3 2026-11-15 RP2040 第一轮：PIO 其实是过的，是判据旧了
+
+按 §32 的顺序上板（`run_rp2040_accept.py`，原始回显
+`build/rp2040-accept-1115-213218.log`）：
+
+| 关卡 | 结果 |
+| --- | --- |
+| A 镜像自检 | **PASS**（`pio0`/`pio1` 都在 `/proc/dev`，`/bin/pio` 存在） |
+| B PIO 回环 | 报告 FAIL，**但这是判据的问题，见下** |
+| C PIO LED | 汇编 11 字与清单逐字一致；闪烁没肉眼验 |
+| E 外设 | **PASS**（`dma` 256 B 校验、`pwm`/`uart`/`spi`/`i2c` 命令都正常） |
+| E littlefs | **PASS**（`dd` 写 4096 B，`reboot` 后文件还在） |
+
+**B 的"FAIL"是期望值写反了，不是驱动 bug。** 实测读回
+
+```
+80000000 00000000 80000000 80000000
+```
+
+而脚本期望 `00000001 00000000 00000001 00000001`。这正是 **RP2350 上量到的那个
+形状**：`SMx_SHIFTCTRL` 的复位值里 `IN_SHIFTDIR = 1`（右移），一位的 `in pins` 从
+**ISR 的 bit31** 进来，所以高电平读回 `0x80000000` 而不是 `0x00000001`。四次的
+"有无"是 `1 0 1 1`，一位不差，只是位置在顶端。`scripts/rp2350/pio_accept.py` 里
+`RX_WORDS` 从 RP2350 那一轮起就是 `80000000` 基准的，注释也写了"没有一拍延迟"。
+**所以 RP2040 的回环是通的**（pad 驱动、IN 索引、移位方向三件事都对），只是
+RP2040 这一轮用的是另写的一个脚本，期望值停在了修 `SHIFTCTRL` 之前。
+
+下次直接跑仓库里的那一份，判据和平台无关：
+
+```sh
+python scripts/rp2350/pio_accept.py --image rp2040 --uf2 build/rp2040.uf2
+python scripts/rp2350/pio_accept.py --image rp2040 --no-flash --visual   # 眼睛那两项
+```
+
+**剩下没验的只有 C 的"眼睛"**：GP25 是否约 2 Hz、灯带是否亮红（需要接 GP4）。
+§32 的 RP2040 半边因此只差这一项。
+
+**顺带修掉的两件噪音**（同一轮报告）：
+
+- `[usb@]` / `[tr N]` / `[usblog]` 每次启动刷屏：那是
+  `board/rp2040/platform.c` 里 1 s 和 3 s 两次自动 USB 快照，调试枚举时加的。现在
+  由 `TOS_USB_BOOT_SNAPSHOT` 控制、**默认关闭**；同一个 dump 仍然按一个键就要得到
+  （`TRACE_CHAR` → `g_trace_req`）。要原来的行为在构建时加
+  `-DTOS_USB_BOOT_SNAPSHOT=1`。
+- **Ctrl-D 不生效是设计使然**：RP2040 端口里它就是关掉的（`[bootsel] Ctrl-D
+  disabled: use the BOOTSEL button`），因为 ROM 的 `reset_usb_boot()` 在这块板子上
+  不可靠（见 `clocks_init` 上方那段注释）。不再追这条。
+
 ## 33. 待真机清单（2026-11-14 汇总）
 
 这一节只列**代码已落地、等板子**的项，按“刷哪个镜像、跑什么、判什么”写。上机

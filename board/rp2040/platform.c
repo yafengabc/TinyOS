@@ -751,12 +751,19 @@ void plat_timer_tick(void)
         usb_dump("[usbt] ");
         usb_cdc_trace_dump();
     }
-    /* Two late snapshots: by 1 s the host has had time to enumerate with
-     * interrupts unmasked (they are still masked during the early wait). */
+    /* Two late snapshots, off by default: by 1 s the host has had time to
+     * enumerate with interrupts unmasked, which is what the USB bring-up
+     * needed to see - but they dump the whole interrupt ring and the TinyUSB
+     * log buffer on every boot, and that floods the console in normal use.
+     * The same dump is still one key away (TRACE_CHAR -> g_trace_req above),
+     * which is how it should have been from the start.  Build with
+     * -DTOS_USB_BOOT_SNAPSHOT=1 to get the automatic ones back. */
+#if defined(TOS_USB_BOOT_SNAPSHOT) && TOS_USB_BOOT_SNAPSHOT
     if (g_ticks == 1000u || g_ticks == 3000u) {
         usb_dump("[usb@] ");
         usb_cdc_trace_dump();
     }
+#endif
     /* SysTick reloads itself; nothing to re-arm. */
 }
 
