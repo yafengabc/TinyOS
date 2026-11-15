@@ -2419,7 +2419,8 @@ CH343**（约 18 轮 dd 之后 UART 的 host→MCU 方向会单向死掉，探�
 
 ## 29. 待真机验收：SMP 的删除/回收路径与 RV 的 USB 中断（2026-11-14）
 
-两条都只能在有 RP2350 的机器上做，代码已在 `threads-preemptive`。
+两条都只能在有 RP2350 的机器上做，代码已在 `main`（原 `threads-preemptive`，2026-11-15
+并入后该分支退休）。
 
 ### 29.1 `rp2350smp` / `rp2350rvsmp`：`dd` + `rm` 回收 200 轮
 

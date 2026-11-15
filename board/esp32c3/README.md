@@ -121,8 +121,8 @@ i2c write 0 0x3c 0x00 0xff   # 写寄存器 0x00 = 0xff
 
 ## 线程实验（kthreads）
 
-分支 `threads-preemptive` 在 C3 上做内核线程原型（评估材料见
-`docs/REAL-THREADS.md`）。构建与运行：
+C3 上也有一份内核线程原型（`TOS_KTHREADS`，评估材料见 `docs/REAL-THREADS.md`；
+原 `threads-preemptive` 分支已并入 `main`，分支本身退休）。构建与运行：
 
 ```bash
 go run ./cmd/tos build -config configs/c3-kthreads.conf

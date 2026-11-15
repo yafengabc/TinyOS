@@ -61,7 +61,8 @@ echo hello > /dev/lcd0
 
 ## 线程实验（kthreads）
 
-分支 `threads-preemptive` 的内核线程在 RP2350 的两个架构上都能构建：
+内核线程在 RP2350 的两个架构上都能构建（原 `threads-preemptive` 分支已并入
+`main`）：
 
 ```bash
 go run ./cmd/tos build -config configs/rp2350smp-kthreads.conf    # Cortex-M33 x2
