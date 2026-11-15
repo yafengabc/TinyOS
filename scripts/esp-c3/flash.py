@@ -15,6 +15,7 @@ reclaimed block by block - no erase_region pass is needed.
     scripts/esp-c3/flash.py                  # build is assumed done
     scripts/esp-c3/flash.py --build          # tos build -target esp32c3 first
     scripts/esp-c3/flash.py --keep-fs -p COM4
+    scripts/esp-c3/flash.py --full -p COM4    # one combined image, like MicroPython
 
 The board's CH343 has DTR/RTS wired to the auto-download circuit, so esptool
 enters download mode by itself.  After writing we deliberately do NOT let
@@ -35,6 +36,7 @@ import serial
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = ROOT / "build" / "esp32c3.bin"
 FS = ROOT / "build" / "ramdisk-esp32c3.bin"
+FULL = ROOT / "build" / "esp32c3-full.bin"     # kernel padded to FS_OFFSET + fs
 FS_OFFSET = 0x80000
 
 
@@ -50,6 +52,10 @@ def main():
     ap.add_argument("-p", "--port", default="COM4")
     ap.add_argument("--build", action="store_true", help="run 'tos build -target esp32c3' first")
     ap.add_argument("--keep-fs", action="store_true", help="do not rewrite the littlefs image")
+    ap.add_argument("--full", action="store_true",
+                    help="flash build/esp32c3-full.bin at 0x0 (kernel + fs in one"
+                         " write, the way MicroPython ships); the split pair stays"
+                         " the default")
     ap.add_argument("--wait", type=float, default=20.0, help="seconds to wait for the prompt")
     args = ap.parse_args()
 
@@ -61,7 +67,11 @@ def main():
         subprocess.run(["go", "run", "./cmd/tos", "build", "-target", "esp32c3"],
                        cwd=ROOT, check=True)
 
-    for p in (KERNEL,) + (() if args.keep_fs else (FS,)):
+    if args.full and args.keep_fs:
+        sys.exit("--full rewrites the filesystem by definition; drop --keep-fs")
+
+    wanted = (FULL,) if args.full else (KERNEL,) + (() if args.keep_fs else (FS,))
+    for p in wanted:
         if not p.exists():
             sys.exit(f"missing {p}: build the esp32c3 target first")
 
@@ -74,9 +84,16 @@ def main():
         print("[keep-fs] user programs on the board are NOT updated "
               "(only safe if the ramdisk did not change)")
 
-    esptool(args.port, "--after", "no-reset", "write-flash", "0x0", str(KERNEL))
-    if not args.keep_fs:
-        esptool(args.port, "--after", "no-reset", "write-flash", hex(FS_OFFSET), str(FS))
+    if args.full:
+        # One write, one checksum: 0x20000..0x80000 is 0xFF padding here, so
+        # this is byte-identical to the split pair at every address the pair
+        # writes.  It does rewrite the filesystem - which is why --keep-fs is
+        # refused above.
+        esptool(args.port, "--after", "no-reset", "write-flash", "0x0", str(FULL))
+    else:
+        esptool(args.port, "--after", "no-reset", "write-flash", "0x0", str(KERNEL))
+        if not args.keep_fs:
+            esptool(args.port, "--after", "no-reset", "write-flash", hex(FS_OFFSET), str(FS))
 
     port = serial.Serial(args.port, 115200, timeout=0.05)
     port.dtr = False          # IO9 high: boot from flash, not download mode

@@ -378,7 +378,20 @@ go run ./cmd/tos menuconfig -print -config configs/esp32c3-wifi.conf   # 只输�
 
 ### ESP32-C3 联网（WiFi + 小型 IPv4 栈）
 
-烧写 `build/esp32c3.bin` 到 `0x0`、`build/ramdisk-esp32c3.bin` 到 `0x80000`：
+烧写分体两份：`build/esp32c3.bin` 到 `0x0`、`build/ramdisk-esp32c3.bin` 到 `0x80000`
+（`scripts/esp-c3/flash.py`，默认就是这两步）。构建还会输出一份**合体镜像**
+`build/esp32c3-full.bin`：内核补齐到 `0x80000` 后接上 littlefs，**一次写到 `0x0`**
+即可，和 MicroPython 那种"刷一个文件"一样：
+
+```
+python scripts/esp-c3/flash.py --full -p COM4    # 一次写 0x0
+python scripts/esp-c3/flash.py -p COM4           # 分体，默认（可 --keep-fs）
+```
+
+两者在"分体实际写到的每个地址"上字节完全相同；合体会把 `0x20000..0x80000` 的
+0xFF 填充也写一遍，所以 `--full` 必然重写文件系统（不支持 `--keep-fs`）。
+C3 实机验过：`--full` 之后 `accept.py` 24/24（本机 `tos.conf` 裁掉 `hello` 时是
+23/24，见 OPEN-ITEMS §33）。
 
 ```
 tos> wificonn songhome ********

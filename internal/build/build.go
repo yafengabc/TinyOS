@@ -1195,8 +1195,37 @@ func (b *Builder) buildKernel() error {
 					return err
 				}
 				b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
+
+				/* One file to flash at 0x0, the way MicroPython ships: the
+				 * kernel image padded to the filesystem offset, then the
+				 * littlefs image.  esptool writes a file linearly, so a
+				 * padded blob is the same two writes in one command - and
+				 * it is what a browser-based flasher or a "drop this onto
+				 * the chip" instruction can use.  The split pair stays the
+				 * default for flashing: it does not rewrite 0x20000..0x80000
+				 * and it keeps --keep-fs possible. */
+				fs, err := os.ReadFile(b.fsImage())
+				if err != nil {
+					return err
+				}
+				const fsOff = 0x80000
+				full := make([]byte, fsOff+len(fs))
+				for i := range full {
+					full[i] = 0xff
+				}
+				copy(full, img)
+				copy(full[fsOff:], fs)
+				fullPath := filepath.Join(b.BuildDir, "esp32c3-full.bin")
+				if err := os.WriteFile(fullPath, full, 0o644); err != nil {
+					return err
+				}
+				b.logf("      %s (%d bytes = kernel 0x%x..0x%x + fs 0x%x..0x%x)\n",
+					relName(b.Root, fullPath), len(full), 0, len(img),
+					fsOff, fsOff+len(fs))
 				b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x80000 %s\n",
 					relName(b.Root, out), relName(b.Root, b.fsImage()))
+				b.logf("      or one shot: esptool write-flash 0x0 %s\n",
+					relName(b.Root, fullPath))
 			case "rp2040":
 				if err := b.emitRP2040UF2(elfPath); err != nil {
 					return err
