@@ -60,6 +60,18 @@ RV32EMU 是纯解释器，代价随指令数走、±2% 确定。所以这是「�
 `-ramdisk` 也印证：它把文件系统放在 `0x3F080000`。要跑 RP2350 得补 SRAM/XIP 和
 XOSC/CLOCKS/PLL/FC0/TICKS/RESETS 一组外设桩——那是另一台机器。
 
+**ESP32-C3 这边能跑**（同一轮实测）：`-elf build/kernel-esp32c3.elf -ramdisk
+build/ramdisk-esp32c3.bin` 直接起到 `tos>`；`tostest emu test` 报
+`boot: 0.040 s / filesystem: ok / SMOKE TEST OK`。两个注意：
+
+- **手工起模拟器要带 `-rxdelay 5000000 -rxrate 64 -rxperiod 20000`**（`startEmulator()`
+  就是这么传的）。不带这三个参数时，内核每 tick 轮询控制台的代价会被放大，同一次启动
+  的墙钟时间从 0.3 s 变成 15–20 s，看起来像"卡在 tick self-check"；带上是 0.04 s 到
+  提示符；
+- **合体 `esp32c3-full.bin` 不能喂 `-flashimg`**：那条路要的是 ESP-IDF/MicroPython
+  的分区表（`[image] no app partition found (partition table @0x8000)`），而我们是
+  0x0 直接放 app。模拟器只认 ELF + ramdisk；合体镜像是给真机一次刷写用的。
+
 ## 3. 调度器优先级（已合并 `97b07c4`）
 
 三级（0/1/2）、同级轮转、唤醒即 `need_resched`、`nice <n> <prog>` 与 `prio <pid> <n>`。

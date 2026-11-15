@@ -140,9 +140,20 @@ func emuSmoke() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	ok, _ = s.waitFor([]byte("bin/sh"), 5*time.Second)
+	// `ls /` lists one level, so the marker is the directory entry itself
+	// ("bin/" and the readme that every image carries) - "bin/sh" was left
+	// over from a listing that printed whole paths, and made a working
+	// filesystem look broken.
+	ok, _ = s.waitFor([]byte("bin/"), 5*time.Second)
 	if !ok {
-		fmt.Fprintln(os.Stderr, "`ls` did not list the filesystem")
+		fmt.Fprintln(os.Stderr, "`ls /` did not list bin/; last output:")
+		fmt.Fprintln(os.Stderr, s.tail(800))
+		return 1
+	}
+	ok, _ = s.waitFor([]byte("readme.txt"), 3*time.Second)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "`ls /` did not list readme.txt; last output:")
+		fmt.Fprintln(os.Stderr, s.tail(800))
 		return 1
 	}
 	fmt.Println("filesystem: ok")
