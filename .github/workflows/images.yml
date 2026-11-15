@@ -67,17 +67,23 @@ jobs:
           if [ "$target" = "esp32c3" ]; then
             cp build/esp32c3.bin "$out/"
             cp build/ramdisk-esp32c3.bin "$out/"
+            cp build/esp32c3-full.bin "$out/"
             {
-              echo "TinyOS ESP32-C3 flash image"
+              echo "TinyOS ESP32-C3 flash images"
               echo
-              echo "The kernel boot image goes to flash offset 0x0, the"
-              echo "littlefs/ramdisk image to offset 0x80000:"
+              echo "One file, one write - kernel and littlefs together:"
+              echo
+              echo "  esptool --chip esp32c3 write-flash 0x0 esp32c3-full.bin"
+              echo
+              echo "Or the split pair, which leaves 0x20000..0x80000 untouched"
+              echo "and lets you update the kernel without rewriting the"
+              echo "filesystem:"
               echo
               echo "  esptool.py --chip esp32c3 write-flash 0x0     esp32c3.bin"
               echo "  esptool.py --chip esp32c3 write-flash 0x80000 ramdisk-esp32c3.bin"
               echo
-              echo "Newer esptool syntax allows both in one command:"
-              echo "  esptool --chip esp32c3 write-flash 0x0 esp32c3.bin 0x80000 ramdisk-esp32c3.bin"
+              echo "Both contain the same bytes at every address the split pair"
+              echo "writes; esp32c3-full.bin just pads to the filesystem offset."
               echo
               echo "Put the board in download mode first (hold BOOT, tap RESET)."
             } > "$out/FLASH-$target.txt"

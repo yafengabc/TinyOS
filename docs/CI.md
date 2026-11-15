@@ -7,7 +7,7 @@
 
 | 目标 | 文件 | 刷写方式 |
 | --- | --- | --- |
-| `esp32c3` | `esp32c3.bin` + `ramdisk-esp32c3.bin` | `esptool` 分别写 `0x0` 和 `0x80000` |
+| `esp32c3` | `esp32c3-full.bin`（推荐，一次写完）+ `esp32c3.bin` / `ramdisk-esp32c3.bin`（分体） | `esptool write-flash 0x0 esp32c3-full.bin`；分体见下 |
 | `rp2040` | `rp2040.uf2` | BOOTSEL 后拖到 `RPI-RP2` |
 | `rp2350` | `rp2350.uf2` | BOOTSEL 后拖到 `RP2350` |
 | `rp2350smp` | `rp2350smp.uf2` | 同上（双核） |
@@ -45,6 +45,14 @@ git push origin v0.1.0
 ```
 
 ## ESP32-C3 刷写
+
+**一次写完**（内核 + 文件系统在同一个文件里，和 MicroPython 的发布形态一样）：
+
+```bash
+esptool --chip esp32c3 write-flash 0x0 esp32c3-full.bin
+```
+
+**分体**（保留：只换内核时可以不动文件系统）：
 
 ```bash
 esptool.py --chip esp32c3 write-flash 0x0     esp32c3.bin
