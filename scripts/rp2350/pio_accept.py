@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """PIO acceptance on an RP2350 (the board that is actually plugged in).
 
-PIO has never run on hardware (OPEN-ITEMS 32).  The RP2040 path has no
-automated flow yet, so this drives the RP2350 first - same HAL, three blocks
-instead of two, and one extra thing to get wrong (block 2's FUNCSEL and the
-pad ISO bit).
+PIO has run on the RP2350 (17/17 on both images, OPEN-ITEMS 32.2); the RP2040
+uses the same HAL with two blocks instead of three, so the same run applies
+with --image rp2040 and the LED on GP25.
 
 What can be checked without eyes or wires is checked exactly:
 
@@ -152,6 +151,13 @@ def asm(con, results, path, block, sm, table, pins=None):
 
 
 def run_checks(con, results, opts):
+    if opts.led_pin < 0:
+        opts.led_pin = 25 if opts.image.startswith("rp2040") else 3
+    # The RP2040 has two PIO blocks; the RP2350's third one is what makes the
+    # ws2812 check exercise FUNCSEL 8 and the pad ISO bit, so it stays there
+    # when it exists.
+    ws_block, ws_sm = (1, 3) if opts.image.startswith("rp2040") else (2, 2)
+
     # 1. The files the build packs.  blink3 only exists once this board's LED
     #    pin was noticed, so an old image failing this is information.
     out = con.cmd("pio")
@@ -179,7 +185,8 @@ def run_checks(con, results, opts):
 
     # 4. WS2812: block 2 exercises the RP2350-only third block (FUNCSEL 8,
     #    pad ISO).  Assembly is the part a script can judge.
-    asm(con, results, "/pio/ws2812.pio", 2, 2, WORDS["ws2812"], (4, 4))
+    asm(con, results, "/pio/ws2812.pio", ws_block, ws_sm, WORDS["ws2812"],
+        (4, 4))
 
     if opts.visual:
         check(results, "C blink started", con.cmd("pio start 1 1"),
@@ -191,14 +198,15 @@ def run_checks(con, results, opts):
         con.cmd("pio rel 1 1")
 
         if opts.strip:
-            check(results, "D ws2812 started", con.cmd("pio start 2 2"),
+            check(results, "D ws2812 started",
+                  con.cmd("pio start %d %d" % (ws_block, ws_sm)),
                   want=("pio: ok",))
-            out = con.cmd("pio tx 2 2 0x00ff0000")
+            out = con.cmd("pio tx %d %d 0x00ff0000" % (ws_block, ws_sm))
             check(results, "D ws2812 pixel queued", out, want=("wrote",))
             ans = input("  is the strip's first pixel red? [y/N] ").strip().lower()
             check_ok(results, "D ws2812 seen by eye", ans.startswith("y"), ans)
-            con.cmd("pio stop 2 2")
-            con.cmd("pio rel 2 2")
+            con.cmd("pio stop %d %d" % (ws_block, ws_sm))
+            con.cmd("pio rel %d %d" % (ws_block, ws_sm))
 
         check(results, "E all SMs released", con.cmd("pio rel 0 0"),
               want=("pio: ok",))
@@ -266,14 +274,16 @@ def report(results, image):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True, choices=[
-        "rp2350", "rp2350smp", "rp2350rv", "rp2350rvsmp"])
+        "rp2350", "rp2350smp", "rp2350rv", "rp2350rvsmp",
+        "rp2040", "rp2040smp"])
     ap.add_argument("-p", "--port", default="COM14")
     ap.add_argument("--dtr", action="store_true", help="assert DTR (CDC console)")
     ap.add_argument("--uf2", help="flash this image first")
     ap.add_argument("--no-flash", action="store_true")
     ap.add_argument("--first-boot", type=float, default=25.0)
-    ap.add_argument("--led-pin", type=int, default=3,
-                    help="3 = this board's LED (blink3.pio), 25 = Pico (blink.pio)")
+    ap.add_argument("--led-pin", type=int, default=-1,
+                    help="-1 picks 3 on the RP2350 board (blink3.pio) and 25 on"
+                         " the Pico (blink.pio); give a number to override")
     ap.add_argument("--visual", action="store_true",
                     help="also ask about the LED and the strip")
     ap.add_argument("--strip", action="store_true",
