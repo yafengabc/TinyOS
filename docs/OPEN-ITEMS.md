@@ -2982,6 +2982,36 @@ python scripts/rp2350/pio_accept.py --image rp2040 --no-flash --visual   # 眼�
   disabled: use the BOOTSEL button`），因为 ROM 的 `reset_usb_boot()` 在这块板子上
   不可靠（见 `clocks_init` 上方那段注释）。不再追这条。
 
+### 32.4 RP2040 的 `dd` 偶尔写死（2026-11-15 报告，待定位）
+
+现象：`dd` 写 flash **偶尔卡死，但有时 200 轮又全过**——间歇性，所以先分清"卡在
+哪里"再改代码，别猜。
+
+flash 路径本身该做的都做了（`board/rp2040/platform.c`）：`rp_flash_op` 放在
+`.data.flash_ram`（XIP 关掉期间从 SRAM 执行）、`plat_block_{erase,write}` 在调用
+ROM 前后 `cpsid i`/恢复、`rp2040smp` 还会先把另一个核停进
+`rp_flash_park_loop()`，写入源的 bounce 缓冲也在 SRAM。所以"中断在 XIP 关闭时取指"
+这类经典坑已经堵住了，剩下的可疑面是：littlefs 自身的分配扫描、USB/控制台路径在
+块操作之间的 `tty_poll()`、以及"卡"到底有没有伴随复位。
+
+**新加的诊断（`2ca645e` 之后，随下一次构建生效）**：每次 ROM 调用前往 watchdog
+scratch 写一条面包屑（`scratch[1]` = 魔数|op，`scratch[2]` = 地址，`scratch[3]` =
+长度），返回后清掉。这些 scratch 跨复位保留，所以：
+
+- **卡死之后按一下 RESET**，启动横幅里会出现
+  `[flash] previous boot stopped in erase addr=0x… len=0x…`（或 `program`）——
+  说明死的是 ROM 的擦/写，还是调用之后（面包屑已被清掉，那就是 littlefs 或控制台）；
+- 对应的 flash 偏移可以换算成 littlefs 的块：`addr - 0x80000` 除以 4096。
+
+**上板时请顺手记这四条**（每条都能砍掉一半可能性）：
+
+1. 是 `rp2040` 还是 `rp2040smp`？后者多一条"另一个核没停住"的路径；
+2. 卡住时**灯还在闪吗、UART 还回显吗、`ps` 还能出吗**——tick 活着说明是块层/文件
+   系统，全哑说明核已经停了；
+3. 换 `dd bs=512 count=64`（走非对齐的读-改-写路径）对比 `bs=4096 count=8`
+   （直接写整扇区），看是否只在小块时复现；
+4. **USB 拔掉、只用 UART0** 再跑，排除 USB IRQ 在块操作窗口里的干扰。
+
 ## 33. 待真机清单（2026-11-14 汇总）
 
 这一节只列**代码已落地、等板子**的项，按“刷哪个镜像、跑什么、判什么”写。上机
