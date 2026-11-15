@@ -52,6 +52,14 @@ RV32EMU 是纯解释器，代价随指令数走、±2% 确定。所以这是「�
 热路径按字拷贝。顺带量到 RV32EMU 上 U-mode 8–9 ns/指令 vs M-mode 3.6（每条访存退回
 `Step()` 做 PMP 检查）。
 
+**RV32EMU-C 只模拟 ESP32-C3 那一台机器**（2026-11-15 实测，别再试）：喂
+`build/kernel-rp2350rv.elf` 时 ELF 能装载、入口 `0x10000020` 也执行了，但
+`0x20000000` 的 `.data/.bss` 写全部是 `[bus] unmapped write`（它的内建区间是
+`0x40000000..0x4007FFFF`、`0x3FC80000`、IROM/DROM），PC 停 `clocks_init()` 里
+`x10=0x40048000`（XOSC）的空转，因为那个地址落在 C3 外设窗口里、读回 0。
+`-ramdisk` 也印证：它把文件系统放在 `0x3F080000`。要跑 RP2350 得补 SRAM/XIP 和
+XOSC/CLOCKS/PLL/FC0/TICKS/RESETS 一组外设桩——那是另一台机器。
+
 ## 3. 调度器优先级（已合并 `97b07c4`）
 
 三级（0/1/2）、同级轮转、唤醒即 `need_resched`、`nice <n> <prog>` 与 `prio <pid> <n>`。
