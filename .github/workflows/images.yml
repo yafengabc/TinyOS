@@ -42,10 +42,43 @@ jobs:
 
       # The build drives clang for every target and ld.lld directly for
       # linking; mklfs is a normal host C program compiled by the same clang.
+      #
+      # The version matters more than it looks: user/msh/msh.c sits 60 bytes
+      # under its 8 KiB budget at -Oz with clang 23, and the distro's clang 18
+      # produces a 12 KiB image, which turns msh's window from 16 KiB into
+      # 32 KiB and trips TOS_ONE_GRAIN().  So install the newest LLVM the
+      # Ubuntu release has a package for, and fall back to the distro one only
+      # if apt.llvm.org is unreachable (then the size check will tell us).
       - name: Install LLVM
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang lld libc6-dev
+          sudo apt-get install -y libc6-dev wget gpg
+          . /etc/os-release
+          codename="${UBUNTU_CODENAME:-noble}"
+          got=""
+          if wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+               | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg; then
+            for v in 23 22 21 20 19; do
+              if curl -fsSL "https://apt.llvm.org/${codename}/dists/llvm-toolchain-${codename}-${v}/Release" >/dev/null 2>&1; then
+                echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${v} main" \
+                  | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+                sudo apt-get update
+                if sudo apt-get install -y "clang-${v}" "lld-${v}"; then
+                  sudo ln -sf "/usr/bin/clang-${v}" /usr/local/bin/clang
+                  sudo ln -sf "/usr/bin/ld.lld-${v}" /usr/local/bin/ld.lld
+                  got="clang-${v}"
+                  break
+                fi
+              fi
+            done
+          fi
+          if [ -z "$got" ]; then
+            echo "::warning::apt.llvm.org unavailable, using the distro clang (sizes may differ)"
+            sudo apt-get install -y clang lld
+          else
+            echo "using $got"
+          fi
 
       - name: Show toolchain
         run: |
@@ -55,6 +88,10 @@ jobs:
 
       - name: Build ${{ matrix.target }}
         run: go run ./cmd/tos build -target ${{ matrix.target }}
+
+      - name: Report image sizes
+        run: |
+          wc -c build/user/bin/msh build/user/bin/sh 2>/dev/null || true
 
       - name: Collect images
         shell: bash
