@@ -3761,6 +3761,8 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
   - `dd of=/x bs=512 count=1` + `rm /x` **1000 轮 ALL OK**；
   - `screen mirror on/off` 正常，面板控制台未死锁；
   - `rp2350rvsmp` 启动正常，**100 轮 dd/rm ALL OK**。
+- **RP2040 真机**（换回 RP2040 后）：`rp2040smp` 启动为 `cpus=2`，USB CDC
+  枚举正常；`dd` + `rm` **1000 轮 ALL OK**。
 - **Pico 2 对照**：官方 MicroPython UF2 能枚举 USB；TinyOS 的 v0.3.0 发布版和
   本轮镜像都在启动早期 HardFault、USB 不出现。官方固件正常说明 USB/线材没问题，
   Pico 2 的板级适配需另开一项，不混在本次 review 修复里。
