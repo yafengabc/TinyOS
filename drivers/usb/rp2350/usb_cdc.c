@@ -590,6 +590,13 @@ void usb_cdc_putc(char c)
      * is now the SIO-spinlock critical section: same shape, cross core. */
     US(10);
     primask = usb_cdc_lock();
+    /* A full 128-byte ring used to drop every byte until the next 1 ms
+     * poll; a long `ls` therefore lost everything after roughly two
+     * packets.  Flush the full packet here so the next byte has room.  This
+     * is still bounded and does not wait for the host; if the host is not
+     * draining, the byte is dropped as before. */
+    if (tud_cdc_write_available() == 0)
+        tud_cdc_write_flush();
     if (tud_cdc_write_available() != 0)
         tud_cdc_write_char(c);
     usb_cdc_unlock(primask);
