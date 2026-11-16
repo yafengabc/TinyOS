@@ -3803,8 +3803,12 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
 - **B-5 `file_t` 联合体**：`pipe` / `chr{dev,devpriv}` / `path` 合并为一个 union，
   并把 `writable` 移到 `type` 旁边；`file_t` 从 36 B 降到 24 B。
   RP2350 `free` 的 kernel 占用从约 127 KiB 降到 **125 KiB**。
-- **B-6 / C-4 / C-6 没做**：direct aligned block read 要逐板确认 DMA 目标
-  对齐和 cache 语义；ELF 解析器去重和 Pico/PIO/softfloat 小清理属于低收益
+- **B-6 对齐读直通**：`bd_read` 在扇区偏移、长度和目的地址都对齐时直接读进
+  caller 的 buffer，只有非对齐的情况才经过 4 KiB bounce + memcpy；ESP32-C3
+  的 ROM 仍要求字对齐，所以条件里保留了 `(uintptr_t)buffer & 3`。
+- **B-8 `PROC_CAP` 缩放**：从固定 1536 B 改为 `512 + TOS_MAX_PROCS*64`；
+  16-slot 板保持 1536 B，8-slot 的 RP2040 降到 1024 B。
+- **C-4 / C-6 没做**：ELF 解析器去重和 Pico/PIO/softfloat 小清理属于低收益
   重构，暂不混进本批。
 
 ### 验证
@@ -3822,6 +3826,7 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
     面板未死锁；
   - `dd` + `rm` **1000 轮 ALL OK**；
   - `free`：kernel 125 KiB；`shpr3=0x20e00000` 确认 SysTick 优先级 0x20；
+  - `cat /proc/ps`、`dd if=/x ... pattern verified` 正常（B-6/B-8）；
   - `deep 3`、`prot stack`、`ls /bin | wc` 正常。
 - **RP2040 本批未重测**：按新约定“RP2350 默认测，RP2040 最后统一测”，
   `rp2040smp` 本批镜像标记为 **NOT RUN**；之前 1000 轮结果只对应上一批镜像。

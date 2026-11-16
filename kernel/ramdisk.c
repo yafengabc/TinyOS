@@ -144,9 +144,26 @@ static int bd_read(const struct lfs_config *c, lfs_block_t block,
      * it.  Exec reads a whole program this way, and the paste that is
      * arriving meanwhile lost its tail (a 24-line paste ran 4 commands and
      * the receiver then overran).  tty_poll() touches only the console
-     * queues - no lock, no filesystem - so draining per sector brings the
-     * window down to something the FIFO absorbs. */
+     * queues - no lock, no filesystem - so draining before the read keeps
+     * the window down to something the FIFO absorbs. */
     tty_poll();
+
+    /* littlefs's own file cache is sector aligned, so most reads do not
+     * need the bounce buffer at all.  Skip the extra 4 KiB memcpy when the
+     * target is word aligned too: the ESP32-C3 ROM requires word-aligned
+     * destinations, while the RP/QEMU block layers are plain memcpy.  An
+     * unaligned caller still gets the old path. */
+    if ((byte & 0x1FFu) == 0 && (size & 0x1FFu) == 0 &&
+        ((uintptr_t)buffer & 3u) == 0) {
+        if (plat_block_read(PLAT_LFS_LBA + first, count, buffer) != 0) {
+            kprintf("[lfs] read FAIL block=%u off=%u size=%u abs_lba=%u count=%u\n",
+                    (uint32_t)block, (uint32_t)off, (uint32_t)size,
+                    PLAT_LFS_LBA + first, count);
+            return LFS_ERR_IO;
+        }
+        return 0;
+    }
+
     if (plat_block_read(PLAT_LFS_LBA + first, count, bounce) != 0) {
         kprintf("[lfs] read FAIL block=%u off=%u size=%u abs_lba=%u count=%u\n",
                 (uint32_t)block, (uint32_t)off, (uint32_t)size,

@@ -19,10 +19,14 @@
  * copy to user space - and it is why a `cat` here is a single allocation
  * rather than a generator state machine.
  *
- * 1 KiB is sized for the largest producer (the process table: 16 rows of ~50
- * columns plus a header).  A caller that opens all three at once costs 3 KiB
- * of the 32 KiB heap, which is why they are snapshots and not files on disk. */
-#define PROC_CAP 1536
+ * The largest producer is the process table: every slot can add a row of
+ * roughly 50 columns plus a header.  Scale with TOS_MAX_PROCS instead of
+ * paying the 16-slot size on an 8-slot board; the 512-byte base covers the
+ * other /proc files when no process is live. */
+#ifndef TOS_MAX_PROCS
+#define TOS_MAX_PROCS 16
+#endif
+#define PROC_CAP (512 + TOS_MAX_PROCS * 64)
 
 struct pfile {
     char    *buf;
