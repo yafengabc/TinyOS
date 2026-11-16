@@ -42,6 +42,7 @@
 | 2026-11-17 | A-4 flash exclusive + cache seams | `b49d49f` | RP2350 Cortex-M33 SMP（COM14） | T0–T4 PASS | [A-4 RP2350](2026-11-17-a4-rp2350smp-b49d49f.md) |
 | 2026-11-17 | A-6 pre-tick wait / LCD baseline | `b73db94` | RP2350 Cortex-M33 SMP（COM14） | T0–T3 PASS；完整 1e6 转换 `NOT RUN` | [A-6 RP2350](2026-11-17-a6-rp2350smp-b73db94.md) |
 | 2026-11-17 | A-6 full 1e6 conversion | `4577fd6` | RP2350 ARM + RV32 SMP（COM14） | T0–T4 PASS | [A-6 full](2026-11-17-a6full-rp2350-4577fd6.md) |
+| 2026-11-17 | A-6 long pre-tick bounds | `49dfda6` | RP2350 ARM + RV32 SMP（COM14） | T0–T4 PASS | [A-6 bounds](2026-11-17-a6bounds-rp2350-49dfda6.md) |
 | 2026-11-17 | A-3 exec_format seam | `c25a740` | RP2350 Cortex-M33 SMP（COM14） | T0–T3 PASS；T4 `NOT RUN` | [A-3 RP2350](2026-11-17-a3-rp2350smp-c25a740.md) |
 | 2026-11-17 | A-8 KASSERT + kfree halt | `d15fe16` | RP2350 Cortex-M33 SMP（COM14） | T0–T3 PASS；proc_set_state `NOT RUN` | [A-8 RP2350](2026-11-17-a8-rp2350smp-d15fe16.md) |
 | 2026-11-17 | A-8 full proc_set_state | `5d19a24` | RP2350 ARM + RV32 SMP（COM14） | T0–T4 PASS | [A-8 full](2026-11-17-a8full-rp2350-5d19a24.md) |
