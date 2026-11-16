@@ -57,21 +57,6 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 （先分 host 读速度、CDC TX FIFO 和 console 输出路径）。验收记录：
 `docs/acceptance/2026-11-17-a0-rp2350smp-2fdd6e8.md`。
 
-## 3b. RP2350 RV32 的 `deep 6` 以 store access fault 结束（2026-11-17）
-
-`rp2350rvsmp` 最终 HEAD 上：`deep 3` 正常增长 8 KiB + journal intact；
-`deep 6` 先增长到 8 KiB，随后 **store access fault**，没有 `no room to grow it;
-killing`；`deep 6 0 8` 同样在 malloc 4 KiB 后 store fault。已记入
-`docs/acceptance/2026-11-17-w1w2-rp2350rvsmp-d15fe16.md`。尚未判断是 RV32
-PMP/守卫路径的既有行为还是回归；先保留现场，下一轮用 baseline 对比。
-
-## 3. Cortex-M33 的 `deep 6`（设计取舍）
-
-`HISTORY.md` §33.2.1：异常入口需要栈下面有可写的着陆区，护栏洞里只留了 2560 B，
-所以 `deep 6`（12 KiB 越界）越过着陆区就 MSTKERR，硬件根本不给异常帧。三条路：
-把着陆区扩到 4 KiB（`prot heap` 就守不住）、教增长路径处理"帧没建成"、或者用
-`-fstack-limit-*` 之类的编译期预检。选择之前先问"有没有程序真的需要 12 KiB 的栈"。
-
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
 `internal/build/build.go::WindowGeometry()` 返回 16 KiB grain / 8 KiB stack /
