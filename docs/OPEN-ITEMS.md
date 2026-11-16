@@ -57,6 +57,15 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 （先分 host 读速度、CDC TX FIFO 和 console 输出路径）。验收记录：
 `docs/acceptance/2026-11-17-a0-rp2350smp-2fdd6e8.md`。
 
+## 2d. A-6 剩余的 pre-tick 1e6 驱动循环（2026-11-17）
+
+A-6 的规则和 `plat_pre_tick_spins()` 已落地，首 tick 自检已按 CPU 主频折算，
+LCD 的 5e6 轮询已加“pre-tick 上限、按状态位返回”的基准注释。**未做**：把所有
+驱动里的 `1000000u`/`5000000u`/`20000000u` 循环逐个改成用该 helper 或 tick
+deadline；这些多在启动早期，`plat_cpu_hz()` 尚未稳定，改动需要按驱动逐个上板
+验证。验收摘要：
+`docs/acceptance/2026-11-17-a6-rp2350smp-b73db94.md`。
+
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 
 `HISTORY.md` §33.2.1：异常入口需要栈下面有可写的着陆区，护栏洞里只留了 2560 B，
