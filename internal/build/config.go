@@ -33,7 +33,12 @@ import (
 //
 // Relative paths are resolved against the source tree root.
 type Config struct {
-	Path          string
+	Path string
+	// Explicit is true when the caller named this config (-config or
+	// TOS_CONFIG).  A target mismatch is a hard error only then; the
+	// repository-local tos.conf is a default and -target still overrides
+	// it, which is the historical F-02 behaviour.
+	Explicit      bool
 	Target        string
 	Features      map[string]bool
 	Drivers       []string
@@ -288,6 +293,15 @@ func (b *Builder) ApplyConfig(c *Config) error {
 				return fmt.Errorf("config %s: unknown target %q", c.Path, c.Target)
 			}
 			b.Target = t
+		}
+	}
+
+	if b.Target.Name != "" {
+		if err := b.ensureBoardConfig(); err != nil {
+			return err
+		}
+		if err := b.validateConfig(c); err != nil {
+			return err
 		}
 	}
 

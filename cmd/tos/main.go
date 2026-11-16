@@ -251,6 +251,9 @@ func configure(b *build.Builder, root, configPath, target string) error {
 	if err != nil {
 		return err
 	}
+	if cfg != nil {
+		cfg.Explicit = configPath != "" || os.Getenv("TOS_CONFIG") != ""
+	}
 	if target != "" {
 		t, ok := build.Targets[target]
 		if !ok {

@@ -388,6 +388,7 @@ type Builder struct {
 	Target   Target
 
 	Config         *Config
+	BoardConfig    *BoardConfig
 	Features       map[string]bool
 	DriverDirs     []string
 	driverDirsInit bool
@@ -810,6 +811,12 @@ func (b *Builder) Build() error {
 	var err error
 	if b.Target.Name == "" {
 		b.Target = Targets["x86"]
+	}
+	if err := b.ensureBoardConfig(); err != nil {
+		return err
+	}
+	if err := b.validateConfig(b.Config); err != nil {
+		return err
 	}
 	b.ensureDriverDirs()
 	b.TC, err = DetectToolchain(b.Target)

@@ -52,6 +52,14 @@ func TestWindowGeometryMatchesLayouts(t *testing.T) {
 				t.Fatalf("WindowGeometry() = %d/%d/%d, layout.c = %d/%d/%d",
 					grain, stack, guard, got[0], got[1], got[2])
 			}
+			bc, err := LoadBoardConfig(root, tc.board)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bc.WindowGrain != got[0] || bc.WindowStack != got[1] || bc.WindowGuard != got[2] {
+				t.Fatalf("board.conf window = %d/%d/%d, layout.c = %d/%d/%d",
+					bc.WindowGrain, bc.WindowStack, bc.WindowGuard, got[0], got[1], got[2])
+			}
 		})
 	}
 }
