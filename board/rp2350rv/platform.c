@@ -993,6 +993,22 @@ static void rp_flash_unpark_other(void)
 }
 #endif
 
+int plat_flash_exclusive_begin(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    return rp_flash_park_other();
+#else
+    return 0;
+#endif
+}
+
+void plat_flash_exclusive_end(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    rp_flash_unpark_other();
+#endif
+}
+
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t addr, end, was_enabled;
@@ -1006,8 +1022,8 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 
     __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(was_enabled));
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0) {
-        /* rp_flash_park_other() leaves MIE masked on success because the
+    if (plat_flash_exclusive_begin() != 0) {
+        /* plat_flash_exclusive_begin() leaves MIE masked on success because the
          * ROM call follows; on timeout it returns without parking anyone,
          * so the caller must put the original state back or every tick and
          * console interrupt stays off for the rest of the boot. */
@@ -1042,9 +1058,7 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     g_pk_phase = 5;                          /* XIP restored */
 #endif
     flash_step(0x106);
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    rp_flash_unpark_other();
-#endif
+    plat_flash_exclusive_end();
 #if TOS_DIAG
     g_pk_phase = 6;                          /* unparked */
 #endif
@@ -1065,7 +1079,7 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 
     __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(was_enabled));
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0) {
+    if (plat_flash_exclusive_begin() != 0) {
         if (was_enabled & 8u)
             __asm__ volatile("csrsi mstatus, 8" ::: "memory");
         return -1;
@@ -1094,9 +1108,7 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     g_pk_phase = 5;                          /* XIP restored */
 #endif
     flash_step(0x206);
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    rp_flash_unpark_other();
-#endif
+    plat_flash_exclusive_end();
 #if TOS_DIAG
     g_pk_phase = 6;                          /* unparked */
 #endif

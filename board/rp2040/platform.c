@@ -973,6 +973,22 @@ static void rp_flash_unpark_other(void)
 }
 #endif
 
+int plat_flash_exclusive_begin(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    return rp_flash_park_other();
+#else
+    return 0;
+#endif
+}
+
+void plat_flash_exclusive_end(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    rp_flash_unpark_other();
+#endif
+}
+
 static int __attribute__((noinline, section(".data.flash_ram")))
 rp_flash_op(uint32_t addr, const uint8_t *data, uint32_t count, int erase)
 {
@@ -980,10 +996,8 @@ rp_flash_op(uint32_t addr, const uint8_t *data, uint32_t count, int erase)
     volatile uint32_t *dst = g_boot2_copy;
     uint32_t i;
 
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0)
+    if (plat_flash_exclusive_begin() != 0)
         return -1;
-#endif
 
     for (i = 0; i < 64u; i++)
         dst[i] = src[i];
@@ -999,9 +1013,7 @@ rp_flash_op(uint32_t addr, const uint8_t *data, uint32_t count, int erase)
     ((void (*)(void))((uintptr_t)g_boot2_copy + 1u))();
     __asm__ volatile("dsb\n isb" ::: "memory");
 
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    rp_flash_unpark_other();
-#endif
+    plat_flash_exclusive_end();
     return 0;
 }
 

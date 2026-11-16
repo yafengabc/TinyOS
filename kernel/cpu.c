@@ -231,6 +231,33 @@ __attribute__((weak)) void plat_flash_park_poll(void)
 {
 }
 
+/* Weak C3/A-4 seams.  RP2350/2040 override begin/end with their existing
+ * park handshake; cache maintenance is a no-op until a board needs it. */
+__attribute__((weak)) int plat_flash_exclusive_begin(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) void plat_flash_exclusive_end(void)
+{
+}
+
+__attribute__((weak)) void plat_icache_sync(void)
+{
+}
+
+__attribute__((weak)) void plat_dcache_clean(const void *addr, unsigned len)
+{
+    (void)addr;
+    (void)len;
+}
+
+__attribute__((weak)) void plat_dcache_invalidate(const void *addr, unsigned len)
+{
+    (void)addr;
+    (void)len;
+}
+
 /* Weak defaults for a port that has no atomic instruction of its own.  Every
  * board here is a uniprocessor except the qemu-virt SMP build, so "do
  * nothing" is the correct implementation for them - arch/rv32/platform.c

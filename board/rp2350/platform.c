@@ -1409,6 +1409,22 @@ static void rp_flash_unpark_other(void)
 }
 #endif
 
+int plat_flash_exclusive_begin(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    return rp_flash_park_other();
+#else
+    return 0;
+#endif
+}
+
+void plat_flash_exclusive_end(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    rp_flash_unpark_other();
+#endif
+}
+
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
     uint32_t addr, end, was_enabled;
@@ -1421,10 +1437,8 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
            & ~(RP_FLASH_SECTOR - 1u);
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0)
+    if (plat_flash_exclusive_begin() != 0)
         return -1;
-#endif
     __asm__ volatile("cpsid i" ::: "memory");
     /* Keep the watchdog armed: it used to be disabled around the ROM call,
      * so a wedge inside the sequence was silent and permanent.  Feed instead -
@@ -1443,9 +1457,7 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     g_park_phase = 4;                       /* XIP is back */
 #endif
     flash_enable_xip_via_boot2();
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    rp_flash_unpark_other();
-#endif
+    plat_flash_exclusive_end();
 #if TOS_DIAG
     g_park_phase = 5;                       /* unparked */
 #endif
@@ -1467,10 +1479,8 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     addr = lba * 512u;
 
     __asm__ volatile("mrs %0, primask" : "=r"(was_enabled));
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0)
+    if (plat_flash_exclusive_begin() != 0)
         return -1;
-#endif
     __asm__ volatile("cpsid i" ::: "memory");
     wdt_feed();                            /* stay armed; see plat_block_erase */
 #if TOS_DIAG
@@ -1486,9 +1496,7 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     g_park_phase = 4;                       /* XIP is back */
 #endif
     flash_enable_xip_via_boot2();
-#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    rp_flash_unpark_other();
-#endif
+    plat_flash_exclusive_end();
 #if TOS_DIAG
     g_park_phase = 5;                       /* unparked */
 #endif

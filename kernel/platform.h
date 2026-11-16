@@ -327,6 +327,17 @@ int plat_i2c_xfer(int bus, int addr, int freq_hz,
  * in kernel/periph.c, which returns -1. */
 int plat_dma_memcpy(void *dst, const void *src, int len);
 
+/* Flash/cache seams (C3/A-4).  begin/end are the only way kernel flash code
+ * asks the port to park other cores; a board without parking leaves the weak
+ * default (begin=0, end=no-op).  Cache hooks are no-ops on boards where the
+ * CPU does not need explicit maintenance. */
+int  plat_flash_exclusive_begin(void);
+void plat_flash_exclusive_end(void);
+void plat_icache_sync(void);
+void plat_dcache_clean(const void *addr, unsigned len);
+void plat_dcache_invalidate(const void *addr, unsigned len);
+#define PLAT_CACHE_LINE 32
+
 /* ---- user mode ------------------------------------------------------- */
 
 /* There is no address-space abstraction: the unified model is a single flat
