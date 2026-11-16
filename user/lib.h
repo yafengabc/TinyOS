@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "tos.h"      /* TOS_PIN_*, the pin modes gpio_mode() takes */
+#include "tos_abi.h"  /* kernel/user ABI structs and their static asserts */
 
 /* How much stack this program needs, when the board's default is not it.
  *
@@ -120,11 +121,6 @@ int  ioctl(int fd, int cmd, int arg);
 /* file types returned by stat(): TOS_FTYPE_REG / _DIR / _CHR, defined in
  * tos.h so the kernel and user land cannot disagree about the numbers. */
 
-struct stat {
-    uint32_t size;   /* file size in bytes (0 for directories/devices) */
-    uint8_t  type;   /* TOS_FTYPE_* */
-};
-
 /* lseek() whence.  Positions are kept per descriptor, so two descriptors on
  * the same file (dup, or the same path opened twice) move independently. */
 #define SEEK_SET 0
@@ -162,25 +158,11 @@ int  lseek(int fd, int off, int whence);
 /* Lowest free descriptor sharing the same file; -1 if the table is full. */
 int  dup(int fd);
 
-/* Kernel heap statistics returned by meminfo(). */
-struct meminfo {
-    uint32_t total;        /* heap arena size in bytes        */
-    uint32_t used;         /* currently allocated             */
-    uint32_t free;         /* total - used                   */
-    uint32_t peak;         /* peak bytes ever allocated       */
-    /* The machine, for `free`'s memory map. */
-    uint32_t ram_total;    /* usable RAM from the kernel base */
-    uint32_t kernel_used;  /* kernel image + .bss, heap included */
-    uint32_t app_total;    /* RAM reserved for task windows   */
-    uint32_t ram_unused;   /* ram_total - kernel_used - app_total */
-};
+/* Kernel heap statistics returned by meminfo(); struct meminfo is in
+ * include/tos_abi.h (single ABI source, with size/offset asserts). */
 int  meminfo(struct meminfo *m);
 
-/* littlefs usage returned by dfinfo(). */
-struct dfinfo {
-    uint32_t total;   /* littlefs partition size in bytes */
-    uint32_t used;    /* bytes consumed by littlefs        */
-};
+/* littlefs usage returned by dfinfo(); struct dfinfo is in tos_abi.h. */
 int  dfinfo(struct dfinfo *d);
 int  chdir(const char *path);     /* change current working directory */
 int  getcwd(char *buf, int len);  /* copy cwd into buf, returns len or -1 */
@@ -206,13 +188,7 @@ int  uptime(void);
  * one: `us` and `ms` are the low 32 bits of those values (us wraps after
  * ~71 minutes, ms after ~49 days - both fine for a stopwatch, and the
  * monotonic `ns` is there when a program needs to span that). */
-struct clockinfo {
-    uint64_t ns;       /* monotonic nanoseconds since boot */
-    uint32_t us;       /* same instant, microseconds (low 32 bits) */
-    uint32_t ms;       /* same instant, milliseconds (low 32 bits) */
-    uint32_t tick_hz;  /* scheduler tick rate             */
-    uint32_t cpus;     /* CPUs in this build              */
-};
+/* struct clockinfo is in include/tos_abi.h. */
 int      clockinfo(struct clockinfo *c);
 uint64_t clock_ns(void);
 uint32_t clock_ms(void);

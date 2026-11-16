@@ -1,4 +1,5 @@
 #include "tos.h"
+#include "tos_abi.h"
 #include "console.h"
 #include "ramdisk.h"
 #include "devfs.h"
@@ -499,14 +500,12 @@ static regs_t *dispatch(regs_t *r)
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        /* struct stat { uint32_t size; uint8_t type; } is 8 bytes with
-           `type` at offset 4 (uint32_t alignment). */
-        if (!process_user_ok(ptr, 8)) {
+        if (!process_user_ok(ptr, sizeof(struct stat))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        *(uint32_t *)ptr = size;
-        *((uint8_t *)ptr + 4) = type;
+        *(uint32_t *)(ptr + offsetof(struct stat, size)) = size;
+        *(uint8_t *)(ptr + offsetof(struct stat, type)) = type;
         plat_frame_set_ret(r, 0);
         return r;
     }
@@ -528,18 +527,18 @@ static regs_t *dispatch(regs_t *r)
          * range is sized for a 4 MiB part): report zero, not a wrap. */
         uint32_t ram_unused  = (kernel_used + app_total < ram_total)
                                ? ram_total - kernel_used - app_total : 0;
-        if (!process_user_ok(ptr, 32)) {
+        if (!process_user_ok(ptr, sizeof(struct meminfo))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        *(uint32_t *)ptr        = total;
-        *(uint32_t *)(ptr + 4)  = used;
-        *(uint32_t *)(ptr + 8)  = free;
-        *(uint32_t *)(ptr + 12) = peak;
-        *(uint32_t *)(ptr + 16) = ram_total;
-        *(uint32_t *)(ptr + 20) = kernel_used;
-        *(uint32_t *)(ptr + 24) = app_total;
-        *(uint32_t *)(ptr + 28) = ram_unused;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, total)) = total;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, used)) = used;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, free)) = free;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, peak)) = peak;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, ram_total)) = ram_total;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, kernel_used)) = kernel_used;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, app_total)) = app_total;
+        *(uint32_t *)(ptr + offsetof(struct meminfo, ram_unused)) = ram_unused;
         plat_frame_set_ret(r, 0);
         return r;
     }
@@ -548,12 +547,12 @@ static regs_t *dispatch(regs_t *r)
         uint32_t ptr = sc.a0;          /* struct dfinfo * in user space */
         uint32_t total = 0, used = 0;
         ramdisk_df(&total, &used);
-        if (!process_user_ok(ptr, 8)) {
+        if (!process_user_ok(ptr, sizeof(struct dfinfo))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        *(uint32_t *)ptr       = total;
-        *(uint32_t *)(ptr + 4) = used;
+        *(uint32_t *)(ptr + offsetof(struct dfinfo, total)) = total;
+        *(uint32_t *)(ptr + offsetof(struct dfinfo, used)) = used;
         plat_frame_set_ret(r, 0);
         return r;
     }
@@ -576,17 +575,17 @@ static regs_t *dispatch(regs_t *r)
          * scaled values come from here because user programs do not link a
          * 64-bit division helper. */
         uint32_t ptr = sc.a0;
-        if (!process_user_ok(ptr, 24)) {
+        if (!process_user_ok(ptr, sizeof(struct clockinfo))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
         uint64_t ns = plat_now_ns();
-        *(uint32_t *)ptr        = (uint32_t)ns;
-        *(uint32_t *)(ptr + 4)  = (uint32_t)(ns >> 32);
-        *(uint32_t *)(ptr + 8)  = (uint32_t)(ns / 1000ull);
-        *(uint32_t *)(ptr + 12) = (uint32_t)(ns / 1000000ull);
-        *(uint32_t *)(ptr + 16) = plat_tick_hz();
-        *(uint32_t *)(ptr + 20) = PLAT_MAX_CPUS;
+        *(uint32_t *)(ptr + offsetof(struct clockinfo, ns)) = (uint32_t)ns;
+        *(uint32_t *)(ptr + offsetof(struct clockinfo, ns) + 4) = (uint32_t)(ns >> 32);
+        *(uint32_t *)(ptr + offsetof(struct clockinfo, us)) = (uint32_t)(ns / 1000ull);
+        *(uint32_t *)(ptr + offsetof(struct clockinfo, ms)) = (uint32_t)(ns / 1000000ull);
+        *(uint32_t *)(ptr + offsetof(struct clockinfo, tick_hz)) = plat_tick_hz();
+        *(uint32_t *)(ptr + offsetof(struct clockinfo, cpus)) = PLAT_MAX_CPUS;
         plat_frame_set_ret(r, 0);
         return r;
     }
