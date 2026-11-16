@@ -1030,10 +1030,11 @@ void process_tick(regs_t *r)
                 woke = p;
         }
     }
-    plat_spin_unlock_irqrestore(&proc_lock, irq);
-
+    /* Still under the lock: the pointer is then guaranteed to name a live
+     * slot, and preempt_if_higher() only touches this CPU's request flag. */
     if (woke)
         preempt_if_higher(woke);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     /* Preempt only a task the timer interrupted in user mode: a tick that
        lands inside a kernel call must let that call finish, because the
@@ -2625,13 +2626,12 @@ int process_signal(int pid, int sig)
         victim->stop_pending = 0;
         if (victim->state == ST_STOPPED) {
             victim->state = ST_READY;
+            preempt_if_higher(victim);
             resumed = 1;
         }
         plat_spin_unlock_irqrestore(&proc_lock, irq);
-        if (resumed) {
+        if (resumed)
             kprintf("[pid %d] continued\n", pid);
-            preempt_if_higher(victim);
-        }
     }
     return 0;
 }
