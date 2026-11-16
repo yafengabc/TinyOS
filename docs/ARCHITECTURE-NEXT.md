@@ -67,7 +67,7 @@
 P4 挑战五个假设：核同构、内存单域、外设本地 MMIO、启动链是 PICOBIN/UF2、没有 cache/DMA 一致性接口。
 
 **P4 第一阶段范围（写死）**：
-- 只用片上 SRAM 做任务窗口；PSRAM 只做数据/文件缓存；
+- 只用**一个 HP 核** + 片上 SRAM 做任务窗口；PSRAM 只做数据/文件缓存；第二个 HP 核与 LP 都不进 v1；
 - 只做 B-5a/b/c 台阶（探针 → 出 prompt → `accept.py` 24/24）+ 单域窗口 + PMP/保护 + UART/timer；
 - 不做多域窗口、不做 WiFi full stack、不做 LP 调度。
 
@@ -139,10 +139,20 @@ build/gen/                  ← 构建期生成物，不入库
 - `win_alloc` 加域参数；`process_user_ok`/`plat_task_protect` 走域选择，但单域行为完全一致。
 - **不做**：PSRAM 第二域、cache 维护实现。
 
-### A-6｜等待/超时（C6）
-- `wd_start(cb, ticks)` / `wd_cancel`；先接 1–2 个现有等待点（例如控制台读、`poll` 超时）。
-- 所有新增阻塞 I/O 必须走它；旧路径保留。
-- **不做**：全量替换 `sleep` 列表。
+### A-6｜等待纪律（C6）
+不引入 `wd_start`。这里冻结的是**规则**，不是一个定时器 API：
+
+- **tick 就绪后**：跨硬件/跨核的等待用 `deadline = plat_ticks() + ms_to_ticks(ms)`，
+  超时返回 `-ETIMEDOUT`（或驱动约定的错误）。
+- **tick 就绪前**（XOSC/PLL/clock mux/UART FIFO 等早期初始化）：保留迭代上限，但必须
+  按 `plat_cpu_hz()` 或板级常量折算，并注明 `pre-tick`；不得直接抄 `1e6`。`board/rp2040`
+  的 `(g_cpu_hz / 3000u) * 200u` 是现成先例；`board/rp2350rv` 的 1e6 循环就是待折算样本。
+- 超时是**上限**，不是延时替代：正常路径仍轮询状态位，不得为了"有超时"改成 sleep 固定
+  毫秒。
+- **不在持锁/关中断状态下做长等待**；LCD 的 `5e6` 轮询是第一个样本（在 `lcd_lock` 内）。
+- `wd_start(cb, ticks)` 移到 B-8，触发条件：网络/companion 的请求级超时。
+
+**不做**：全量替换 `sleep` 列表；把早期初始化改成读 tick。
 
 ### A-7｜LCD 接缝（C5）
 - `struct lcd_lowops {init, write_cmd, write_data, fill_rect, sync, delay_ms}`；RP 的 ST7789 作为第一个 lower。
@@ -169,10 +179,22 @@ build/gen/                  ← 构建期生成物，不入库
 |---|---|---|
 | **B-5a 探针** | vendor 最小寄存器头（时钟/GPIO/UART0）；`esptool` ROM 下载；打印版本/复位原因/时钟 | P4 上电稳定打印一行；记录 image header、偏移和 `write-flash` 命令 |
 | **B-5b 最小系统** | clock + UART + timer + 中断；能出 `tos> ` prompt | 心跳/`uptime` 正确，shell 可交互 |
-| **B-5c 平权** | flash + fs + 单域窗口 + PMP + `exec` | **同一个 `scripts/esp-c3/accept.py` 在 P4 上 24/24，`priotest` PASS** |
+| **B-5c 平权** | flash + fs + 单域窗口 + PMP + `exec` | `scripts/esp-c3/accept.py`（按 P4 的 console/复位原因参数化）24/24；`priotest` 单 HP 核基线 |
 
 "一行串口"只是 B-5a 的验收，不是 P4 第一阶段的全部。**P4 v1 的终点是 B-5c**：
 不含 WiFi、LP 调度、PSRAM 可执行窗口。
+
+**验收与止损的关系**（两者不能各说各话）：
+
+- `accept.py` 是串口上的 shell 语义测试，不是 C3 端口绑定；但它的启动/复位断言依赖
+  `RTC_SW_SYS_RST` 这类 C3 文案，P4 上要按实际复位原因与 console（UART vs USB CDC）
+  参数化，这是一次小的移植，不是重写。
+- 24 项里的 `prot rodata/heap/stack/null` 依赖 `plat_task_protect`。若止损点触发
+  （PMP 做不到 4 KB 粒度），**B-5c 的通过标准改为 20/24**：prot 四项按设计不适用，
+  降级理由写进 `OPEN-ITEMS.md`；不得把降级结果记成 24/24。
+- `priotest` 只在 B-5c 用**单 HP 核**跑，作为调度器语义门槛（worst 不超过一个 tick、
+  不输给 NORMAL）；不套 C3 的绝对毫秒数，也不代表 PSRAM 路径已经收口
+  （PSRAM 的 `priotest` 门槛只在启用 PSRAM 窗口时才有意义，见 `OPEN-ITEMS.md` §9）。
 
 **止损点**：B-5b 之后若确认 PMP 做不到 4 KB 粒度保护，v1 明确降级为"无用户保护"，
 记入 `OPEN-ITEMS.md`，不为了跑通保护而改窗口模型。
