@@ -54,80 +54,65 @@ static int copy_user_string(char *dst, uint32_t src, int max)
     return 0;
 }
 
+/* Append one path's segments to the normalized buffer.  A segment is
+ * consumed in place, so this needs no `tmp` and no per-segment `seg[64]`:
+ * the old resolver kept four buffers (cwd, tmp, norm, seg) on every path
+ * syscall, which is a lot of the 4 KiB stack on the RP2040. */
+static void path_segments(char *norm, int cap, int *no, const char *src)
+{
+    int si = 0;
+
+    while (src && src[si]) {
+        while (src[si] == '/')
+            si++;
+        if (!src[si])
+            break;
+
+        int start = si;
+        while (src[si] && src[si] != '/')
+            si++;
+        int len = si - start;
+
+        if (len == 1 && src[start] == '.')
+            continue;
+        if (len == 2 && src[start] == '.' && src[start + 1] == '.') {
+            if (*no > 1) {
+                int k = *no - 1;
+                while (k > 0 && norm[k] != '/')
+                    k--;
+                *no = k;            /* keep the leading '/' */
+            }
+            continue;
+        }
+
+        if (*no < cap - 1)
+            norm[(*no)++] = '/';
+        for (int s = 0; s < len && *no < cap - 1; s++)
+            norm[(*no)++] = src[start + s];
+    }
+}
+
 /* Resolve `in` against the calling task's cwd into an absolute, normalized
  * path written to `out` (outlen bytes, always NUL-terminated).  A leading
  * '/' makes the path absolute (cwd ignored); otherwise it is joined onto the
  * cwd.  '.' and '..' are collapsed, and '..' above the root stays at '/'. */
 static void resolve_path(const char *in, char *out, int outlen)
 {
-    char cwd[64];
-    strncpy(cwd, process_cwd_str(), sizeof(cwd) - 1);
-    cwd[sizeof(cwd) - 1] = '\0';
-
-    const char *rest = (in && in[0]) ? in : "";
-    char tmp[128];
-    if (in && in[0] == '/') {
-        /* Absolute: ignore the cwd. */
-        int ti = 0;
-        while (in[ti]) {
-            if (ti < (int)sizeof(tmp) - 1)
-                tmp[ti] = in[ti];
-            ti++;
-        }
-        tmp[ti < (int)sizeof(tmp) - 1 ? ti : (int)sizeof(tmp) - 1] = '\0';
-    } else {
-        int bi = 0;
-        while (cwd[bi] && bi < (int)sizeof(tmp) - 1)
-            tmp[bi++] = cwd[bi];
-        if (bi < (int)sizeof(tmp) - 1)
-            tmp[bi++] = '/';
-        int j = 0;
-        while (rest[j] && bi < (int)sizeof(tmp) - 1)
-            tmp[bi++] = rest[j++];
-        tmp[bi] = '\0';
-    }
-
-    /* Normalize: drop duplicate slashes, skip '.', pop on '..', keep a
-     * leading '/'. */
     char norm[128];
     int no = 0;
-    int si = 0;
-    while (tmp[si]) {
-        while (tmp[si] == '/')
-            si++;
-        if (!tmp[si])
-            break;
-        char seg[64];
-        int sl = 0;
-        while (tmp[si] && tmp[si] != '/') {
-            if (sl < (int)sizeof(seg) - 1)
-                seg[sl++] = tmp[si];
-            si++;
-        }
-        seg[sl] = '\0';
-        if (strcmp(seg, ".") == 0)
-            continue;
-        if (strcmp(seg, "..") == 0) {
-            if (no > 1) {
-                int k = no - 1;
-                while (k > 0 && norm[k] != '/')
-                    k--;
-                no = k;            /* keep the leading '/' */
-            }
-            continue;
-        }
-        if (no < (int)sizeof(norm) - 1)
-            norm[no++] = '/';
-        for (int s = 0; seg[s] && no < (int)sizeof(norm) - 1; s++)
-            norm[no++] = seg[s];
-    }
-    if (no == 0) {
-        norm[0] = '/';
-        no = 1;
-    }
+
+    if (!in || in[0] != '/')
+        path_segments(norm, (int)sizeof(norm), &no, process_cwd_str());
+    path_segments(norm, (int)sizeof(norm), &no, in ? in : "");
+
+    if (no == 0)
+        norm[no++] = '/';
     norm[no] = '\0';
-    strncpy(out, norm, outlen - 1);
-    out[outlen - 1] = '\0';
+
+    if (outlen > 0) {
+        strncpy(out, norm, (size_t)(outlen - 1));
+        out[outlen - 1] = '\0';
+    }
 }
 
 /* stat() for any path: device directories and device nodes first, then

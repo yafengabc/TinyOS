@@ -3856,3 +3856,25 @@ A-5 是 review 里少数“不是去重、而是实际上下文错误”的项�
 其余 review 项继续按价值取舍：C-4/C-6、A-2/A-3/A-4/A-6、F/G/H 等没有实际
 故障证据的结构性改造，暂不为了“清空 review”而实施。
 
+## 41. 2026-11-16 B-7：路径解析去掉四段栈缓冲
+
+`resolve_path()` 原来每次路径 syscall 都在内核栈上放 `cwd[64] + tmp[128] +
+norm[128] + seg[64]`（约 384 B），而 RP2040 的任务栈只有 4 KiB。现在改成：
+
+- 直接用 `process_cwd_str()`，不再复制 cwd；
+- 用 `path_segments()` 在源串上按段解析，不再需要 `tmp` 和 `seg`；
+- 只保留一个 128 B 的 `norm` 输出缓冲。
+
+`.`、`..`、重复斜杠、绝对/相对路径和 root 语义保持不变。QEMU 和真机都验证了
+`pwd`、`cd /bin`、`cd ..`、`ls ./bin`、`ls /bin/../bin`、`cat /proc/uptime`。
+
+- T0/T1 全通过；`rv32smp`/`arm` smoke+soak PASS；`rv32` 的 `piperace`
+  长输出仍会在 QEMU 单核上触发既有的命令窗口误判（在 B-7 前的 `63ac1e4`
+  基线同样复现，不是本项回归）；
+- ATK-DNRP2350AM：上述路径命令、`piperace 2 64`、`free` 正常；
+- RP2040 按约定 **NOT RUN**。
+
+这一项优先于 A-2/A-4/A-6：后三者主要是跨端口源码去重，不会让单个镜像变小，
+而且改动落在 flash park/时钟等高风险路径；B-7 直接减少每个路径 syscall 的内核
+栈峰值，对 4 KiB 栈的 RP2040 更有稳定性收益。
+
