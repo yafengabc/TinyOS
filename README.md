@@ -21,10 +21,12 @@ build/test toolchain written in Go — small enough to read end to end.
   the pad registers and the pico-sdk-shaped facade TinyUSB asks for are all
   vendored under `third_party/` and `board/`. A new board is a directory, not
   an SDK.
-- **A C compiler in the tree.** `goc32` (a submodule) compiles user programs
-  from C to RV32IM/Thumb and emits the exact on-disk envelope the kernel loads
-  — no libLLVM, no cgo. In this milestone clang is still used as the assembler
-  and linker; a self-contained one is next.
+- **A C compiler in the tree.** `goc32` (a submodule) compiles one C file into
+  the exact **LZ4TOS** blob `tos build` would put in littlefs — window hint,
+  stack/heap asks and the LZ4 block included — for RV32IMC, Thumb-1/ARMv6-M,
+  ARMv7-M and ARMv8-M. No libLLVM, no cgo; the assembler and linker it drives
+  today are clang/ld.lld (an in-tree pair is the next milestone). A `.tos`
+  dropped into `build/fs-stage/bin/` is installed by the ramdisk rebuild.
 - **One kernel, one userland, 12 targets** — including both instruction sets of
   the same RP2350 silicon, and a PC.
 - **Readable size** — the kernel is ~70 KiB of flash and ~45 KiB of RAM, and the
