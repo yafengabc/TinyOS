@@ -3755,8 +3755,15 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
   `esp32c3`、`rv32`、`rv32smp`、`arm` 全部构建通过。
 - QEMU `rv32`/`rv32smp`/`arm` smoke 通过（`piperace` 在单核 QEMU 上的长输出
   时序仍会使 soak 偶发“命令交换窗口”误判，基线同样复现，不是本轮回归）。
-- RP2040/RP2350 真机验证本轮未做（用户暂未接板）；N-01/N-03 的 USB 与 flash
-  路径仍需上板确认。
+- **RP2350 真机（ATK-DNRP2350AM）**：
+  - `rp2350smp` 启动日志 `[B]..[E]` 齐全，`[E] usb hw=1 cfg=1`，USB CDC
+    `2e8a:000a` 重新枚举，shell 正常；
+  - `dd of=/x bs=512 count=1` + `rm /x` **1000 轮 ALL OK**；
+  - `screen mirror on/off` 正常，面板控制台未死锁；
+  - `rp2350rvsmp` 启动正常，**100 轮 dd/rm ALL OK**。
+- **Pico 2 对照**：官方 MicroPython UF2 能枚举 USB；TinyOS 的 v0.3.0 发布版和
+  本轮镜像都在启动早期 HardFault、USB 不出现。官方固件正常说明 USB/线材没问题，
+  Pico 2 的板级适配需另开一项，不混在本次 review 修复里。
 
 ### 暂缓
 

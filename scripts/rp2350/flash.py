@@ -512,7 +512,11 @@ def main():
         print("---- UART0 early log (captured across the reboot) ----")
         if early:
             for line in early.decode("utf-8", "replace").splitlines():
-                print("  " + line.rstrip())
+                # Windows consoles often run CP936/GBK; a decoded replacement
+                # character would otherwise abort the flash script right after
+                # the image was accepted.
+                safe = line.rstrip().encode("ascii", "replace").decode("ascii")
+                print("  " + safe)
         else:
             print("  (nothing; check GPIO0 TX / GPIO1 RX / GND and the adapter)")
         print("-----------------------------------------------------")
