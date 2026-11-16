@@ -129,6 +129,8 @@ PIO 17/17；RP2040 1000 轮 `dd`+`rm`。
 | 文档 | 内容 |
 | --- | --- |
 | [`docs/GUIDE.zh-CN.md`](docs/GUIDE.zh-CN.md) | 长手册：逐板用法、内存布局、系统调用 ABI |
+| [`docs/TESTING.md`](docs/TESTING.md) | 回归测试手册：分级、命令、证据模板（所有 agent 必读） |
+| [`AGENTS.md`](AGENTS.md) | agent 规范：测试、安全、硬件 |
 | [`docs/PLATFORM-DESIGN.md`](docs/PLATFORM-DESIGN.md) | 移植契约、trap/用户态入口、PMP/MPU 布局 |
 | [`docs/REAL-THREADS.md`](docs/REAL-THREADS.md) | kthreads 的设计与 SMP 规则 |
 | [`docs/SHELL-GUIDE.md`](docs/SHELL-GUIDE.md) | shell、工具与用户态 API |

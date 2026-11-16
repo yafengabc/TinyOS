@@ -146,6 +146,8 @@ RP2350 (M33) 16/16 SMP with `smpbench` 1.95x, RP2350 (Hazard3) 17/17 SMP with
 | Document | What it covers |
 | --- | --- |
 | [`docs/GUIDE.zh-CN.md`](docs/GUIDE.zh-CN.md) | The long manual: per-board usage, memory layout, syscall ABI (Chinese) |
+| [`docs/TESTING.md`](docs/TESTING.md) | Regression rules every agent must follow: tiers, commands, evidence (Chinese) |
+| [`AGENTS.md`](AGENTS.md) | Normative agent rules: testing, safety, hardware |
 | [`docs/PLATFORM-DESIGN.md`](docs/PLATFORM-DESIGN.md) | Porting contract, trap/user-mode entry, PMP/MPU layouts |
 | [`docs/REAL-THREADS.md`](docs/REAL-THREADS.md) | The kthreads design and its SMP rules |
 | [`docs/SHELL-GUIDE.md`](docs/SHELL-GUIDE.md) | Shell, tools and the userland API |
