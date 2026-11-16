@@ -68,7 +68,7 @@ P4 挑战五个假设：核同构、内存单域、外设本地 MMIO、启动链
 
 **P4 第一阶段范围（写死）**：
 - 只用片上 SRAM 做任务窗口；PSRAM 只做数据/文件缓存；
-- 只做 B-5 启动探针 + 单域窗口 + PMP/保护 + UART/timer；
+- 只做 B-5a/b/c 台阶（探针 → 出 prompt → `accept.py` 24/24）+ 单域窗口 + PMP/保护 + UART/timer；
 - 不做多域窗口、不做 WiFi full stack、不做 LP 调度。
 
 ---
@@ -159,9 +159,23 @@ build/gen/                  ← 构建期生成物，不入库
 | B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench |
 | B-3 | LZ4TOS flags 高字节版本 + V1 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归 |
-| B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；P4 串口一行 |
+| B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |
 | B-6 | LP/companion 的窄消息接口 + 心跳 | P4 硬件；LP 不进入 SMP |
 | B-7 | 多内存域（仅 PSRAM 窗口确有需求） | C4；QEMU 双段 + P4 硬件 |
+
+#### B-5 的三级台阶
+
+| 台阶 | 内容 | 通过标准 |
+|---|---|---|
+| **B-5a 探针** | vendor 最小寄存器头（时钟/GPIO/UART0）；`esptool` ROM 下载；打印版本/复位原因/时钟 | P4 上电稳定打印一行；记录 image header、偏移和 `write-flash` 命令 |
+| **B-5b 最小系统** | clock + UART + timer + 中断；能出 `tos> ` prompt | 心跳/`uptime` 正确，shell 可交互 |
+| **B-5c 平权** | flash + fs + 单域窗口 + PMP + `exec` | **同一个 `scripts/esp-c3/accept.py` 在 P4 上 24/24，`priotest` PASS** |
+
+"一行串口"只是 B-5a 的验收，不是 P4 第一阶段的全部。**P4 v1 的终点是 B-5c**：
+不含 WiFi、LP 调度、PSRAM 可执行窗口。
+
+**止损点**：B-5b 之后若确认 PMP 做不到 4 KB 粒度保护，v1 明确降级为"无用户保护"，
+记入 `OPEN-ITEMS.md`，不为了跑通保护而改窗口模型。
 
 **B-8 条件项，不排期**：5 档优先级、workqueue、tickless、task group、通用 RPC。出现具体需求再立项，且先补 PI/aging 等前提。
 
