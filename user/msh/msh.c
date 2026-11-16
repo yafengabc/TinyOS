@@ -6,10 +6,11 @@
  * build.go picks for rv32/arm; zig if present) with `A | B` and `> ` in place:
  * C3 / rp2350rv / rv32 7,364 B (828 B under the 8 KiB span), rp2350 7,684 B
  * (508 B under), rp2040 8,132 B (60 B under).  All round to the 8 KiB span,
- * so the window stays 16 KiB on every 16-KiB-grain board - but rp2040 is the
- * razor's edge: one more byte over 8,192 and the span jumps to 12 KiB, doubling
- * the window to 32 KiB.  TOS_ONE_GRAIN() makes `tos build` check that rather
- * than leaving it to arithmetic in a comment.
+ * so the window stays 16 KiB on the small boards (one 64 KiB grain on the
+ * QEMU/PC boards) - but rp2040 is the razor's edge: one more byte over 8,192
+ * and the span jumps to 12 KiB, doubling the small-board window to 32 KiB.
+ * TOS_WINDOW(16 KiB) makes `tos build` check that rather than leaving it to
+ * arithmetic in a comment.
  *
  * The pipe/redirect wiring (the `|` split, the fd dup2 dance, four error
  * strings, `> ` handling) is paid for by the POOL_MAX cut below; the span held
@@ -50,14 +51,18 @@
  */
 #include "lib.h"
 
-/* The whole point: 4 KiB of stack is what makes the window one grain.  The
- * default on the small boards is 8 KiB, and 4 448 + 8 192 + 4 096 = 16 736
- * rounds up to 32 KiB on a 16 KiB grain - 352 bytes short of one window. */
+/* The whole point: a 4 KiB stack keeps the 16 KiB window from rounding up.
+ * The default on the small boards is 8 KiB, and 8 192 + 8 192 + 4 096 =
+ * 20 480, which takes a 24 KiB window on a 4 KiB grain. */
 TOS_STACK(4 * 1024);
-/* One board grain on every board that gives us one.  The build computes
- * image + stack + heap + guard and fails when that stops fitting, so this is
- * a promise, not a hope. */
+/* 16 KiB on the small boards (4 KiB grain), one 64 KiB grain on the larger
+ * ones.  The build computes image + stack + heap + guard and fails when that
+ * stops fitting, so this is a promise, not a hope. */
+#if TOS_APP_GRAIN >= 64 * 1024
 TOS_ONE_GRAIN();
+#else
+TOS_WINDOW(16 * 1024);
+#endif
 
 #define MAX_ARGS  8
 #define LINE_MAX  256

@@ -260,7 +260,7 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 func (t Target) WindowGeometry() (grain, stack, guard int) {
 	switch t.Board {
 	case "esp32c3", "rp2040", "rp2350", "rp2350rv":
-		return 16 << 10, 8 << 10, 4 << 10
+		return 4 << 10, 4 << 10, 4 << 10
 	}
 	return 64 << 10, 32 << 10, 16 << 10
 }
@@ -342,7 +342,11 @@ func windowNote(data []byte) (windowNotes, bool) {
 	if lo == ^uint64(0) || hi <= lo {
 		return w, false
 	}
-	w.span = uint32((hi - lo + 4095) &^ 4095)
+	span := (hi - lo + 4095) &^ 4095
+	if span > uint64(^uint32(0)) {
+		return w, false
+	}
+	w.span = uint32(span)
 	return w, true
 }
 
@@ -357,17 +361,20 @@ func (b *Builder) checkWindow(prog string, data []byte) error {
 	if w.stack == 0 {
 		w.stack = uint32(defStack)
 	}
-	limit := w.window
+	limit := uint64(w.window)
 	what := fmt.Sprintf("TOS_WINDOW(%d KiB)", w.window/1024)
 	if w.window == 0 {
-		limit = uint32(grain)
+		limit = uint64(grain)
 		what = "TOS_ONE_GRAIN()"
 	}
-	need := w.span + w.stack + w.heap + uint32(guard)
+	// The note fields come from an untrusted ELF.  Do the sum in uint64:
+	// uint32 addition here used to wrap and let an image with a near-4 GiB
+	// heap note pass the build-time check.
+	need := uint64(w.span) + uint64(w.stack) + uint64(w.heap) + uint64(guard)
 	if need <= limit {
 		return nil
 	}
-	rounded := (need + uint32(grain) - 1) / uint32(grain) * uint32(grain)
+	rounded := (need + uint64(grain) - 1) / uint64(grain) * uint64(grain)
 	return fmt.Errorf("%s: %s no longer fits: image %d + stack %d + heap %d + guard %d = %d bytes, so it would take a %d KiB window",
 		prog, what, w.span, w.stack, w.heap, guard, need, rounded/1024)
 }
@@ -704,23 +711,6 @@ func (b *Builder) link(objs []string, script, out string, extra ...string) error
 	args = append(args, "-o", out)
 	args = append(args, objs...)
 	return b.runTool(tool, args, "LD")
-}
-
-// ldLldPath finds the ld.lld bundled with a zig installation.
-func ldLldPath(zig string) string {
-	// <zig dir>/zig.exe sits next to ld.lld on Windows zig distributions;
-	// otherwise fall back to searching PATH.
-	dir := filepath.Dir(zig)
-	for _, name := range []string{"ld.lld.exe", "ld.lld"} {
-		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	if p := findTool("ld.lld"); p != "" {
-		return p
-	}
-	return zig // last resort: let zig report the error
 }
 
 // linkPIE links a user program as a position independent executable (ET_DYN).
@@ -1434,7 +1424,9 @@ func (b *Builder) buildUser() ([]string, error) {
 	// the board's APP_BASE, so one binary runs on QEMU and on real hardware.
 	// -fPIC (not just -fPIE) is needed because the linker rejects GOT-free
 	// absolute references against local symbols in a shared-style link.
-	userPIEFlags := append([]string{"-fPIC"}, b.userDefines()...)
+	grain, _, _ := b.Target.WindowGeometry()
+	userPIEFlags := append([]string{"-fPIC", fmt.Sprintf("-DTOS_APP_GRAIN=%d", grain)},
+		b.userDefines()...)
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).

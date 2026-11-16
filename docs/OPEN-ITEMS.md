@@ -41,6 +41,11 @@ HISTORY §14/§32.3/§35），所以这是这一块板**唯一**还没记账的�
 修法两行：把返回值改成 4K/4K/4K，把 `msh` 的注解换成 `TOS_WINDOW(16*1024)`；改完
 重新确认 `msh`/`sh`/`py` 的承诺仍然成立。单独一次提交，别和别的混。
 
+> **2026-11-16 已修。** `WindowGeometry()` 改为 4K/4K/4K；`msh` 在 4K 板上声明
+> `TOS_WINDOW(16 KiB)`，在 64 KiB grain 的 QEMU/PC 上仍用 `TOS_ONE_GRAIN()`。
+> 构建把 grain 作为 `TOS_APP_GRAIN` 传给用户程序，`internal/build/geometry_test.go`
+> 直接解析四块板的 `layout.c` 比对，防止再次漂移。
+
 ## 5. x86 从来没在 CI 里构建过（§37）
 
 发布矩阵里没有 `x86`，所以它在发行版工具链上直接失败：

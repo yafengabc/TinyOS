@@ -83,8 +83,14 @@
         unsigned window_bytes;                                               \
     } tos_window_note = { 7u, 4u, 3u, "TinyOS", (unsigned)(bytes) }
 
-/* The same note with 0, meaning "one board grain" (16 KiB on C3/RP2040,
- * 64 KiB on the QEMU and PC targets). */
+/* The same note with 0, meaning "one board grain" (4 KiB on C3/RP2040/
+ * RP2350, 64 KiB on the QEMU and PC targets).  The build passes the exact
+ * value as TOS_APP_GRAIN so a program can choose between one grain and a
+ * fixed minimum; the fallback only matters for a source-tree compile that
+ * bypasses tos build. */
+#ifndef TOS_APP_GRAIN
+#define TOS_APP_GRAIN (16 * 1024)
+#endif
 #define TOS_ONE_GRAIN()                                                      \
     __attribute__((section(".note.tos"), used, aligned(4)))                  \
     static const struct {                                                    \
