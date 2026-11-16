@@ -49,7 +49,12 @@ struct clockinfo {
 
 /* The offsets are the contract used by kernel/syscall.c.  Keep these in
  * sync with the field order above; this is deliberately a compile-time
- * failure, not a runtime check. */
+ * failure, not a runtime check.
+ *
+ * goc32's front end cannot parse __builtin_offsetof; it defines __TINYOS__
+ * in its preprocessing environment.  The kernel and clang user builds still
+ * get every assert, and goc32 still sees the struct definitions. */
+#ifndef __TINYOS__
 _Static_assert(sizeof(struct stat) == 8, "struct stat ABI size");
 _Static_assert(offsetof(struct stat, size) == 0, "struct stat.size ABI");
 _Static_assert(offsetof(struct stat, type) == 4, "struct stat.type ABI");
@@ -74,5 +79,6 @@ _Static_assert(offsetof(struct clockinfo, us) == 8, "clockinfo.us ABI");
 _Static_assert(offsetof(struct clockinfo, ms) == 12, "clockinfo.ms ABI");
 _Static_assert(offsetof(struct clockinfo, tick_hz) == 16, "clockinfo.tick_hz ABI");
 _Static_assert(offsetof(struct clockinfo, cpus) == 20, "clockinfo.cpus ABI");
+#endif /* !__TINYOS__ */
 
 #endif
