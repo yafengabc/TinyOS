@@ -106,14 +106,14 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 | boot2 + UF2 + XIP 启动 | ✅ | ROM CRC、family、向量位、MSP 都在构建期校验 |
 | 125 MHz 时钟、SysTick、UART0 分频 | ✅ | 启动探针逐段打印，卡住能定位 |
 | UART0 控制台 + shell | ✅ 实机 | 启动探针、提示符都从 GP0/GP1 出；`scripts/rp2040/autoflash.py --probe/--accept` 就是按"能到 shell"写的 |
-| littlefs @ flash 0x80000（ROM flash API） | ✅ 挂载 / ◐ 写 | shell 能启动说明根文件系统挂上了；写/擦路径要用 `dd` 再验 |
+| littlefs @ flash 0x80000（ROM flash API） | ✅ 实机 | 挂载、32 KiB 写入/读回、`reboot` 后持久化、100 轮 `dd`+`rm` 均通过 |
 | USB CDC（TinyUSB，IRQ 5） | ✅ 实机 | COM17 `2e8a:000a` 枚举并可交互（2026-11-17）；UART0 = COM19 同时可用。已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B；Ctrl-D 在本板是**故意禁用**的（ROM 的 `reset_usb_boot()` 不可靠，用 BOOTSEL 按钮） |
 | PWM / UART1 / SPI0-1 / I2C0-1 / DMA | ◐ | 驱动 + 用户命令已接，menuconfig 可裁；实机覆盖以自测为准 |
 | PIO（2 块 / 8 个 SM + 用户态汇编器） | ✅ 实机 | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；RP2040 `pio_accept.py --image rp2040` **17/17**（2026-11-17），GP25 `blink` 目视约 2 Hz；WS2812 因无灯带只验了字表/装入。清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
-| `rp2040smp`（core 1） | ◐ | 目标可构建，握手走 SIO FIFO；未做完整验收 |
+| `rp2040smp`（core 1） | ✅ 实机 | `cpus=2`；`smpbench` **2.04x**；`smp -s 2 400` / `smp -t 4 2 300` 双核均衡；`piperace 2 64`、100 轮 `dd`+`rm`、heartbeat 6/6（UART 与 USB CDC）通过 |
 | BOOTSEL 回退（Ctrl-D） | ◐ | ROM 调用路径已实现，含看门狗 scratch 标记 |
 | 内存保护 | ☐ | 硬件没有，`prot` 在本板会真的写穿；默认不打包 |
-| `reboot`（AIRCR.SYSRESETREQ） | ◐ | 代码在，注释里仍标"未实测" |
+| `reboot`（watchdog + PSM_WDSEL） | ✅ 实机 | 2026-11-17 `dd` 32 KiB 后 `reboot`，文件仍可读、USB CDC/串口重新枚举；不是 AIRCR.SYSRESETREQ |
 
 ### 排障：先确认"我们的 UF2 能不能跑"
 
