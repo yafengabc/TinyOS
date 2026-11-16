@@ -13,6 +13,26 @@ It is not a Linux clone. It is a complete, readable system for microcontrollers:
 scheduler, MMU-less memory protection, filesystem, shell, drivers, and a
 build/test toolchain written in Go — small enough to read end to end.
 
+## Why it is different
+
+- **No SDK.** Every target — M0+, M33, Hazard3, RV32, i386 — is built by the
+  same plain `clang` + `ld.lld` and nothing else. No pico-sdk install, no
+  ESP-IDF install, no vendor build system: the boot2 stub, the ROM call tables,
+  the pad registers and the pico-sdk-shaped facade TinyUSB asks for are all
+  vendored under `third_party/` and `board/`. A new board is a directory, not
+  an SDK.
+- **A C compiler in the tree.** `goc32` (a submodule) compiles user programs
+  from C to RV32IM/Thumb and emits the exact on-disk envelope the kernel loads
+  — no libLLVM, no cgo. In this milestone clang is still used as the assembler
+  and linker; a self-contained one is next.
+- **One kernel, one userland, 12 targets** — including both instruction sets of
+  the same RP2350 silicon, and a PC.
+- **Readable size** — the kernel is ~70 KiB of flash and ~45 KiB of RAM, and the
+  whole system is a repository you can read end to end.
+
+The only prebuilt binaries in the tree are the 256-byte RP2040 boot2 and the
+optional ESP32-C3 WiFi blobs.
+
 ## At a glance
 
 | Target | CPU | Board | RAM | Flash | State |
@@ -58,9 +78,9 @@ baseline used to tell "SMP-specific" from "ordinary" bugs.
 
 ## Quick start
 
-Requirements: **Go** (1.22+), **clang** and **ld.lld** on `PATH`. Everything
-else — the linker scripts, the image packers, the filesystem builder — runs
-through `go run ./cmd/tos`.
+Requirements: **Go** (1.22+), **clang** and **ld.lld** on `PATH` — and nothing
+else. There is no SDK to install: everything the boards need beyond that is in
+the tree.
 
 ```sh
 # Build any target
