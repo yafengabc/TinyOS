@@ -3878,3 +3878,26 @@ norm[128] + seg[64]`（约 384 B），而 RP2040 的任务栈只有 4 KiB。现�
 而且改动落在 flash park/时钟等高风险路径；B-7 直接减少每个路径 syscall 的内核
 栈峰值，对 4 KiB 栈的 RP2040 更有稳定性收益。
 
+## 42. 2026-11-16 N-06 的 RV32 端口补齐
+
+用户核对发现 ARM 版本的 `dma_armed` 顺序/屏障/驱动锁只修了 `board/rp2350`，
+`board/rp2350rv` 仍是“先写 TRIG，后置 `dma_armed`”。这确实会留下同一个
+窗口：DMA 已经读 `rowbuf`，嵌套 console 路径却看到 `dma_armed == 0`。
+
+已把 ARM 的修复对等地搬到 `drivers/display/st7789/rp2350rv/lcd_st7789.c`：
+
+- `dma_armed = 1` 移到 `CTRL_TRIG` 写之前，并用 RV32 的 `fence rw, rw`
+  作为屏障；
+- 增加与 ARM 相同的 `lcd_lock`，覆盖 `clear/cell/row/scan/sync/info` 的
+  `data_phase -> kick -> sync`，锁内保存/恢复中断状态，避免 tick 的
+  控制台镜像嵌套进半成品命令。
+
+真机验收（ATK-DNRP2350AM，`rp2350rvsmp`）：
+
+- `screen info/text/clear blue/mirror on|off` 全部返回，面板未死锁；
+- `piperace 2 64` 两对全部 `ok`；
+- `dd` 写入/读回 `pattern verified`，`rm` 正常；
+- `smpbench` **1.99x**；`free` 正常。
+
+T0/T1/T2 仍通过；RP2040 按约定 **NOT RUN**。
+
