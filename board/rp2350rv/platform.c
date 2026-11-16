@@ -465,8 +465,9 @@ static void pll_sys_init(void)
 static uint32_t measure_clk_khz(void)
 {
     uint32_t spins;
+    const uint32_t bound = plat_pre_tick_spins(1000000u);
 
-    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
+    for (spins = 0; spins < bound; spins++) {
         if (!(mmio_read32(FC0_STATUS) & FC0_STATUS_RUNNING))
             break;
     }
@@ -476,11 +477,11 @@ static uint32_t measure_clk_khz(void)
     mmio_write32(FC0_INTERVAL, 10u);
     mmio_write32(FC0_SRC, FC0_SRC_CLK_SYS);
 
-    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
+    for (spins = 0; spins < bound; spins++) {
         if (mmio_read32(FC0_STATUS) & FC0_STATUS_DONE)
             break;
     }
-    if (spins == plat_pre_tick_spins(1000000u))
+    if (spins == bound)
         return 0;
     return mmio_read32(FC0_RESULT) >> FC0_RESULT_KHZ_S;
 }

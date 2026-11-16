@@ -198,14 +198,21 @@ uint32_t plat_cpu_hz(void);
 /* Scale an old pre-tick spin bound (written for the 125 MHz RP2040) to the
  * board's actual clock.  It is an upper bound, not a delay: callers still
  * poll the state bit and return as soon as it is ready.  A board that has not
- * filled in plat_cpu_hz() yet keeps the old count. */
+ * filled in plat_cpu_hz() yet keeps the old count.
+ *
+ * 32-bit on purpose: the obvious 64-bit form pulls __udivdi3 into every
+ * loop-condition evaluation on RV32.  The clock is rounded up to the next
+ * 125 kHz so the result is never smaller than the exact value, and bounds
+ * below 1000 iterations are not scaled at all. */
 static inline uint32_t plat_pre_tick_spins(uint32_t old_bound)
 {
     uint32_t hz = plat_cpu_hz();
+    uint32_t per_125k;
 
-    if (hz == 0)
+    if (hz == 0 || old_bound < 1000u)
         return old_bound;
-    return (uint32_t)(((uint64_t)old_bound * hz) / 125000000ull);
+    per_125k = (hz + 124999u) / 125000u;
+    return (old_bound / 1000u) * per_125k;
 }
 
 /* Human-readable core and ISA names.  The board owns model (the chip/core

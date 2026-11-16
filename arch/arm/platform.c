@@ -102,7 +102,9 @@ regs_t *arm_handle_fault(regs_t *f)
          * registers are not there.  Do not dump a garbage frame as if it
          * were a wild pointer; the task has run out of stack and there is
          * nowhere to grow on this port, so kill it with the same message the
-         * software guard uses. */
+         * software guard uses.  The frame pointer is still passed to
+         * process_exit() (which reaps without reading it); it must not be
+         * printed or restored here. */
         {
             uint32_t cfsr = mmio_read32(ARM_CFSR);
             if (cfsr & (ARM_CFSR_MSTKERR | ARM_CFSR_MUNSTKERR)) {
@@ -887,12 +889,11 @@ void plat_spin_release(volatile int *v)
  * writable means the push succeeds; the task then reaches its next syscall,
  * where process_stack_guard() sees sp outside the stack and grows it.
  *
- * 2560 B covers deep's 2 KiB frame plus a frame's prologue/push.  The rest
- * of the 4 KiB hole stays MPU_ATTR_GUARD, which is what keeps prot heap
- * (brk+64, near the bottom of the hole) and prot stack faulting. */
-/* A-8/deep: deep's 2 KiB frame plus the exception push needs more than the
- * old 2.5 KiB strip when the second growth has nowhere to come from.  Keep
- * a small hard guard below it for prot heap/stack; 0xF00 leaves 256 B. */
+ * The strip is 0xF00 of the 4 KiB hole: deep's 2 KiB frame plus the exception
+ * push needs more than the old 2.5 KiB when the second growth has nowhere to
+ * come from.  The remaining 256 B at the bottom stays MPU_ATTR_GUARD, which
+ * is what keeps prot heap (brk+64, near the bottom of the hole) and prot
+ * stack faulting. */
 #define ARM_STACK_LANDING 0xF00u
 
 static void mpu_region(uint32_t n, uint32_t base, uint32_t size, uint32_t attr)

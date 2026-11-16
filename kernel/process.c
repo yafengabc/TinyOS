@@ -307,7 +307,11 @@ static int proc_state_transition_ok(int from, int to)
 
 static void proc_set_state(proc_t *p, int st)
 {
-    KASSERT(proc_state_transition_ok(p->state, st));
+    /* Called from sched_switch(), which runs inside the tick interrupt and
+     * from paths that already hold proc_lock with interrupts masked.  A
+     * printing assert here could deadlock on the console lock, so halt
+     * without printing: a broken transition is unrecoverable anyway. */
+    KASSERT_HALT(proc_state_transition_ok(p->state, st));
     p->state = st;
 }
 

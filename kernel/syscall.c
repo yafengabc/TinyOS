@@ -1,5 +1,6 @@
 #include "tos.h"
 #include "tos_abi.h"
+#include "tos_abi_asserts.h"   /* offset asserts: kernel only, goc32 cannot parse them */
 #include "console.h"
 #include "ramdisk.h"
 #include "devfs.h"

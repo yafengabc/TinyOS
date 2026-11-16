@@ -47,38 +47,14 @@ struct clockinfo {
     uint32_t cpus;     /* CPUs in this build              */
 };
 
-/* The offsets are the contract used by kernel/syscall.c.  Keep these in
- * sync with the field order above; this is deliberately a compile-time
- * failure, not a runtime check.
- *
- * goc32's front end cannot parse __builtin_offsetof; it defines __TINYOS__
- * in its preprocessing environment.  The kernel and clang user builds still
- * get every assert, and goc32 still sees the struct definitions. */
-#ifndef __TINYOS__
+/* Sizes are cheap enough for every compiler (goc32 included).  Field
+ * offsets need offsetof(); goc32's front end cannot fold that, so the
+ * offset asserts live in tos_abi_asserts.h and are included by the kernel
+ * only.  Both files are generated from the same struct definitions, so a
+ * field reorder still fails the kernel build. */
 _Static_assert(sizeof(struct stat) == 8, "struct stat ABI size");
-_Static_assert(offsetof(struct stat, size) == 0, "struct stat.size ABI");
-_Static_assert(offsetof(struct stat, type) == 4, "struct stat.type ABI");
-
 _Static_assert(sizeof(struct meminfo) == 32, "struct meminfo ABI size");
-_Static_assert(offsetof(struct meminfo, total) == 0, "meminfo.total ABI");
-_Static_assert(offsetof(struct meminfo, used) == 4, "meminfo.used ABI");
-_Static_assert(offsetof(struct meminfo, free) == 8, "meminfo.free ABI");
-_Static_assert(offsetof(struct meminfo, peak) == 12, "meminfo.peak ABI");
-_Static_assert(offsetof(struct meminfo, ram_total) == 16, "meminfo.ram_total ABI");
-_Static_assert(offsetof(struct meminfo, kernel_used) == 20, "meminfo.kernel_used ABI");
-_Static_assert(offsetof(struct meminfo, app_total) == 24, "meminfo.app_total ABI");
-_Static_assert(offsetof(struct meminfo, ram_unused) == 28, "meminfo.ram_unused ABI");
-
 _Static_assert(sizeof(struct dfinfo) == 8, "struct dfinfo ABI size");
-_Static_assert(offsetof(struct dfinfo, total) == 0, "dfinfo.total ABI");
-_Static_assert(offsetof(struct dfinfo, used) == 4, "dfinfo.used ABI");
-
 _Static_assert(sizeof(struct clockinfo) == 24, "struct clockinfo ABI size");
-_Static_assert(offsetof(struct clockinfo, ns) == 0, "clockinfo.ns ABI");
-_Static_assert(offsetof(struct clockinfo, us) == 8, "clockinfo.us ABI");
-_Static_assert(offsetof(struct clockinfo, ms) == 12, "clockinfo.ms ABI");
-_Static_assert(offsetof(struct clockinfo, tick_hz) == 16, "clockinfo.tick_hz ABI");
-_Static_assert(offsetof(struct clockinfo, cpus) == 20, "clockinfo.cpus ABI");
-#endif /* !__TINYOS__ */
 
 #endif
