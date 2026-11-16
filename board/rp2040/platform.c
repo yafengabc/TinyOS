@@ -897,7 +897,7 @@ rp_flash_park_loop(void)
      * Publish the acknowledgement for every generation: a request raised
      * while this core is still inside the loop never re-enters it, so an ack
      * written only on entry would be consumed by the earlier request. */
-    for (volatile uint32_t spins = 0; spins < 200000000u; spins++) {
+    for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
         if (!g_flash_park)
             break;
         __asm__ volatile("dmb" ::: "memory");
@@ -950,7 +950,7 @@ static int rp_flash_park_other(void)
     __asm__ volatile("dmb" ::: "memory");
     g_flash_park = 1;
     __asm__ volatile("sev" ::: "memory");
-    for (uint32_t i = 0; i < 20000000u; i++)
+    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++)
         if (g_park_ack == myreq) {
             /* Stay masked: the caller restores the interrupt state after the
              * ROM call and the unpark. */

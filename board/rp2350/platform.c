@@ -734,7 +734,7 @@ static void rom_stop_other_core(void)
     g_flash_park = 1;
     __asm__ volatile("sev" ::: "memory");
 
-    for (uint32_t i = 0; i < 20000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
         if (g_park_ack == myreq)
             break;
         wdt_feed();
@@ -1244,7 +1244,7 @@ static RAMFUNC void rp_flash_park_loop(void)
      * "dd: write error at block 0 (-1)" on rp2350rvsmp.  Publishing while the
      * flag is still up is safe: the flag is cleared only after XIP is back, so
      * "flag clear" means "you may return to flash". */
-    for (volatile uint32_t spins = 0; spins < 200000000u; spins++) {
+    for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
         if (!g_flash_park)
             break;
         __asm__ volatile("dmb" ::: "memory");
@@ -1335,7 +1335,7 @@ static int rp_flash_park_other(void)
     __asm__ volatile("dmb" ::: "memory");
     g_flash_park = 1;
     __asm__ volatile("sev" ::: "memory");
-    for (uint32_t i = 0; i < 20000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
         /* Only this request's acknowledgement counts.  An ack left over from
          * an earlier, timed-out handshake must not be read as "the other core
          * is parked now". */

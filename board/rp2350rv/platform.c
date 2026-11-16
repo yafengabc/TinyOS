@@ -858,7 +858,7 @@ static RAMFUNC void rp_flash_park_loop(void)
      * "dd: write error at block 0 (-1)" on rp2350rvsmp.  Publishing while the
      * flag is still up is safe: the flag is only cleared after XIP is back,
      * so "flag clear" is exactly "you may return to flash". */
-    for (volatile uint32_t spins = 0; spins < 200000000u; spins++) {
+    for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
         if (!g_flash_park)
             break;
         __asm__ volatile("fence rw, rw" ::: "memory");
@@ -920,7 +920,7 @@ static int rp_flash_park_other(void)
     __asm__ volatile("fence rw, rw" ::: "memory");
     g_flash_park = 1;
     __asm__ volatile("slt x0, x0, x1" ::: "memory");
-    for (uint32_t i = 0; i < 20000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
         /* Only this request's acknowledgement counts. */
         if (g_park_ack == myreq) {
             /* Stay masked: the caller restores mstatus.MIE after the ROM

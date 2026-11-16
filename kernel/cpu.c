@@ -125,7 +125,7 @@ void cpu_init(void)
         for (int i = 1; i < n; i++)
             (void)plat_start_cpu(i);
 
-        for (uint32_t spins = 0; spins < 20000000u; spins++) {
+        for (uint32_t spins = 0; spins < plat_pre_tick_spins(20000000u); spins++) {
             if (cpu_count == n) {
                 __sync_synchronize();
                 break;

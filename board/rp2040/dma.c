@@ -80,7 +80,7 @@ int plat_dma_memcpy(void *dst, const void *src, int len)
     mmio_write32(DMA_CTRL(ch),
                  DMA_EN | DMA_INCR_READ | DMA_INCR_WRITE | DMA_TREQ_PERM);
 
-    for (spins = 0; spins < 100000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(100000000u); spins++) {
         uint32_t ctrl = mmio_read32(DMA_CTRL(ch));
         if (ctrl & (DMA_READ_ERR | DMA_WRITE_ERR)) {
             mmio_write32(DMA_CTRL(ch), 0);
@@ -90,7 +90,7 @@ int plat_dma_memcpy(void *dst, const void *src, int len)
         if (!(ctrl & DMA_BUSY))
             break;
     }
-    if (spins == 100000000u) {
+    if (spins == plat_pre_tick_spins(100000000u)) {
         mmio_write32(DMA_CTRL(ch), 0);
         spin_unlock(&dma_lock);
         return -1;

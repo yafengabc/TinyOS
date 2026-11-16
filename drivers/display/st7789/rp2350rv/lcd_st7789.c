@@ -186,14 +186,14 @@ static void lcd_dma_sync(void)
      * clock; at 150 MHz the empty poll is well under 100 ms, and the loop
      * returns on the state bit rather than sleeping.  Keep the bound in
      * iterations until this path has a tick-backed deadline. */
-    for (spins = 0; spins < 5000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(5000000u); spins++) {
         if (!(mmio_read32(DMA_BASE + DMA_CH_OFFSET(LCD_DMA_CH) +
                           DMA_CH_CTRL_TRIG) & DMA_CTRL_BUSY))
             break;
     }
     /* The DMA may be done while the last bytes are still in the SPI
      * FIFO / shift register.  CS must not rise over them. */
-    for (spins = 0; spins < 5000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(5000000u); spins++) {
         if (!(mmio_read32(SPI1_BASE + RP_SPI_SR) & RP_SPI_SR_BSY))
             break;
     }
@@ -221,7 +221,7 @@ static void lcd_dma_kick(const void *buf, uint32_t n)
     /* Belt and braces: one channel, one buffer.  If any caller skipped a
      * sync, never program the channel while it is still walking the
      * previous transfer - two overlapping kicks scramble the panel. */
-    for (spins = 0; spins < 5000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(5000000u); spins++) {
         if (!(mmio_read32(ch + DMA_CH_CTRL_TRIG) & DMA_CTRL_BUSY))
             break;
     }
@@ -289,7 +289,7 @@ static void lcd_delay_ms(uint32_t ms)
     uint32_t spins = 0;
 
     while ((uint32_t)(mmio_read32(TIMER0_BASE + TIMERAWL_OFFSET) - start) < want
-           && spins < 200000000u)
+           && spins < plat_pre_tick_spins(200000000u))
         spins++;
 }
 
@@ -441,7 +441,7 @@ int plat_display_clear(int idx, uint16_t color)
          * refilling - but keep CS low and let the SPI FIFO catch up on
          * its own; the next kick just queues behind it. */
         uint32_t spins;
-        for (spins = 0; spins < 5000000u; spins++) {
+        for (spins = 0; spins < plat_pre_tick_spins(5000000u); spins++) {
             if (!(mmio_read32(DMA_BASE + DMA_CH_OFFSET(LCD_DMA_CH) +
                               DMA_CH_CTRL_TRIG) & DMA_CTRL_BUSY))
                 break;
