@@ -8,6 +8,9 @@ follow it. The detailed matrix, commands and evidence template are in
 
 1. **A test without a log did not run.** Report the exact command, target,
    build config, host toolchain, and the result. "Looks fine" is not evidence.
+   Write the result as a summary under `docs/acceptance/` (one file per run,
+   named as the directory README says) and link it from the commit; raw logs
+   stay local or in a CI artifact, not in git.
 2. **Never weaken a test to get green.** Do not delete, comment out, or add a
    `t.Skip` to a failing test. Do not regenerate golden files just to match new
    output. If the expected behaviour really changed, update the test in a
@@ -57,6 +60,8 @@ Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
 
 - [ ] T0 is green and the skip list did not grow.
 - [ ] The T1/T2/T3 levels required above were run.
+- [ ] The run is summarised under `docs/acceptance/` (one file per run) and
+      indexed in its README; raw logs are not committed.
 - [ ] Logs and the exact commands are in the change description.
 - [ ] No test was weakened, skipped, or golden-updated without a separate
       explanation.

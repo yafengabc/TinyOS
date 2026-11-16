@@ -249,13 +249,16 @@ python scripts/soak.py --cycles 8 --targets rv32,rv32smp,arm
 
 ## 10. 证据模板
 
-复制到 PR/提交说明/任务回复：
+复制到 `docs/acceptance/` 的一份摘要（一次运行一个文件，命名与索引见
+[`acceptance/README.md`](acceptance/README.md)），并在 PR/提交说明里链接它。
+**原始日志不入库**：留在本地或 CI artifact；确需长期保存的贴到 issue/commit。
 
 ```text
-commit:
-change:
-baseline: <sha>（重构必填）
+commit: <短 sha>（被测提交）
+change: <一句话>
+baseline: <sha>（重构/修复前；没有就写 none）
 target/config: <target> / <config file 或 defaults>
+board/port/image: <板子/端口/镜像；纯 QEMU 写 target>
 toolchain: go <ver>, clang <ver>, qemu <ver>, python <ver>
 host:
 T0: go build/vet/test ... -> PASS (skips: N, list)
@@ -263,7 +266,7 @@ T1: targets ... -> PASS/FAIL
 T2: smoke rv32/rv32smp/arm -> PASS; soak -> PASS
 T3: board/port/image -> PASS/NOT RUN (last UART line)
 T4: rounds -> PASS
-logs: build/testlogs/...
+logs: <本地路径；或 "not kept">
 notes:
 ```
 
