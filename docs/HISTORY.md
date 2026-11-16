@@ -3968,3 +3968,35 @@ block 的四个 SM 共享。`pio_accept.py` 在 RP2040 上先给 `PIO1 SM1` 装�
 RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` 未改，
 避免把未在 RP2350 上复测的驱动改动带进这次收口。
 
+## 44. 2026-11-17 SMP 并发 exec：两处进程无关的全局状态（A-0）
+
+**问题**（issue #2 裁决）：
+
+- `kernel/elf.c` 的 `g_win_lo/g_win_hi` 是文件级 static，由 `elf_set_window()` 设置；
+  `proc_create_claim()` 的 `elf_set_window(base, base+win) -> elf_load -> elf_set_window(0,0)`
+  之间不持锁。两核同时 exec 可交错成 A 设 -> B 设 -> A 校验，A 的段写入于是用 B 的窗口
+  边界做检查。单核不可见（tick 不抢占内核态），SMP 可见。
+- `kernel/syscall.c::do_exec` 的 `static char path[EXEC_ARG_MAX]` 同理：A 填入
+  `"progA"` 后，B 在 `envelope_probe`/`stream_load`/`ramdisk_open` 期间可以改写它。
+
+**修复**：
+
+- `lo/hi` 进 `elf_view_t`（由 `win`/`win_size` 派生）；`user_range_ok/zero_user/read_u32/
+  write_u32` 全部带 `const elf_view_t *`；`elf_set_window()` 与 `elf.h` 的声明删除，
+  `process.c` 的三处调用删除。
+- `do_exec()` 的 `path` 改栈上（256 B；最小 8 KiB 内核栈的 3%，该帧无递归）。
+- `kernel/ramdisk.c` 的静态缓冲**未动**：它们已在 `fs_lock` 下（每个公开 API 入口取锁），
+  exec 的文件读取本来就已经串行；改成 per-call 是拆掉一个已验证的设计。
+
+**验收**：
+
+- T0：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全绿；
+- T1：11 个目标构建全部 `build ok`；
+- T2：`rv32`/`rv32smp`/`arm` smoke 均 `SMOKE TEST OK`；`scripts/soak.py --cycles 3
+  --targets rv32,rv32smp,arm` 3/3 PASS；
+- 并发压力（`rv32smp`）：10 轮、每轮两个后台 `piperace 1 8 &` 同时跑，
+  **20/20 `piperace: ok`**，无 `exec failed`/`not found`/panic。同路径的压力覆盖的是
+  loader 边界（BUG-A）；不同路径的 BUG-B 由"per-call 栈缓冲"按构造消除，
+  没有可以确定性注入的交错点，这一点如实记录。
+- 真机：**NOT RUN**（本机只有 C3 的 COM4），待 `rp2350smp`/`rp2040smp` 冒烟，
+  见 `OPEN-ITEMS.md` §2b。

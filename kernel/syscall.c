@@ -139,7 +139,12 @@ static int path_stat(const char *path, uint32_t *size, uint8_t *type)
 
 static regs_t *do_exec(regs_t *r, const syscall_t *sc)
 {
-    static char path[EXEC_ARG_MAX];
+    /* On the stack: two cores can exec() at once, and this buffer is read
+     * all the way through proc_create_claim() (envelope probe, stream load,
+     * ramdisk open).  A file-static copy here was the same hazard the
+     * list_name_at() comment warns about.  256 B on a kernel stack of at
+     * least 8 KiB, with no recursion below this frame. */
+    char path[EXEC_ARG_MAX];
     char *argv[MAX_EXEC_ARGS];
     char *argbuf = NULL;            /* argv strings, from the kernel heap */
     int argc = (int)sc->a2;

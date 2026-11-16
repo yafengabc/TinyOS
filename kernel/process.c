@@ -1987,16 +1987,13 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     }
 
     /* The loader slides the segments into place, clears .bss, applies
-       relocations and checks every write against the window. */
-    elf_set_window(base, base + win);
+       relocations and checks every write against the window it was given. */
     uint32_t entry = 0;
     if (elf_load(data, size, win, base, &entry) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
-        elf_set_window(0, 0);
         proc_retire(p);
         return NULL;
     }
-    elf_set_window(0, 0);
 
     /* proc_alloc() already cleared this entry and marked it ST_NEW; from
      * here to the publish at the bottom it is "owned and unusable", which is

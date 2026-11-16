@@ -3,17 +3,10 @@
 #include "string.h"
 #include "console.h"
 
-/* Task window the loader may write into (set by process.c before every
- * load).  The flat model has no page tables, so "mapping" is a no-op and
- * every write is a plain store. */
-static uint32_t g_win_lo;
-static uint32_t g_win_hi;
-
-void elf_set_window(uint32_t lo, uint32_t hi)
-{
-    g_win_lo = lo;
-    g_win_hi = hi;
-}
+/* The flat model has no page tables, so "mapping" is a no-op and every
+ * write is a plain store.  The window bounds live in elf_view_t: two cores
+ * can exec() at once, and a file-static pair would let one image be checked
+ * against the other's window. */
 
 #define PT_LOAD    1
 #define PT_DYNAMIC 2
@@ -115,6 +108,7 @@ typedef struct {
     uint8_t     *win;          /* the task window holding the image */
     uint32_t     size;         /* raw ELF byte count */
     uint32_t     win_size;     /* window byte count */
+    uint32_t     lo, hi;       /* window bounds for every write: [lo, hi) */
     Elf32_Ehdr   eh;
     Elf32_Phdr   ph[ELF_MAX_PHDR];
     uint32_t     phnum;
@@ -125,39 +119,41 @@ typedef struct {
 /* writes are plain stores: the flat model has no address translation  */
 /* ------------------------------------------------------------------ */
 
-/* The loader may only touch the task window selected with elf_set_window().
- * Without an MMU a corrupt or hostile image could otherwise overwrite the
- * kernel through p_vaddr / r_offset. */
-static int user_range_ok(uint32_t va, uint32_t len)
+/* The loader may only touch the task window it was handed.  Without an MMU a
+ * corrupt or hostile image could otherwise overwrite the kernel through
+ * p_vaddr / r_offset.  The bounds live in the per-call view: two cores can
+ * exec() at the same time, and a file-static pair would let one image be
+ * checked against the other's window. */
+static int user_range_ok(const elf_view_t *v, uint32_t va, uint32_t len)
 {
     if (len == 0)
         return 1;
-    if (va < g_win_lo)
+    if (va < v->lo)
         return 0;
     if (va + len < va) /* overflow */
         return 0;
-    return va + len <= g_win_hi;
+    return va + len <= v->hi;
 }
 
-static int zero_user(uint32_t va, uint32_t len)
+static int zero_user(const elf_view_t *v, uint32_t va, uint32_t len)
 {
-    if (!user_range_ok(va, len))
+    if (!user_range_ok(v, va, len))
         return -1;
     memset((void *)va, 0, len);
     return 0;
 }
 
-static int read_u32(uint32_t va, uint32_t *out)
+static int read_u32(const elf_view_t *v, uint32_t va, uint32_t *out)
 {
-    if (!user_range_ok(va, 4))
+    if (!user_range_ok(v, va, 4))
         return -1;
     memcpy(out, (const void *)va, 4);
     return 0;
 }
 
-static int write_u32(uint32_t va, uint32_t val)
+static int write_u32(const elf_view_t *v, uint32_t va, uint32_t val)
 {
-    if (!user_range_ok(va, 4))
+    if (!user_range_ok(v, va, 4))
         return -1;
     memcpy((void *)va, &val, 4);
     return 0;
@@ -388,6 +384,8 @@ static int view_init(elf_view_t *v, uint8_t *win, uint32_t size,
     v->win = win;
     v->size = size;
     v->win_size = win_size;
+    v->lo = (uint32_t)(uintptr_t)win;
+    v->hi = v->lo + win_size;
     return view_read_header(win, size, v);
 }
 
@@ -523,7 +521,7 @@ static int apply_relocations_view(elf_view_t *v, uint32_t bias)
                     return -1;
                 }
 
-                if (write_u32(where, val) != 0)
+                if (write_u32(v, where, val) != 0)
                     return -1;
             }
         }
@@ -549,7 +547,7 @@ static int apply_relocations_view(elf_view_t *v, uint32_t bias)
 
                 uint32_t where = r_offset + bias;
                 uint32_t val;
-                if (read_u32(where, &val) != 0) {
+                if (read_u32(v, where, &val) != 0) {
                     kprintf("elf: reloc read failed at 0x%x (r_offset=0x%x bias=0x%x type=%u)\n",
                             where, r_offset, bias, type);
                     return -1;
@@ -571,7 +569,7 @@ static int apply_relocations_view(elf_view_t *v, uint32_t bias)
                     kprintf("exec: unsupported relocation %u\n", type);
                     return -1;
                 }
-                if (write_u32(where, val) != 0) {
+                if (write_u32(v, where, val) != 0) {
                     kprintf("elf: reloc write failed at 0x%x\n", where);
                     return -1;
                 }
@@ -640,14 +638,14 @@ static int load_view(elf_view_t *v, uint32_t load_base, uint32_t *entry_out)
         }
 
         uint32_t dst = ph->p_vaddr + bias;
-        if (!user_range_ok(dst, ph->p_memsz)) {
+        if (!user_range_ok(v, dst, ph->p_memsz)) {
             kprintf("elf: segment %u outside app window (0x%x+0x%x)\n",
                     i, dst, ph->p_memsz);
             return -1;
         }
         /* the segment is already at dst; only .bss remains */
         if (ph->p_memsz > ph->p_filesz) {
-            if (zero_user(dst + ph->p_filesz, ph->p_memsz - ph->p_filesz) != 0)
+            if (zero_user(v, dst + ph->p_filesz, ph->p_memsz - ph->p_filesz) != 0)
                 return -1;
         }
     }
@@ -656,7 +654,7 @@ static int load_view(elf_view_t *v, uint32_t load_base, uint32_t *entry_out)
         return -1;
 
     uint32_t entry = v->eh.e_entry + bias;
-    if (!user_range_ok(entry, 1)) {
+    if (!user_range_ok(v, entry, 1)) {
         kprintf("elf: entry 0x%x outside app window\n", entry);
         return -1;
     }

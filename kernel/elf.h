@@ -11,8 +11,9 @@
  * applies the R_* relocations found in .rel/.rela.dyn.  The position
  * independent (ET_DYN) image is relocated to `load_base` and `entry_out`
  * receives the absolute entry address.  `win_size` bounds every placement,
- * and every write is also checked against the window selected with
- * elf_set_window(), so a corrupt image can never touch the kernel.
+ * and every write is also checked against that same window, so a corrupt
+ * image can never touch the kernel.  Both the image and its bounds are
+ * per-call, so two cores may load different programs at the same time.
  *
  * Returns 0 on success, -1 on error. */
 int elf_load(uint8_t *win, uint32_t size, uint32_t win_size,
@@ -36,9 +37,5 @@ int elf_probe(const uint8_t *data, uint32_t size, uint32_t *load_base_out,
  * better. */
 int elf_tos_note(const uint8_t *data, uint32_t size,
                  uint32_t *stack_out, uint32_t *heap_out);
-
-/* Select the task window [lo, hi) the loader may write into.  process.c
- * sets this before every load; the loader never writes outside it. */
-void elf_set_window(uint32_t lo, uint32_t hi);
 
 #endif
