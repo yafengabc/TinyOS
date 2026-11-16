@@ -66,10 +66,8 @@ static void con_putc(char c)
     screen_mirror_putc(c);
 }
 
-static void out_char(char c)
+static void out_char_as(char c, int who)
 {
-    int who = process_current_pid();
-
     if (who != out_owner && out_mid) {
         con_putc('\r');
         con_putc('\n');
@@ -81,12 +79,19 @@ static void out_char(char c)
     con_putc(c);
 }
 
+static void out_char(char c)
+{
+    out_char_as(c, process_current_pid());
+}
+
 /* Lock already held. */
 static void adopt_line_locked(void)
 {
-    if (!out_mid || process_current_pid() == out_owner)
+    int who = process_current_pid();
+
+    if (!out_mid || who == out_owner)
         return;
-    out_owner = process_current_pid();
+    out_owner = who;
     out_mid = 0;
     con_putc('\r');
     con_putc('\n');
@@ -335,8 +340,9 @@ void kprintf(const char *fmt, ...)
         return;
     echo_drain_locked(-1);
     adopt_line_locked();
+    int who = process_current_pid();
     for (int i = 0; i < n; i++)
-        out_char(buf[i]);
+        out_char_as(buf[i], who);
     spin_unlock(&out_lock);
 }
 
@@ -406,8 +412,9 @@ void console_write(const char *s, size_t n)
     if (!out_lock_take())
         return;
     echo_drain_locked(-1);
+    int who = process_current_pid();
     for (size_t i = 0; i < n; i++)
-        out_char(s[i]);
+        out_char_as(s[i], who);
     out_lock_give();
 }
 

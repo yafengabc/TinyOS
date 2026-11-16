@@ -593,6 +593,14 @@ int tty_take_line(char *dst, int max)
 
 void tty_ctrl_deliver(void)
 {
+    /* Fast path: no control key is pending, so the target pid is unused.
+     * process_ctrl_target() scans the whole process table three times and
+     * this runs on every tick (1000 Hz). */
+    if (!ctrl_bs && !ctrl_c && !ctrl_z) {
+        ctrl_age = 0;
+        return;
+    }
+
     /* The console reader is the foreground task in the usual sense; a job a
      * blocked parent waits for is the same task one level up (`run spin`
      * never reads, so without it ^C could not stop one at all); and the task

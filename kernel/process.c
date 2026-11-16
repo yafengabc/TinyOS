@@ -115,6 +115,7 @@ enum {
     ST_DYING,       /* leader exited; threads are still winding down */
 #endif
     ST_KT_WAIT,     /* kernel thread blocked by the WiFi OSI layer */
+    ST_KILLING,     /* SIGKILL is releasing it outside proc_lock; not runnable */
     /* A slot claimed by proc_alloc() and still being filled in.  It has to
      * exist as a state of its own: on SMP two exec()s can be building two
      * tasks at the same time, and a slot that is only "not FREE yet" is
@@ -252,6 +253,9 @@ typedef struct proc {
 static proc_t procs[MAX_PROCS];
 static proc_t *init_proc;
 static int next_pid = 1;
+/* 1000 / tick_hz, computed once: the tick rate is fixed after boot and the
+ * old expression did a 32-bit division on every tick (__udivsi3 on RV32). */
+static uint32_t ms_per_tick;
 
 /* Trap entry cannot trust mstatus.MPP to tell it where it came from: mret
  * always writes MPP=U, so a kernel thread entered through a trap frame would
@@ -975,7 +979,7 @@ void process_tick(regs_t *r)
 
     if (cur && cur->state == ST_RUNNING) {
         cur->cpu_ticks++;
-        cur->cpu_ms += 1000u / plat_tick_hz();
+        cur->cpu_ms += ms_per_tick;
     }
 
     /* Console input first: a line finished this tick should reach its
@@ -1003,12 +1007,33 @@ void process_tick(regs_t *r)
     }
 
     now = plat_ticks();
+
+    /* The scan, the deadline test, the frame write and the state change are
+     * one critical section.  Both CPUs take ticks, so two of them can see
+     * the same sleeper as due; make_ready() only takes the lock for the
+     * write and does not re-check the state, so the slower tick used to
+     * turn a task the scheduler had already made RUNNING back into READY -
+     * the same task on two CPUs, or a lost return value. */
+    proc_t *woke = NULL;
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &procs[i];
+
         if ((p->state == ST_WAIT_SLEEP || p->state == ST_KT_WAIT) &&
-            p->wake_tick && (int64_t)(now - p->wake_tick) >= 0)
-            make_ready(p, 0);
+            p->wake_tick && (int64_t)(now - p->wake_tick) >= 0) {
+            regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
+
+            plat_frame_set_ret(frame, 0);
+            p->state = ST_READY;
+            if (!woke || p->prio < woke->prio)
+                woke = p;
+        }
     }
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    if (woke)
+        preempt_if_higher(woke);
 
     /* Preempt only a task the timer interrupted in user mode: a tick that
        lands inside a kernel call must let that call finish, because the
@@ -1158,6 +1183,7 @@ void process_init(void)
     rr = 0;
     quantum = QUANTUM;
     need_resched = 0;
+    ms_per_tick = 1000u / plat_tick_hz();
 
     /* Before the first tick: kmain runs with interrupts off up to here. */
     kstack_guard_init();
@@ -2155,17 +2181,17 @@ int process_setprio(int pid, int prio)
     if (current && prio < current->prio && current != init_proc)
         return -1;
 
-    if (pid == 0) {
-        t = current;
-    } else {
-        t = proc_by_pid(pid);
-    }
-    if (!t)
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+    t = pid == 0 ? current : proc_by_pid(pid);
+    if (!t) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         return -1;
+    }
 
     t->prio = prio;
     if (t != current && t->state == ST_READY)
         preempt_if_higher(t);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return 0;
 }
 
@@ -2320,28 +2346,49 @@ static void retire_and_reap(proc_t *p, int code)
         preempt_if_higher(woke);
 }
 
-/* Retire a task that is not the caller: the caller keeps the CPU, the
- * victim's frame is never resumed again.  Used by SIGKILL; the init task
- * cannot be retired this way (it is what shuts the machine down). */
-static void task_kill(proc_t *p, int code)
+/* SIGKILL against a task that is not running.  Called with proc_lock held.
+ *
+ * task_release() closes descriptors and may take proc_lock itself (pipe
+ * wakeups), so it cannot run inside this critical section.  Mark the slot
+ * ST_KILLING first: it is no longer schedulable and proc_alloc() only reuses
+ * ST_FREE, so the pointer stays valid while the caller drops the lock and
+ * releases the files.  Returns 1 when the caller must call
+ * task_kill_finish(); 0 means the kthread path deferred the work. */
+static int task_kill_prepare_locked(proc_t *p, int code)
 {
 #ifdef TOS_KTHREADS
     /* A thread dies at its own trap exit so the live_threads accounting and
      * the group finalisation run in one place; a leader with live threads
      * follows the same deferred path process_exit() uses. */
     if (p->leader || p->live_threads > 0) {
-        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
-
         if (p->leader)
             p->kill_pending = 1;
         else
             begin_group_exit_locked(p, code);
-        plat_spin_unlock_irqrestore(&proc_lock, irq);
-        return;
+        return 0;
     }
 #endif
+    p->state = ST_KILLING;
+    p->cpu = -1;
+    return 1;
+}
+
+/* Called without proc_lock after task_kill_prepare_locked() returned 1. */
+static void task_kill_finish(proc_t *p, int code)
+{
     task_release(p);
-    retire_and_reap(p, code);
+
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+    proc_t *woke = NULL;
+
+    if (p->state == ST_KILLING) {
+        woke = reap_into_parent_locked(p, code);
+        proc_retire_locked(p);
+    }
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    if (woke)
+        preempt_if_higher(woke);
 }
 
 regs_t *process_exit(regs_t *r, int code)
@@ -2475,10 +2522,23 @@ regs_t *process_yield(regs_t *r)
  * exit.  Refusing outright (the old behaviour) lost that ^C entirely. */
 int process_signal(int pid, int sig)
 {
-    proc_t *victim = proc_by_pid(pid);
+    uint32_t irq;
+    proc_t *victim;
 
-    if (!victim || victim == init_proc)
+    if (sig != SIGKILL && sig != SIGSTOP && sig != SIGCONT)
         return -1;
+
+    /* Resolve and mutate under the same lock the scheduler, exit and reap
+     * paths use.  proc_by_pid() used to run unlocked, so another CPU could
+     * retire or reuse the slot between the scan and every field write below:
+     * a SIGCONT could turn an ST_NEW exec (no window yet) into ST_READY, and
+     * a ^Z could be overwritten by that CPU's sched_switch(). */
+    irq = plat_spin_lock_irqsave(&proc_lock);
+    victim = proc_by_pid(pid);
+    if (!victim || victim == init_proc) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return -1;
+    }
 
 #ifdef TOS_KTHREADS
     /* A signal aimed at a thread acts on its group - that is what ^C and a
@@ -2502,24 +2562,48 @@ int process_signal(int pid, int sig)
             victim->kill_pending = 1;
         else if (sig == SIGSTOP)
             victim->stop_pending = 1;
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
         return 0;
     }
 
     if (sig == SIGKILL) {
         int was_current = (victim == current);
 
-        kprintf("\n[pid %d] killed\n", pid);
-        /* The caller keeps the CPU; the victim simply never runs again.
-           Its exit code reaches a waiting parent through lag_pid. */
-        task_kill(victim, 137);
+        /* A victim running on the other CPU must not be ripped out of its
+         * frame from here: its own trap exit is the only safe boundary.  The
+         * tick makes that happen within a millisecond. */
+        if (victim->state == ST_RUNNING) {
+            victim->kill_pending = 1;
+            plat_spin_unlock_irqrestore(&proc_lock, irq);
+            kprintf("\n[pid %d] killed\n", pid);
+            return 0;
+        }
+
+        if (victim->state == ST_KILLING) {
+            plat_spin_unlock_irqrestore(&proc_lock, irq);
+            return -1;
+        }
+
+        int immediate = task_kill_prepare_locked(victim, 137);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+        /* Release descriptors and retire outside the table lock: fd_close_in
+         * takes it for pipe wakeups.  ST_KILLING kept the slot unreusable in
+         * between. */
+        if (immediate)
+            task_kill_finish(victim, 137);
+
         /* The CPU was only parked next to it, not inside it: stop pointing
            at a slot that is now free, the way process_exit() does. */
         if (was_current)
             current = NULL;
+        kprintf("\n[pid %d] killed\n", pid);
         return 0;
     }
 
     if (sig == SIGSTOP) {
+        int stopped = 0;
+
         victim->stop_pending = 1;
         /* A task blocked in the kernel (a sleeper, a console reader, a
            parent waiting for a child) is already off the CPU and only
@@ -2530,17 +2614,24 @@ int process_signal(int pid, int sig)
         if (victim->state == ST_READY) {
             victim->state = ST_STOPPED;
             victim->stop_pending = 0;
-            kprintf("\n[pid %d] stopped\n", pid);
+            stopped = 1;
         }
-    } else if (sig == SIGCONT) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        if (stopped)
+            kprintf("\n[pid %d] stopped\n", pid);
+    } else { /* SIGCONT */
+        int resumed = 0;
+
         victim->stop_pending = 0;
         if (victim->state == ST_STOPPED) {
             victim->state = ST_READY;
-            preempt_if_higher(victim);
-            kprintf("[pid %d] continued\n", pid);
+            resumed = 1;
         }
-    } else {
-        return -1;
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        if (resumed) {
+            kprintf("[pid %d] continued\n", pid);
+            preempt_if_higher(victim);
+        }
     }
     return 0;
 }
@@ -2976,6 +3067,7 @@ static const char *state_name(int st)
     case ST_THREAD_ZOMBIE: return "zombi";
     case ST_DYING:         return "dying";
 #endif
+    case ST_KILLING:    return "kill ";
     case ST_NEW:        return "new  ";
     default:            return "free ";
     }
