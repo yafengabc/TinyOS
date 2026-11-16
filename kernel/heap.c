@@ -1,5 +1,6 @@
 #include "heap.h"
 #include "cpu.h"
+#include "kassert.h"
 #include "string.h"
 
 /* First-fit allocator over a static arena with free-block coalescing.
@@ -138,8 +139,13 @@ static void kfree_locked(void *ptr)
     if (!ptr)
         return;
     blk_t *b = header_of(ptr);
-    if (!(b->size & ALLOC_BIT))
+    if (!(b->size & ALLOC_BIT)) {
+        /* The only entry to kfree_locked(); no caller can hide a second
+         * free path.  A non-allocated header here means the free list is
+         * already corrupt, so a silent return would spread the damage. */
+        KASSERT_HALT(0);
         return;
+    }
 
     heap_used -= b->size & ~ALLOC_BIT;
     b->size &= ~ALLOC_BIT;
