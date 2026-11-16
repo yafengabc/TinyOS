@@ -96,7 +96,7 @@ void kmain(void)
        is exactly this, and the process tables are live already. */
     plat_irq_enable();
     {
-        uint32_t spins = 20000000;
+        uint32_t spins = plat_pre_tick_spins(20000000u);
         while (plat_ticks() == 0 && --spins)
             ;
         kprintf("tick self-check: %u tick(s) after boot\n",

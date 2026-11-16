@@ -180,7 +180,12 @@ static void lcd_dma_sync(void)
         return;
 
     /* Bounded waits: a wedged DMA or a panel that never releases BSY
-     * must cost a few milliseconds at worst, never a dead kernel. */
+     * must cost a few milliseconds at worst, never a dead kernel.
+     *
+     * A-6 note: 5e6 is a pre-tick iteration bound written for the old
+     * clock; at 150 MHz the empty poll is well under 100 ms, and the loop
+     * returns on the state bit rather than sleeping.  Keep the bound in
+     * iterations until this path has a tick-backed deadline. */
     for (spins = 0; spins < 5000000u; spins++) {
         if (!(mmio_read32(DMA_BASE + DMA_CH_OFFSET(LCD_DMA_CH) +
                           DMA_CH_CTRL_TRIG) & DMA_CTRL_BUSY))

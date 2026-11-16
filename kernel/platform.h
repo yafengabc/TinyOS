@@ -195,6 +195,19 @@ int plat_cpu_id(void);
  * own clock, not the scheduler tick (plat_tick_hz) and not the bus clock. */
 uint32_t plat_cpu_hz(void);
 
+/* Scale an old pre-tick spin bound (written for the 125 MHz RP2040) to the
+ * board's actual clock.  It is an upper bound, not a delay: callers still
+ * poll the state bit and return as soon as it is ready.  A board that has not
+ * filled in plat_cpu_hz() yet keeps the old count. */
+static inline uint32_t plat_pre_tick_spins(uint32_t old_bound)
+{
+    uint32_t hz = plat_cpu_hz();
+
+    if (hz == 0)
+        return old_bound;
+    return (uint32_t)(((uint64_t)old_bound * hz) / 125000000ull);
+}
+
 /* Human-readable core and ISA names.  The board owns model (the chip/core
  * combination); the architecture port owns isa because it is a property of
  * how this image was compiled, not of the board.  Both have weak defaults
