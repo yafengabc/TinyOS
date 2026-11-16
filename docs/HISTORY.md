@@ -2580,7 +2580,7 @@ python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2   # 按 BOOTSEL
 | `sleep` 之类的 wink | **16 KiB**（原来 24/32），并发窗口数明显变多 |
 | `deep 3`（6 KiB 递归） | `stack grown to 8 KiB` + `journal intact` |
 | `deep 6`（12 KiB） | 先长到 8K，再打 `stack overflow: guard word ...`，最后 `no room to grow it; killing` |
-| `deep 6 0 8`（堆先占余量） | 同上，应在增长阶段就拒绝 |
+| `deep 6 100 8`（堆先占余量） | 同上，应在增长阶段就拒绝；`deep 6 0 8` 的 sleep=0 不会进 syscall，RP2040 的软件守卫不会检查（见 §43） |
 | `dd of=/x bs=4096 count=8` × 若干轮 + `reboot` | 文件系统行为不变 |
 
 失败签名：
@@ -3900,4 +3900,64 @@ norm[128] + seg[64]`（约 384 B），而 RP2040 的任务栈只有 4 KiB。现�
 - `smpbench` **1.99x**；`free` 正常。
 
 T0/T1/T2 仍通过；RP2040 按约定 **NOT RUN**。
+
+## 43. 2026-11-17 RP2040 收口：§30.3 窗口/守卫 + PIO 视觉（issue #1）
+
+RP2040 已接上（UART0 = COM19，USB CDC = COM17），这一轮把
+`docs/OPEN-ITEMS.md` §1 和 §2 的 RP2040 部分一次跑完。
+
+### 镜像与 PIO
+
+构建：`go run ./cmd/tos build -target rp2040`，产物 `build/rp2040.uf2`
+（2,277,376 B），BOOTSEL 刷入。
+
+```sh
+python scripts/rp2350/pio_accept.py --image rp2040 \
+    --uf2 build/rp2040.uf2 -p COM19 --log build/pio-rp2040-final-1117e.log
+```
+
+结果 **17/17**：三个程序字表、pin window、装入、回环
+`80000000 00000000 80000000 80000000` 全过。随后：
+
+```sh
+pio start 1 1
+pio regs 1 1     # addr 在 4 / 9 之间移动
+gpio dev 25      # 0/1 交替
+```
+
+用户目视确认 GP25 约 **2 Hz** 闪烁。WS2812 没有接灯带，**视觉项 NOT RUN**；
+`ws2812.pio` 的 `6221 1123 1400 a442` 字表和装入由脚本判定通过。
+
+### §30.3 窗口与软件守卫
+
+| 项目 | 实测 |
+| --- | --- |
+| `ps` 的 `msh` | `wink=16` KiB（`stk/sz 0.9/4`） |
+| `sleep 3000 &` 后的 `sleep` | 同样 `wink=16` KiB（`0.3/4`） |
+| `deep 3` | `stack grown to 8 KiB` + `deep: 3 levels, journal intact` |
+| `deep 6` | `stack overflow` → `4 KiB stack and no room to double it` → `no room to grow it; killing` |
+| `deep 6 100 8` | 同样在护栏处 kill；先 `malloc stopped after 4 KiB` |
+| `dd of=/x bs=4096 count=8` / `dd if=/x ...` | 32768 B 写 + `pattern verified`；`rm /x` 正常 |
+| `mem` / `wheap` / `free` / `df` | 正常；littlefs 356352 / 1572864 B 已用 |
+| `ls /bin \| wc` | `48 192 1916` |
+
+> 判据修正：`deep 6 0 8` 把 `sleep` 参数设成 0，递归到底时不会发 syscall，
+> 而 RP2040 的软件守卫是在 syscall 入口检查的；所以它不触发 kill。要验
+> “堆先占满、栈无处增长”必须用非零 sleep，验收表改用 `deep 6 100 8`。
+
+完整原始回显在 `build/rp2040-accept-1117.log`。
+
+### blink 首次启动失败的根因
+
+不是 PIO 驱动，而是**验收脚本自己覆盖了程序**：PIO 的 32 字指令存储由同一
+block 的四个 SM 共享。`pio_accept.py` 在 RP2040 上先给 `PIO1 SM1` 装入
+`blink`（11 字，origin 0），随后又给 `PIO1 SM3` 装入 `ws2812`（4 字，origin
+0），把 blink 的前 4 条指令覆盖成 ws2812 的开头。此时 `pio start 1 1`
+报告 ok，但 PC 跑到地址 4 的 `jmp y--`，Y 没有被 `set y,31` 初始化，
+`y--` 从 0 回绕成 0xffffffff 后死循环，GP25 一直保持低电平；重新
+`pio asm /pio/blink.pio 1 1` 后立即恢复。
+
+修复只改验收脚本：RP2040 的 ws2812 改到 **PIO0 SM3**，blink 留在 PIO1 SM1。
+RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` 未改，
+避免把未在 RP2350 上复测的驱动改动带进这次收口。
 

@@ -190,7 +190,7 @@ python scripts/rp2040/autoflash.py --uf2 build/rp2040smp.uf2
 python scripts/rp2350/pio_accept.py --image rp2040smp --uf2 build/rp2040smp.uf2
 ```
 
-- RP2040 的窗口数字（`ps` 的 `wink`、`deep 3`/`deep 6`）目前仍需人工核对，见 `OPEN-ITEMS.md` §1。
+- RP2040 的窗口数字与守卫已在 2026-11-17 人工核对（`HISTORY.md` §43）：`wink=16`、`deep 3` 增长、`deep 6` kill；注意 `deep 6 0 8` 不触发 syscall 入口的软件守卫，要用非零 sleep。
 - PIO 的 LED/灯带是目视项，必须写"看了/没看"，不能只写"PIO 通过"。
 
 ### 5.4 Pico 2（暂不支持）

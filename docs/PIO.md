@@ -126,16 +126,23 @@ struct pio_req {
 ## 验证
 
 真机验收按 `docs/HW-ACCEPTANCE.md` 的关卡 B–D 走，`scripts/rp2350/pio_accept.py`
-一条命令跑完；详细记录在 `docs/OPEN-ITEMS.md` §32。
+一条命令跑完；详细记录在 `docs/HISTORY.md` §32 / §43。
 
 - **`rp2350`（ARM）17/17、`rp2350rvsmp`（RV32）17/17**（2026-11-15）；
+- **`rp2040` 17/17**（2026-11-17），日志 `build/pio-rp2040-final-1117e.log`；
+  GP25 板载 LED 目视约 2 Hz；WS2812 因没有灯带，视觉项仍未验；
 - `loopback.pio`：`pio asm` → `start` → `tx 0 0 1 0 1 1` → `rx 0 0 4`，读回
   `80000000 00000000 80000000 80000000`——一位的 `in pins` 落在 ISR 的 bit31
   （右移），而且紧跟 `out pins` 之后读到的就是同一拍的电平，没有延迟；
-- `blink.pio` / `blink3.pio`：GP3（本板 LED）约 2 Hz，只判到"装入成功"，看灯要
-  `--visual`；
+- `blink.pio` / `blink3.pio`：RP2350 GP3、RP2040 GP25 都已目视约 2 Hz；脚本的
+  `--visual` 才会问，非视觉运行只报"装入成功"；
 - `ws2812.pio`：编码与 pico-sdk `pioasm` 生成的 `ws2812.pio.h` 逐字一致
   （`6221 1123 1400 a442`）；实机接一条灯带，`pio tx` 写 `pixel_grb << 8` 看颜色。
+  两块板都没有灯带，**视觉项仍未验**。
+
+RP2040 的验收脚本曾把 `blink`（PIO1 SM1）和 `ws2812`（PIO1 SM3）都装在 origin
+0：同一 block 的四个 SM 共用 32 字指令存储，后装的 4 字覆盖了 blink 的前 4 条，
+`pio start` 于是停在旧 PC、LED 不亮。脚本已把 RP2040 的 ws2812 移到 PIO0 SM3。
 
 真机上踩过、以后改驱动前先看的三条：`SHIFTCTRL` 别写 0（会变成左移，`out pins`
 出 MSB）；清 FIFO 的 `FJOIN_RX` 位在 RP2350 是 bit31、RP2040 是 bit14；

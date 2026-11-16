@@ -102,14 +102,14 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| **当前镜像（`main`，4 KiB 窗口 + 软件栈守卫）** | ◐ **能启动，未验收** | 2026-11-15 在真机上确认这一版**可以启动**；窗口几何与守卫的判据（`ps` 里 msh/sleep 的 `wink`、`deep 3`/`deep 6`、`dd`+`reboot`）还没跑，按 §30.3 的表格补 |
+| **当前镜像（`main`，4 KiB 窗口 + 软件栈守卫）** | ✅ 实机 | 2026-11-17 按 §30.3 验收：`ps` msh/sleep 的 `wink=16`，`deep 3` 增长 8 KiB + journal intact，`deep 6` 在护栏处 kill，`dd` 32 KiB 写入/读回 `pattern verified`。注意 `deep 6 0 8` 的 sleep=0 不会触发 syscall 入口的软件守卫，用 `deep 6 100 8` |
 | boot2 + UF2 + XIP 启动 | ✅ | ROM CRC、family、向量位、MSP 都在构建期校验 |
 | 125 MHz 时钟、SysTick、UART0 分频 | ✅ | 启动探针逐段打印，卡住能定位 |
 | UART0 控制台 + shell | ✅ 实机 | 启动探针、提示符都从 GP0/GP1 出；`scripts/rp2040/autoflash.py --probe/--accept` 就是按"能到 shell"写的 |
 | littlefs @ flash 0x80000（ROM flash API） | ✅ 挂载 / ◐ 写 | shell 能启动说明根文件系统挂上了；写/擦路径要用 `dd` 再验 |
-| USB CDC（TinyUSB，IRQ 5） | ◐ 调试中 | 目前 trace 是 BUS_RESET + DEV_SUSPEND、没有 SETUP_REQ；已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B。**启动快照默认关**（`TOS_USB_BOOT_SNAPSHOT=1` 才在 1 s/3 s 自动 dump），平时按 trace 键取同一份；Ctrl-D 在本板是**故意禁用**的（ROM 的 `reset_usb_boot()` 不可靠，用 BOOTSEL 按钮） |
+| USB CDC（TinyUSB，IRQ 5） | ✅ 实机 | COM17 `2e8a:000a` 枚举并可交互（2026-11-17）；UART0 = COM19 同时可用。已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B；Ctrl-D 在本板是**故意禁用**的（ROM 的 `reset_usb_boot()` 不可靠，用 BOOTSEL 按钮） |
 | PWM / UART1 / SPI0-1 / I2C0-1 / DMA | ◐ | 驱动 + 用户命令已接，menuconfig 可裁；实机覆盖以自测为准 |
-| PIO（2 块 / 8 个 SM + 用户态汇编器） | ◐ | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；**RP2350 上已 17/17**（同一份 `drivers/pio/rp2`，只是 `RP_PIO_*` 常量不同），Pico 实机仍待测；清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
+| PIO（2 块 / 8 个 SM + 用户态汇编器） | ✅ 实机 | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；RP2040 `pio_accept.py --image rp2040` **17/17**（2026-11-17），GP25 `blink` 目视约 2 Hz；WS2812 因无灯带只验了字表/装入。清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
 | `rp2040smp`（core 1） | ◐ | 目标可构建，握手走 SIO FIFO；未做完整验收 |
 | BOOTSEL 回退（Ctrl-D） | ◐ | ROM 调用路径已实现，含看门狗 scratch 标记 |
 | 内存保护 | ☐ | 硬件没有，`prot` 在本板会真的写穿；默认不打包 |

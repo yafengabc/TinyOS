@@ -4,15 +4,8 @@
 [`HISTORY.md`](HISTORY.md) 里，编号沿用原样（代码注释里写的"OPEN-ITEMS §23.3"之类的
 引用，去 HISTORY 里找）。
 
-## 1. RP2040 验收表里还差的一项（2026-11-16）
-
-`HISTORY.md` §30.3 那张表里的**窗口数字**没量：`ps` 里 `msh` 的 `wink` 应为 16 KiB、
-`sleep` 之类的任务也应是 16 KiB（而不是 24/32），`deep 3` 要打印
-`stack grown to 8 KiB` 且 `journal intact`，`deep 6` 要按"先长到 8K → `guard word` →
-`no room to grow it; killing`"走。
-
-RP2040 其余部分已经收口（启动、PIO 回环、外设、littlefs、1000 轮 `dd`+`rm`，见
-HISTORY §14/§32.3/§35），所以这是这一块板**唯一**还没记账的判据。
+> 原 §1（RP2040 4 KiB 窗口 + 软件栈守卫）已于 2026-11-17 验收关闭，结论和原始
+> 回显在 `HISTORY.md` §43。
 
 ## 1b. Pico 2 上的 TinyOS 启动失败（2026-11-16）
 
@@ -24,15 +17,22 @@ HISTORY §14/§32.3/§35），所以这是这一块板**唯一**还没记账的�
 `board/rp2350/README.md` 目前写"同一套代码也能跑在 Pico 2 上"，需要按 Pico 2 的
 实际 flash/时钟/板级外设重新验证；在修好之前不要把这句话当验收结论。
 
-## 2. PIO 的"眼睛两项"（RP2040 / RP2350）
+## 2. PIO 的"眼睛两项"（只剩 WS2812 视觉）
 
-汇编和回环都是自动判定、已通过；需要人看的两项还没做：
+汇编和回环都是自动判定、已通过；RP2040 和 RP2350 的板载 LED 都已看过：
 
-- `blink` / `blink3`：GP25（Pico）或 GP3（ATK-DNRP2350AM）约 2 Hz 闪烁；
-- `ws2812`：GP4 接灯带，`pio tx 0 0 0xff0000` 后首像素亮红。
+- `blink` / `blink3`：RP2350 GP3、RP2040 GP25 均约 2 Hz 闪烁（RP2040 见 HISTORY
+  §43，2026-11-17）；
+- `ws2812`：GP4 接灯带，`pio tx 0 0 0xff0000` 后首像素亮红——**仍未验**，因为
+  两块板都没有接灯带；字表/装入已由 `pio_accept.py` 判定通过。
 
 注意 RP2350 那次"LED 没闪"是**引脚假设**问题（pad 在 2 Hz 翻转，见 HISTORY
 §32.2），不是 PIO 的 bug；换板子先确认用户 LED 到底在哪个 GPIO。
+
+另记一个验收脚本陷阱：PIO 的 32 字指令存储由同一 block 的四个 SM 共享。
+RP2040 只有两个 block，早期脚本把 `blink`（PIO1 SM1）和 `ws2812`（PIO1 SM3）
+都装在 origin 0，后者覆盖了前者前 4 字；`pio start` 会停在旧 PC，看起来像
+PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTORY §43。
 
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 

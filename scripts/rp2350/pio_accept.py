@@ -155,8 +155,12 @@ def run_checks(con, results, opts):
         opts.led_pin = 25 if opts.image.startswith("rp2040") else 3
     # The RP2040 has two PIO blocks; the RP2350's third one is what makes the
     # ws2812 check exercise FUNCSEL 8 and the pad ISO bit, so it stays there
-    # when it exists.
-    ws_block, ws_sm = (1, 3) if opts.image.startswith("rp2040") else (2, 2)
+    # when it exists.  On the RP2040, put ws2812 on PIO0: instruction memory is
+    # shared by all four SMs in a block, so loading it into PIO1 at origin 0
+    # would overwrite the blink program that the visual check is about to
+    # start.  (Symptom: `pio start 1 1` reports ok, `addr` sticks at 4, and
+    # the LED stays dark until blink is reloaded.)
+    ws_block, ws_sm = (0, 3) if opts.image.startswith("rp2040") else (2, 2)
 
     # 1. The files the build packs.  blink3 only exists once this board's LED
     #    pin was noticed, so an old image failing this is information.

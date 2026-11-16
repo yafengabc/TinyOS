@@ -139,7 +139,8 @@ python scripts/soak.py --cycles 8           # exec/heap/segment churn, free must
 
 Hardware results live in [`docs/HISTORY.md`](docs/HISTORY.md): ESP32-C3 24/24,
 RP2350 (M33) 16/16 SMP with `smpbench` 1.95x, RP2350 (Hazard3) 17/17 SMP with
-2.00x, PIO 17/17 on both RP2350 images, RP2040 1000 rounds of `dd`+`rm`.
+2.00x, PIO 17/17 on both RP2350 images and on RP2040, RP2040 §30.3 window/guard
+acceptance plus 1000 rounds of `dd`+`rm`.
 
 ## Documentation
 
