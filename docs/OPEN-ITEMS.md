@@ -34,24 +34,6 @@ HISTORY §14/§32.3/§35），所以这是这一块板**唯一**还没记账的�
 注意 RP2350 那次"LED 没闪"是**引脚假设**问题（pad 在 2 Hz 翻转，见 HISTORY
 §32.2），不是 PIO 的 bug；换板子先确认用户 LED 到底在哪个 GPIO。
 
-## 2b. rp2350rv 的 LCD 锁缺口（2026-11-16，另一个改动在做）
-
-`drivers/display/st7789/rp2350rv/lcd_st7789.c` 里**没有任何** `spin_lock`/
-`plat_irq_save`，而 `/dev/lcd0` 的 ioctl 与 console mirror 会落到同一批
-`plat_display_*`（共享 `rowbuf`/`cellbuf`/CS/单 DMA 通道）。ARM 版已在 `a2c3fe1`
-修过，RV32 漏了。另外它的 `lcd_dma_kick()` 是 `TRIG` 在前、`dma_armed = 1` 在后，
-ARM 版相反且中间有屏障。
-
-**这项工作已由另一个改动负责，不要在别的分支重复补**，否则两边都要处理 rebase。
-验收要求记在这里，谁合并谁检查：
-
-- 一把 `lcd_lock` 覆盖 data phase → kick → sync；`plat_irq_save` 在锁外保存、锁内屏蔽；
-- 每个 early return 都 `lcd_leave`——漏一个就是永久持锁、屏幕静默死掉；
-- `plat_display_sync` 也要进锁；`dma_armed = 1` + 屏障（RV32 用 `fence rw, rw`）
-  放在 `TRIG` 写之前；
-- 真机冒烟（`rp2350rv` + `rp2350rvsmp`）。措辞写"已加与 ARM 相同的锁 + 冒烟通过"，
-  **不写"证明修复了竞态"**。
-
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 
 `HISTORY.md` §33.2.1：异常入口需要栈下面有可写的着陆区，护栏洞里只留了 2560 B，
