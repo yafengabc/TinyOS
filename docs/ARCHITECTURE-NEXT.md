@@ -22,20 +22,20 @@
 | # | 契约 | 冻结什么 | 现在给什么实现 | 以后怎么扩展 |
 |---|---|---|---|---|
 | C1 | **board/chip/config** | `board.conf`（INI，`schema=1`）+ `board/<chip>` / `board/<vendor>/<board>` 分层 + 能力校验 | 只声明能力 + 构建期校验；不生成头、不搬 `layout.c` | 三层事实（chip/board/image）；`Targets` 全生成、`build/gen/board_config.h`；加 variant（Pico 2） |
-| C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位 | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
+| C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位（V1 `0x0001` 特例，见 §0.4） | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
 | C3 | **flash/跨核独占** | `plat_flash_exclusive_begin/end` + 协作式 park poll + `plat_cache_*`/`plat_dma_*` 钩子 | RP 现有 park 包一层，行为不变；cache/DMA 钩子 no-op | 三块 RP 共享骨架；P4 实现自己的独占；不承诺通用 pause |
 | C4 | **内存域/窗口** | `struct mem_domain` 列表（现在 1 个）+ `win_alloc` 带域参数 | 单域，行为与现在完全一致 | P4 PSRAM 需要时加第二域；不提前做多域 |
 | C5 | **驱动接缝** | `dev_ops` + LCD `lcd_lowops` | LCD 的 RP lower 接到 ops；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
 | C6 | **等待/超时** | 等待**规则**（不是定时器 API）：tick 就绪后用毫秒上限；tick 前按 `plat_cpu_hz()` 折算迭代上限；不在持锁/关中断状态长等 | 规则 + 一个 helper；`wd_start` 不做 | `wd_start` 只在网络/companion 出现请求级超时时立项（B-8） |
-| C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；`remote_ep_irq()` 是唯一 ISR 入口（只置 pending，无 I/O）；send/recv 仅任务上下文；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
+| C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；`send/recv` 仅任务上下文；`poll`/`link_state` 在任务或 tick 上下文（可做 I/O）；`remote_ep_irq()` 是唯一 ISR 入口（只置 pending，无 I/O）；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
 
 ### 0.2 兼容承诺（违反一条就必须单独评审，不能混进架构提交）
 
 - 既有 syscall 编号**只追加，不改语义**；
 - 既有结构**只追加字段，不重排**；`_Static_assert(sizeof(...))` 守住；
 - 旧 V1 `.tos` 在新内核继续加载；
-- 12 个既有目标的启动/shell/窗口/SMP 行为不变；
-- `board.conf schema`、`tos_abi`、LZ4TOS flags、`exec_format` 都带版本号；扩展是加字段/加 handler，不是重写；
+- 12 个既有目标在**正常路径、合法输入**下的可观察语义不变（Phase A 的例外见 §4）；
+- 每条契约各自有版本策略（见 §0.4）；扩展是加字段/加 handler，不是重写；
 - 不把 Pico 2 的未解决问题带进回归基线（`OPEN-ITEMS.md` §1b）。
 
 ### 0.3 断言边界（KASSERT）
@@ -61,6 +61,21 @@
 - 仅仅"值得记一笔"的偏差（栈尺寸与预算不符）用计数器，不 halt。
 - `TOS_KASSERT=0` 可按 target 关闭（bring-up 用），**默认开**；`_Static_assert` 永远开。
 - halt 点位逐个过审，判据是"命中即意味着状态不可恢复"，不是"看起来可疑"。
+
+### 0.4 冻结判据与版本策略
+
+**冻结判据**：冻**形状与调用约束**（改则牵动所有调用点），不冻**未测参数**（猜错就是 bug）。
+C4（单域形状冻、第二域参数不冻）与 C7（`send/recv/link_state` 形状冻、
+`max_frame`/`queue_depth` 由 `remote_ep_caps()` 返回）都按这一条判。
+
+| 项 | 现在 | 目标 |
+|---|---|---|
+| `board.conf` | `schema=1` | 追加键只升 schema |
+| `tos_abi` | 只有 `sizeof`/`offsetof` 断言，无版本字段 | A-2 加 `TOS_ABI_VERSION`；结构只追加 |
+| LZ4TOS flags | 唯一值 `0x0001`（bit0 = hint） | B-3：V1 的 `0x0001` 继续接受；V2 起 `flags = (version << 8) \| caps`，`0x0101` = V2 + hint |
+| `exec_format` | `{name, probe, load, note}`，无版本 | B-3 追加 `version` 字段；旧 handler 不动 |
+
+"带版本号"在这张表里是**目标态**，不是现状：现在只有 `board.conf` 的 `schema=1` 是真字段。
 
 ---
 
@@ -135,9 +150,17 @@ build/gen/                  ← 构建期生成物，不入库
 
 ---
 
-## 4. Phase A：只加接缝，不改行为
+## 4. Phase A：先修 bug + 加接缝，不改正常路径语义
 
-**Phase A 结束条件：12 目标构建 + QEMU smoke/soak + 有硬件的板级基线完全不变。**
+**"不改行为"的准确含义**：合法输入、正常路径下的可观察语义（启动、shell、窗口几何、
+SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回归证据：
+
+- (a) 修既有真 bug：A-0 把并发 exec 从"可能加载错文件/越界写"改成正确；
+- (b) 内部不变量从静默容忍改 halt：A-8，依 §0.3；
+- (c) 等待循环按主频折算：A-6，"等到状态就绪"的语义不变，只是上限可换算。
+
+**Phase A 结束条件：12 目标构建 + QEMU smoke/soak + 有硬件的板级基线完全不变**
+（按上面的定义判，不按字面"一个字节都不变"判）。
 
 ### A-0｜SMP exec 并发（先做，BUG-A/B）
 放行条件：这是真 bug，不是接缝；先修完再动 A-3，否则 loader 带病重构。
@@ -151,7 +174,11 @@ build/gen/                  ← 构建期生成物，不入库
   回帖写清驱动 soak 的程序和命令行。
 
 ### A-1｜board.conf 能力声明 + 冲突校验（C1）
-- 复用 INI，新增 `board/<vendor>/<board>/board.conf`：`schema=1`、`arch`、`cores`（HP/LP）、`memory_domains`、`protection`、`connectivity`、`peripherals`、`variant`。
+- 复用 INI，新增 `board/<vendor>/<board>/board.conf`：`schema=1`、`chip=<型号>`、
+  `peripherals`（外设存在性）、`connectivity`、`variant`、引脚/LED/KEY 事实。
+- **chip 事实不在 board.conf 里**：`arch`/`triple`/`march`/时钟/XIP/核数/保护后端/
+  内存域由 chip 层唯一拥有；board.conf 只写 `chip=<型号>`，构建期据此解析并校验。
+  写 `arch=` 会把同一事实放两个地方，正是 B-1 警告的那种两层真相。
 - `ApplyConfig()` 在套用 conf features/drivers 前校验目标能力；不相容直接报错。
 - 扩展 `geometry_test.go` 为 board.conf ↔ `layout.c` ↔ `WindowGeometry()` 三方一致。
 - **不做**：生成头、搬 `layout.c`、TOML。
@@ -330,15 +357,22 @@ Phase B（A 稳定后）
 - 12 目标构建（x86 按 `OPEN-ITEMS.md` §5 记录）；
 - QEMU `rv32/rv32smp/arm` smoke + soak；
 - 有硬件的板按 `docs/TESTING.md` 跑 T3；
-- Phase A 任何一项不得改变既有目标的启动/shell/窗口/SMP 结果。
+- **复现/压力类测试必须记命令行**（不是只写"跑过了"），并在
+  `docs/acceptance/` 留一份摘要；
+- Phase A 任何一项不得改变既有目标在正常路径、合法输入下的启动/shell/窗口/SMP 结果
+  （例外见 §4）。
+
+**心跳级六项的适用范围**：只用于**新板接入**和 **P4 的 B-5b/B-5c**；Phase A/B 的每项提交
+按上面的 T0–T2 跑，不要求心跳。已有板（C3 / ATK / RP2040）的 T3 是**平权级**；
+心跳级通过不等于板子可交付（`docs/TESTING.md` §5.0）。
 
 ---
 
 ## 8. 新板 checklist（稳定 v1）
 
-- [ ] `board/<vendor>/<board>/board.conf`：schema/arch/cores/memory_domains/protection/connectivity/peripherals/variant。
+- [ ] `board/<vendor>/<board>/board.conf`：schema/chip/peripherals/connectivity/variant + 引脚/LED 事实；chip 事实（arch/时钟/核数/保护后端）不写在这里。
 - [ ] `board/<vendor>/<board>/` 只写引脚/外设存在性/LED/KEY/LCD；不写时钟/XIP/驱动逻辑。
-- [ ] 同芯片不同板用 variant（Pico 2 是第一个案例），不复制 `platform.c`。
+- [ ] 同芯片不同板用 variant（Pico 2 是 variant 机制的**动机案例**；它的 HardFault 另案，稳定前不进基线），不复制 `platform.c`。
 - [ ] `configs/<target>.conf` 只声明能力；构建期校验。
 - [ ] 在 `internal/build` 的 `Targets` 表登记一行——这是当前唯一必须改的 Go 源码，
       B-1 之后交给 `board.conf` 生成；不要假装它已经消失。
