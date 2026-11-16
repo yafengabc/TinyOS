@@ -7,6 +7,11 @@
 #include "string.h"
 #include "cpu.h"
 
+/* Code that must run from SRAM: XIP is off inside the flash window, and an
+ * instruction fetch then bus-faults.  The linker script copies
+ * .data.ramfunc before kmain. */
+#define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
+
 /* Board: Raspberry Pi RP2350 (dual Cortex-M33, ARMv8-M, Secure state).
  *
  * Boot flow: the mask ROM configures XIP itself - there is no RP2040-style
@@ -102,7 +107,7 @@ static void rom_reboot(uint32_t flags)
 }
 
 static void rom_stop_other_core(void);   /* defined with the flash helpers */
-static void wdt_feed(void);               /* defined with the flash helpers */
+static RAMFUNC void wdt_feed(void);       /* defined with the flash helpers */
 
 static void rom_enter_bootsel(void)
 {
@@ -464,12 +469,12 @@ void plat_diag_poll(void)
  * of a dead board, large enough for one erase+program burst (~50-200 ms). */
 #define WATCHDOG_RELOAD   0x001fffffu
 
-static void wdt_feed(void)
+static RAMFUNC void wdt_feed(void)
 {
     mmio_write32(WATCHDOG_BASE + WATCHDOG_LOAD_OFF, WATCHDOG_RELOAD);
 }
 
-static void wdt_enable(void)
+static RAMFUNC void wdt_enable(void)
 {
     uint32_t ctrl = mmio_read32(WATCHDOG_BASE + WATCHDOG_CTRL_OFF);
 
@@ -752,6 +757,17 @@ static void early_put_hex(uint32_t v)
         plat_console_putc(hex[(v >> i) & 0xfu]);
 }
 
+/* USBCTRL runs at priority 0x00 in drivers/usb/rp2350/tusb_shim.c.  A tick at
+ * the same level cannot preempt it and vice versa, and the tick handler is
+ * long enough (diagnostics, USB poll) to blow through the microseconds a
+ * SET_ADDRESS status stage allows.  Keeping SysTick at 0x20 makes USB always
+ * win that arbitration.  This hook is called by arm_exceptions_init() on
+ * both cores, so the secondary sees the same value. */
+uint32_t plat_arm_systick_priority(void)
+{
+    return 0x20u;
+}
+
 void plat_console_init(void)
 {
     uart_init();
@@ -765,16 +781,10 @@ void plat_console_init(void)
     usb_cdc_console_init(g_clk_hz);
     early_puts("[P2] usb init returned\r\n");
 
-    /* USB must be able to preempt the tick.  SysTick keeps the default
-     * priority 0x00 from arch/arm/scs.h, and a handler at the same level
-     * cannot interrupt another - but the tick's handler is long enough
-     * (diagnostics, USB poll) to blow through the microseconds a
-     * SET_ADDRESS status stage allows.  Drop SysTick to 0x20 and leave
-     * USBCTRL at 0x00, so enumeration latency no longer depends on what
-     * the tick happens to be doing.  SHPR3 packs SysTick in [31:24] and
-     * PendSV in [23:16]; only the SysTick byte changes. */
-    mmio_write32(ARM_SHPR3,
-                 (mmio_read32(ARM_SHPR3) & 0x00FFFFFFu) | (0x20u << 24));
+    /* SysTick priority is set by plat_arm_systick_priority() below, from
+     * inside arm_exceptions_init().  Writing SHPR3 here would be undone a
+     * moment later by plat_init(), and on the secondary core the same
+     * hand-written value would never be applied at all. */
 
     /* Only let the console shunt characters into the CDC ring when the
        controller actually came up.  With the PLL handshake failed (stage 2)
@@ -1165,12 +1175,6 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
     memcpy(buf, src, count * 512u);
     return 0;
 }
-
-/* These two must run out of SRAM: rom_flash_exit_xip() puts QSPI into
- * serial-command mode, and the ROM's program/erase routines cannot
- * tolerate an instruction fetch from XIP while they are busy.  The linker
- * script's .data section (AT > FLASH) is copied by _start before kmain. */
-#define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
 
 /* Restore XIP the way pico-sdk's flash_range_erase/program does.
  *

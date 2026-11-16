@@ -25,6 +25,10 @@ void plat_board_early(void);
 void plat_board_init(void);
 void plat_timer_tick(void);
 
+/* Optional board override, read by arm_exceptions_init() on every core.
+ * The weak default in arch/arm/platform.c is ARM_PRIO_SYSTICK (0x00). */
+uint32_t plat_arm_systick_priority(void);
+
 /* Called from plat_irq_enable() so a board can unmask a timer interrupt
  * that its plat_timer_init() deliberately left masked. */
 void plat_timer_irq_unmask(void);

@@ -326,13 +326,19 @@ void plat_task_protect(const plat_seg_t *segs, int n)
          * and anything below it must stay unmatched. */
         addr[0] = segs[0].base >> 2;
 
-        for (int i = 0; i < n && k + 1 < (int)PMP_TOR_ENTRIES; i++) {
+        for (int i = 0; i < n; i++) {
             if (i > 0 && segs[i].base > segs[i - 1].top) {
                 /* A gap: close the piece below with a disabled entry whose
                  * address is the next piece's base, so that piece starts
-                 * there and the hole stays uncovered. */
+                 * there and the hole stays uncovered.  Check the bound
+                 * before each increment: a three-segment list with two holes
+                 * used to advance k twice past PMP_TOR_ENTRIES. */
+                if (k + 1 >= (int)PMP_TOR_ENTRIES)
+                    break;
                 addr[++k] = segs[i].base >> 2;
             }
+            if (k + 1 >= (int)PMP_TOR_ENTRIES)
+                break;
             addr[++k] = (segs[i].top & ~3u) >> 2;
             cfg[k] = PMP_TOR | PMP_R |
                      ((segs[i].attr == PLAT_SEG_CODE) ? PMP_X : PMP_W);

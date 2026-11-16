@@ -363,6 +363,17 @@ int plat_cpu_id(void)
  * the expected MemManage).  Its fault handler also sat at priority 0, above
  * the tick - the deadlock described below, on the core least likely to be
  * watched. */
+/* Board override for the SysTick priority.  The generic layer must set the
+ * priority itself (it runs after plat_board_early() on the boot core, and
+ * again on every secondary), so a board cannot safely patch SHPR3 from its
+ * console init: that write is overwritten here.  RP2350 needs 0x20 to let
+ * USBCTRL at 0x00 preempt the tick; every other ARM board keeps the reset
+ * value, which is also what SVCall at 0x40 requires. */
+__attribute__((weak)) uint32_t plat_arm_systick_priority(void)
+{
+    return ARM_PRIO_SYSTICK;
+}
+
 static void arm_exceptions_init(void)
 {
     /* SysTick must outrank SVCall.  A task that blocks inside a syscall
@@ -378,7 +389,8 @@ static void arm_exceptions_init(void)
 
        PendSV is parked at the lowest priority for a future deferred
        context switch. */
-    mmio_write32(ARM_SHPR3, (ARM_PRIO_SYSTICK << 24) | (ARM_PRIO_PENDSV << 16));
+    mmio_write32(ARM_SHPR3, (plat_arm_systick_priority() << 24) |
+                            (ARM_PRIO_PENDSV << 16));
     mmio_write32(ARM_SHPR2, ARM_PRIO_SVC << 24);
 #ifndef TOS_ARM_M0P
     /* Faults sit *below* SysTick so the tick can always preempt a fault
@@ -704,7 +716,10 @@ static int sio_gate_claim_bounded(void)
 
 static inline void sio_gate_irq_restore(uint32_t pm)
 {
-    __asm__ volatile("msr primask, %0" :: "r"(pm) : "memory");
+    /* Same context synchronisation as plat_irq_restore(): the next
+     * instruction may already rely on the new PRIMASK value. */
+    __asm__ volatile("msr primask, %0\n\t"
+                     "isb" :: "r"(pm) : "memory");
 }
 
 #endif /* TOS_ARM_SIO_SPIN */

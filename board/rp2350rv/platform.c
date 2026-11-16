@@ -723,14 +723,12 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
  * window, both while XIP is off.  They were inlined into their RAMFUNC
  * callers in every build so far, which is exactly the kind of luck that turns
  * into a dead board the first time the optimiser makes a different choice. */
-#define RAMFUNC_WDT __attribute__((section(".data.ramfunc"), noinline))
-
-static RAMFUNC_WDT void wdt_feed(void)
+static RAMFUNC void wdt_feed(void)
 {
     mmio_write32(WATCHDOG_BASE + WATCHDOG_LOAD_OFF, WATCHDOG_RELOAD);
 }
 
-static RAMFUNC_WDT void wdt_enable(void)
+static RAMFUNC void wdt_enable(void)
 {
     uint32_t ctrl = mmio_read32(WATCHDOG_BASE + WATCHDOG_CTRL_OFF);
 
@@ -896,7 +894,7 @@ void plat_flash_park_poll(void)
 
 static int rp_flash_park_other(void)
 {
-    uint32_t mstatus, myreq;
+    uint32_t myreq;
 
     if (cpu_count <= 1)
         return 0;
@@ -904,8 +902,10 @@ static int rp_flash_park_other(void)
     /* Mask interrupts for the handshake: with them on, the tick can land in
      * this wait loop and reschedule the caller onto the other hart, which
      * then is no longer the one that will unpark - both harts park and
-     * nothing clears the flag again. */
-    __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(mstatus));
+     * nothing clears the flag again.  The caller already saved mstatus.MIE
+     * in was_enabled and restores it on both the success and timeout paths:
+     * saving it again here would only see the zero this csrci just wrote. */
+    __asm__ volatile("csrci mstatus, 8" ::: "memory");
 
     myreq = ++g_park_req;                    /* new generation first */
     g_flash_parked = 0;
@@ -982,8 +982,6 @@ static int rp_flash_park_other(void)
     early_puts("\r\n");
 #endif
     __asm__ volatile("slt x0, x0, x1" ::: "memory");
-    if (mstatus & 8u)
-        __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return -1;              /* core 1 never parked: do not kill XIP under it */
 }
 
@@ -1008,8 +1006,15 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 
     __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(was_enabled));
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0)
+    if (rp_flash_park_other() != 0) {
+        /* rp_flash_park_other() leaves MIE masked on success because the
+         * ROM call follows; on timeout it returns without parking anyone,
+         * so the caller must put the original state back or every tick and
+         * console interrupt stays off for the rest of the boot. */
+        if (was_enabled & 8u)
+            __asm__ volatile("csrsi mstatus, 8" ::: "memory");
         return -1;
+    }
 #endif
     /* Feed around the ROM call rather than disarming the watchdog: with it
      * off, a wedge inside the sequence was silent and permanent.  One erase
@@ -1060,8 +1065,11 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 
     __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(was_enabled));
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
-    if (rp_flash_park_other() != 0)
+    if (rp_flash_park_other() != 0) {
+        if (was_enabled & 8u)
+            __asm__ volatile("csrsi mstatus, 8" ::: "memory");
         return -1;
+    }
 #endif
     wdt_feed();                 /* stay armed; see the watchdog note above */
     flash_step(0x201);

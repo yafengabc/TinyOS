@@ -202,10 +202,17 @@ static void lcd_dma_kick(const void *buf, uint32_t n)
     mmio_write32(ch + DMA_CH_READ_ADDR, (uint32_t)(uintptr_t)buf);
     mmio_write32(ch + DMA_CH_WRITE_ADDR, SPI1_BASE + RP_SPI_DR);
     mmio_write32(ch + DMA_CH_TRANS_COUNT, n);   /* MODE bits [31:28] = 0  */
+
+    /* Publish "armed" before the trigger.  The old order left a window in
+     * which the DMA was already walking rowbuf while a nested caller saw
+     * dma_armed == 0, returned from lcd_dma_sync() immediately, and started
+     * a second transfer under the same CS.  The barrier keeps the store
+     * before the trigger from being reordered by the compiler or core. */
+    dma_armed = 1;
+    __asm__ volatile("dmb" ::: "memory");
     mmio_write32(ch + DMA_CH_CTRL_TRIG,
                  DMA_CTRL_EN | DMA_CTRL_DATA_BYTE | DMA_CTRL_INCR_READ |
                  DMA_CTRL_TREQ(DREQ_SPI1_TX));
-    dma_armed = 1;
 }
 
 static void lcd_cmd(uint8_t c)
