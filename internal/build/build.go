@@ -863,6 +863,9 @@ func (b *Builder) Build() error {
 			return err
 		}
 		b.logf("      %s\n", filepath.Join("build", "kernel-"+b.Target.Name+".elf"))
+		if err := b.writeBuildConfig(); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -885,6 +888,71 @@ func (b *Builder) Build() error {
 	if err := b.buildDiskImage(); err != nil {
 		return err
 	}
+	if err := b.writeBuildConfig(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeBuildConfig records the knobs that a menuconfig file can change, so a
+// released image can be compared with the build that was tested on hardware.
+// CI builds with no tos.conf (target defaults), while a local acceptance run
+// usually has one - heap, opt and the program set then differ, and without
+// this file that difference is invisible in the artifact.
+func (b *Builder) writeBuildConfig() error {
+	grain, stack, guard := b.Target.WindowGeometry()
+	pick := func(v, d int) int {
+		if v != 0 {
+			return v
+		}
+		return d
+	}
+	opt := b.Opt
+	if opt == "" {
+		opt = "-O2 (kernel) / -Oz (size-opt programs)"
+	}
+	cpus := b.Target.CPUs
+	if cpus == 0 {
+		cpus = 1
+	}
+	cfg := "(none: target defaults)"
+	if b.Config != nil && b.Config.Path != "" {
+		cfg = b.Config.Path
+	}
+	var feats []string
+	for k, on := range b.Features {
+		if on {
+			feats = append(feats, k)
+		}
+	}
+	sort.Strings(feats)
+
+	lines := []string{
+		"target      " + b.Target.Name,
+		"board       " + b.Target.Board,
+		"arch        " + b.Target.Arch,
+		"cpus        " + fmt.Sprint(cpus),
+		"heap        " + fmt.Sprintf("%d bytes", pick(b.HeapBytes, b.Target.HeapBytes)),
+		"max_procs   " + fmt.Sprint(pick(b.MaxProcs, b.Target.MaxProcs)),
+		"kstack      " + fmt.Sprint(pick(b.KStack, b.Target.KStack)),
+		"opt         " + opt,
+		// The board's real grain/stack/guard live in board/*/layout.c; these
+		// three are what checkWindow() validates TOS_WINDOW/TOS_ONE_GRAIN
+		// against, and they have not followed the 4 KiB migration yet
+		// (OPEN-ITEMS 36), so they are labelled for what they are.
+		"check-grain " + fmt.Sprintf("%d bytes", grain),
+		"check-stack " + fmt.Sprintf("%d bytes", stack),
+		"check-guard " + fmt.Sprintf("%d bytes", guard),
+		"features    " + strings.Join(feats, ","),
+		"config      " + cfg,
+		"note        runtime grain/stack/guard are in board/*/layout.c; the",
+		"            check-* lines are the build-time TOS_WINDOW validation",
+	}
+	out := filepath.Join(b.BuildDir, "build-config.txt")
+	if err := os.WriteFile(out, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	b.logf("      %s\n", relName(b.Root, out))
 	return nil
 }
 

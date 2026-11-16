@@ -3663,3 +3663,29 @@ NULL；现在先快照为 `cur`。
 - 弱符号/锁审计：`rp2040smp` 编译带 `TOS_ARM_M0P` + `TOS_ARM_SIO_SPIN`，
   `plat_spin_acquire/release` 的强符号（SIO gate 31）生效，没有退化成单核 no-op；
   `plat_flash_park_poll`、`plat_start_cpu` 也由 board 强定义覆盖 weak。
+
+## 36. 构建期的窗口几何还停在 16 KiB 时代（2026-11-16 发现，待改）
+
+`internal/build/build.go::WindowGeometry()` 给带保护单元的板子返回
+**16 KiB grain / 8 KiB stack / 4 KiB guard**：
+
+```go
+case "esp32c3", "rp2040", "rp2350", "rp2350rv":
+    return 16 << 10, 8 << 10, 4 << 10
+```
+
+但四块板的 `board/*/layout.c` 在 4 KiB 窗口那一轮之后都是
+**4 KiB grain / 4 KiB stack / 4 KiB guard**。这个函数只被 `checkWindow()` 用来校验
+`TOS_WINDOW()` / `TOS_ONE_GRAIN()` 的承诺，不影响运行时，所以它一直"安静地"用旧数字：
+
+- `msh` 写的是 `TOS_ONE_GRAIN()`（"必须放得进一个 grain"）。按 16 KiB 算，
+  8192+4096+4096 = 16384 ≤ 16384 → 通过；按真实的 4 KiB grain 算，这个承诺早就
+  不成立了（它的窗口是 16 KiB，也就是四个 grain）；
+- 所以 CI 那次 `msh` 在 clang 18 下编到 12288 时报 "would take a 32 KiB window"：
+  结论没错（真实窗口确实会涨到 32 KiB），但"grain"这个词已经名不副实。
+
+**要改**：`WindowGeometry()` 换成真实的 4K/4K/4K（`qemu-virt` 的 64K/32K/16K 本来
+就对），把 `msh` 的注解从 `TOS_ONE_GRAIN()` 改成 `TOS_WINDOW(16*1024)`，然后
+`build-config.txt` 里那三行 `check-*` 才配得上它们的名字。改完要重新确认每个程序的
+`TOS_WINDOW` 承诺仍然成立（至少 `msh`、`sh`、`py`），值得单独一次提交，别和别的改动
+混。

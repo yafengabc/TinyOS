@@ -135,6 +135,11 @@ jobs:
             } > "$out/FLASH-$target.txt"
           fi
 
+          # What this image was built from: a menuconfig build and the release
+          # defaults differ in heap/opt/programs, and that must be visible in
+          # the artifact rather than inferred from the tag.
+          cp build/build-config.txt "$out/" 2>/dev/null || true
+
           for f in "$out"/*; do
             test -s "$f" || { echo "empty file: $f"; exit 1; }
           done
@@ -148,10 +153,43 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  smoke:
+    name: qemu smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Install toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld libc6-dev \
+            qemu-system-misc qemu-system-x86 qemu-system-arm
+      - name: Build the QEMU targets
+        run: |
+          set -euo pipefail
+          for t in x86 rv32 rv32smp arm; do
+            go run ./cmd/tos build -target "$t"
+          done
+      - name: Boot and drive each one
+        run: |
+          set -euo pipefail
+          for t in x86 rv32 rv32smp arm; do
+            go run ./cmd/tostest smoke -target "$t" \
+              -commands "ps, ls /bin | wc, piperace, prot stack, deep 3" \
+              -commandwait-ms 4000
+          done
+      - name: Window and segment soak
+        run: python3 scripts/soak.py --cycles 3
+
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
