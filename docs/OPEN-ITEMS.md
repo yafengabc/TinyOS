@@ -49,14 +49,6 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
 
-## 2c. RP2350 ARM USB CDC 长输出截断（2026-11-17）
-
-`rp2350smp`（Cortex-M33）在 COM17 上短命令正常，但 `ls /bin` 和 `crash` 的长输出
-会在约 200 B 处截断，prompt 也可能只剩 `os>`；UART0 COM14 同一镜像正常，heartbeat
-6/6。因此 A-0 的 ARM 真机结论以 UART0 为准；USB CDC 的批量 TX 仍需单独查
-（先分 host 读速度、CDC TX FIFO 和 console 输出路径）。验收记录：
-`docs/acceptance/2026-11-17-a0-rp2350smp-2fdd6e8.md`。
-
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
 `internal/build/build.go::WindowGeometry()` 返回 16 KiB grain / 8 KiB stack /
