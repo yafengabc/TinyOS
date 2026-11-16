@@ -3763,6 +3763,15 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
   - `rp2350rvsmp` 启动正常，**100 轮 dd/rm ALL OK**。
 - **RP2040 真机**（换回 RP2040 后）：`rp2040smp` 启动为 `cpus=2`，USB CDC
   枚举正常；`dd` + `rm` **1000 轮 ALL OK**。
+  - `smpbench`：single 179 ms / dual 173+176 ms，**2.03x**；
+  - `smp -s 2 400`：两个 worker 分别在 cpu1/cpu0，1179/1177 blocks；
+  - `smp -t 4 2 300`：两个 worker 跨 cpu1/cpu0，2376/2353 blocks；
+  - `piperace`（64 KiB 单对）：发送/校验全部 `ok`；
+  - `deep 3`：`stack grown to 8 KiB` + `journal intact`；
+  - `mem` / `wheap` / `ls /bin | wc` 正常；`ps` 的 `msh wink=16`。
+  - `piperace 2 16` 的第二对因 20 KiB 窗口只剩 16 KiB 连续块而明确报
+    `exec failed`，没有崩溃；这是 RP2040 200 KiB 用户区上的窗口碎片边界，
+    不是本轮锁修复回归。
 - **Pico 2 对照**：官方 MicroPython UF2 能枚举 USB；TinyOS 的 v0.3.0 发布版和
   本轮镜像都在启动早期 HardFault、USB 不出现。官方固件正常说明 USB/线材没问题，
   Pico 2 的板级适配需另开一项，不混在本次 review 修复里。
