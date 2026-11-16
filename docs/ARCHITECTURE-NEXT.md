@@ -22,7 +22,7 @@
 | # | 契约 | 冻结什么 | 现在给什么实现 | 以后怎么扩展 |
 |---|---|---|---|---|
 | C1 | **board/chip/config** | `board.conf`（INI，`schema=1`）+ `board/<chip>` / `board/<vendor>/<board>` 分层 + 能力校验 | 只声明能力 + 构建期校验；不生成头、不搬 `layout.c` | 三层事实（chip/board/image）；`Targets` 全生成、`build/gen/board_config.h`；加 variant（Pico 2） |
-| C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位（V1 `0x0001` 特例，见 §0.4） | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
+| C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位（V0 `0x0001` 特例，见 §0.4） | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
 | C3 | **flash/跨核独占** | `plat_flash_exclusive_begin/end` + 协作式 park poll + `plat_cache_*`/`plat_dma_*` 钩子 | RP 现有 park 包一层，行为不变；cache/DMA 钩子 no-op | 三块 RP 共享骨架；P4 实现自己的独占；不承诺通用 pause |
 | C4 | **内存域/窗口** | `struct mem_domain` 列表（现在 1 个）+ `win_alloc` 带域参数 | 单域，行为与现在完全一致 | P4 PSRAM 需要时加第二域；不提前做多域 |
 | C5 | **驱动接缝** | `dev_ops` + LCD `lcd_lowops` | LCD 的 RP lower 接到 ops；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
@@ -33,7 +33,7 @@
 
 - 既有 syscall 编号**只追加，不改语义**；
 - 既有结构**只追加字段，不重排**；`_Static_assert(sizeof(...))` 守住；
-- 旧 V1 `.tos` 在新内核继续加载；
+- 旧 V0 `.tos`（`flags=0x0001`）在新内核继续加载；
 - 12 个既有目标在**正常路径、合法输入**下的可观察语义不变（Phase A 的例外见 §4）；
 - 每条契约各自有版本策略（见 §0.4）；扩展是加字段/加 handler，不是重写；
 - 不把 Pico 2 的未解决问题带进回归基线（`OPEN-ITEMS.md` §1b）。
@@ -72,16 +72,19 @@ C4（单域形状冻、第二域参数不冻）与 C7（`send/recv/link_state` �
 |---|---|---|
 | `board.conf` | `schema=1` | 追加键只升 schema |
 | `tos_abi` | 只有 `sizeof`/`offsetof` 断言，无版本字段 | A-2 加 `TOS_ABI_VERSION`；结构只追加 |
-| LZ4TOS flags | 唯一值 `0x0001`（bit0 = hint，编码版本 0） | B-3：`0x0001` 继续接受；下一个格式编码版本 1，`flags = (1 << 8) \| caps = 0x0101`（文档仍叫 V2） |
+| LZ4TOS flags | 唯一值 `0x0001`（bit0 = hint，**V0**） | B-3：`0x0001` 继续接受；下一个格式 **V1**，`flags = (1 << 8) \| caps = 0x0101` |
 | `exec_format` | `{name, probe, load, note}`，无版本 | B-3 追加 `version` 字段；旧 handler 不动 |
 
 "带版本号"在这张表里是**目标态**，不是现状：现在只有 `board.conf` 的 `schema=1` 是真字段。
 
-LZ4TOS 的名字和编码值差一位，是历史包袱，必须写清楚免得 B-3 写错：
+LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错位：
 
-- 文档里的 **V1** 指现有 `0x0001`，它**没有**版本字段，编码版本算 **0**；
-- 第一个带版本字段的格式编码版本是 **1**（`0x0101`），文档为避免把现有名字全改掉，仍叫 **V2**；
-- 判格式一律按**编码值**，不按文档名字。
+- **V0** = 现有 `0x0001`（bit0 = hint，没有版本字段，历史格式）；
+- **V1** = 第一个带版本字段的格式，`flags = (1 << 8) | caps`，即 `0x0101`；
+- 判格式只看 flags 高字节，不做"文档名 - 1"这类映射。
+
+`LZ4_WRAP_HEADER_V1`（`kernel/lz4.h`）是**28 字节带 hint 头**的名字，与格式版本号无关，
+**不改名**；B-3 落地时在它旁边加一句注释说明这一点即可。
 
 `caps` 只放**可以安全忽略**的能力提示（hint 是第一个）；任何"忽略就会加载错"的变化必须
 升编码版本，不能靠 caps 位。兼容承诺只覆盖一个方向：**新内核读旧文件**；旧内核读到新
@@ -251,7 +254,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 |---|---|---|
 | B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
 | B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench |
-| B-3 | LZ4TOS flags 高字节版本 + V1 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
+| B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归 |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |
 | B-6 | LP/companion 的窄消息接口 + 心跳（C7 形状） | mock lower 在 QEMU 跑通；LP 不进入 SMP |
@@ -403,7 +406,7 @@ Phase B（A 稳定后）
 | conf/target 冲突 | 静默 | 构建期明确报错 |
 | 新板需改内核文件 | 多处 | 0（`Targets` 表一行在 B-1 后消失） |
 | ABI 偏移 | 内核硬编码 | 单一头 + `offsetof` 静态断言 |
-| 格式版本 | flags 精确匹配 | 高字节版本 + V1 兼容 |
+| 格式版本 | flags 精确匹配 | 高字节版本 + V0 兼容 |
 | flash 独占 | 板级私货 | 内核契约 + 共享骨架 |
 | 等待 | 迭代数当时钟，部分在锁内 | tick 后毫秒上限、tick 前按主频折算；不在锁内长等 |
 | 断言 | `assert()` 无条件 no-op | 内部不变量 halt、外部数据返回错误；`TOS_KASSERT` 默认开 |
