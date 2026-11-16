@@ -179,21 +179,30 @@ build/gen/                  ← 构建期生成物，不入库
 |---|---|---|
 | **B-5a 探针** | vendor 最小寄存器头（时钟/GPIO/UART0）；`esptool` ROM 下载；打印版本/复位原因/时钟 | P4 上电稳定打印一行；记录 image header、偏移和 `write-flash` 命令 |
 | **B-5b 最小系统** | clock + UART + timer + 中断；能出 `tos> ` prompt | 心跳/`uptime` 正确，shell 可交互 |
-| **B-5c 平权** | flash + fs + 单域窗口 + PMP + `exec` | `scripts/esp-c3/accept.py`（按 P4 的 console/复位原因参数化）24/24；`priotest` 单 HP 核基线 |
+| **B-5c 平权** | flash + fs + 单域窗口 + PMP + `exec` | `accept.py` 24/24（reboot 的 reset-cause 文案先抓后填）；`priotest` 三条判据（见下） |
 
 "一行串口"只是 B-5a 的验收，不是 P4 第一阶段的全部。**P4 v1 的终点是 B-5c**：
 不含 WiFi、LP 调度、PSRAM 可执行窗口。
 
 **验收与止损的关系**（两者不能各说各话）：
 
-- `accept.py` 是串口上的 shell 语义测试，不是 C3 端口绑定；但它的启动/复位断言依赖
-  `RTC_SW_SYS_RST` 这类 C3 文案，P4 上要按实际复位原因与 console（UART vs USB CDC）
-  参数化，这是一次小的移植，不是重写。
+- `accept.py` 是串口上的 shell 语义测试，不是 C3 端口绑定；但 `reboot resets the chip`
+  这一项写死了 C3 的 ROM 复位原因文案（`RTC_SW_SYS_RST`），其余 23 项是通用的
+  prompt-send-expect 检查。P4 上**先跑一次 `reboot` 抓到实际的 reset-cause 字符串**，
+  再把它和 console 类型（UART vs USB CDC）一起参数化；不能直接沿用 C3 的期望，
+  否则该项会以"文案不匹配"失败，看起来像 reboot 坏了。
 - 24 项里的 `prot rodata/heap/stack/null` 依赖 `plat_task_protect`。若止损点触发
   （PMP 做不到 4 KB 粒度），**B-5c 的通过标准改为 20/24**：prot 四项按设计不适用，
   降级理由写进 `OPEN-ITEMS.md`；不得把降级结果记成 24/24。
-- `priotest` 只在 B-5c 用**单 HP 核**跑，作为调度器语义门槛（worst 不超过一个 tick、
-  不输给 NORMAL）；不套 C3 的绝对毫秒数，也不代表 PSRAM 路径已经收口
+- `priotest` 只在 B-5c 用**单 HP 核**跑。判据照 `scripts/esp-c3/priotest.py` 的实现，
+  不写"看起来还行"：
+  1. 每个 hog 数下，`nice 0` 的 miss 数不劣于 `normal`；
+  2. `nice 0` 的 worst gap ≤ 2 ms（脚本判 `rt[4] > 2` 即失败）；
+  3. hog ≥ 2 时，`nice 0` 的 miss 数 ≤ 30/1000。
+
+  注意脚本里那句 "order of magnitude fewer misses" 的注释与它实际执行的
+  `rt_bad > 30` 并不完全一致；**引用判据时以代码为准，不以注释为准**。
+  这些阈值不套 C3 的绝对毫秒数，也不代表 PSRAM 路径已经收口
   （PSRAM 的 `priotest` 门槛只在启用 PSRAM 窗口时才有意义，见 `OPEN-ITEMS.md` §9）。
 
 **止损点**：B-5b 之后若确认 PMP 做不到 4 KB 粒度保护，v1 明确降级为"无用户保护"，
