@@ -87,7 +87,8 @@ build/gen/                  ← 构建期生成物，不入库
 ```
 
 **"板子即目录"的精确含义**：
-- 新板只动 `board/<vendor>/<board>/` + `configs/<target>.conf`；
+- 新板只动 `board/<vendor>/<board>/` + `configs/<target>.conf` + `internal/build` 的
+  `Targets` 表一行（B-1 之后这一行由 `board.conf` 生成）；
 - chip 目录由 SoC 家族维护，板级不得改；
 - 内核不得出现 `#ifdef BOARD_X`；
 - 同芯片不同板用 **variant**（ATK / Pico 2）表达。
@@ -257,6 +258,8 @@ Phase B（A 稳定后）
 - [ ] `board/<vendor>/<board>/` 只写引脚/外设存在性/LED/KEY/LCD；不写时钟/XIP/驱动逻辑。
 - [ ] 同芯片不同板用 variant（Pico 2 是第一个案例），不复制 `platform.c`。
 - [ ] `configs/<target>.conf` 只声明能力；构建期校验。
+- [ ] 在 `internal/build` 的 `Targets` 表登记一行——这是当前唯一必须改的 Go 源码，
+      B-1 之后交给 `board.conf` 生成；不要假装它已经消失。
 - [ ] `scripts/accept-<board>.py` 最小心跳；纳入 CI 或 nightly。
 - [ ] README 目标表按实测状态填写；未上板不写 "on hardware"。
 - [ ] 不改内核 `switch`/`#ifdef`，不改 chip 目录。
