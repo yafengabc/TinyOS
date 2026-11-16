@@ -74,6 +74,14 @@ halt（审计确认 `kfree` 无旁路）。**未做**：`proc_set_state()` 和 2
 机械替换赌启动。验收摘要：
 `docs/acceptance/2026-11-17-a8-rp2350smp-d15fe16.md`。
 
+## 3b. RP2350 RV32 的 `deep 6` 以 store access fault 结束（2026-11-17）
+
+`rp2350rvsmp` 最终 HEAD 上：`deep 3` 正常增长 8 KiB + journal intact；
+`deep 6` 先增长到 8 KiB，随后 **store access fault**，没有 `no room to grow it;
+killing`；`deep 6 0 8` 同样在 malloc 4 KiB 后 store fault。已记入
+`docs/acceptance/2026-11-17-w1w2-rp2350rvsmp-d15fe16.md`。尚未判断是 RV32
+PMP/守卫路径的既有行为还是回归；先保留现场，下一轮用 baseline 对比。
+
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 
 `HISTORY.md` §33.2.1：异常入口需要栈下面有可写的着陆区，护栏洞里只留了 2560 B，

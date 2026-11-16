@@ -44,3 +44,4 @@
 | 2026-11-17 | A-3 exec_format seam | `c25a740` | RP2350 Cortex-M33 SMP（COM14） | T0–T3 PASS；T4 `NOT RUN` | [A-3 RP2350](2026-11-17-a3-rp2350smp-c25a740.md) |
 | 2026-11-17 | A-8 KASSERT + kfree halt | `d15fe16` | RP2350 Cortex-M33 SMP（COM14） | T0–T3 PASS；proc_set_state `NOT RUN` | [A-8 RP2350](2026-11-17-a8-rp2350smp-d15fe16.md) |
 | 2026-11-17 | A-1/A-2/A-4/A-6 组合回归 | `e5c9cac` | ESP32-C3（COM4） | T0–T3 PASS；soak 9 轮无复位；goc32 `FAIL`（另记 issue） | [C3](2026-11-17-a1-a2-c3-e5c9cac.md) |
+| 2026-11-17 | W1/W2 combined check | `d15fe16` | RP2350 Hazard3 RV32 SMP（COM14） | T0–T2 PASS；deep 6 FAIL；T4 PASS | [W1/W2 RV32](2026-11-17-w1w2-rp2350rvsmp-d15fe16.md) |
