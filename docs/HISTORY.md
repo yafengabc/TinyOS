@@ -3715,3 +3715,51 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
 的装载方式（内核已经支持按地址装载）、把这几处 16 位重定位改成 32 位、或者显式
 `-Wl,-z,notext`（治标）。**在那之前，`x86` 只是本机可用**，CI 的 `qemu smoke`
 先只覆盖 `rv32`/`rv32smp`/`arm`。
+
+## 38. 2026-11-16 项目审查的落实（SMP / 板级 / 构建）
+
+本轮按 `PROJECT-REVIEW-2026-11-16.md` 处理了可直接改、可验证的项；纯架构去重和 ABI 演进没有混进来。
+
+### 已修
+
+- **N-01 SysTick 优先级**：`arm_exceptions_init()` 改为调用可覆盖的
+  `plat_arm_systick_priority()`；RP2350 返回 0x20，USBCTRL 保持 0x00。
+  删掉了 `plat_console_init()` 里时机错误的 SHPR3 写入，二级核也会拿到同一优先级。
+- **N-02 RP2350rv park 超时**：`rp_flash_park_other()` 在调用者已经清 MIE 后不再
+  保存一个必然为 0 的旧值；erase/write 的失败路径按 `was_enabled` 恢复 `mstatus.MIE`。
+- **N-03 / A-1 wdt RAM 驻留**：RP2350 ARM 的 `wdt_feed()` / `wdt_enable()` 加
+  `RAMFUNC`；RP2350rv 删除 `RAMFUNC_WDT` 副本，两端口统一用 `RAMFUNC`。
+- **N-04 信号竞态**：`process_signal()` 用 `proc_lock` 包住 lookup + 状态写；
+  运行在另一核的任务只置 kill/stop pending，非运行任务用 `ST_KILLING` 占住槽位，
+  `task_release()` 在锁外执行后再锁内 reap/retire。`process_setprio()` 同样补锁。
+- **N-05 sleep 唤醒**：`process_tick()` 一次持锁扫描到期 sleeper，锁内写 saved
+  frame + READY，锁外只做一次 `preempt_if_higher()`；不再让两个 tick 重复唤醒。
+- **N-06 LCD DMA 顺序**：`dma_armed` 在写 `CTRL_TRIG` 之前发布，并加 `dmb`。
+- **N-07 低风险项**：`sio_gate_irq_restore()` 补 `isb`；RV32 TOR 的每个数组下标
+  自增前都检查 `PMP_TOR_ENTRIES`。
+- **C-2**：`checkWindow()` 的 span/stack/heap/guard 求和改 uint64，并拒绝
+  超过 uint32 的 ELF span，避免 note 回绕后静默通过。
+- **C-3**：`WindowGeometry()` 改 4K/4K/4K；`msh` 在 4K 板上用
+  `TOS_WINDOW(16 KiB)`，64 KiB grain 板仍用 `TOS_ONE_GRAIN()`；构建把
+  `TOS_APP_GRAIN` 传给用户程序；新增 `geometry_test.go` 解析四块 `layout.c` 比对。
+- **B-1/B-2/B-3**：`tty_ctrl_deliver()` 无控制键时早退；tick 的
+  `1000/plat_tick_hz()` 缓存为 `ms_per_tick`；console 批量输出只取一次当前 pid。
+- **C-1**：删除未调用的 `py_split/py_join` 及其文件、`ldLldPath()`、
+  `ReadFileIfExists()`、`map2()`、悬空 `compile_block()` 声明。
+- **C-5**：CI 新增 `checks` job（`go test ./...`、`go vet ./...`），release 依赖它。
+
+### 验证
+
+- `go test ./...`、`go vet ./...` 通过。
+- `rp2040`、`rp2040smp`、`rp2350`、`rp2350smp`、`rp2350rv`、`rp2350rvsmp`、
+  `esp32c3`、`rv32`、`rv32smp`、`arm` 全部构建通过。
+- QEMU `rv32`/`rv32smp`/`arm` smoke 通过（`piperace` 在单核 QEMU 上的长输出
+  时序仍会使 soak 偶发“命令交换窗口”误判，基线同样复现，不是本轮回归）。
+- RP2040/RP2350 真机验证本轮未做（用户暂未接板）；N-01/N-03 的 USB 与 flash
+  路径仍需上板确认。
+
+### 暂缓
+
+- A-2–A-6、C-4/C-6、F/G/H 的跨端口抽象、ABI schema、配置代码生成等是结构性
+  重构，需单独分支和完整回归，不在这次 bug 修复里一起改。
+

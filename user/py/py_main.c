@@ -23,7 +23,6 @@
 #include "py_lex.h"
 #include "py_code.h"
 #include "py_rt.h"
-#include "py_str.h"
 
 /* How much heap the interpreter wants, and how much stack.
  *

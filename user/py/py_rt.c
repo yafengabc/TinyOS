@@ -19,7 +19,6 @@
 
 #include "py_rt.h"
 #include "py_mem.h"
-#include "py_str.h"
 #include "lib.h"
 
 /* ---- errors ------------------------------------------------------------ */

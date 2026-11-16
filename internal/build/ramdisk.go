@@ -210,11 +210,6 @@ func ELFEndAddress(path string) (uint64, error) {
 	return end, nil
 }
 
-func ReadFileIfExists(path string) ([]byte, bool) {
-	b, err := os.ReadFile(path)
-	return b, err == nil
-}
-
 func collectFiles(root string) ([]RamFile, error) {
 	var files []RamFile
 	dir := filepath.Join(root, "files")

@@ -1,7 +1,7 @@
 /* py_obj.c - values, containers and reference counting. */
 
 #include "py_obj.h"
-#include "py_str.h"
+#include "lib.h"
 
 /* ---- constructors ---------------------------------------------------- */
 

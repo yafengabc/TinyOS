@@ -14,6 +14,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  checks:
+    name: go test and vet
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Unit tests
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
   build:
     name: ${{ matrix.target }}
     runs-on: ubuntu-24.04
@@ -194,7 +210,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, smoke]
+    needs: [checks, build, smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

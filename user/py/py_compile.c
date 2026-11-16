@@ -435,7 +435,6 @@ static void compile_primary(py_comp *cp);
 static void compile_test(py_comp *cp);
 static void compile_stmt(py_comp *cp);
 static void compile_suite(py_comp *cp);
-static void compile_block(py_comp *cp);
 
 /* The `or` level: `a or b or c`, left associative. */
 static void compile_or(py_comp *cp)

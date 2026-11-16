@@ -208,15 +208,6 @@ static int label_define(const char *name, int addr)
 
 /* ---- operand tables ---------------------------------------------------- */
 
-static int map2(const char *s, const char *a, int va, const char *b, int vb)
-{
-    if (!strcmp(s, a))
-        return va;
-    if (!strcmp(s, b))
-        return vb;
-    return -1;
-}
-
 static int cond_val(const char *s)
 {
     static const char *n[] = { "always", "!x", "x--", "!y", "y--",
