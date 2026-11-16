@@ -27,7 +27,8 @@ build/test toolchain written in Go — small enough to read end to end.
   ARMv7-M and ARMv8-M. No libLLVM, no cgo, and no external toolchain: its
   assembler and linker live in `internal/as` and `internal/ld`. A `.tos`
   dropped into `build/fs-stage/bin/` is installed by the ramdisk rebuild.
-  (goc32's code is still larger than clang's and has a known ARM codegen bug;
+  (goc32's code is larger than clang's; that is fine — release images and
+  the prebuilt `msh` stay on clang, and goc32 is the fast single-file loop.)
   release images stay on clang.)
 - **One kernel, one userland, 12 targets** — including both instruction sets of
   the same RP2350 silicon, and a PC.
