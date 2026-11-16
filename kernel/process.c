@@ -3057,6 +3057,18 @@ int process_stack_guard(const regs_t *r)
     return 1;
 }
 
+/* True when sp is outside the task's current stack, i.e. a load/store fault
+ * is a stack-overflow candidate rather than a wild pointer inside the stack.
+ * Used by fault-driven ports after process_stack_grow() refuses. */
+int process_stack_overflow_at(uint32_t sp)
+{
+    proc_t *p = current;
+
+    if (!p || p->win_size == 0 || p->stack_size == 0)
+        return 0;
+    return sp < p->stack_top - p->stack_size;
+}
+
 int process_stack_grow(uint32_t addr, uint32_t sp)
 {
     proc_t *p = current;

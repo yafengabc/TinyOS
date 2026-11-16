@@ -185,6 +185,7 @@ uint32_t process_stack_peak(char *name, uint32_t cap);
  * the instruction, which faulted before writing anything.  Returns 1 when the
  * fault was handled, 0 when it is a real fault and the task must die. */
 int process_stack_grow(uint32_t addr, uint32_t sp);
+int process_stack_overflow_at(uint32_t sp);
 
 /* Current working directory of the calling task.  chdir()/getcwd() and the
  * directory-relative open/stat/readdir syscalls ride on this. */

@@ -132,6 +132,18 @@ regs_t *trap_handler(regs_t *f)
         if ((cause == RV_MCAUSE_LOAD_FAULT || cause == RV_MCAUSE_STORE_FAULT) &&
             process_stack_grow(fault_addr, f->sp))
             return f;
+        if ((cause == RV_MCAUSE_LOAD_FAULT ||
+             cause == RV_MCAUSE_STORE_FAULT) &&
+            process_stack_overflow_at(f->sp)) {
+            /* The fault was outside the current stack and the growth above
+             * either had no room or could not describe the larger range.
+             * This is deep 6's shape on RV32: report the same refusal the
+             * software-guard ports print instead of a bare store fault. */
+            kprintf("\n[pid %d] stack overflow (sp 0x%08x left the stack); "
+                    "no room to grow it; killing\n",
+                    process_current_pid(), (unsigned)f->sp);
+            return process_exit(f, 139);
+        }
 
         /* A user program trapped: kill it and keep the system alive. */
         kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
