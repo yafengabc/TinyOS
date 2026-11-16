@@ -129,7 +129,7 @@ struct pio_req {
 一条命令跑完；详细记录在 `docs/HISTORY.md` §32 / §43。
 
 - **`rp2350`（ARM）17/17、`rp2350rvsmp`（RV32）17/17**（2026-11-15）；
-- **`rp2040` 17/17**（2026-11-17），日志 `build/pio-rp2040-final-1117e.log`；
+- **`rp2040` 17/17**（2026-11-17），日志 `build/pio-rp2040-deepfix-1117.log`；
   GP25 板载 LED 目视约 2 Hz；WS2812 因没有灯带，视觉项仍未验；
 - `loopback.pio`：`pio asm` → `start` → `tx 0 0 1 0 1 1` → `rx 0 0 4`，读回
   `80000000 00000000 80000000 80000000`——一位的 `in pins` 落在 ISR 的 bit31

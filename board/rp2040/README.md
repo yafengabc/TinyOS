@@ -102,7 +102,7 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| **当前镜像（`main`，4 KiB 窗口 + 软件栈守卫）** | ✅ 实机 | 2026-11-17 按 §30.3 验收：`ps` msh/sleep 的 `wink=16`，`deep 3` 增长 8 KiB + journal intact，`deep 6` 在护栏处 kill，`dd` 32 KiB 写入/读回 `pattern verified`。注意 `deep 6 0 8` 的 sleep=0 不会触发 syscall 入口的软件守卫，用 `deep 6 100 8` |
+| **当前镜像（`main`，4 KiB 窗口 + 软件栈守卫）** | ✅ 实机 | 2026-11-17 按 §30.3 验收：`ps` msh/sleep 的 `wink=16`，`deep 3` 增长 8 KiB + journal intact，`deep 6` 在护栏处 kill，`dd` 32 KiB 写入/读回 `pattern verified` 且 `reboot` 后仍可读。`deep 6 0 8` 也已验证会在增长阶段 kill（`deep.c` 已让 sleep(0) 进入 syscall） |
 | boot2 + UF2 + XIP 启动 | ✅ | ROM CRC、family、向量位、MSP 都在构建期校验 |
 | 125 MHz 时钟、SysTick、UART0 分频 | ✅ | 启动探针逐段打印，卡住能定位 |
 | UART0 控制台 + shell | ✅ 实机 | 启动探针、提示符都从 GP0/GP1 出；`scripts/rp2040/autoflash.py --probe/--accept` 就是按"能到 shell"写的 |

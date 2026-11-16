@@ -2580,7 +2580,7 @@ python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2   # 按 BOOTSEL
 | `sleep` 之类的 wink | **16 KiB**（原来 24/32），并发窗口数明显变多 |
 | `deep 3`（6 KiB 递归） | `stack grown to 8 KiB` + `journal intact` |
 | `deep 6`（12 KiB） | 先长到 8K，再打 `stack overflow: guard word ...`，最后 `no room to grow it; killing` |
-| `deep 6 100 8`（堆先占余量） | 同上，应在增长阶段就拒绝；`deep 6 0 8` 的 sleep=0 不会进 syscall，RP2040 的软件守卫不会检查（见 §43） |
+| `deep 6 0 8`（堆先占余量） | 同上，应在增长阶段就拒绝；`deep.c` 已改为 `sleep(0)` 也进入 syscall，软件守卫才能看到溢出（见 §43） |
 | `dd of=/x bs=4096 count=8` × 若干轮 + `reboot` | 文件系统行为不变 |
 
 失败签名：
@@ -2918,7 +2918,10 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 `blink`（GP3 约 2 Hz）与 `ws2812`（灯带首像素亮红）仍是**需要眼睛**的两项，
 `--visual` 才问；这一轮只判到"汇编字对 + 装入成功"。灯带也没接。
 
-### 32.3 `blink` 的"眼睛"这项：pad 在翻，板载 LED 常亮（未结案）
+### 32.3.1 `blink` 的"眼睛"这项：pad 在翻，板载 LED 常亮（RP2350 引脚假设，未结案）
+
+> 这条记录的是 ATK-DNRP2350AM 的 **GP3 引脚/接法假设**，不是 PIO 代码 bug；
+> RP2040 的 GP25 blink 已在 §43 目视通过。
 
 `blink3` 跑着的时候实测：
 
@@ -2946,7 +2949,7 @@ PIO 的代码路径是完整的，但**一次都没有在硬件上跑过**：实
 
 `pio_accept.py` 把这项记成"已装入"是对的：它判的是 pad，不是灯。
 
-### 32.3 2026-11-15 RP2040 第一轮：PIO 其实是过的，是判据旧了
+### 32.3.2 2026-11-15 RP2040 第一轮：PIO 其实是过的，是判据旧了
 
 按 §32 的顺序上板（`run_rp2040_accept.py`，原始回显
 `build/rp2040-accept-1115-213218.log`）：
@@ -3909,7 +3912,8 @@ RP2040 已接上（UART0 = COM19，USB CDC = COM17），这一轮把
 ### 镜像与 PIO
 
 构建：`go run ./cmd/tos build -target rp2040`，产物 `build/rp2040.uf2`
-（2,277,376 B），BOOTSEL 刷入。
+（2,277,376 B），BOOTSEL 刷入。以下判据都来自这个**单核 `rp2040` 镜像**，
+不是拿之前的 `rp2040smp` 结果顶替。
 
 ```sh
 python scripts/rp2350/pio_accept.py --image rp2040 \
@@ -3936,14 +3940,17 @@ gpio dev 25      # 0/1 交替
 | `sleep 3000 &` 后的 `sleep` | 同样 `wink=16` KiB（`0.3/4`） |
 | `deep 3` | `stack grown to 8 KiB` + `deep: 3 levels, journal intact` |
 | `deep 6` | `stack overflow` → `4 KiB stack and no room to double it` → `no room to grow it; killing` |
-| `deep 6 100 8` | 同样在护栏处 kill；先 `malloc stopped after 4 KiB` |
+| `deep 6 0 8` | 先 `malloc stopped after 4 KiB`，同样在护栏处 kill（`deep.c` 已让 sleep(0) 进入 syscall） |
 | `dd of=/x bs=4096 count=8` / `dd if=/x ...` | 32768 B 写 + `pattern verified`；`rm /x` 正常 |
+| 写入后 `reboot` | 重新回到 shell，`dd if=/x ...` 仍 `pattern verified`；随后 `rm /x`、`df` 正常 |
 | `mem` / `wheap` / `free` / `df` | 正常；littlefs 356352 / 1572864 B 已用 |
 | `ls /bin \| wc` | `48 192 1916` |
+| `scripts/rp2040/heartbeat.py --port COM19` | **6/6**（启动、1 s 时间、fs 读、hello、fs 写回、crash 隔离） |
 
-> 判据修正：`deep 6 0 8` 把 `sleep` 参数设成 0，递归到底时不会发 syscall，
-> 而 RP2040 的软件守卫是在 syscall 入口检查的；所以它不触发 kill。要验
-> “堆先占满、栈无处增长”必须用非零 sleep，验收表改用 `deep 6 100 8`。
+> 判据修正：`deep 6 0 8` 原来把 `sleep` 参数设成 0，而旧代码用 `ms > 0` 把
+> `sleep()` 整段跳过了；RP2040 的软件守卫在 syscall 入口检查，于是这个用例
+> 静默越界后还打印 `journal intact`。`user/deep.c` 已改成 level 1 无条件
+> `sleep(ms)`（`sleep(0)` 也是 syscall），本表结果是修复后的 `kill`。
 
 完整原始回显在 `build/rp2040-accept-1117.log`。
 

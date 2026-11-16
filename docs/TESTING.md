@@ -186,11 +186,13 @@ python scripts/rp2350/kthread_accept.py --uf2 build/rp2350smp.uf2 --out build/kt
 ### 5.3 RP2040
 
 ```sh
-python scripts/rp2040/autoflash.py --uf2 build/rp2040smp.uf2
+python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2
+python scripts/rp2040/heartbeat.py --port COM19
 python scripts/rp2350/pio_accept.py --image rp2040smp --uf2 build/rp2040smp.uf2
 ```
 
-- RP2040 的窗口数字与守卫已在 2026-11-17 人工核对（`HISTORY.md` §43）：`wink=16`、`deep 3` 增长、`deep 6` kill；注意 `deep 6 0 8` 不触发 syscall 入口的软件守卫，要用非零 sleep。
+- RP2040 的窗口数字与守卫已在 2026-11-17 人工核对（`HISTORY.md` §43）：`wink=16`、`deep 3` 增长、`deep 6` kill；`deep 6 0 8` 也已验证会触发（`deep.c` 现在 sleep(0) 也进入 syscall）。
+- `scripts/rp2040/heartbeat.py --port COM19` 已在最终单核镜像上 **6/6**（启动、时间、fs 读、用户程序、fs 写回、crash 隔离）。
 - PIO 的 LED/灯带是目视项，必须写"看了/没看"，不能只写"PIO 通过"。
 
 ### 5.4 Pico 2（暂不支持）

@@ -53,8 +53,11 @@ static int recurse(int level, int ms)
 
     if (level > 1)
         recurse(level - 1, ms);
-    if (level == 1 && ms > 0)
-        sleep(ms);          /* parked in the deepest frame: ps reads it live */
+    if (level == 1)
+        sleep(ms);          /* parked in the deepest frame: ps reads it live.
+                             * sleep(0) still enters the syscall, which is what
+                             * lets the software guard see `deep 6 0 8`; without
+                             * it the run silently writes past the stack. */
 
     /* Touch the frame again on the way out, so the high-water mark is the
        deepest frame rather than whatever the last level happened to write. */
