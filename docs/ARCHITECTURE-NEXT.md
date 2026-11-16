@@ -193,6 +193,11 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
   内存域由 chip 层唯一拥有；board.conf 只写 `chip=<型号>`，构建期据此解析并校验。
   写 `arch=` 会把同一事实放两个地方，正是 B-1 警告的那种两层真相。
 - `ApplyConfig()` 在套用 conf features/drivers 前校验目标能力；不相容直接报错。
+- 能力校验的覆盖范围要说清楚：`featurePeripheral()` 目前只映射 `wifi`/`pio`/`lcd`；
+  其余 feature 暂时静默通过，A-1 的注释里写明，或改成按 `peripherals` 反推。
+- `chip=` 的校验**不要按板名硬编码**：用"已知 chip 集合 + chip→arch 映射"，再核对
+  `Target.Arch`；测试遍历 `Targets` 里的棋盘，而不是写死板名列表。否则"加一块已有 chip
+  的新板"仍要改三处 Go（`Targets`、chip 映射、测试），正好是 C1 要消灭的返工面。
 - 扩展 `geometry_test.go` 为 board.conf ↔ `layout.c` ↔ `WindowGeometry()` 三方一致。
 - **不做**：生成头、搬 `layout.c`、TOML。
 

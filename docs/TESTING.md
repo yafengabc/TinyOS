@@ -44,7 +44,16 @@ go test ./... -count=1 -v > build/testlogs/go-test.log
 grep -- '--- SKIP' build/testlogs/go-test.log || true
 # PowerShell:
 # Select-String -Path build\testlogs\go-test.log -Pattern '--- SKIP'
+
+# 6) goc32 单文件循环（动过 user/lib.h、include/*.h 或 ABI 结构时必跑）
+cd goc32
+go run . ../user/hello.c -o ../build/goc32-hello.tos
+cd ..
 ```
+
+**为什么第 6 步在 T0 里**：goc32 不是 clang，它自己解析共享头。`tos_abi.h` 里的
+`offsetof` 断言（`__builtin_offsetof`）就曾让**所有**用户程序在 goc32 下编译失败，
+而 clang 构建、QEMU、真机全部通过——只有这一条能发现。
 
 **规则**
 

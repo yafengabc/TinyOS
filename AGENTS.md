@@ -35,6 +35,7 @@ follow it. The detailed matrix, commands and evidence template are in
 | drivers | T0 + T1 + T2 if emulated + T3 on the board with that device |
 | userland / libc / shell | T0 + T1 + T2 smoke + T3 where the console is involved |
 | LZ4TOS / ELF / ABI / protocol | T0 + T1 + T2 full + compatibility vectors + T3 |
+| shared headers / `user/lib.h` | T0 **including the goc32 sample compile**, plus the rows above that the change touches |
 | goc32 | goc32 and native32 `go test`, a sample compile, and the QEMU single-file loop |
 
 Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
