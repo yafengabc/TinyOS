@@ -102,7 +102,8 @@ RV32 上 goc32 版 `msh` 需要 20 KiB 窗口这件事，不需要去追平 clan
   今天实现就是死代码，等第二个从 bootloader 手里接管 PMP 的平台（HISTORY §34）；
 - **内核工作队列 / 优先级继承**：现在只有一个延迟用户（USB 轮询）和很短的控制台/
   fs 临界区，出现"整文件拷贝期间持锁"这类真实需求再说；
-- **MTD / PSRAM**：`plat_block_*` 够用，接第二种存储时再引入；
+- **MTD / PSRAM**：`plat_block_*` 够用，接第二种存储时再引入；PSRAM 到板后
+  先按 §9 的"数据池"形态做，不要直接做成任务窗口；
 - **`connected/disconnected`（`-ENOTCONN`）**：按原话不成立——控制台是 UART+CDC
   复合体，UART 永远"连着"；状态已经能从 `/proc/cdcfix` 看到。
 
@@ -110,3 +111,38 @@ RV32 上 goc32 版 `msh` 需要 20 KiB 窗口这件事，不需要去追平 clan
 
 - `README.md` / `README.zh-CN.md` 是入口，长手册在 `docs/GUIDE.zh-CN.md`；
 - 计划中的系列文章（设计取舍、每一次真机事故的复盘）放在 `docs/blog/`，目前还没开始写。
+
+## 9. P4 的 PSRAM 最终做成什么样（2026-11-16）
+
+PSRAM 本身还在 §7 的"先不做"里，但**形态和升级门槛先记下来**，免得板子到了以后
+顺手把它做成一等任务窗口，再回头拆。
+
+**目标形态：数据池，不是任务窗口。** `mem_domain` 加第二项时不带可执行标志，
+`win_alloc()` 只接受可执行域——"PSRAM 上的地址不能 `exec`"是代码约束，不是文档
+提醒。三个阶段，逐级解锁：
+
+- **A 数据池（先做）**：文件系统 page cache、大块 buffer、网络/图像/音频接收缓冲。
+  用户拿到的是句柄或偏移，不是可直接跳进去的地址；分配走独立的
+  `kalloc_domain()`，不经过窗口分配器。
+- **B 大块映射（中期）**：允许进程在自己的地址空间里挂一段 PSRAM（读写、不可
+  执行），这样大 buffer 不用拷进 4 KB 窗口，窗口仍然留在片上 SRAM。
+- **C 可执行窗口（最后，可能永远不做）**：任务窗口直接落在 PSRAM。要动 loader、
+  `process_user_ok`、保护后端和调度，且每条路径多一个"快/慢窗口"分支。
+
+**升级到 C 的门槛（三条全满足才讨论）**：
+
+1. 有程序真的需要 >768 KB 的**可执行**镜像（现在最大的用户程序差两个数量级）；
+2. 片上窗口区在高负载下真的耗尽——是 `ps` 能看到的碎片，不是猜的；
+3. PSRAM 上的 `priotest` worst-case 仍可接受，且外部内存 MMU 页粒度 ≤16 KB。
+
+**到板后必须先用 TRM 确认**：
+
+- 外部内存 MMU 的页大小、能否同一物理页做 cached + uncached 双映射；
+- cache line 大小、两个 HP 核的 cache 是否硬件一致（大概率不是）；
+- PSRAM 的 DMA 可达性与对齐要求（不对齐就要 bounce buffer）。
+
+两个已知的坑：ESP32-S3 的外部内存是 **64 KB 页**，若 P4 相同，PSRAM 上"最小窗口"
+就是 64 KB，4 KB 窗口语义直接失效；cache miss 的延迟比片上 SRAM 高一个量级，
+所以实时任务的栈和热路径不能放进去。计划里的 C3/C4 接缝
+（`plat_dcache_clean/invalidate`、`mem_domain.flags`）就是为这三件事留的位置，
+相关契约见 [`ARCHITECTURE-NEXT.md`](ARCHITECTURE-NEXT.md) 的 C3/C4 与 B-7。

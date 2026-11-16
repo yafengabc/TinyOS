@@ -222,7 +222,8 @@ Phase B（A 稳定后）
 ## 10. 开放问题
 
 1. **P4 启动链**：ROM 偏移/header/二级 bootloader/`esptool` 是否 `write-flash 0x0`。
-2. **P4 保护单元**：PMP/MMU、PSRAM 可保护性、粒度。
+2. **P4 保护单元**：PMP/MMU、PSRAM 可保护性、粒度（PSRAM 的目标形态与升级门槛见
+   `OPEN-ITEMS.md` §9：先做数据池，不做可执行窗口）。
 3. **P4 cache/DMA**：cache line、PSRAM 一致性、bounce 需求。
 4. **LP 核**：谁拉起、共享内存边界、mailbox 协议。
 5. **companion**：ESP-Hosted 全栈还是窄帧接口。
