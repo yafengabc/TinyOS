@@ -29,4 +29,5 @@
 
 | 日期 | 变更 | commit | 目标 / 板 | 结果 | 文件 |
 |---|---|---|---|---|---|
-| 2026-11-17 | A-0 SMP exec 并发 | `7453bd6` | QEMU rv32/rv32smp/arm；11 目标构建 | T0/T1/T2 PASS；T3 `NOT RUN` | [A-0](2026-11-17-a0-rv32smp-7453bd6.md) |
+| 2026-11-17 | A-0 SMP exec 并发 | `7453bd6` | QEMU rv32/rv32smp/arm；11 目标构建 | T0/T1/T2 PASS；T3 `NOT RUN` | [A-0 QEMU](2026-11-17-a0-rv32smp-7453bd6.md) |
+| 2026-11-17 | A-0 SMP exec 并发 | `7453bd6` | RP2040 SMP 真机 | T3 PASS（RP2350 `NOT RUN`） | [A-0 RP2040](2026-11-17-a0-rp2040smp-7453bd6.md) |
