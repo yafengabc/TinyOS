@@ -322,11 +322,11 @@ static int usb_clock_init(void)
     /* The PLL registers are ignored while PLL_USB is still coming out of
      * reset.  Wait for its RESET_DONE bit before writing CS/FBDIV; USBCTRL
      * is excluded because its done bit only rises after clk_usb runs. */
-    for (spins = 0; spins < 1000000u; spins++)
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
         if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) &
             RESETS_PLL_USB)
             break;
-    if (spins == 1000000u) {
+    if (spins == plat_pre_tick_spins(1000000u)) {
         g_init_stage = 2;
         return -1;
     }
@@ -343,7 +343,7 @@ static int usb_clock_init(void)
         m = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
         mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, m | RESETS_PLL_USB);
         mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, m & ~RESETS_PLL_USB);
-        for (spins = 0; spins < 1000000u; spins++) {
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
             if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & RESETS_PLL_USB)
                 break;
         }
@@ -353,11 +353,11 @@ static int usb_clock_init(void)
 
         /* Only PD and VCOPD come off here; DSMPD and POSTDIVPD stay set. */
         PLL_PWR_REG &= ~(PLL_PWR_PD | PLL_PWR_VCOPD);
-        for (spins = 0; spins < 1000000u; spins++) {
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
             if (PLL_CS_REG & PLL_CS_LOCK)
                 break;
         }
-        if (spins == 1000000u) {
+        if (spins == plat_pre_tick_spins(1000000u)) {
             g_init_stage = 2;
             return -1;                  /* PLL never locked: UART only      */
         }
@@ -371,13 +371,13 @@ static int usb_clock_init(void)
     CLOCKS_CLK_USB_CTRL = CLK_USB_ENABLE | CLK_USB_AUX_PLL_USB;
 
     /* Now clk_usb is running, so USBCTRL can finish coming out of reset. */
-    for (spins = 0; spins < 1000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
         if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) &
              (RESETS_USBCTRL | RESETS_PLL_USB)) ==
             (RESETS_USBCTRL | RESETS_PLL_USB))
             break;
     }
-    if (spins == 1000000u) {
+    if (spins == plat_pre_tick_spins(1000000u)) {
         g_init_stage = 1;
         return -1;                      /* no USB: UART-only console        */
     }

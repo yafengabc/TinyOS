@@ -133,7 +133,7 @@ static int pll_sys_start_125(void)
     spins = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, spins | RESET_PLL_SYS);
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, spins & ~RESET_PLL_SYS);
-    for (spins = 0; spins < 1000000u; spins++)
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
         if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & RESET_PLL_SYS)
             break;
 
@@ -141,7 +141,7 @@ static int pll_sys_start_125(void)
     mmio_write32(PLL_SYS_FBDIV, 125u);               /* 12 * 125 MHz VCO  */
     mmio_write32(PLL_SYS_PWR, 0x2du);                /* all power down    */
     mmio_write32(PLL_SYS_PWR, 0x0cu);                /* PD + VCOPD off    */
-    for (spins = 0; spins < 1000000u; spins++)
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
         if (mmio_read32(PLL_SYS_CS) & PLL_CS_LOCK)
             break;
     if (!(mmio_read32(PLL_SYS_CS) & PLL_CS_LOCK))
@@ -159,7 +159,7 @@ static void clocks_init(void)
 
     if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)) {
         mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
-        for (spins = 0; spins < 1000000u; spins++)
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
             if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
                 break;
     }
@@ -167,7 +167,7 @@ static void clocks_init(void)
         goto keep_ref;                   /* no crystal: stay on ROSC      */
 
     mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);
-    for (spins = 0; spins < 1000000u; spins++)
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
         if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
             break;
 
@@ -188,7 +188,7 @@ static void clocks_init(void)
     /* Park clk_sys on clk_ref (12 MHz) and wait for the glitchless mux. */
     mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
     mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, CLK_SYS_CTRL_SRC_CLKREF);
-    for (spins = 0; spins < 1000000u; spins++)
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
         if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
             break;
 
@@ -200,7 +200,7 @@ static void clocks_init(void)
         mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
                      (CLK_SYS_CTRL_AUXSRC_PLL_SYS << 5) |
                      CLK_SYS_CTRL_SRC_AUX);
-        for (spins = 0; spins < 1000000u; spins++)
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
             if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 2u) {
                 locked = 1;
                 break;

@@ -166,7 +166,7 @@ static void lcd_dma_init(void)
      * - learned the hard way with the SPI block, now with this one. */
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) & ~RESET_DMA);
-    for (uint32_t i = 0; i < 1000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & RESET_DMA)
             break;
     }

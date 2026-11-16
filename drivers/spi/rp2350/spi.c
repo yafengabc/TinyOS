@@ -32,7 +32,7 @@ void rp_spi_init(int bus, uint32_t div)
      * while it is held stalls the bus. */
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) & ~bit);
-    for (uint32_t i = 0; i < 1000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bit)
             break;
     }
@@ -72,7 +72,7 @@ int rp_spi_write(int bus, const void *buf, size_t n)
 
     /* Idle before the caller drops chip select: releasing CS while the
      * shift register is still running truncates the last byte. */
-    for (uint32_t spins = 0; spins < 1000000u; spins++) {
+    for (uint32_t spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
         if (!(mmio_read32(base + RP_SPI_SR) & RP_SPI_SR_BSY))
             break;
     }

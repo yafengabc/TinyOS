@@ -75,7 +75,7 @@ static void spi_init_once(int bus)
     if (v & spi_reset[bus]) {
         mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                      v & ~spi_reset[bus]);
-        for (spins = 0; spins < 1000000u; spins++)
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
             if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) &
                 spi_reset[bus])
                 break;
@@ -174,18 +174,18 @@ int plat_spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
     for (int i = 0; i < len; i++) {
         uint8_t out = src ? src[i] : 0xFFu;
 
-        for (spins = 0; spins < 1000000u; spins++)
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
             if (mmio_read32(base + SPI_SR) & SR_TNF)
                 break;
-        if (spins == 1000000u)
+        if (spins == plat_pre_tick_spins(1000000u))
             goto fail;
 
         mmio_write32(base + SPI_DR, out);
 
-        for (spins = 0; spins < 1000000u; spins++)
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
             if (mmio_read32(base + SPI_SR) & SR_RNE)
                 break;
-        if (spins == 1000000u)
+        if (spins == plat_pre_tick_spins(1000000u))
             goto fail;
 
         if (dst)
@@ -194,7 +194,7 @@ int plat_spi_xfer(int bus, int cs_gpio, int freq_hz, int mode,
             (void)mmio_read32(base + SPI_DR);
     }
 
-    for (spins = 0; spins < 1000000u; spins++)
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
         if (!(mmio_read32(base + SPI_SR) & SR_BSY))
             break;
 

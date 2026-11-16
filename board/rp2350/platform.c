@@ -178,7 +178,7 @@ static void unreset(uint32_t bits)
 {
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) & ~bits);
-    for (uint32_t i = 0; i < 1000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bits) == bits)
             return;
     }
@@ -196,14 +196,14 @@ static void clocks_init(void)
        PLL_USB has no reference and can never reach LOCK. */
     if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE))
         mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
-    for (uint32_t i = 0; i < 1000000u; i++) {
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
             break;
     }
 
     if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
         mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);
-        for (uint32_t i = 0; i < 1000000u; i++) {
+        for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
             if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
                 break;
         }
@@ -245,7 +245,7 @@ static void pll_sys_init(void)
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) | RESET_PLL_SYS);
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) & ~RESET_PLL_SYS);
-    for (i = 0; i < 1000000u; i++) {
+    for (i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & RESET_PLL_SYS)
             break;
     }
@@ -274,7 +274,7 @@ static void pll_sys_init(void)
     mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
                  CLK_SYS_CTRL_SRC_AUX |
                  (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
-    for (i = 0; i < 1000000u; i++) {
+    for (i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
             break;
     }
@@ -291,7 +291,7 @@ static uint32_t measure_clk_src_khz(uint32_t src)
 {
     uint32_t spins;
 
-    for (spins = 0; spins < 1000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
         if (!(mmio_read32(FC0_STATUS) & FC0_STATUS_RUNNING))
             break;
     }
@@ -301,11 +301,11 @@ static uint32_t measure_clk_src_khz(uint32_t src)
     mmio_write32(FC0_INTERVAL, 10u);
     mmio_write32(FC0_SRC, src);                  /* writing starts it */
 
-    for (spins = 0; spins < 1000000u; spins++) {
+    for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
         if (mmio_read32(FC0_STATUS) & FC0_STATUS_DONE)
             break;
     }
-    if (spins == 1000000u)
+    if (spins == plat_pre_tick_spins(1000000u))
         return 0;
     return mmio_read32(FC0_RESULT) >> FC0_RESULT_KHZ_S;
 }

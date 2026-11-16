@@ -5,6 +5,7 @@
  * before or while the rest of the kernel may be wedged. */
 
 #include "uart_dbg.h"
+#include "platform.h"
 
 #define UART0_BASE   0x40034000u
 #define UART_DR      (*(volatile uint32_t *)(UART0_BASE + 0x00u))
@@ -51,7 +52,7 @@ void dbg_uart_init(uint32_t clk_hz)
         uint32_t m = RESETS_RESET & ~want;
 
         RESETS_RESET = m;
-        for (uint32_t i = 0; i < 1000000u; i++)
+        for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++)
             if ((RESETS_DONE & want) == want)
                 break;
     }

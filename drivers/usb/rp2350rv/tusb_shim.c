@@ -69,7 +69,7 @@ void unreset_block_wait(uint32_t bits)
     /* Bounded like every other wait in this port: a block whose clock is not
      * running never reports RESET_DONE, and an unbounded spin there turns a
      * USB problem into an unbootable board. */
-    for (uint32_t spins = 0; spins < 1000000u; spins++) {
+    for (uint32_t spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
         if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bits) == bits)
             return;
     }

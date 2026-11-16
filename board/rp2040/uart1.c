@@ -53,7 +53,7 @@ static void uart1_init_once(void)
     v = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
     if (v & RESET_UART1) {
         mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, v & ~RESET_UART1);
-        for (spins = 0; spins < 1000000u; spins++)
+        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
             if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) &
                 RESET_UART1)
                 break;

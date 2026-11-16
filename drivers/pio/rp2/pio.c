@@ -128,7 +128,7 @@ static void pio_init_once(void)
         want |= RP_PIO_RESET_BIT(b);
     mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET,
                  mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET) & ~want);
-    for (uint32_t i = 0; i < 1000000u; i++)
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++)
         if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & want) == want)
             break;
     pio_inited = 1;
