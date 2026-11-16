@@ -57,14 +57,6 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 （先分 host 读速度、CDC TX FIFO 和 console 输出路径）。验收记录：
 `docs/acceptance/2026-11-17-a0-rp2350smp-2fdd6e8.md`。
 
-## 2e. A-8 的 `proc_set_state()` 与 27 处状态直写（2026-11-17）
-
-A-8 已完成 `TOS_KASSERT`/`KASSERT`/`KASSERT_HALT` 和 `kfree_locked()` 的收口
-halt（审计确认 `kfree` 无旁路）。**未做**：`proc_set_state()` 和 27 处直接
-`->state =`；必须先写出合法迁移表、grep 证明没有旁路，再逐个替换，不能用
-机械替换赌启动。验收摘要：
-`docs/acceptance/2026-11-17-a8-rp2350smp-d15fe16.md`。
-
 ## 3b. RP2350 RV32 的 `deep 6` 以 store access fault 结束（2026-11-17）
 
 `rp2350rvsmp` 最终 HEAD 上：`deep 3` 正常增长 8 KiB + journal intact；
