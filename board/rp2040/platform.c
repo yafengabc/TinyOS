@@ -1214,16 +1214,27 @@ void plat_shutdown(void)
 
 void plat_reboot(void)
 {
+    /* Use the watchdog, not SYSRESETREQ.  On this board SYSRESETREQ leaves
+     * the USB/clock state such that the next boot stops after the banner,
+     * and the host keeps a stale CDC node even after a later power cycle.
+     * The watchdog path with PSM_WDSEL is the one BOOTSEL handover already
+     * uses: it puts every peripheral back to its power-on state and lets
+     * the ROM load stage-2 from flash again.  Drop D+ first so the host sees
+     * a real disconnect. */
+    usb_cdc_disconnect();
+    for (volatile uint32_t i = 0; i < (g_cpu_hz / 3000u) * 200u; i++)
+        ;
+
     console_shutdown();
 
-    /* SYSRESETREQ resets everything but the debug domain, and the boot ROM
-     * then loads stage-2 from flash again - the same cold path as power-on.
-     * Not exercised yet: the Pico has no console wired up (see the notes on
-     * the missing second USB CDC port), so this is textbook ARMv6-M, not
-     * hardware-verified. */
-    mmio_write32(ARM_AIRCR, ARM_AIRCR_VECTKEY | ARM_AIRCR_SYSRESETREQ);
+    WD_SCRATCH(0) = 0u;
+    for (unsigned i = 1; i < 8u; i++)
+        WD_SCRATCH(i) = 0u;
+    PSM_WDSEL_REG = 0x0001fffcu;
+    WD_CTRL_REG = WD_CTRL_TRIGGER;
 
-    plat_panic_halt();
+    for (;;)
+        ;
 }
 
 /* SIO_CPUID reads 0 on core 0 and 1 on core 1 - the only thing that tells

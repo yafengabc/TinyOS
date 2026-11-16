@@ -3772,6 +3772,10 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
   - `piperace 2 16` 的第二对因 20 KiB 窗口只剩 16 KiB 连续块而明确报
     `exec failed`，没有崩溃；这是 RP2040 200 KiB 用户区上的窗口碎片边界，
     不是本轮锁修复回归。
+  - **`reboot` 修复**：原来 `SYSRESETREQ` 后 USB CDC 留下僵尸节点、重启
+    有时停在 banner 之后。改用 watchdog + `PSM_WDSEL` 冷复位（与 BOOTSEL
+    handover 相同），并在复位前拉低 D+ 200 ms。复测：COM19 完整打印
+    `[p]`、`[smp] 2 of 2`、`starting /bin/msh`，COM17 重新枚举后 shell 正常。
 - **Pico 2 对照**：官方 MicroPython UF2 能枚举 USB；TinyOS 的 v0.3.0 发布版和
   本轮镜像都在启动早期 HardFault、USB 不出现。官方固件正常说明 USB/线材没问题，
   Pico 2 的板级适配需另开一项，不混在本次 review 修复里。
