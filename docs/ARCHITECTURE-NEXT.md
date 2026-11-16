@@ -21,13 +21,13 @@
 
 | # | 契约 | 冻结什么 | 现在给什么实现 | 以后怎么扩展 |
 |---|---|---|---|---|
-| C1 | **board/chip/config** | `board.conf`（INI，`schema=1`）+ `board/<chip>` / `board/<vendor>/<board>` 分层 + 能力校验 | 只声明能力 + 构建期校验；不生成头、不搬 `layout.c` | 生成 `build/gen/board_config.h`；加 variant（Pico 2） |
+| C1 | **board/chip/config** | `board.conf`（INI，`schema=1`）+ `board/<chip>` / `board/<vendor>/<board>` 分层 + 能力校验 | 只声明能力 + 构建期校验；不生成头、不搬 `layout.c` | 三层事实（chip/board/image）；`Targets` 全生成、`build/gen/board_config.h`；加 variant（Pico 2） |
 | C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位 | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
 | C3 | **flash/跨核独占** | `plat_flash_exclusive_begin/end` + 协作式 park poll + `plat_cache_*`/`plat_dma_*` 钩子 | RP 现有 park 包一层，行为不变；cache/DMA 钩子 no-op | 三块 RP 共享骨架；P4 实现自己的独占；不承诺通用 pause |
 | C4 | **内存域/窗口** | `struct mem_domain` 列表（现在 1 个）+ `win_alloc` 带域参数 | 单域，行为与现在完全一致 | P4 PSRAM 需要时加第二域；不提前做多域 |
 | C5 | **驱动接缝** | `dev_ops` + LCD `lcd_lowops` | LCD 的 RP lower 接到 ops；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
 | C6 | **等待/超时** | 等待**规则**（不是定时器 API）：tick 就绪后用毫秒上限；tick 前按 `plat_cpu_hz()` 折算迭代上限；不在持锁/关中断状态长等 | 规则 + 一个 helper；`wd_start` 不做 | `wd_start` 只在网络/companion 出现请求级超时时立项（B-8） |
-| C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；send/recv 仅任务上下文；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
+| C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；`remote_ep_irq()` 是唯一 ISR 入口（只置 pending，无 I/O）；send/recv 仅任务上下文；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
 
 ### 0.2 兼容承诺（违反一条就必须单独评审，不能混进架构提交）
 
@@ -55,6 +55,9 @@
 - **覆盖率看收口点，不看断言条数**：`kfree_locked()` 现有的
   `if (!(b->size & ALLOC_BIT)) return;` 是唯一收口，改成 halt 就覆盖全部调用者；
   `proc` 先加 `proc_set_state()`，**1 个点覆盖现有 27 处直接赋值**。
+- **收口点落地前先 grep 证明没有旁路**：另一条 free 路径、直接写 `->state`、宏封装。
+  "唯一入口"是这套论证的全部效力，旁路一旦存在，"一个点覆盖全部"就不成立；
+  审计结果写进 commit（本仓库当前：`kfree` 无旁路，`->state` 有 27 处直接写）。
 - 仅仅"值得记一笔"的偏差（栈尺寸与预算不符）用计数器，不 halt。
 - `TOS_KASSERT=0` 可按 target 关闭（bring-up 用），**默认开**；`_Static_assert` 永远开。
 - halt 点位逐个过审，判据是"命中即意味着状态不可恢复"，不是"看起来可疑"。
@@ -278,7 +281,11 @@ build/gen/                  ← 构建期生成物，不入库
   lower 里。
 - `link_state(ep)` 是查询；liveness 是 `last_rx_tick` 属性，**不做 `heartbeat()` 命令**
   （那会逼出上层定时器，重复造 liveness）；`recv` 只做轮询 + 超时，不先写死回调。
-- `send/recv` **只允许任务上下文**；ISR 只能置位/唤醒。这条现在定，晚了改的是所有调用点。
+- `remote_ep_irq(ep)` 是唯一的 ISR 入口：只置 pending 位/计数，无 I/O、无锁。
+  ISR **不唤醒任务**——`process_tick()` 调用 `remote_ep_poll(ep)` 排空 pending、
+  更新 `link_state` 后再唤醒，所以不存在"盲唤醒"，也不需要 lower 在 ISR 里可读。
+  `link_state()` 因此是任务/ tick 上下文，C6 的 lower 可以在里面做 SPI 查询。
+- `send/recv` **只允许任务上下文**；ISR 只能走 `remote_ep_irq()`。这条现在定，晚了改的是所有调用点。
 - `max_frame`/`queue_depth` 由 `remote_ep_caps()` 返回，**不写成宏**：LP 的 mailbox 与
   C6 的 SPI 帧容量不同，mock 证明不了；猜错冻进去的是 bug 不是接口。
 - 先做 mock lower + QEMU 的 send/recv 测试，等 B-5b 拿到 LP 真实行为后再评容量与错误码。
@@ -337,6 +344,8 @@ Phase B（A 稳定后）
       B-1 之后交给 `board.conf` 生成；不要假装它已经消失。
 - [ ] `scripts/<board>/heartbeat.py`：按 `docs/TESTING.md` §5.0 的心跳级六项，末行
       `HEARTBEAT OK n/n`、退出码 0/1；脚本随 target 入库，纳入 CI 或 nightly。
+- [ ] 平权验收写 **24/24 或具名 N/24**；"构建期不存在"与"运行期降级"分开记，
+      两者都进 `OPEN-ITEMS.md`，禁止"按能力取子集"和把 N/24 记成 24/24。
 - [ ] README 目标表按实测状态填写；未上板不写 "on hardware"。
 - [ ] 不改内核 `switch`/`#ifdef`，不改 chip 目录。
 
