@@ -921,7 +921,9 @@ void process_console_kick(void)
                 if (p->state != ST_WAIT_INPUT)
                     continue;
                 int n = tty_take_raw((char *)p->in_buf, (int)p->in_len);
-                plat_frame_set_ret(&p->saved, (uint32_t)n);
+                regs_t *frame = p->is_ktask && p->kframe ? p->kframe
+                                                          : &p->saved;
+                plat_frame_set_ret(frame, (uint32_t)n);
                 p->state = ST_READY;
                 wake = p;
                 break;
@@ -933,7 +935,8 @@ void process_console_kick(void)
             if (p->state != ST_WAIT_INPUT)
                 continue;
             int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
-            plat_frame_set_ret(&p->saved, (uint32_t)n);
+            regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
+            plat_frame_set_ret(frame, (uint32_t)n);
             p->state = ST_READY;
             wake = p;
             break;
