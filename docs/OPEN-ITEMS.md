@@ -14,6 +14,16 @@
 RP2040 其余部分已经收口（启动、PIO 回环、外设、littlefs、1000 轮 `dd`+`rm`，见
 HISTORY §14/§32.3/§35），所以这是这一块板**唯一**还没记账的判据。
 
+## 1b. Pico 2 上的 TinyOS 启动失败（2026-11-16）
+
+同一块 RP2350 上换成 **Pico 2** 后，GitHub v0.3.0 发布版和本轮 `rp2350smp` 都在
+启动早期 HardFault（`PC=0xeffffffe`），USB CDC 不枚举；官方 MicroPython Pico 2 UF2
+则能正常枚举。ATK-DNRP2350AM 上同一轮镜像通过 USB、1000 轮 `dd/rm` 和屏幕命令，
+所以这不是 USB 线材/供电问题，也不能用这次 review 的 SMP/锁补丁解释。
+
+`board/rp2350/README.md` 目前写"同一套代码也能跑在 Pico 2 上"，需要按 Pico 2 的
+实际 flash/时钟/板级外设重新验证；在修好之前不要把这句话当验收结论。
+
 ## 2. PIO 的"眼睛两项"（RP2040 / RP2350）
 
 汇编和回环都是自动判定、已通过；需要人看的两项还没做：
