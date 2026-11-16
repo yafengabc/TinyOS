@@ -3689,3 +3689,20 @@ case "esp32c3", "rp2040", "rp2350", "rp2350rv":
 `build-config.txt` 里那三行 `check-*` 才配得上它们的名字。改完要重新确认每个程序的
 `TOS_WINDOW` 承诺仍然成立（至少 `msh`、`sh`、`py`），值得单独一次提交，别和别的改动
 混。
+
+## 37. x86 从来没有在 CI 里构建过（2026-11-16 发现）
+
+给 CI 加 QEMU 冒烟 job 时才发现：发布矩阵里没有 `x86`（它是 PC 镜像，不是可刷写的
+板子），所以**这台目标的构建在本机之外从没跑过**。在 `ubuntu-24.04` + 发行版
+clang/lld 上直接失败：
+
+```
+ld.lld: error: relocation R_386_16 cannot be used against local symbol;
+               recompile with -fPIC
+```
+
+原因是 i386 的 PIE 链接不接受端口生成的 16 位绝对重定位——本机（MSYS2 的
+clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 的用户程序换一种非 PIE
+的装载方式（内核已经支持按地址装载）、把这几处 16 位重定位改成 32 位、或者显式
+`-Wl,-z,notext`（治标）。**在那之前，`x86` 只是本机可用**，CI 的 `qemu smoke`
+先只覆盖 `rv32`/`rv32smp`/`arm`。

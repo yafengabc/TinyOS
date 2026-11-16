@@ -96,7 +96,8 @@ TinyOS。
   打 `::warning::` 并退回流发行版 clang，失败点会落在体积检查上。
 - 每个 job 结束前会打印 `wc -c build/user/bin/msh`，编译器漂移在日志里就看得见。
 - 每个目标在独立的 matrix job 里执行 `go run ./cmd/tos build -target <target>`。
-- 另有 **`qemu smoke` job**：构建 `x86`/`rv32`/`rv32smp`/`arm` 四个 QEMU 目标，
+- 另有 **`qemu smoke` job**：构建 `rv32`/`rv32smp`/`arm` 三个 QEMU 目标（`x86` 暂缺，
+  见 OPEN-ITEMS §37），
   各自跑 `tostest smoke`（`ps`、管道、`piperace`、`prot stack`、`deep 3`），再跑
   `scripts/soak.py --cycles 3`。**打 tag 时 `release` 依赖它**——内核起不来的提交
   不会发出镜像。
