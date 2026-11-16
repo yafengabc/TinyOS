@@ -35,7 +35,7 @@ RP2040 只有两个 block，早期脚本把 `blink`（PIO1 SM1）和 `ws2812`（
 都装在 origin 0，后者覆盖了前者前 4 字；`pio start` 会停在旧 PC，看起来像
 PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTORY §43。
 
-## 2b. A-0（SMP exec 并发）真机冒烟（RP2040 / RP2350 RV32 已验，RP2350 ARM 未跑）
+## 2b. A-0（SMP exec 并发）真机冒烟（RP2040 / RP2350 RV32 / RP2350 ARM 已验）
 
 `kernel/elf.c` 的窗口边界和 `kernel/syscall.c::do_exec` 的 `path` 缓冲已改为 per-call
 （HISTORY §44），QEMU `rv32smp` 上通过。
@@ -45,8 +45,17 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 - **rp2350rvsmp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Hazard3）：10 轮并发
   exec **20/20 ok**；10 轮 `dd`+`rm` bad=0；heartbeat UART/USB 6/6；
   `smpbench` 2.00x。
-- **rp2350smp**（RP2350 ARM）真机仍 **NOT RUN**（本机没有 ARM 镜像在线），
-  需要时按同样步骤补。
+- **rp2350smp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Cortex-M33）：UART0 上
+  10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
+  `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
+
+## 2c. RP2350 ARM USB CDC 长输出截断（2026-11-17）
+
+`rp2350smp`（Cortex-M33）在 COM17 上短命令正常，但 `ls /bin` 和 `crash` 的长输出
+会在约 200 B 处截断，prompt 也可能只剩 `os>`；UART0 COM14 同一镜像正常，heartbeat
+6/6。因此 A-0 的 ARM 真机结论以 UART0 为准；USB CDC 的批量 TX 仍需单独查
+（先分 host 读速度、CDC TX FIFO 和 console 输出路径）。验收记录：
+`docs/acceptance/2026-11-17-a0-rp2350smp-2fdd6e8.md`。
 
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 

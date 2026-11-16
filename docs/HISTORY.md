@@ -4003,7 +4003,9 @@ RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` �
   无 `exec failed`/`not found`/panic。
 - 真机（RP2350 Hazard3 RV32 SMP，2026-11-17，`7453bd6`）：同样 10 轮并发 exec
   **20/20 ok**，10 轮 `dd`+`rm` bad=0，heartbeat UART/USB 6/6，`smpbench` 2.00x。
-  `rp2350smp`（ARM）真机仍 **NOT RUN**。
+- 真机（RP2350 Cortex-M33 ARM SMP，2026-11-17，`7453bd6`）：UART0 上 10 轮并发
+  exec **20/20 ok**，10 轮 `dd`+`rm` bad=0，heartbeat 6/6，`smpbench` 2.06x。
+  USB CDC 长输出会截断，ARM 轮以 UART0 为准。
 ## 45. 2026-11-17 RP2040 SMP 回归：2350 review 修复在双核上的验证
 
 本轮先在 `88ef705` 上跑常规 SMP 回归；随后把当前 HEAD `7453bd6`（A-0）
