@@ -4023,6 +4023,7 @@ RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` �
 | `reboot` 持久化 | 写 32 KiB → `reboot` → 回 shell 后 `dd if=/x` 仍 `pattern verified`；随后 `smpbench` 2.04x |
 | `sleep 3000` + `^C` | 20/20 回到 `tos>`，无残留 sleep 任务 |
 | heartbeat | UART COM19 **6/6**；USB CDC COM17 **6/6** |
+| 路径解析 | `pwd` / `cd /bin` / `cd ..` / `ls ./bin` / `ls /bin/../bin` / `cat /proc/uptime` 正常 |
 
 A-0 刷入 `7453bd6` 后另跑：10 轮、每轮两个后台 `piperace 1 8 &` 同时 exec，
 **20/20 `piperace: ok`**，无 `exec failed`/panic；10 轮 `dd`+`rm` bad=0。
