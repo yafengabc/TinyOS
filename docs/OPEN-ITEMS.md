@@ -55,7 +55,29 @@ i386 的 PIE 链接不接受端口生成的 16 位绝对重定位；本机 MSYS2
 `-Wl,-z,notext`（治标）。在那之前 CI 的 `qemu smoke` 只覆盖
 `rv32`/`rv32smp`/`arm`。
 
-## 6. 明确"先不做"的设计项（有理由，别当遗忘）
+## 6. goc32 的工具链已自包含，编译器还有三个缺口（2026-11-16）
+
+`goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在
+`goc32/internal/ld`，两者都已用 QEMU 上的 RV32 / Cortex-M3 程序验证过，并且
+**生成的每一条非跳转指令都和 clang 汇编器逐字节比对过**（RV32 3,378 条 / Thumb
+2,089 条 + 1,184 条）。剩下的问题不在工具链：
+
+- **ARM 代码生成会丢后自增的旧指针**：`*s++ = '\0';` 这个形状在 `msh` 的
+  `split()` 里会生成 `strb r0, [r1]`，而 `r1` 已经被前一条 `ldrb r1, [r5]`
+  改成字符值。于是 `gmsh` 在 `echo hi` 上触发 MemManage（地址 0x20）。把同一份
+  汇编交给 clang 汇编/链接也一样崩，所以这是 native32 的寄存器分配问题，不是
+  汇编器/链接器；
+- **goc32 编出的 `msh` 需要 20 KiB 窗口**（RV32；ARM 上是 16 KiB），原因是它
+  不发 RVC 压缩指令、不做 `c.j`/`c.b` 放松，ARM 上还用内联文字池。发布镜像继续
+  用 clang，`goc32` + `tosput/rx` 仍只适合单个程序；
+- **前端缺口**：部分声明位置的 `const`、浮点 IR、多数 GCC 扩展 asm、少数
+  typedef（如 `mutex_t`）在代码生成之前就被拒绝。132 次 `user/*.c` 构建里
+  97 次能走完整条流水线，其余都卡在这里，而不是汇编/链接。
+
+修 ARM 那个后自增 bug 是让 `goc32` 能替换整条用户态构建链的最后一块；修它之前，
+`goc32` 的定位仍是"单文件开发循环 + 发布镜像用 clang"。
+
+## 7. 明确"先不做"的设计项（有理由，别当遗忘）
 
 - **PMP region 位图分配**（`ffs(~mask)`）：Hazard3 的 8..10/11..15 是硬连接线，
   今天实现就是死代码，等第二个从 bootloader 手里接管 PMP 的平台（HISTORY §34）；
@@ -65,7 +87,7 @@ i386 的 PIE 链接不接受端口生成的 16 位绝对重定位；本机 MSYS2
 - **`connected/disconnected`（`-ENOTCONN`）**：按原话不成立——控制台是 UART+CDC
   复合体，UART 永远"连着"；状态已经能从 `/proc/cdcfix` 看到。
 
-## 7. 文档与博客
+## 8. 文档与博客
 
 - `README.md` / `README.zh-CN.md` 是入口，长手册在 `docs/GUIDE.zh-CN.md`；
 - 计划中的系列文章（设计取舍、每一次真机事故的复盘）放在 `docs/blog/`，目前还没开始写。

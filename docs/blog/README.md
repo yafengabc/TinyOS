@@ -6,8 +6,9 @@ README 只留亮点和上手路径，长出来的部分写成一组文章放在�
 1. **一个 clang 构建整个系统**——没有 pico-sdk、没有 ESP-IDF、没有厂商构建系统：
    boot2 桩、ROM 函数表、pad 寄存器、TinyUSB 要的那层 pico-sdk 门面，分别为什么
    能 vendored 进 `third_party/`，以及"加一块板子是加一个目录"意味着什么。
-2. **自带编译器**——`goc32` 怎么把 C 编到 RV32IM/Thumb、为什么先复用 clang 当汇编
-   器/链接器、以及一个没有 libLLVM 的编译器在 40 KiB 的用户程序上够不够用。
+2. **自带编译器**——`goc32` 怎么把 C 编到 RV32IM/Thumb、为什么最后把 clang/ld.lld
+   也从流水线里拿掉（两遍汇编器、PIE 链接器、`R_*_RELATIVE` 与 `--gc-sections`
+   的等价物）、以及一个没有 libLLVM 的编译器在 40 KiB 的用户程序上够不够用。
 3. **十秒钟一轮**——`goc32` + `tosput-cli`/`rx` 把单个二进制从控制台送进 littlefs，
    为什么不重刷 300 KiB 镜像、为什么 UART 上停等流控是必须的（`FILE-TRANSFER.md`），
    以及"落盘字节 CRC32"这条为什么比"线路上算 CRC"更有用。
