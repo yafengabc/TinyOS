@@ -1,3 +1,7 @@
+> **已废弃（2026-11-16）**：讨论已迁移到 issue
+> [#2](https://github.com/yafengabc/TinyOS/issues/2)。本文只作历史记录，不再更新；
+> 结论以 `ARCHITECTURE-NEXT.md`、`OPEN-ITEMS.md` 和该 issue 为准。
+
 # 对反馈的复核与反驳（2026-11-16）
 
 - **立场**：四条共识照单接受，不重复。本文只列**需要再商榷的点**，全部带代码/文档证据。
