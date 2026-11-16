@@ -107,8 +107,9 @@ CRC32），所以任何有控制台的板子都能用，内核侧只需要 `ttyr
 没有硬件流控的 UART 上停等是必须的"见
 [`docs/FILE-TRANSFER.md`](docs/FILE-TRANSFER.md)。
 
-clang 生成的目标码仍比 `goc32` 小一些，所以发布镜像继续用 clang；上面这个循环是给
-"十秒钟一轮"的开发用的。
+上一次 `tos build` 的功能宏（`TOS_THREADS`、`TOS_MAILBOX`、`TOS_NET` 等）会
+自动复用；构建配置打开线程/kthread 时，运行时也会一起链接。clang 生成的目标码仍比
+`goc32` 小一些，所以发布镜像继续用 clang；上面这个循环是给"十秒钟一轮"的开发用的。
 
 ## 测试
 

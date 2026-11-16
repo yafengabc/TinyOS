@@ -122,8 +122,11 @@ console and needs no kernel support beyond `ttyraw()`. See
 [`docs/FILE-TRANSFER.md`](docs/FILE-TRANSFER.md) for the frame format and why
 stop-and-wait is mandatory on a UART with no flow control.
 
-clang still produces smaller code than `goc32`, so release images stay with
-clang; the loop above is for the ten-second cycle.
+The feature defines from the last `tos build` (`TOS_THREADS`, `TOS_MAILBOX`,
+`TOS_NET`, ...) are reused automatically, and the thread/kthread runtimes are
+linked when the build config enables them. clang still produces smaller code
+than `goc32`, so release images stay with clang; the loop above is for the
+ten-second cycle.
 
 ## Testing
 

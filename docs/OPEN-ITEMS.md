@@ -68,6 +68,14 @@ i386 的 PIE 链接不接受端口生成的 16 位绝对重定位；本机 MSYS2
 goc32 的定位是不装 clang 时的单文件开发循环（`goc32` + `tosput/rx`）。所以
 RV32 上 goc32 版 `msh` 需要 20 KiB 窗口这件事，不需要去追平 clang 的 16 KiB。
 
+功能宏已经跟着构建走：`tos build` 在 `build/build-config-<target>.txt` 里记下
+用户程序的 `-D` 列表，`goc32` 自动导入（`TOS_THREADS`、`TOS_MAILBOX`、
+`TOS_<FEATURE>`），并在启用时一起链接 `thread.c`/`thread_switch.S` 或
+`kthread.c`。用 `-config` 打开 threads/mailbox/net 构建后，`goc32` 编出的
+`gthread`（threadtest）和 `gmail`（mailtest）在 QEMU 上跑通；`-no-build-defines`
+可以关掉自动导入。
+
+
 还剩前端缺口：浮点 IR 和多数 GCC 扩展 asm，在代码生成之前就被拒绝。132 次
 `user/*.c` 构建里有 111 次能走完整条流水线；其余是浮点/soft-float、扩展 asm，
 以及没有 `main` 的库编译单元（`lib.c`、`syscall.c`、`thread.c` 等），不是

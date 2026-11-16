@@ -405,6 +405,22 @@ func (b *Builder) feature(name string) bool {
 	return b.Features[name]
 }
 
+// userDefines is the set of -D flags every user program is compiled with.
+// goc32 reads the same list back from build/build-config.txt, so a program
+// built with `goc32` sees TOS_THREADS/TOS_MAILBOX/TOS_NET exactly like one
+// built by `tos build`.
+func (b *Builder) userDefines() []string {
+	defs := append([]string{}, b.featureDefines()...)
+	if b.Threads {
+		defs = append(defs, "-DTOS_THREADS")
+	}
+	if b.Mailbox {
+		defs = append(defs, "-DTOS_MAILBOX=1")
+	}
+	sort.Strings(defs)
+	return defs
+}
+
 // boolInt writes a boolean into a -D flag, where "absent" is not the same as
 // "0" (the kernel headers test the number).
 func boolInt(v bool) int {

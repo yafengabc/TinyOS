@@ -944,12 +944,21 @@ func (b *Builder) writeBuildConfig() error {
 		"check-stack " + fmt.Sprintf("%d bytes", stack),
 		"check-guard " + fmt.Sprintf("%d bytes", guard),
 		"features    " + strings.Join(feats, ","),
+		"user-defines " + strings.Join(b.userDefines(), " "),
 		"config      " + cfg,
 		"note        runtime grain/stack/guard are in board/*/layout.c; the",
 		"            check-* lines are the build-time TOS_WINDOW validation",
 	}
 	out := filepath.Join(b.BuildDir, "build-config.txt")
-	if err := os.WriteFile(out, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+	data := []byte(strings.Join(lines, "\n") + "\n")
+	if err := os.WriteFile(out, data, 0o644); err != nil {
+		return err
+	}
+	// A per-target copy lets goc32 pick up the feature defines for the target
+	// it is compiling for even after another target was built last.  Releases
+	// ship only build-config.txt.
+	perTarget := filepath.Join(b.BuildDir, "build-config-"+b.Target.Name+".txt")
+	if err := os.WriteFile(perTarget, data, 0o644); err != nil {
 		return err
 	}
 	b.logf("      %s\n", relName(b.Root, out))
@@ -1425,13 +1434,7 @@ func (b *Builder) buildUser() ([]string, error) {
 	// the board's APP_BASE, so one binary runs on QEMU and on real hardware.
 	// -fPIC (not just -fPIE) is needed because the linker rejects GOT-free
 	// absolute references against local symbols in a shared-style link.
-	userPIEFlags := append([]string{"-fPIC"}, b.featureDefines()...)
-	if b.Threads {
-		userPIEFlags = append(userPIEFlags, "-DTOS_THREADS")
-	}
-	if b.Mailbox {
-		userPIEFlags = append(userPIEFlags, "-DTOS_MAILBOX=1")
-	}
+	userPIEFlags := append([]string{"-fPIC"}, b.userDefines()...)
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
