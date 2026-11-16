@@ -89,6 +89,25 @@ go run ./cmd/tostest smoke -target rv32
 起来的是 `msh`，可以试 `ls`、`cat readme.txt`、`ps`、`free`、`echo hi > /f`、
 `cat /f | wc`、`deep 3`、`prot stack`、`py demo.py`。
 
+## 快速循环（不重刷镜像）
+
+程序就是 littlefs 里的一个文件，所以改一行代码不需要重建 300 KiB 的文件系统镜像，
+更不需要重新刷机：
+
+```sh
+goc32 user/foo.c -target rp2350 -o build/foo.tos   # C -> LZ4TOS blob
+tosput-cli COM14 build/foo.tos /bin/foo            # base64 + CRC32，走控制台
+tos> foo
+```
+
+`tosput-cli` 和板上的 `rx` 说同一套行协议（raw 模式、停等流控、对**落盘字节**算
+CRC32），所以任何有控制台的板子都能用，内核侧只需要 `ttyraw()`。帧格式以及"为什么
+没有硬件流控的 UART 上停等是必须的"见
+[`docs/FILE-TRANSFER.md`](docs/FILE-TRANSFER.md)。
+
+clang 生成的目标码仍比 `goc32` 小一些，所以发布镜像继续用 clang；上面这个循环是给
+"十秒钟一轮"的开发用的。
+
 ## 测试
 
 ```sh

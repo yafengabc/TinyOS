@@ -102,6 +102,26 @@ go run ./cmd/tostest smoke -target rv32
 The shell that comes up is `msh`; try `ls`, `cat readme.txt`, `ps`, `free`,
 `echo hi > /f`, `cat /f | wc`, `deep 3`, `prot stack`, `py demo.py`.
 
+## The fast loop
+
+A program is just a file in littlefs, so a one-line change does not need a new
+300 KiB filesystem image — or a reflash:
+
+```sh
+goc32 user/foo.c -target rp2350 -o build/foo.tos   # C -> LZ4TOS blob
+tosput-cli COM14 build/foo.tos /bin/foo            # base64 + CRC32 over the console
+tos> foo
+```
+
+`tosput-cli` speaks the same line protocol as the on-board `rx` (raw mode,
+stop-and-wait, CRC32 over what reached flash), so it works on any board with a
+console and needs no kernel support beyond `ttyraw()`. See
+[`docs/FILE-TRANSFER.md`](docs/FILE-TRANSFER.md) for the frame format and why
+stop-and-wait is mandatory on a UART with no flow control.
+
+clang still produces smaller code than `goc32`, so release images stay with
+clang; the loop above is for the ten-second cycle.
+
 ## Testing
 
 ```sh
