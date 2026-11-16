@@ -576,6 +576,9 @@ B 档还要补 10 个 hosted libc shim 头、约 20 个软浮点辅助（`__adds
 
 ## 14. RP2040：这个目标从未在真机上跑过（2026-11-06 记录）
 
+> **2026-11-16 更新：已过时。** RP2040 单核/SMP 已上板，USB CDC、littlefs、
+> PWM/UART1/SPI/I2C/DMA 均已验证；双核 `dd`/`rm` 的最终问题见 §35。
+
 `go run ./cmd/tos build -target rp2040` 能出 `build/kernel-rp2040.elf`、
 `build/ramdisk-rp2040.bin`、`build/rp2040.uf2`（1.66 MB），但**这些产物一次都没
 烧进过 Pico**。板子那边是空的（"Pico 没接控制台"），所以从 ROM 校验 boot2 到
@@ -3620,3 +3623,43 @@ rv32smp 和 C3 真机三处 `mailtest` 都是 `reply 1..3`。
 另一个可以顺手借的点：region 编号用位图分配（NuttX 的 `ffs(~mask)`），而不是现在
 写死的“entry 5 是 trap vector、0..14 是块”。Hazard3 上现在没问题，但如果以后有
 第二个 RV 平台从 bootloader 手里接管 PMP，就需要先跳过 `L` 位占用的条目。
+
+## 35. RP2040 双核 dd/rm：console kick 的 slot 竞态（2026-11-16，已收口）
+
+现象是 `rp2040smp` 上反复 `dd of=/x` + `rm /x` 时偶尔 HardFault，PC 有时落在用户任务的
+rodata（实测 `sh` 帮助字符串），不是 XIP/flash park 故障：故障现场 `g_flash_park=0`、
+owner=-1，`[PREV]` 显示最后一次 flash 已 `DONE`。
+
+### 根因
+
+`process_console_kick()` 原来在没有 `proc_lock` 的情况下：
+
+1. 扫描 `procs[]` 找 `ST_WAIT_INPUT`；
+2. 直接往 `p->in_buf` 写控制台输入；
+3. 调用 `make_ready()`。
+
+在 SMP 上，另一个核可以在扫描和写入之间 retire/reuse 这个 slot；`in_buf` 于是变成
+旧任务的栈地址。`sh` 的 `read()` 已把返回地址压栈，下一次 console 输入写到那个旧栈槽，
+任务恢复时 `pop {pc}` 就跳到错误地址（这次正好是 sh 的 rodata 帮助串）。
+
+同时，`process_tick()` 里 `current` 是 `cpu_self()->cur` 宏，原来的
+`if (current && current->state ...)` 求值两次，另一个核清空当前槽时第二次会解引用
+NULL；现在先快照为 `cur`。
+
+### 修复
+
+- `process_console_kick()`：scan + `tty_take_raw/line` + `plat_frame_set_ret` +
+  `state=ST_READY` 全部放进同一个 `plat_spin_lock_irqsave(&proc_lock)` 临界区，
+  解锁后再 `preempt_if_higher()`；不再调用会自锁的 `make_ready()`。
+- `process_tick()`：使用 `cur` 快照。
+- 定位期间本地加过 `[PREV]` / watchdog / fault-record 诊断；上游已 revert 那两笔
+  flash breadcrumb/trace，这次修复提交只保留 `kernel/process.c` 的两个竞态修复。
+
+### 验收（真机）
+
+- `rp2040smp` 上 `dd of=/x bs=512 count=1` + `rm /x` **1000 轮**：
+  `ALL OK`，无 HardFault、无 park timeout、无复位；每轮约 0.21–0.35 s。
+- 之前同脚本在第 19 / 40 / 91 轮可复现 HardFault；修复后 1000 轮通过。
+- 弱符号/锁审计：`rp2040smp` 编译带 `TOS_ARM_M0P` + `TOS_ARM_SIO_SPIN`，
+  `plat_spin_acquire/release` 的强符号（SIO gate 31）生效，没有退化成单核 no-op；
+  `plat_flash_park_poll`、`plat_start_cpu` 也由 board 强定义覆盖 weak。

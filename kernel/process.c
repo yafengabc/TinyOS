@@ -900,6 +900,17 @@ static regs_t *done(regs_t *r, int32_t val)
  * current task, so it needs no frame and returns nothing. */
 void process_console_kick(void)
 {
+    proc_t *wake = NULL;
+
+    /* The scan, the user-buffer write and the state change have to be one
+     * critical section.  On SMP the other core can retire or reuse a slot
+     * between the scan and tty_take_line(), and the stale in_buf then points
+     * into a dead task's stack - measured on rp2040smp as `sh` resuming with
+     * its saved PC pointing at its own help string.  make_ready() cannot be
+     * called here because it takes proc_lock itself; do the same three
+     * stores inline. */
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+
     if (tty_is_raw()) {
         /* Raw reader: hand over whatever arrived, a keystroke at a time.
          * An editor wants the byte before the next tick, not after a
@@ -910,7 +921,9 @@ void process_console_kick(void)
                 if (p->state != ST_WAIT_INPUT)
                     continue;
                 int n = tty_take_raw((char *)p->in_buf, (int)p->in_len);
-                make_ready(p, n);
+                plat_frame_set_ret(&p->saved, (uint32_t)n);
+                p->state = ST_READY;
+                wake = p;
                 break;
             }
         }
@@ -920,14 +933,28 @@ void process_console_kick(void)
             if (p->state != ST_WAIT_INPUT)
                 continue;
             int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
-            make_ready(p, n);
+            plat_frame_set_ret(&p->saved, (uint32_t)n);
+            p->state = ST_READY;
+            wake = p;
             break;
         }
     }
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    if (wake)
+        preempt_if_higher(wake);
 }
 
 void process_tick(regs_t *r)
 {
+    /* `current` is a macro (cpu_self()->cur), so every mention re-reads the
+     * CPU slot.  Taking a snapshot is not cosmetic: the null check below and
+     * the dereference that follows used to be two separate loads, and a tick
+     * that lands while the slot is being cleared (exit, kill, a task killed
+     * from the other core) dereferenced NULL at current->state.  Measured on
+     * rp2040smp as a HardFault at `ldrb r0,[r0,#0x74]` in process_tick, with
+     * r0 = 0, roughly every few hundred dd/rm rounds. */
+    proc_t *cur = current;
     uint64_t now;
 
 #ifdef TOS_KTHREADS
@@ -940,12 +967,12 @@ void process_tick(regs_t *r)
     /* Only a live user task owns the kernel stack.  A ktask frame is on its
      * own stack, and during SYS_KTASK_EXIT the current slot is already free
      * (or NULL) while the frame is still on that stack. */
-    if (current && !current->is_ktask && current->state != ST_FREE)
+    if (cur && !cur->is_ktask && cur->state != ST_FREE)
         kstack_check(r);
 
-    if (current && current->state == ST_RUNNING) {
-        current->cpu_ticks++;
-        current->cpu_ms += 1000u / plat_tick_hz();
+    if (cur && cur->state == ST_RUNNING) {
+        cur->cpu_ticks++;
+        cur->cpu_ms += 1000u / plat_tick_hz();
     }
 
     /* Console input first: a line finished this tick should reach its
@@ -983,7 +1010,7 @@ void process_tick(regs_t *r)
     /* Preempt only a task the timer interrupted in user mode: a tick that
        lands inside a kernel call must let that call finish, because the
        kernel stack below it is not resumable. */
-    if (!current || !plat_fault_is_user(r)) {
+    if (!cur || !plat_fault_is_user(r)) {
         return;
     }
     if (quantum > 0)
