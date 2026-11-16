@@ -6,6 +6,7 @@
 #include "string.h"
 #include "heap.h"
 #include "lz4.h"
+#include "exec_format.h"
 #include "pipe.h"
 #include "devfs.h"
 #include "mailbox.h"
@@ -1851,12 +1852,24 @@ static int stream_load(const char *path, uint32_t hdr, uint8_t *dst,
     return rc;
 }
 
+/* C2/A-3: the only format handlers in the current tree.  A new container or
+ * image format registers here instead of adding another branch to exec(). */
+static const struct exec_format lz4tos_exec = {
+    "lz4tos", envelope_probe, stream_load,
+    "LZ4TOS envelope with 28-byte hint"
+};
+
+static const struct exec_image_format elf32_exec = {
+    "elf32", elf_probe, elf_load,
+    "ET_DYN/ET_EXEC ELF32, segments relocated into the task window"
+};
+
 static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
                                  int claim)
 {
     uint32_t raw_size = 0;
     lz4_window_hint_t hint = {0, 0, 0};
-    uint32_t hdr = envelope_probe(path, &raw_size, &hint);
+    uint32_t hdr = lz4tos_exec.probe(path, &raw_size, &hint);
     if (!hdr) {
         kprintf("exec: '%s' not found or not a loadable program\n", path);
         return NULL;
@@ -1930,7 +1943,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     }
 
     /* Decode the envelope straight into the reserved window. */
-    if (stream_load(path, hdr, (uint8_t *)base, raw_size) != 0) {
+    if (lz4tos_exec.load(path, hdr, (uint8_t *)base, raw_size) != 0) {
         kprintf("exec: '%s' is corrupt (bad LZ4 block)\n", path);
         proc_retire(p);
         return NULL;
@@ -1941,7 +1954,8 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     /* Re-read what the ELF says now that it is here, and refuse a stale or
        tampered hint before the loader can write past an undersized window. */
     uint32_t link_lo = 0, link_hi = 0, link_entry = 0, link_wx = 0;
-    if (elf_probe(data, size, &link_lo, &link_hi, &link_entry, &link_wx) != 0) {
+    if (elf32_exec.probe(data, size, &link_lo, &link_hi, &link_entry,
+                         &link_wx) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         proc_retire(p);
         return NULL;
@@ -1989,7 +2003,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     /* The loader slides the segments into place, clears .bss, applies
        relocations and checks every write against the window it was given. */
     uint32_t entry = 0;
-    if (elf_load(data, size, win, base, &entry) != 0) {
+    if (elf32_exec.load(data, size, win, base, &entry) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         proc_retire(p);
         return NULL;
