@@ -7,6 +7,7 @@
 #include "heap.h"
 #include "lz4.h"
 #include "exec_format.h"
+#include "kassert.h"
 #include "pipe.h"
 #include "devfs.h"
 #include "mailbox.h"
@@ -255,6 +256,62 @@ typedef struct proc {
     file_t fds[MAX_FDS];
 } proc_t;
 
+/* One setter for task state.  A direct `p->state = ...` silently allows
+ * states that make no sense (FREE->READY is the expensive one: the slot is
+ * handed out again while the old task still has a window).  The table is
+ * deliberately broad where the existing paths legitimately jump, but it
+ * rejects resurrection from FREE and unknown targets. */
+static int proc_state_transition_ok(int from, int to)
+{
+    if (from == to)
+        return 1;
+    if (from == ST_FREE)
+        return to == ST_NEW;
+    if (to == ST_FREE)
+        return from != ST_FREE;
+    if (to == ST_NEW)
+        return 0;
+    if (to == ST_KILLING)
+        return 1;
+    if (from == ST_KILLING)
+        return to == ST_FREE || to == ST_READY;
+#ifdef TOS_KTHREADS
+    if (from == ST_DYING)
+        return to == ST_FREE || to == ST_READY;
+    if (from == ST_THREAD_ZOMBIE)
+        return to == ST_FREE || to == ST_READY;
+#endif
+    if (from == ST_NEW)
+        return to == ST_READY || to == ST_RUNNING || to == ST_KT_WAIT;
+    if (to == ST_READY)
+        return from != ST_FREE;
+    if (to == ST_RUNNING)
+        return from == ST_READY || from == ST_STOPPED;
+    if (to == ST_STOPPED)
+        return from == ST_READY || from == ST_RUNNING;
+    if (to == ST_WAIT_CHILD || to == ST_WAIT_INPUT ||
+        to == ST_WAIT_SLEEP || to == ST_WAIT_PIPE ||
+#ifdef TOS_KTHREADS
+        to == ST_WAIT_THREAD ||
+#endif
+        to == ST_KT_WAIT)
+        return from == ST_RUNNING || from == ST_READY;
+#ifdef TOS_KTHREADS
+    if (to == ST_THREAD_ZOMBIE)
+        return from == ST_RUNNING;
+    if (to == ST_DYING)
+        return from == ST_RUNNING || from == ST_READY;
+#endif
+    return 0;
+}
+
+static void proc_set_state(proc_t *p, int st)
+{
+    KASSERT(proc_state_transition_ok(p->state, st));
+    p->state = st;
+}
+
+
 static proc_t procs[MAX_PROCS];
 static proc_t *init_proc;
 static int next_pid = 1;
@@ -464,7 +521,7 @@ static void make_ready(proc_t *p, int32_t val)
     regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
 
     plat_frame_set_ret(frame, (uint32_t)val);
-    p->state = ST_READY;
+    proc_set_state(p, ST_READY);
     plat_spin_unlock_irqrestore(&proc_lock, irq);
     preempt_if_higher(p);
 }
@@ -739,7 +796,7 @@ static regs_t *sched_switch(regs_t *r)
             if (prev && prev->state == ST_RUNNING && prev->cpu == cpu_id()) {
                 prev->saved = *r;
                 prev->kframe = r;
-                prev->state = ST_READY;
+                proc_set_state(prev, ST_READY);
                 prev->cpu = -1;
                 requeued = 1;
 
@@ -777,7 +834,7 @@ static regs_t *sched_switch(regs_t *r)
                  * sched_pick(): one owner, and the frame is the one the waker
                  * patched, not the live trap frame whose r0 still holds the
                  * syscall number. */
-                prev->state = ST_RUNNING;
+                proc_set_state(prev, ST_RUNNING);
                 prev->cpu = cpu_id();
                 current = prev;
                 ktask_running = prev->is_ktask ? 1 : 0;
@@ -798,7 +855,7 @@ static regs_t *sched_switch(regs_t *r)
             else
                 sched_switches++;
 #endif
-            next->state = ST_RUNNING;
+            proc_set_state(next, ST_RUNNING);
             next->cpu = cpu_id();
             current = next;
             ktask_running = next->is_ktask ? 1 : 0;
@@ -872,7 +929,7 @@ static regs_t *block_locked(regs_t *r, int st, uint32_t irq)
     /* Woken by something unexpected?  Better a failed syscall than the
        syscall number handed back as a result. */
     plat_frame_set_ret(&p->saved, (uint32_t)-1);
-    p->state = st;
+    proc_set_state(p, st);
     p->cpu = -1;
     plat_spin_unlock_irqrestore(&proc_lock, irq);
 
@@ -933,7 +990,7 @@ void process_console_kick(void)
                 regs_t *frame = p->is_ktask && p->kframe ? p->kframe
                                                           : &p->saved;
                 plat_frame_set_ret(frame, (uint32_t)n);
-                p->state = ST_READY;
+                proc_set_state(p, ST_READY);
                 wake = p;
                 break;
             }
@@ -946,7 +1003,7 @@ void process_console_kick(void)
             int n = tty_take_line((char *)p->in_buf, (int)p->in_len);
             regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
             plat_frame_set_ret(frame, (uint32_t)n);
-            p->state = ST_READY;
+            proc_set_state(p, ST_READY);
             wake = p;
             break;
         }
@@ -1030,7 +1087,7 @@ void process_tick(regs_t *r)
             regs_t *frame = p->is_ktask && p->kframe ? p->kframe : &p->saved;
 
             plat_frame_set_ret(frame, 0);
-            p->state = ST_READY;
+            proc_set_state(p, ST_READY);
             if (!woke || p->prio < woke->prio)
                 woke = p;
         }
@@ -1086,7 +1143,7 @@ proc_t *cpu_take_task(void)
     spin_lock(&proc_lock);
     p = sched_pick();
     if (p) {
-        p->state = ST_RUNNING;
+        proc_set_state(p, ST_RUNNING);
         p->cpu = cpu_id();
         current = p;
         quantum = QUANTUM;
@@ -1128,7 +1185,7 @@ regs_t *process_suspend(regs_t *r)
     if (current && current->stop_pending && current->state == ST_RUNNING) {
         current->stop_pending = 0;
         kprintf("\n[pid %d] stopped\n", current->pid);
-        current->state = ST_STOPPED;
+        proc_set_state(current, ST_STOPPED);
         /* Leaving the CPU: `cpu` is what the scheduler uses to decide
          * ownership now, so it has to be cleared here as well.  A stopped
          * task that still names this CPU makes sched_switch() believe it
@@ -1434,7 +1491,7 @@ static proc_t *proc_alloc(void)
              * memset() the whole struct a hundred lines later, which wiped
              * this very claim (ST_FREE is 0) and reopened the race. */
             memset(p, 0, sizeof(*p));
-            p->state = ST_NEW;
+            proc_set_state(p, ST_NEW);
             p->cpu = -1;
             break;
         }
@@ -1453,7 +1510,7 @@ static proc_t *proc_alloc(void)
  * address space, and its gap merges with its neighbours on the next scan. */
 static void proc_retire_locked(proc_t *p)
 {
-    p->state = ST_FREE;
+    proc_set_state(p, ST_FREE);
     p->pid = 0;
     p->parent = NULL;
 #ifdef TOS_KTHREADS
@@ -1660,7 +1717,7 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
 
     spin_lock(&proc_lock);
     p->pid = next_pid++;
-    p->state = ST_READY;
+    proc_set_state(p, ST_READY);
     spin_unlock(&proc_lock);
     plat_irq_restore(irq);
     return p->pid;
@@ -1689,7 +1746,7 @@ regs_t *process_ktask_syscall(regs_t *r)
         p->kframe = r;
         plat_frame_set_ret(r, 0);
         p->wake_tick = plat_ticks() + ticks;
-        p->state = ST_KT_WAIT;
+        proc_set_state(p, ST_KT_WAIT);
         p->cpu = -1;
         return sched_switch(r);
     }
@@ -1698,7 +1755,7 @@ regs_t *process_ktask_syscall(regs_t *r)
         p->saved = *r;
         p->kframe = r;
         plat_frame_set_ret(r, 0);
-        p->state = ST_READY;
+        proc_set_state(p, ST_READY);
         p->cpu = -1;
         return sched_switch(r);
 
@@ -2135,7 +2192,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        followed by a boot that dies in the shell roughly one time in three,
        because both cores end up running it on different stacks. */
     irq = plat_spin_lock_irqsave(&proc_lock);
-    p->state = claim ? ST_RUNNING : ST_READY;
+    proc_set_state(p, claim ? ST_RUNNING : ST_READY);
     if (claim) {
         p->cpu = cpu_id();
         current = p;
@@ -2324,7 +2381,7 @@ static proc_t *reap_into_parent_locked(proc_t *p, int code)
              * must not release it: the frame write and the state store stay
              * in the sender's critical section. */
             plat_frame_set_ret(&parent->saved, (uint32_t)code);
-            parent->state = ST_READY;
+            proc_set_state(parent, ST_READY);
             woke = parent;
         } else {
             lag_push(parent, p->pid, code);
@@ -2384,7 +2441,7 @@ static int task_kill_prepare_locked(proc_t *p, int code)
         return 0;
     }
 #endif
-    p->state = ST_KILLING;
+    proc_set_state(p, ST_KILLING);
     p->cpu = -1;
     return 1;
 }
@@ -2628,7 +2685,7 @@ int process_signal(int pid, int sig)
            blocked is one waiting in the run queue: park it now, there is
            no kernel stack to protect. */
         if (victim->state == ST_READY) {
-            victim->state = ST_STOPPED;
+            proc_set_state(victim, ST_STOPPED);
             victim->stop_pending = 0;
             stopped = 1;
         }
@@ -2640,7 +2697,7 @@ int process_signal(int pid, int sig)
 
         victim->stop_pending = 0;
         if (victim->state == ST_STOPPED) {
-            victim->state = ST_READY;
+            proc_set_state(victim, ST_READY);
             preempt_if_higher(victim);
             resumed = 1;
         }
@@ -2712,7 +2769,7 @@ static proc_t *wake_joiner_locked(proc_t *tid_task, int code)
         if (q->wbuf && group_user_ok(PROC_GROUP(q), q->wbuf, sizeof(int)))
             *(int *)q->wbuf = code;
         plat_frame_set_ret(&q->saved, 0);
-        q->state = ST_READY;
+        proc_set_state(q, ST_READY);
         q->cpu = -1;
         return q;
     }
@@ -2764,7 +2821,7 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     p->name[2] = 'r';
     p->name[3] = (char)('0' + (pid % 10));
     p->name[4] = '\0';
-    p->state = ST_READY;
+    proc_set_state(p, ST_READY);
     p->cpu = -1;
     leader->live_threads++;
     plat_spin_unlock_irqrestore(&proc_lock, irq);
@@ -2802,7 +2859,7 @@ static proc_t *finish_group_locked(proc_t *leader)
 static void begin_group_exit_locked(proc_t *leader, int code)
 {
     leader->exit_code = code;
-    leader->state = ST_DYING;
+    proc_set_state(leader, ST_DYING);
     leader->cpu = -1;
 
     for (int i = 0; i < MAX_PROCS; i++) {
@@ -2815,7 +2872,7 @@ static void begin_group_exit_locked(proc_t *leader, int code)
             q->state == ST_WAIT_SLEEP || q->state == ST_WAIT_PIPE ||
             q->state == ST_WAIT_THREAD) {
             plat_frame_set_ret(&q->saved, (uint32_t)-1);
-            q->state = ST_READY;
+            proc_set_state(q, ST_READY);
             q->cpu = -1;
         }
     }
@@ -2845,7 +2902,7 @@ regs_t *process_thread_exit(regs_t *r, int code)
          * or until the leader exits and retires the whole group.  A thread
          * nobody ever joins therefore holds one table slot - the same cost a
          * zombie child has in POSIX until wait(). */
-        p->state = ST_THREAD_ZOMBIE;
+        proc_set_state(p, ST_THREAD_ZOMBIE);
         p->cpu = -1;
     }
 
@@ -3461,7 +3518,7 @@ static proc_t *pipe_deliver_locked(struct pipe *p, int dir)
         }
         w->wpipe = NULL;
         plat_frame_set_ret(&w->saved, (uint32_t)n);
-        w->state = ST_READY;
+        proc_set_state(w, ST_READY);
         return w;                   /* n == 0 is EOF and is delivered too */
     }
     return NULL;
@@ -3491,7 +3548,7 @@ static regs_t *block_on_pipe_locked(regs_t *r, struct pipe *p, int dir,
     me->wdir  = dir;
     me->wbuf  = buf;
     me->wlen  = len;
-    me->state = ST_WAIT_PIPE;
+    proc_set_state(me, ST_WAIT_PIPE);
     me->cpu   = -1;
     plat_spin_unlock_irqrestore(&proc_lock, irq);
 
