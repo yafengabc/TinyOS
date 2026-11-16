@@ -66,6 +66,14 @@ deadline；这些多在启动早期，`plat_cpu_hz()` 尚未稳定，改动需�
 验证。验收摘要：
 `docs/acceptance/2026-11-17-a6-rp2350smp-b73db94.md`。
 
+## 2e. A-8 的 `proc_set_state()` 与 27 处状态直写（2026-11-17）
+
+A-8 已完成 `TOS_KASSERT`/`KASSERT`/`KASSERT_HALT` 和 `kfree_locked()` 的收口
+halt（审计确认 `kfree` 无旁路）。**未做**：`proc_set_state()` 和 27 处直接
+`->state =`；必须先写出合法迁移表、grep 证明没有旁路，再逐个替换，不能用
+机械替换赌启动。验收摘要：
+`docs/acceptance/2026-11-17-a8-rp2350smp-d15fe16.md`。
+
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 
 `HISTORY.md` §33.2.1：异常入口需要栈下面有可写的着陆区，护栏洞里只留了 2560 B，
