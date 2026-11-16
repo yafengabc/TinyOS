@@ -189,7 +189,7 @@ jobs:
               -commandwait-ms 4000
           done
       - name: Window and segment soak
-        run: python3 scripts/soak.py --cycles 3
+        run: python3 scripts/soak.py --cycles 3 --targets rv32,rv32smp,arm
 
   release:
     name: Publish release
