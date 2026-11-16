@@ -105,7 +105,9 @@ void cpu_init(void)
         cpus[i].rr = 0;
     }
     cpus[0].online = 1;
+    __sync_synchronize();
     cpu_count = 1;
+    __sync_synchronize();
 
     if (n > 1) {
         /* Everything the secondaries need exists from here on: the process
@@ -116,14 +118,18 @@ void cpu_init(void)
          * on it (rv32/qemu-virt).  A board whose cores have to be launched
          * gets the kick loop below as well; plat_start_cpu() is a no-op
          * there and returns 0. */
+        __sync_synchronize();
         cpu_release = CPU_RELEASE_MAGIC;
+        __sync_synchronize();
 
         for (int i = 1; i < n; i++)
             (void)plat_start_cpu(i);
 
         for (uint32_t spins = 0; spins < 20000000u; spins++) {
-            if (cpu_count == n)
+            if (cpu_count == n) {
+                __sync_synchronize();
                 break;
+            }
         }
         kprintf("[smp] %d of %d CPU(s) online\n", cpu_count, n);
     }
@@ -153,7 +159,13 @@ void cpu_secondary_main(void)
     me->cur = 0;
     me->quantum = 0;
     me->online = 1;
+    /* One writer, but readers on the boot CPU poll it and spin_lock()/
+     * spin_unlock() use it as the SMP/UP gate.  A full barrier before and
+     * after the increment makes the per-CPU slot writes visible before the
+     * boot CPU starts scheduling on that core. */
+    __sync_synchronize();
     cpu_count++;
+    __sync_synchronize();
 
     /* This CPU needs its own timer: mtimecmp is per hart, so the one the
      * boot CPU armed says nothing about us. */

@@ -3,6 +3,7 @@
 #include "arm_memmap.h"
 #include "board.h"
 #include "spi.h"
+#include "cpu.h"
 #include "font5x7.h"
 
 /* ST7789V2 panel on the ATK-DNRP2350AM.
@@ -134,6 +135,26 @@ static int dma_up;              /* reset released, channel configured    */
 static int dma_armed;           /* pixels still in flight                 */
 static uint8_t rowbuf[LCD_COLS * LCD_CELL_W * LCD_CELL_H * 2];  /* 3840 B */
 static uint8_t cellbuf[LCD_CELL_W * LCD_CELL_H * 2];           /* 96 B   */
+
+/* The screen layer has its own lock, but /dev/lcd0 goes through hwdev and
+ * can be opened by another task: rowbuf, cellbuf, CS and the single DMA
+ * channel are shared by both paths.  Take one driver lock for the whole
+ * data-phase -> kick -> sync sequence, with local interrupts masked so a
+ * tick cannot nest into a half-built command. */
+static spin_t lcd_lock = SPIN_INIT;
+
+static uint32_t lcd_enter(void)
+{
+    uint32_t irq = plat_irq_save();
+    spin_lock(&lcd_lock);
+    return irq;
+}
+
+static void lcd_leave(uint32_t irq)
+{
+    spin_unlock(&lcd_lock);
+    plat_irq_restore(irq);
+}
 
 static void lcd_dma_init(void)
 {
@@ -378,9 +399,12 @@ int plat_display_info(int idx, int *w, int *h, int *cw, int *ch)
 {
     if (idx != 0)
         return -1;
+    uint32_t irq = lcd_enter();
     lcd_init_hw();
-    if (!lcd_up)
+    if (!lcd_up) {
+        lcd_leave(irq);
         return -1;
+    }
     if (w)
         *w = LCD_W;
     if (h)
@@ -389,6 +413,7 @@ int plat_display_info(int idx, int *w, int *h, int *cw, int *ch)
         *cw = LCD_CELL_W;
     if (ch)
         *ch = LCD_CELL_H;
+    lcd_leave(irq);
     return 0;
 }
 
@@ -396,9 +421,12 @@ int plat_display_clear(int idx, uint16_t color)
 {
     if (idx != 0)
         return -1;
+    uint32_t irq = lcd_enter();
     lcd_init_hw();
-    if (!lcd_up)
+    if (!lcd_up) {
+        lcd_leave(irq);
         return -1;
+    }
 
     /* rowbuf is shared with the row hook: quiesce BEFORE refilling it,
      * or an in-flight row DMA pushes a mix of two rows to the panel. */
@@ -424,6 +452,7 @@ int plat_display_clear(int idx, uint16_t color)
         lcd_dma_kick(rowbuf, LCD_W * 2);
     }
     lcd_dma_sync();
+    lcd_leave(irq);
     return 0;
 }
 
@@ -436,11 +465,16 @@ int plat_display_cell(int idx, int col, int row, char c,
 
     if (idx != 0)
         return -1;
+    uint32_t irq = lcd_enter();
     lcd_init_hw();
-    if (!lcd_up)
+    if (!lcd_up) {
+        lcd_leave(irq);
         return -1;
-    if (col < 0 || col >= LCD_COLS || row < 0 || row >= LCD_ROWS)
+    }
+    if (col < 0 || col >= LCD_COLS || row < 0 || row >= LCD_ROWS) {
+        lcd_leave(irq);
         return -1;
+    }
 
     /* cellbuf is shared by every cell, and the previous kick may still
      * be reading it: quiesce before refilling.  The wait is ~20 us of
@@ -462,6 +496,7 @@ int plat_display_cell(int idx, int col, int row, char c,
     lcd_window(col * LCD_CELL_W, row * LCD_CELL_H, LCD_CELL_W, LCD_CELL_H);
     lcd_data_phase();
     lcd_dma_kick(cellbuf, (uint32_t)n);
+    lcd_leave(irq);
     return 0;
 }
 
@@ -477,12 +512,17 @@ int plat_display_row(int idx, int row, const char *chars, int ncols,
 
     if (idx != 0 || !chars)
         return -1;
+    uint32_t irq = lcd_enter();
     lcd_init_hw();
-    if (!lcd_up)
+    if (!lcd_up) {
+        lcd_leave(irq);
         return -1;
+    }
     if (row < 0 || row >= LCD_ROWS ||
-        ncols <= 0 || ncols > LCD_COLS)
+        ncols <= 0 || ncols > LCD_COLS) {
+        lcd_leave(irq);
         return -1;
+    }
 
     /* The row hook fills the shared rowbuf immediately.  A previous row's
      * DMA may still be reading that same buffer (scrolling paints 16 rows
@@ -511,6 +551,7 @@ int plat_display_row(int idx, int row, const char *chars, int ncols,
     lcd_window(0, row * LCD_CELL_H, roww, LCD_CELL_H);
     lcd_data_phase();
     lcd_dma_kick(rowbuf, (uint32_t)roww * LCD_CELL_H * 2);
+    lcd_leave(irq);
     return 0;
 }
 
@@ -521,16 +562,22 @@ int plat_display_scan(int idx, int x, int y, int w, const uint8_t *px)
 {
     if (idx != 0 || w <= 0 || w > LCD_W)
         return -1;
+    uint32_t irq = lcd_enter();
     lcd_init_hw();
-    if (!lcd_up)
+    if (!lcd_up) {
+        lcd_leave(irq);
         return -1;
-    if (x < 0 || y < 0 || x + w > LCD_W || y >= LCD_H)
+    }
+    if (x < 0 || y < 0 || x + w > LCD_W || y >= LCD_H) {
+        lcd_leave(irq);
         return -1;
+    }
 
     lcd_dma_sync();
     lcd_window(x, y, w, 1);
     lcd_data_phase();
     lcd_dma_kick(px, (uint32_t)w * 2u);
+    lcd_leave(irq);
     return 0;
 }
 
@@ -540,8 +587,10 @@ void plat_display_sync(int idx)
 {
     if (idx != 0)
         return;
+    uint32_t irq = lcd_enter();
     if (lcd_up)
         lcd_dma_sync();
+    lcd_leave(irq);
 }
 
 int plat_display_backlight(int idx, int on)

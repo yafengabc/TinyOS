@@ -3785,3 +3785,44 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
 - A-2–A-6、C-4/C-6、F/G/H 的跨端口抽象、ABI schema、配置代码生成等是结构性
   重构，需单独分支和完整回归，不在这次 bug 修复里一起改。
 
+## 39. 2026-11-16 review 第二批（LCD 锁 / fd 布局 / 屏障）
+
+按“code review 不是圣旨”的原则，只做了有实际收益且能验证的三项，其余低收益项没有硬上。
+
+### 已做
+
+- **N-06 完整 LCD 驱动锁**：`drivers/display/st7789/rp2350/lcd_st7789.c`
+  的所有公共入口（`clear/cell/row/scan/sync/info`）现在用一把驱动锁覆盖
+  `data_phase -> kick -> sync`；`rowbuf`、`cellbuf`、CS 和单 DMA 通道不再可能
+  被 `/dev/lcd0` 与屏幕镜像同时改写。锁同时保存/恢复 PRIMASK，避免同一个核上
+  tick 的控制台镜像嵌套进半成品命令。
+- **N-07 内存序**：`cpu_count` 的发布/读取与 `cpu_release` 的 magic store
+  加了 `__sync_synchronize()`；RV32 secondary 在等到 magic 后执行
+  `fence rw, rw`。仍只有一个 secondary 写入者，不做昂贵的 `__atomic_*`
+  库调用。
+- **B-5 `file_t` 联合体**：`pipe` / `chr{dev,devpriv}` / `path` 合并为一个 union，
+  并把 `writable` 移到 `type` 旁边；`file_t` 从 36 B 降到 24 B。
+  RP2350 `free` 的 kernel 占用从约 127 KiB 降到 **125 KiB**。
+- **B-6 / C-4 / C-6 没做**：direct aligned block read 要逐板确认 DMA 目标
+  对齐和 cache 语义；ELF 解析器去重和 Pico/PIO/softfloat 小清理属于低收益
+  重构，暂不混进本批。
+
+### 验证
+
+- T0：`go test -count=1 ./...`、`go vet ./...` 通过。
+- T1：十个目标 build 全部 rc=0。
+- T2：QEMU `rv32`/`rv32smp`/`arm` smoke 全 OK；`scripts/soak.py --cycles 3`
+  3/3 PASS。
+- T3（ATK-DNRP2350AM，本批镜像）：
+  - `smpbench` **2.06x**；
+  - `smp -s 2 400`：3317 / 3320 blocks，双核均衡；
+  - `smp -t 4 2 300`：6724 / 6677 blocks；
+  - `piperace 2 64`：两对全部发送/校验 `ok`（fd union 回归）；
+  - `screen info/text/clear blue/mirror on|off/backlight on|off` 全部返回，
+    面板未死锁；
+  - `dd` + `rm` **1000 轮 ALL OK**；
+  - `free`：kernel 125 KiB；`shpr3=0x20e00000` 确认 SysTick 优先级 0x20；
+  - `deep 3`、`prot stack`、`ls /bin | wc` 正常。
+- **RP2040 本批未重测**：按新约定“RP2350 默认测，RP2040 最后统一测”，
+  `rp2040smp` 本批镜像标记为 **NOT RUN**；之前 1000 轮结果只对应上一批镜像。
+

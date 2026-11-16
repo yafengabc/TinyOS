@@ -182,6 +182,7 @@ park:
     li      t1, 0x534D5031              /* "SMP1", see kernel/cpu.c */
 1:  lw      t2, 0(t0)
     bne     t2, t1, 1b
+    fence   rw, rw                      /* acquire: cpu.c wrote this last */
 
     .option push
     .option norelax

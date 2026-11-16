@@ -140,14 +140,18 @@ enum {
 
 typedef struct {
     uint8_t  type;
+    uint8_t  writable;     /* FD_FILE: created for writing (reopen as rw) */
     int      fh;           /* FD_FILE: littlefs open-file handle */
     uint32_t size;
     uint32_t pos;
-    struct pipe *pipe;     /* FD_PIPE_R / FD_PIPE_W */
-    const dev_t *dev;      /* FD_CHRDEV: which device this descriptor is on */
-    void    *devpriv;      /* FD_CHRDEV: per-open state from ops->open() */
-    char    *path;         /* FD_FILE: heap copy, so a child can reopen it */
-    uint8_t  writable;     /* FD_FILE: created for writing (reopen as rw) */
+    union {
+        struct pipe *pipe; /* FD_PIPE_R / FD_PIPE_W */
+        struct {
+            const dev_t *dev;  /* FD_CHRDEV: which device */
+            void *devpriv;     /* FD_CHRDEV: per-open state from ops->open() */
+        } chr;
+        char *path;        /* FD_FILE: heap copy, so a child can reopen it */
+    } u;
 } file_t;
 
 /* A descriptor has to be duplicable to be inheritable, and both the child
@@ -3267,21 +3271,21 @@ static int fd_clone(file_t *dst, const file_t *src)
     case FD_PIPE_W:
         *dst = *src;
         if (src->type == FD_PIPE_R)
-            pipe_ref_reader(src->pipe);
+            pipe_ref_reader(src->u.pipe);
         else
-            pipe_ref_writer(src->pipe);
+            pipe_ref_writer(src->u.pipe);
         return 0;
 
     case FD_FILE: {
         int h;
 
-        if (!src->path)
+        if (!src->u.path)
             return -1;
         /* Reopen with the same access the original had.  A read-only handle
          * would make `echo hi > f` fail in the child, which is the one case
          * inheritance exists for now. */
-        h = src->writable ? ramdisk_open_rw(src->path)
-                          : ramdisk_open(src->path);
+        h = src->writable ? ramdisk_open_rw(src->u.path)
+                          : ramdisk_open(src->u.path);
         if (h < 0)
             return -1;
         /* The new handle starts at 0; the descriptor it replaces was
@@ -3296,18 +3300,18 @@ static int fd_clone(file_t *dst, const file_t *src)
         dst->size     = ramdisk_size(h);
         dst->pos      = src->pos;
         dst->writable = src->writable;
-        dst->path     = kstrdup(src->path);
+        dst->u.path     = kstrdup(src->u.path);
         return 0;
     }
 
     case FD_CHRDEV: {
-        void *priv = src->dev->priv;
+        void *priv = src->u.chr.dev->priv;
 
-        if (src->dev->ops->open && src->dev->ops->open(src->dev, &priv) < 0)
+        if (src->u.chr.dev->ops->open && src->u.chr.dev->ops->open(src->u.chr.dev, &priv) < 0)
             return -1;
         dst->type    = FD_CHRDEV;
-        dst->dev     = src->dev;
-        dst->devpriv = priv;
+        dst->u.chr.dev     = src->u.chr.dev;
+        dst->u.chr.devpriv = priv;
         dst->pos     = src->pos;
         return 0;
     }
@@ -3346,8 +3350,8 @@ int process_fd_open(const char *path)
         }
         f = &PFD(current)[fd];
         f->type    = FD_CHRDEV;
-        f->dev     = d;
-        f->devpriv = priv;
+        f->u.chr.dev     = d;
+        f->u.chr.devpriv = priv;
         f->pos     = 0;
         f->size    = 0;
         group_unlock(current);
@@ -3370,7 +3374,7 @@ int process_fd_open(const char *path)
     f->fh   = h;
     f->size = ramdisk_size(h);
     f->pos  = 0;
-    f->path = kstrdup(path);
+    f->u.path = kstrdup(path);
     group_unlock(current);
     return fd;
 }
@@ -3404,7 +3408,7 @@ int process_fd_create(const char *path)
     f->fh   = h;
     f->size = ramdisk_size(h);
     f->pos  = 0;
-    f->path = kstrdup(path);
+    f->u.path = kstrdup(path);
     f->writable = 1;            /* a child inheriting this must be able to write */
     group_unlock(current);
     return fd;
@@ -3548,9 +3552,9 @@ regs_t *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
          * only keeps the position.  A device that has nothing more to say
          * returns 0, which is indistinguishable from a file at EOF - which
          * is exactly what `cat` needs. */
-        if (!f->dev->ops->read)
+        if (!f->u.chr.dev->ops->read)
             return done(r, (uint32_t)-1);
-        n = f->dev->ops->read(f->devpriv, f->pos, (void *)ubuf, len);
+        n = f->u.chr.dev->ops->read(f->u.chr.devpriv, f->pos, (void *)ubuf, len);
         if (n > 0)
             f->pos += (uint32_t)n;
         return done(r, (uint32_t)n);
@@ -3569,11 +3573,11 @@ regs_t *process_read(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
         proc_t *woke;
         int n;
 
-        n = pipe_read(f->pipe, (void *)ubuf, len);
+        n = pipe_read(f->u.pipe, (void *)ubuf, len);
         if (n == PIPE_EAGAIN)
-            return block_on_pipe_locked(r, f->pipe, 0, ubuf, len, irq);
+            return block_on_pipe_locked(r, f->u.pipe, 0, ubuf, len, irq);
         /* Room appeared: writers may be parked waiting for it. */
-        woke = n > 0 ? pipe_wake_locked(f->pipe, 1) : NULL;
+        woke = n > 0 ? pipe_wake_locked(f->u.pipe, 1) : NULL;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (woke)
             preempt_if_higher(woke);
@@ -3620,9 +3624,9 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
     case FD_CHRDEV: {
         int n;
 
-        if (!f->dev->ops->write)
+        if (!f->u.chr.dev->ops->write)
             return done(r, (uint32_t)-1);
-        n = f->dev->ops->write(f->devpriv, f->pos, (const void *)ubuf, len);
+        n = f->u.chr.dev->ops->write(f->u.chr.devpriv, f->pos, (const void *)ubuf, len);
         if (n > 0)
             f->pos += (uint32_t)n;
         return done(r, (uint32_t)n);
@@ -3633,12 +3637,12 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
         proc_t *woke;
         int n;
 
-        n = pipe_write(f->pipe, (const void *)ubuf, len);
+        n = pipe_write(f->u.pipe, (const void *)ubuf, len);
         if (n == PIPE_EAGAIN)
-            return block_on_pipe_locked(r, f->pipe, 1, ubuf, len, irq);
+            return block_on_pipe_locked(r, f->u.pipe, 1, ubuf, len, irq);
         /* Data for a sleeping reader - delivered before the lock goes, so
          * nobody can drain it in between and leave the reader parked. */
-        woke = n > 0 ? pipe_wake_locked(f->pipe, 0) : NULL;
+        woke = n > 0 ? pipe_wake_locked(f->u.pipe, 0) : NULL;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
         if (woke)
             preempt_if_higher(woke);
@@ -3662,17 +3666,17 @@ static void fd_close_in(proc_t *p, int fd)
     switch (f->type) {
     case FD_FILE:
         ramdisk_close(f->fh);
-        if (f->path)
-            kfree(f->path);
+        if (f->u.path)
+            kfree(f->u.path);
         break;
 
     case FD_CHRDEV:
-        if (f->dev->ops->close)
-            f->dev->ops->close(f->devpriv);
+        if (f->u.chr.dev->ops->close)
+            f->u.chr.dev->ops->close(f->u.chr.devpriv);
         break;
 
     case FD_PIPE_R: {
-        struct pipe *pp = f->pipe;
+        struct pipe *pp = f->u.pipe;
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke = NULL;
         int last;
@@ -3695,7 +3699,7 @@ static void fd_close_in(proc_t *p, int fd)
     }
 
     case FD_PIPE_W: {
-        struct pipe *pp = f->pipe;
+        struct pipe *pp = f->u.pipe;
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
         proc_t *woke = NULL;
         int last;
@@ -3747,9 +3751,9 @@ int process_ioctl(int fd, int cmd, int arg)
     if (!current)
         return -1;
     f = fd_slot(current, fd);
-    if (!f || f->type != FD_CHRDEV || !f->dev->ops->ioctl)
+    if (!f || f->type != FD_CHRDEV || !f->u.chr.dev->ops->ioctl)
         return -1;
-    return f->dev->ops->ioctl(f->devpriv, cmd, arg);
+    return f->u.chr.dev->ops->ioctl(f->u.chr.devpriv, cmd, arg);
 }
 
 int process_pipe(int *fds)
@@ -3773,7 +3777,7 @@ int process_pipe(int *fds)
         return -1;
     }
     PFD(me)[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
-    PFD(me)[r].pipe = p;
+    PFD(me)[r].u.pipe = p;
     pipe_ref_reader(p);
 
     w = fd_alloc(me);
@@ -3784,7 +3788,7 @@ int process_pipe(int *fds)
         return -1;
     }
     PFD(me)[w].type = FD_PIPE_W;
-    PFD(me)[w].pipe = p;
+    PFD(me)[w].u.pipe = p;
     pipe_ref_writer(p);
     group_unlock(me);
 
@@ -3944,7 +3948,7 @@ short process_poll(int fd, short events)
     case FD_PIPE_R: {
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        if (pipe_readable(f->pipe))
+        if (pipe_readable(f->u.pipe))
             rev |= TOS_POLLIN;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
         break;
@@ -3953,7 +3957,7 @@ short process_poll(int fd, short events)
     case FD_PIPE_W: {
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
-        if (pipe_writable(f->pipe))
+        if (pipe_writable(f->u.pipe))
             rev |= TOS_POLLOUT;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
         break;
