@@ -92,6 +92,21 @@ build/gen/                  ← 构建期生成物，不入库
 - 内核不得出现 `#ifdef BOARD_X`；
 - 同芯片不同板用 **variant**（ATK / Pico 2）表达。
 
+### 3.1 源文件、生成物、跨仓库快照
+
+"生成物不入库"只约束**派生输出**，不约束**输入**。三类东西分清楚：
+
+| 类别 | 例子 | 入库 | 规则 |
+|---|---|---|---|
+| **源文件** | `configs/*.conf`、`board/*/board.conf`、`abi/syscalls.csv` | 是 | 手写、评审、带版本号；改动要单独提交 |
+| **派生输出** | `build/gen/board_config.h`、生成的 syscall 头/表 | 否 | 由 `go run ./cmd/tos gen` 从源文件重建；CI 可复现；不进 diff |
+| **跨仓库快照** | goc32 的 `abi/syscalls.snapshot.csv` | 是 | 是 goc32 的**输入**，不是构建产物；文件头记 `tinyos_commit` 与表 hash |
+
+因此 goc32 里那份表**必须入库**：它不能读 TinyOS 工作区，否则发布就依赖另一个仓库的
+当前状态。两个仓库同时存在时，由测试比对快照与 `abi/syscalls.csv`；只有 goc32 时，
+快照自洽即可构建。这条规则对 `board.conf` 也适用：板级事实入库，生成头不入库。
+
+
 ---
 
 ## 4. Phase A：只加接缝，不改行为
@@ -229,7 +244,8 @@ Phase B（A 稳定后）
 5. **companion**：ESP-Hosted 全栈还是窄帧接口。
 6. **生成文件**：`build/gen/` 不入库；CI 可复现命令固定。
 7. **Pico 2**：`PC=0xeffffffe` 根因；variant 的 LED/LCD/flash 几何；稳定前不进回归基线。
-8. **goc32**：`syscalls.csv` 生成表在 goc32 仓库保留快照，发布不依赖 TinyOS 工作区。
+8. **goc32**：按 §3.1，goc32 提交 `abi/syscalls.snapshot.csv`（入库，带 TinyOS commit
+   与 hash），发布不依赖 TinyOS 工作区；两边都在时由测试比对。
 
 ---
 
