@@ -4000,7 +4000,10 @@ RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` �
   没有可以确定性注入的交错点，这一点如实记录。
 - 真机（RP2040 SMP，2026-11-17，`7453bd6`）：10 轮、每轮两个后台
   `piperace 1 8 &`，**20/20 `piperace: ok`**；随后 10 轮 `dd`+`rm` bad=0，
-  无 `exec failed`/`not found`/panic。`rp2350smp` 真机仍 **NOT RUN**。
+  无 `exec failed`/`not found`/panic。
+- 真机（RP2350 Hazard3 RV32 SMP，2026-11-17，`7453bd6`）：同样 10 轮并发 exec
+  **20/20 ok**，10 轮 `dd`+`rm` bad=0，heartbeat UART/USB 6/6，`smpbench` 2.00x。
+  `rp2350smp`（ARM）真机仍 **NOT RUN**。
 ## 45. 2026-11-17 RP2040 SMP 回归：2350 review 修复在双核上的验证
 
 本轮先在 `88ef705` 上跑常规 SMP 回归；随后把当前 HEAD `7453bd6`（A-0）
