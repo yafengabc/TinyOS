@@ -258,3 +258,125 @@
 3. **结构性收益**：B-5 的 `file_t` union（2.3 KiB .bss），需配回归测试；A-1/A-2 的 1–15 行低风险去重。
 4. **成体系但需完整回归**：A-3/A-4/A-5/A-6 的跨端口抽象——价值主要在于**阻止"一个端口修了另一个没修"再次发生**，这条项目历史上已经付过学费。
 5. **不要碰**：D 节全部条目。`go test`/`go vet` 进 CI（C-5）与 F-06 合并推进。
+
+---
+
+# 附录二：架构级建议（同日追加）
+
+这一节回答"还有哪些架构上的建议"。分三个维度调研：配置真相来源、ABI 与格式演进、平台抽象与驱动模型。
+
+**总判断**：这个项目的架构债不在"抽象不够"，而在**隐含约束没有被编码成可验证的东西**。配置几何、早期初始化时序、weak 接口的真实依赖、ABI 结构布局、flash 独占协议——全靠注释和人记，所以必然漂移，必然"一个端口修了另一个没修"。OPEN-ITEMS §4 的几何漂移、上次 F-06 的半落地、本次 N-02/N-03 的分叉，本质都是同一个病。
+
+## F. 配置：6 类事实散在 4 种介质
+
+### F-1｜现状：目标配置不是一个系统，是四种介质的勉强缝合
+
+| 来源 | 定义的事实 |
+|---|---|
+| `internal/build/build.go:38-115,150-255` 的 `Targets` 表 | Arch/Board/Triple、FSBacking、RamdiskSectors、HeapBytes、MaxProcs、KStack、CPUs、Drivers/Features，以及 `WindowGeometry()`（`:257-266`） |
+| `board/*/layout.c` | 几何（`PLAT_APP_GRAIN/STACK_BYTES/HEAP_GUARD/APP_MAX`）、RAM 边界、FS LBA/BLOCKS、`PLAT_MAX_CPUS` |
+| `configs/*.conf` + `tos.conf` | target 选择、内核旋钮（heap/max_procs/kstack/opt/threads/…）、features、drivers |
+| `kernel/platform.h` + `board/*/kernel*.ld` | 声明（`extern const uint32_t`，非编译期宏）与链接期几何（`ALIGN(0x4000)` 与 `ASSERT` 字面量） |
+
+`kernel/platform.h:183-186` 的注释"board owns the answer, the build only says what it is"说明了设计意图，但 `build.go:258` 自己写着 "mirrors the board's layout.c" 却返回 16K/8K/4K——**唯一没有交叉校验的那一类恰好先漂移了**。FS 的 LBA 有 `checkLayout()`（`internal/build/layout.go:12-79`，用正则读 C 源码再求值）守住，所以从没错过。
+
+### F-2｜症状推演：错在哪里、什么时候暴露
+
+- **几何漂移（已发生）**：`checkWindow()` 按 16K grain/8K 默认栈校验，内核按 4K 分配。结果是校验过松且语义错位：写了 `TOS_STACK(16K)` 的程序（`user/py/py_main.c:50`、`user/stk.c:28`）在 4K-grain 板上会被内核拒绝（`process.c:1740-1743,1922-1924`），但构建期不拦。症状是"构建成功、运行时 exec 失败"，极难联想到两处常数不一致。
+- **`-target` 与 conf target 冲突（完全静默）**：`cmd/tos/main.go:254-260` 先设 `b.Target`，`config.go:285-291` 因 Name 非空跳过 conf 的 target，**但仍套用 conf 的 features/drivers/user-exclude**（`:294-370`）。`-target rp2040 -config configs/esp32c3-wifi.conf` 会给无 WiFi 硬件的板子编出带 WiFi 栈的镜像，路径检查还通过（目录确实存在）。
+- **heap/kstack 改大**：`.bss` 增长推高 `__app_base`，链接期报 `kernel leaves no room for a task window`（`rp2040/kernel.ld:56-57`）——是链接失败，不是数值提示，更不会告诉你牺牲了几个窗口。`configs/esp32c3-16k.conf:1-10` 的"距 16 KiB 边界只剩 32 B"是人工测量的注释，不是工具报告。
+
+### F-3｜几何收敛方案评估
+
+先纠正前提：内核侧用的**不是编译期常量**。`PLAT_APP_GRAIN` 等是 `extern const uint32_t`（`platform.h:44,410,446`），在 `layout.c` 里定义为变量；真正编译期的是 ld 的 `ALIGN`/`ASSERT`。这为收敛留了余地。
+
+| 方案 | 代价 | 评价 |
+|---|---|---|
+| **A. 板级清单 + 代码生成**：一份机器可读清单生成 C 头（内核仍以同名 `const` 链接）+ Go 常量 + ld 字面量 | 新增生成步骤；迁移 6 个 `layout.c` 与 5 个 ld；生成物不入库否则成第四份真相 | **真正收敛，运行时语义零变化**，推荐 |
+| B. 几何做 ELF note，构建期从内核 ELF 反读 | 要改所有板级 ld 的 `/DISCARD/`（现在明确丢 note，`rp2040/kernel.ld:63`），处理 `--gc-sections`；构建顺序锁死为"先链接内核再校验"；Go ELF 解析已有 3–4 份实现 | 能收敛但失败更晚、代价更高 |
+| C. 校验全挪运行时 | 删 `checkWindow()` | **否决**：`TOS_WINDOW` 沦为纯注释，错误从构建期滑到板子上，且违反约束 (b) |
+| D. 接受分裂加一致性测试 | 复用 `layout.go:84-98` 的求值器比对 6 个 `layout.c` 与 `WindowGeometry()` | 改动最小、零语义变化，**不收敛但能立刻防漂移**；禁止 `t.Skip` 化 |
+
+建议顺序：**先 D 止损，再 A 收敛**；B 只在不愿引入生成步骤时替代 A；C 不做。D 即便在 A 落地后也值得保留作回归防线。
+
+## G. ABI 与格式演进：当前就有静默错位风险
+
+### G-1｜syscall 无版本协商，结构布局靠注释同步
+
+编号是单一来源（`include/tos.h:6-73`），且 `:60` 跳过 46 说明作者已意识到编号只能追加。但全树无 `ABI_VERSION`/能力查询，未知号只在 `kernel/syscall.c:893-895` 返回 -1，无错误码语义。
+
+真正的风险在结构布局：`struct stat/meminfo/clockinfo/dfinfo` 只定义在 `user/lib.h:117-209`，内核不含该头，而是**硬编码偏移写入**——`syscall.c:512-519` 写死"8 字节、type 在 offset 4"，`:541` 写死 meminfo 32 字节，`:589` 写死 clockinfo 24 字节。换内核后若结构扩字段，老程序静默读到截断/错位数据，**没有任何检测**。
+
+### G-2｜LZ4TOS 有魔数无版本号
+
+布局见 `kernel/lz4.h:6-21`：魔数 6B + flags u16（bit0=hint）+ orig/comp/span/stack/heap 各 u32 + LZ4 block。`kernel/lz4.c:26-37` 要求 `flags != LZ4_WRAP_HINT_BIT` 即拒——**精确匹配**，任何新增 bit 都让旧内核拒载。常量名 `LZ4_WRAP_HEADER_V1` 暗示版本意识，但文件里没有编码版本号。
+
+历史演进是不兼容的：旧 16B 信封（flags=0）被明确砍掉（`kernel/process.c:1753-1754`："there is no 16-byte-header fallback to keep alive"），而 `docs/HISTORY.md:842` 与 `docs/GUIDE.zh-CN.md:1077-1088` **至今写着相反的格式说明**。
+
+格式同步面至少 5 处：`kernel/lz4.h`、`kernel/lz4.c`、`tools/mklfs.c:114-117`、`internal/build/build.go:268-347`、goc32 子模块。而 `git submodule status` 显示 **goc32 未初始化（`-` 前缀）**，这一块当前无法验证。
+
+### G-3｜ELF note 契约做得很扎实，不要动
+
+标准 ELF32 + PIE，自定义 note 只有 type 1/2（STACK/HEAP）；type 3 `TOS_WINDOW` 是构建期契约、内核不读（`build.go:333-335`）。关键校验在 `process.c:1951-1956`：信封 hint 必须与 ELF note 派生值**完全相等**才加载——这是防 hint 篡改的安全底线。`win_need` 算两遍不是冗余（见附录 A 的 B-9），删掉等于去掉边界检查。
+
+### G-4｜建议（按代价）
+
+1. **低**：flags 改"高字节版本 + 低字节能力位"，`flags & 0x0001` 判 hint、`flags >> 8` 分派解析器，保留 V1 分支让存量文件继续加载。
+2. **低-中**：新增 `SYS_INFO` 返回 ABI level + feature bitmap，libc 启动时查询缓存，对有差异的 API 显式降级。注意**对存量已部署程序无效**，必须配合"既有编号永不改语义、既有结构只追加不重排"的纪律。
+3. **中**：结构布局收敛到 `include/` 一份带 `_Static_assert(sizeof(...)==N)` 的头，内核改用具名 `sizeof/offsetof`；对可演进结构让内核接收用户传入的尺寸按 `min` 填充。clockinfo 已用"写 32 位半字规避 64 位原子性"（`syscall.c:583-601`）说明团队有 ABI 意识，扩展这条纪律即可。
+4. **高**：为 LZ4TOS 定义机器可读 schema/IDL，mklfs/build.go/goc32 同源生成，建立"goc32 产物→内核 probe/note/load"端到端黄金向量并纳入 CI。先补测试再谈演进——目前 goc32 未 init，这块处于无法验证状态。
+
+## H. 平台抽象：weak 的"可选"是危险的谎言
+
+### H-1｜platform.h 513 行平铺，隐含两层但没显式分
+
+`kernel/main.c:47-77` 的顺序：`plat_early_init(49) → plat_init(50) → plat_timer_init(56) → heap_init(58) → devfs_init(66) → periph_init_devs(67) → process_init(77)`，之后才 `cpu_init(87)` 唤醒 secondary。
+
+- **早期静态层**：时钟、PLL、UART/console 下层、引脚、flash XIP 必须在 `plat_board_early()` 就绪，此时堆/devfs/进程表/回调都不存在。`g_idle_poll` 定义在 `kernel/process.c:549`，`g_usb_irq_handler` 由 `drivers/usb/rp2350/tusb_shim.c:75` 安装——都晚于早期层。这就是为什么早期驱动只能编译期参数化、不能运行时回调（附录 A-3 的约束来源）。
+- **晚期注册层**：`periph_init_devs()`（`kernel/periph.c:445-472`）与 `hwdev_init()`（`kernel/hwdev.c:602-663`）才构建 `/dev` 树，之后表只读（SMP open 无需锁，`devfs.c:62-63`）。
+
+### H-2｜"看起来可选、实际强依赖"的接口
+
+1. **`plat_flash_park_poll`**：三处 weak 空实现（`kernel/cpu.c:218`、`arch/arm/platform.c:514`、`arch/rv32/platform.c:267`），却是 SMP+flash 路径的硬依赖。它被 `plat_cpu_idle`（`arm:527`、`rv32:275`）和 spin-lock 等待循环（`cpu.c:301`、`arm:724`）调用。漏实现 → 另一核在 XIP 关闭时取指 → 总线错误、静默死板（`board/rp2350/platform.c:1281-1285` 记录了楔死）。
+2. **`plat_timer_start_cpu`/`plat_start_cpu`/`plat_cpu_secondary_init`**：weak 默认让单核板省事，但 SMP 板上 secondary 分别依赖它们获得 tick（`cpu.c:158-161`）、脱离 ROM 等待（`cpu.c:121-127`）、配置本核异常优先级（`arm:413-416`）。漏实现表现为 "1 of 2 online" 或首访存 HardFault，不是链接错误。
+3. **`plat_spin_acquire/release/try_acquire`**：weak 空/返回 1（`cpu.c:228,233,258`），SMP 端口不覆盖则临界区静默失效。
+4. **`plat_now_ns`**：注释说"只有 tick 的板回退到 ticks×period"（`platform.h:215-217`），但全树无 weak 默认，7 个板全都强实现——文档说可选，契约实际是强制。
+
+### H-3｜SMP flash 独占协议完全下沉，内核看不见边界
+
+三块板各实现一套 park/unpark（`rp2040:887-973`、`rp2350:1220-1403`、`rp2350rv:836-996`），共享变量定义在板级、不在 `platform.h`。内核只看到一个无参轮询钩子 `plat_flash_park_poll`（`cpu.h:140`），`cpu.c:292-300` 的注释证明内核知道"spin 等待的核必须能响应 park"，但**不知道"flash 操作需要独占另一核"**——没有 `plat_flash_begin/end` 这类成对接口。真正的协议（mask 中断→发布请求→等逐代 ack→ROM 调用→XIP 恢复→unpark→restore）全在板级块驱动里。
+
+这正是 N-02、N-03 都出在这条路径的结构性原因，都是"一个端口修了另一个没修"。
+
+### H-4｜跨端口重复的根因是抽象层缺位，不是寄存器基址不同
+
+逐字 diff：`board/rp2350/board_devs.c` vs `rp2350rv` 仅 include 行与板名字符串不同；GPIO 217 行仅 include 不同；SPI 87 行同理。两份 memmap 头里 XOSC/CLOCKS/RESETS/UART0/PLL_SYS/SIO/IO_BANK0/PADS **完全一致**，差异只在 ARM 的 SCS/SysTick/SPI/ADC/DMA 与 RV32 的 `SIO_MTIME*`/`TICKS_BASE`/ROM lookup。
+
+按当前架构支持第三款 RP 芯片需复制约 2000–2500 行，其中可同构收敛的约 1050 行。收敛方案代价：
+
+| 方案 | 评价 |
+|---|---|
+| **宏注入寄存器基址 + 单份实现文件** | 收益最高，贴合"新板是一个目录"；需先拆 memmap 公共/架构层；跨架构原语需第二套注入 |
+| **`static inline` 共享头参数化** | 与上一项组合可覆盖 boot2 copyout/XIP 恢复 15 行逐字段；早期驱动只能编译期、与 H-1 约束吻合 |
+| weak 函数 + 单一实现 | **不适合**基址参数化（weak 无法注入地址）；间接调用不利于 early/RAMFUNC 内联；只能作补充 |
+| 代码生成驱动 | 理论最高，**不推荐**——引入生成器、破坏"板子即目录、源码可读"哲学 |
+
+**新增外设的改动面**：复用现有 class 只需 2 处（`board_devs[]` 加一行 + `Targets[..].Drivers` 加目录）；若要独占 `/dev` 节点与自定义 ioctl，则要改 `kernel/hwdev.c:614-650` 的 switch、新增 `dev_ops` 与 class-level weak hook——**必须改 kernel，破坏"新板是一个目录"的局部性**。
+
+### H-5｜建议（按收益/代价）
+
+1. **小步收敛（低风险、收益最高）**：抽 flash park 四件套为共享骨架 `board/rp_park_protocol.h`，宏注入 `IRQ_SAVE/IRQ_RESTORE/BARRIER/WDT_FEED/NOTIFY/PARK_DIAG`，三板只留调用序列与架构原语。不动 `platform.h`、不动内核、不动 12 目标构建，直接锁死已两次分叉的路径。
+2. **小步收敛（低风险）**：拆 memmap 为公共层 + 架构层，让 board_devs/gpio/spi 共用单份驱动；新端口从"复制 500 行"降为"复用 + 一个架构 memmap 层"。
+3. **架构重构（高风险）**：`platform.h` 显式分早期静态层/晚期注册层，用链接期未定义符号检查禁止早期层引用 `heap_*`/`devfs_*`/`process_*`/`g_*_poll`；同时把 H-2 四类接口的"真实强依赖"标注出来（或去掉不该有的 weak 默认）。
+4. **架构重构（高风险，最后做）**：引入 `plat_cross_core_exclusive_begin/end()`，把 park/unpark 的最外层中断保存/恢复收进 arch 一处，idle/spin/tick 三处轮询收敛为内核可见的单一注册点。触及三条热路径，**必须与建议 1 配合先固化协议**，否则等于同时重构又复制。
+
+## I. 架构建议优先级
+
+| 级别 | 条目 |
+|---|---|
+| **零成本止损** | target 冲突显式报错、几何一致性测试（禁止 `t.Skip` 化）、H-2 四类 weak 接口标注真实依赖 |
+| **低风险收敛** | park 协议骨架、memmap 公共层、LZ4TOS flags 版本化、`wdt_feed` 统一 `RAMFUNC` |
+| **中风险** | 结构布局单一真相 + size 传递、`SYS_INFO` ABI 查询 |
+| **高风险重构** | `platform.h` 显式两层、跨核独占抽象、板级清单 + 代码生成 |
+
+**明确不做**：代码生成驱动的板级接入（破坏源码可读哲学）、把 ELF note 校验挪到运行时、合并 msh/sh 与 libc 两份实现（见附录 D）。整个架构收敛的方向是**让隐含约束变成可检查的契约**，而不是增加抽象层数。
