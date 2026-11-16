@@ -3998,14 +3998,15 @@ RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` �
   **20/20 `piperace: ok`**，无 `exec failed`/`not found`/panic。同路径的压力覆盖的是
   loader 边界（BUG-A）；不同路径的 BUG-B 由"per-call 栈缓冲"按构造消除，
   没有可以确定性注入的交错点，这一点如实记录。
-- 真机：**NOT RUN**（本机只有 C3 的 COM4），待 `rp2350smp`/`rp2040smp` 冒烟，
-  见 `OPEN-ITEMS.md` §2b。
+- 真机（RP2040 SMP，2026-11-17，`7453bd6`）：10 轮、每轮两个后台
+  `piperace 1 8 &`，**20/20 `piperace: ok`**；随后 10 轮 `dd`+`rm` bad=0，
+  无 `exec failed`/`not found`/panic。`rp2350smp` 真机仍 **NOT RUN**。
 ## 45. 2026-11-17 RP2040 SMP 回归：2350 review 修复在双核上的验证
 
-本轮实测基于 `88ef705`，不含紧接在后的 A-0 (`7453bd6`)；A-0 的 RP2040
-真机仍是 §44 记的 **NOT RUN**，要另刷当前 HEAD 再跑并发 exec。
+本轮先在 `88ef705` 上跑常规 SMP 回归；随后把当前 HEAD `7453bd6`（A-0）
+重新构建并刷入同一块 RP2040，补跑 §44 的并发 exec 压测。
 
-在 `rp2040smp` 最终镜像（`build/rp2040smp.uf2`，HEAD `88ef705`）上补跑
+在 `rp2040smp` 最终镜像（`build/rp2040smp.uf2`）上补跑
 2350 review 涉及的锁、唤醒、信号、console、文件系统和 PIO 路径。
 
 | 项目 | 实测 |
@@ -4023,8 +4024,11 @@ RP2350 仍用 PIO2，原有 17/17 证据不受影响；`drivers/pio/rp2/pio.c` �
 | `sleep 3000` + `^C` | 20/20 回到 `tos>`，无残留 sleep 任务 |
 | heartbeat | UART COM19 **6/6**；USB CDC COM17 **6/6** |
 
+A-0 刷入 `7453bd6` 后另跑：10 轮、每轮两个后台 `piperace 1 8 &` 同时 exec，
+**20/20 `piperace: ok`**，无 `exec failed`/panic；10 轮 `dd`+`rm` bad=0。
+
 `prot` 四项在 RP2040 上仍然不存在：这块板没有 MPU/PMP，`board/rp2040` 默认
 不打包 `/bin/prot`，所以不是“失败”，而是构建期不存在。日志：
 `build/rp2040smp-review-1117.log`、`build/rp2040smp-dd100-1117.log`、
 `build/heartbeat-rp2040smp-uart.log`、`build/heartbeat-rp2040smp-usb.log`、
-`build/pio-rp2040smp-review.log`。
+`build/pio-rp2040smp-review.log`、`build/rp2040smp-a0-stress.log`。

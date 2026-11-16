@@ -35,20 +35,14 @@ RP2040 只有两个 block，早期脚本把 `blink`（PIO1 SM1）和 `ws2812`（
 都装在 origin 0，后者覆盖了前者前 4 字；`pio start` 会停在旧 PC，看起来像
 PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTORY §43。
 
-## 2b. A-0（SMP exec 并发）真机冒烟未跑（2026-11-17）
+## 2b. A-0（SMP exec 并发）真机冒烟（RP2040 已验，RP2350 未跑）
 
 `kernel/elf.c` 的窗口边界和 `kernel/syscall.c::do_exec` 的 `path` 缓冲已改为 per-call
-（HISTORY §44），QEMU `rv32smp` 上通过。真机没跑：本机只有 C3 的 COM4。
+（HISTORY §44），QEMU `rv32smp` 上通过。
 
-关掉这条需要：在 `rp2350smp` 或 `rp2040smp` 上跑
-
-```
-piperace 1 8 &        # 两次
-ps
-dd of=/x bs=512 count=1 + rm /x   # 10 轮
-```
-
-确认无 `exec failed`/`not found`/panic，记录板子、镜像、端口。
+- **rp2040smp**（2026-11-17，`7453bd6`）：10 轮双后台 `piperace 1 8 &`，
+  **20/20 `piperace: ok`**；10 轮 `dd`+`rm` bad=0；无 `exec failed`/panic。
+- `rp2350smp` 真机仍 **NOT RUN**（本机没有这块板在线），需要时按同样步骤补。
 
 ## 3. Cortex-M33 的 `deep 6`（设计取舍）
 
