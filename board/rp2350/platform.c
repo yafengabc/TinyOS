@@ -871,32 +871,35 @@ int plat_console_tx_room(void)
     return (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF) ? 0 : 16;
 }
 
+/* TinyUSB's state machine needs real thread context.  tty_poll() is also
+ * called with interrupts masked, from the tick and from the block device
+ * while a task waits for flash; letting it call usb_cdc_poll() was the RV32
+ * port's boot hang (see the matching comment in board/rp2350rv).  Run the
+ * state machine from the scheduler's idle loop instead and let the console
+ * read path touch only the completed-byte queue. */
+extern void (*g_idle_poll)(void);
+
+static void usb_idle_poll(void)
+{
+    if (plat_cpu_id() == 0 && g_usb_ready)
+        usb_cdc_poll();
+}
+
 int plat_console_getchar(void)
 {
     int c;
 
     g_console_claimed = 1;
 
-    /* USB belongs to core 0.  Its interrupt is enabled there, TinyUSB's
-     * state machine is not reentrant, and tty_poll() is also called from the
-     * block device while a task waits for flash - which can be a task on
-     * either core.  Two cores driving one controller is how the board hung
-     * solid after a couple of background jobs: CDC stopped answering and
-     * UART0 went silent, with the kernel still ticking.
-     *
-     * Core 1 therefore reads the UART only.  USB bytes still reach a reader
-     * on either core, because core 0's tick drains the device into the tty
-     * line buffer regardless of which core owns the task. */
-    if (plat_cpu_id() == 0) {
-        /* Thread context, called on every console poll: the natural place to
-         * run the USB state machine when the shell is blocked reading. */
-        usb_cdc_poll();
-
-        if (g_usb_ready) {
-            c = usb_cdc_getchar();
-            if (c >= 0)
-                return c;
-        }
+    /* USB belongs to core 0.  Core 1 therefore reads the UART only; USB
+     * bytes still reach a reader on either core, because core 0's idle
+     * poll drains the device into the tty line buffer.  The state machine
+     * itself is not run here: this function is also reached from
+     * tty_poll() with interrupts masked. */
+    if (plat_cpu_id() == 0 && g_usb_ready) {
+        c = usb_cdc_getchar();
+        if (c >= 0)
+            return c;
     }
     if (mmio_read32(RP_UART_FR) & RP_UART_FR_RXFE)
         return -1;
@@ -1606,6 +1609,11 @@ void plat_board_init(void)
     g_rom_program   = (rp_rom_program_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_PROGRAM);
     g_rom_ready = (g_rom_connect && g_rom_exit_xip && g_rom_enter_xip &&
                    g_rom_flush && g_rom_erase && g_rom_program) ? 1 : 0;
+
+    /* The ARM USB controller receives IRQ 14, but TinyUSB's task loop still
+     * belongs in thread context.  Install it here, before the scheduler
+     * starts, so a blocked shell lets the idle loop run it. */
+    g_idle_poll = usb_idle_poll;
 }
 
 /* ---- power -------------------------------------------------------------- */

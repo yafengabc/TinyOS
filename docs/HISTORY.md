@@ -3831,3 +3831,28 @@ clang/lld）容忍它们，发行版的不容忍。要修有三条路：给 x86 
 - **RP2040 本批未重测**：按新约定“RP2350 默认测，RP2040 最后统一测”，
   `rp2040smp` 本批镜像标记为 **NOT RUN**；之前 1000 轮结果只对应上一批镜像。
 
+## 40. 2026-11-16 A-5：ARM USB 状态机移出 console getchar
+
+A-5 是 review 里少数“不是去重、而是实际上下文错误”的项：RP2350 ARM 的
+`plat_console_getchar()` 会在 `tty_poll()` 的 tick/块设备路径里被调用，而那里
+中断是关的；同一段代码却直接跑 `usb_cdc_poll()`。RV32 端口已经因为同类问题
+把 TinyUSB 状态机移到 `g_idle_poll`，ARM 端口一直没有对齐。
+
+本批只做这一项，不碰三块板 console 的重复代码：
+
+- `board/rp2350/platform.c` 增加 `usb_idle_poll()`，在 `plat_board_init()` 装入
+  `g_idle_poll`；
+- `plat_console_getchar()` 只取已完成的 `usb_cdc_getchar()` 字节，不再运行
+  TinyUSB 状态机；
+- 中断上下文的 `tty_poll()` 仍只搬 UART/tty 队列，不再进入 TinyUSB task。
+
+验收（ATK-DNRP2350AM，本批镜像）：
+
+- 启动 `[B]..[E]` 完整，`[E] usb hw=1 cfg=1`；
+- COM17 USB CDC shell 可交互，`smpbench` **2.05x**；
+- `piperace 2 64`、`screen info`、`dd`/`rm`、`free` 正常；
+- T0/T1/T2 仍全通过；RP2040 按约定 **NOT RUN**。
+
+其余 review 项继续按价值取舍：C-4/C-6、A-2/A-3/A-4/A-6、F/G/H 等没有实际
+故障证据的结构性改造，暂不为了“清空 review”而实施。
+
