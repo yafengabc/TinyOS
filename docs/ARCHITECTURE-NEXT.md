@@ -11,13 +11,13 @@
 
 稳定不等于"代码不再变"，而是：
 
-1. **契约稳定**：板级能力、ABI/格式、跨核独占、内存域、驱动接缝、等待语义各有唯一入口和版本号；
+1. **契约稳定**：板级能力、ABI/格式、跨核独占、内存域、驱动接缝、等待语义、远端端点各有唯一入口和版本号；
 2. **实现可替换**：接缝后面可以换实现（RP → P4、本地 → companion），接缝本身不变；
 3. **既有目标语义不变**：12 个目标的行为、shell、窗口、SMP 性能在 Phase A 前后一致。
 
 "一次性"指的是**一次把接缝和兼容承诺定对**，不是一次把所有实现写完。
 
-### 0.1 必须冻结的 6 个契约
+### 0.1 必须冻结的 7 个契约
 
 | # | 契约 | 冻结什么 | 现在给什么实现 | 以后怎么扩展 |
 |---|---|---|---|---|
@@ -26,7 +26,8 @@
 | C3 | **flash/跨核独占** | `plat_flash_exclusive_begin/end` + 协作式 park poll + `plat_cache_*`/`plat_dma_*` 钩子 | RP 现有 park 包一层，行为不变；cache/DMA 钩子 no-op | 三块 RP 共享骨架；P4 实现自己的独占；不承诺通用 pause |
 | C4 | **内存域/窗口** | `struct mem_domain` 列表（现在 1 个）+ `win_alloc` 带域参数 | 单域，行为与现在完全一致 | P4 PSRAM 需要时加第二域；不提前做多域 |
 | C5 | **驱动接缝** | `dev_ops` + LCD `lcd_lowops` | LCD 的 RP lower 接到 ops；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
-| C6 | **等待/超时** | `wd_start(cb, ticks)` 的小接口 | 先接 1–2 个现有等待点 | 网络/USB/companion 复用；所有阻塞 I/O 有上限 |
+| C6 | **等待/超时** | 等待**规则**（不是定时器 API）：tick 就绪后用毫秒上限；tick 前按 `plat_cpu_hz()` 折算迭代上限；不在持锁/关中断状态长等 | 规则 + 一个 helper；`wd_start` 不做 | `wd_start` 只在网络/companion 出现请求级超时时立项（B-8） |
+| C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；send/recv 仅任务上下文；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
 
 ### 0.2 兼容承诺（违反一条就必须单独评审，不能混进架构提交）
 
@@ -36,6 +37,27 @@
 - 12 个既有目标的启动/shell/窗口/SMP 行为不变；
 - `board.conf schema`、`tos_abi`、LZ4TOS flags、`exec_format` 都带版本号；扩展是加字段/加 handler，不是重写；
 - 不把 Pico 2 的未解决问题带进回归基线（`OPEN-ITEMS.md` §1b）。
+
+### 0.3 断言边界（KASSERT）
+
+判据不是"能否由用户触发"，而是**这个值是不是本内核自己算出来的**：
+
+- **内部不变量**（窗口 freelist 元数据、`kfree` 双释放、`proc` 状态非法迁移、
+  `build_initial_stack()` 自己算出的尺寸）→ 可以 halt。
+- **外部数据**（非法 ELF、畸形 note、`user_range_ok()` 失败）→ 永远返回错误；
+  一个坏程序不能让内核停机。
+- **配置策略**（MPU/PMP region 不够）→ 按策略降级或 fail-closed，不是断言。
+
+实现纪律：
+
+- `KASSERT(cond)` 走 `panic()`；`KASSERT_HALT(cond)` 走 `plat_panic_halt()`
+  （不打印、ISR 可用）。不做运行时"我在不在 ISR"的猜测，调用点自己选。
+- **覆盖率看收口点，不看断言条数**：`kfree_locked()` 现有的
+  `if (!(b->size & ALLOC_BIT)) return;` 是唯一收口，改成 halt 就覆盖全部调用者；
+  `proc` 先加 `proc_set_state()`，**1 个点覆盖现有 27 处直接赋值**。
+- 仅仅"值得记一笔"的偏差（栈尺寸与预算不符）用计数器，不 halt。
+- `TOS_KASSERT=0` 可按 target 关闭（bring-up 用），**默认开**；`_Static_assert` 永远开。
+- halt 点位逐个过审，判据是"命中即意味着状态不可恢复"，不是"看起来可疑"。
 
 ---
 
@@ -114,6 +136,17 @@ build/gen/                  ← 构建期生成物，不入库
 
 **Phase A 结束条件：12 目标构建 + QEMU smoke/soak + 有硬件的板级基线完全不变。**
 
+### A-0｜SMP exec 并发（先做，BUG-A/B）
+放行条件：这是真 bug，不是接缝；先修完再动 A-3，否则 loader 带病重构。
+
+- `kernel/elf.c`：`g_win_lo/g_win_hi` 移进 `elf_view_t`（`lo/hi` 由 `win`/`win_size`
+  派生），删 `elf_set_window()` 与 `elf.h` 的声明；`user_range_ok/zero_user/read_u32/
+  write_u32` 带 `const elf_view_t *`。
+- `kernel/syscall.c::do_exec`：`static char path[]` 改栈上（256 B，最小 8 KiB 内核栈的 3%）。
+- `kernel/ramdisk.c` 的静态缓冲已有 `fs_lock`，**不动**；把它改成 per-call 是拆已验证设计。
+- 验收：QEMU `rv32smp` 两核并发 exec soak（可复现）+ 真机；校验进程名与加载内容一致。
+  回帖写清驱动 soak 的程序和命令行。
+
 ### A-1｜board.conf 能力声明 + 冲突校验（C1）
 - 复用 INI，新增 `board/<vendor>/<board>/board.conf`：`schema=1`、`arch`、`cores`（HP/LP）、`memory_domains`、`protection`、`connectivity`、`peripherals`、`variant`。
 - `ApplyConfig()` 在套用 conf features/drivers 前校验目标能力；不相容直接报错。
@@ -160,19 +193,49 @@ build/gen/                  ← 构建期生成物，不入库
 - 输出/时序不变；mock lower 单测加在 Phase B。
 - **不做**：GPIO/SPI/WiFi 全量 upper/lower。
 
+### A-8｜KASSERT 落地（C2 的配套）
+按 §0.3 执行，放在 A-0/A-3 之后：
+
+- `kfree_locked()` 的静默 `return` 改成 halt（收口点已存在，一行改动覆盖全部调用者）；
+- 新增 `proc_set_state()` + 合法性表，替换现有 27 处直接 `->state =`；
+- `TOS_KASSERT=0/1` 开关（默认开）、`KASSERT`/`KASSERT_HALT` 两种形态；
+- `_Static_assert` 与 `offsetof` 断言随 A-2 一起，永远开。
+
+**不做**：给每个调用点加断言；在外部数据路径上 panic。
+
 ---
 
 ## 5. Phase B：把实现搬进去
 
 | 项 | 内容 | 依赖/验收 |
 |---|---|---|
-| B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变 |
+| B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
 | B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench |
 | B-3 | LZ4TOS flags 高字节版本 + V1 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归 |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |
-| B-6 | LP/companion 的窄消息接口 + 心跳 | P4 硬件；LP 不进入 SMP |
+| B-6 | LP/companion 的窄消息接口 + 心跳（C7 形状） | mock lower 在 QEMU 跑通；LP 不进入 SMP |
 | B-7 | 多内存域（仅 PSRAM 窗口确有需求） | C4；QEMU 双段 + P4 硬件 |
+
+#### B-1 的三层事实（生成边界）
+
+生成之前先把事实分层，否则只是把"两层真相"从 Go 挪进 INI：
+
+| 层 | 放什么 | 在哪 |
+|---|---|---|
+| chip | arch/triple/march/时钟/XIP/内核段布局 | chip 目录固定事实，不随板变 |
+| board | 引脚、外设存在性、LED/LCD/PSRAM、驱动能力、硬件不存在的用户程序 | `board/<vendor>/<board>/board.conf` |
+| image | heap/max_procs/kstack/opt、本镜像裁掉的用户程序 | `configs/<target>.conf` |
+
+- `Targets` **全部**成为生成物。`Drivers` 不写成路径：board.conf 写能力
+  （`peripherals = gpio, spi, lcd, usb, pio`），能力→源码目录的映射留在 Go 的共享表里，
+  这样加板不改 Go。
+- `UserExclude` 拆成两个语义：board.conf 的"硬件不存在"（永久，例如 RP2040 无 MPU →
+  `prot` 不编）与 configs 的"本镜像不带"（可逆）。混成一个字段就会出现
+  "某镜像裁了 net、另一个镜像又带回来"的假真相。
+- `layout.c` / `kernel.ld` **留源文件**：`checkLayout()` 继续解析 `boot/stage1.S` 与
+  `board/*/layout.c`；读生成物会让生成器写错时"自洽通过"。生成物只配往返测试
+  （生成两次一致 + 与源文件解析值相等）。
 
 #### B-5 的三级台阶
 
@@ -209,6 +272,17 @@ build/gen/                  ← 构建期生成物，不入库
 **止损点**：B-5b 之后若确认 PMP 做不到 4 KB 粒度保护，v1 明确降级为"无用户保护"，
 记入 `OPEN-ITEMS.md`，不为了跑通保护而改窗口模型。
 
+#### B-6 的纪律（C7 形状已冻结，参数未定）
+
+- 内核里第一个符号必须是 `remote_ep_*`，不得出现 `lp_mailbox_*`；LP 专属名字只允许在
+  lower 里。
+- `link_state(ep)` 是查询；liveness 是 `last_rx_tick` 属性，**不做 `heartbeat()` 命令**
+  （那会逼出上层定时器，重复造 liveness）；`recv` 只做轮询 + 超时，不先写死回调。
+- `send/recv` **只允许任务上下文**；ISR 只能置位/唤醒。这条现在定，晚了改的是所有调用点。
+- `max_frame`/`queue_depth` 由 `remote_ep_caps()` 返回，**不写成宏**：LP 的 mailbox 与
+  C6 的 SPI 帧容量不同，mock 证明不了；猜错冻进去的是 bug 不是接口。
+- 先做 mock lower + QEMU 的 send/recv 测试，等 B-5b 拿到 LP 真实行为后再评容量与错误码。
+
 **B-8 条件项，不排期**：5 档优先级、workqueue、tickless、task group、通用 RPC。出现具体需求再立项，且先补 PI/aging 等前提。
 
 ---
@@ -229,9 +303,10 @@ build/gen/                  ← 构建期生成物，不入库
 
 ```
 Phase A（可并行、每项独立提交）
+  A-0 SMP exec 并发（BUG-A/B，先做）
   A-1 配置校验 ─┬─> A-4 flash/cache ─> A-5 内存域接缝
-  A-2 ABI 头     ├─> A-3 exec_format
-  A-6 等待/超时  └─> A-7 LCD lowops
+  A-2 ABI 头     ├─> A-3 exec_format ─> A-8 KASSERT
+  A-6 等待纪律   └─> A-7 LCD lowops
 
 Phase B（A 稳定后）
   B-1 生成头
@@ -260,7 +335,8 @@ Phase B（A 稳定后）
 - [ ] `configs/<target>.conf` 只声明能力；构建期校验。
 - [ ] 在 `internal/build` 的 `Targets` 表登记一行——这是当前唯一必须改的 Go 源码，
       B-1 之后交给 `board.conf` 生成；不要假装它已经消失。
-- [ ] `scripts/accept-<board>.py` 最小心跳；纳入 CI 或 nightly。
+- [ ] `scripts/<board>/heartbeat.py`：按 `docs/TESTING.md` §5.0 的心跳级六项，末行
+      `HEARTBEAT OK n/n`、退出码 0/1；脚本随 target 入库，纳入 CI 或 nightly。
 - [ ] README 目标表按实测状态填写；未上板不写 "on hardware"。
 - [ ] 不改内核 `switch`/`#ifdef`，不改 chip 目录。
 
@@ -270,15 +346,18 @@ Phase B（A 稳定后）
 
 | 指标 | 现在 | 稳定 v1 目标 |
 |---|---|---|
-| 配置事实 | 4 处 | 1 份 board.conf + 1 份生成头 |
+| 配置事实 | 4 处 | chip/board/image 三层各一处，`Targets` 全生成 |
 | conf/target 冲突 | 静默 | 构建期明确报错 |
-| 新板需改内核文件 | 多处 | 0 |
-| ABI 偏移 | 内核硬编码 | 单一头 + 静态断言 |
+| 新板需改内核文件 | 多处 | 0（`Targets` 表一行在 B-1 后消失） |
+| ABI 偏移 | 内核硬编码 | 单一头 + `offsetof` 静态断言 |
 | 格式版本 | flags 精确匹配 | 高字节版本 + V1 兼容 |
 | flash 独占 | 板级私货 | 内核契约 + 共享骨架 |
-| 等待 | 分散 bounded wait | 统一 `wd_start` |
+| 等待 | 迭代数当时钟，部分在锁内 | tick 后毫秒上限、tick 前按主频折算；不在锁内长等 |
+| 断言 | `assert()` 无条件 no-op | 内部不变量 halt、外部数据返回错误；`TOS_KASSERT` 默认开 |
+| 远端端点 | 无 | C7 形状 + mock lower（参数由 caps 提供） |
 | 单域→多域 | 无接缝 | `mem_domain` 列表，单域行为不变 |
-| 新板验收 | 手工 | 每板心跳脚本 |
+| 新板验收 | 手工 | 心跳级 6 项（`scripts/<board>/heartbeat.py`） |
+| 平权验收 | 24 项全过或口头子集 | 24/24 或具名 N/24，两种不入项都要 OPEN-ITEMS |
 
 ---
 
@@ -288,8 +367,8 @@ Phase B（A 稳定后）
 2. **P4 保护单元**：PMP/MMU、PSRAM 可保护性、粒度（PSRAM 的目标形态与升级门槛见
    `OPEN-ITEMS.md` §9：先做数据池，不做可执行窗口）。
 3. **P4 cache/DMA**：cache line、PSRAM 一致性、bounce 需求。
-4. **LP 核**：谁拉起、共享内存边界、mailbox 协议。
-5. **companion**：ESP-Hosted 全栈还是窄帧接口。
+4. **LP 核**：谁拉起、共享内存边界、mailbox 协议（接口形状见 C7；容量参数未定）。
+5. **companion**：ESP-Hosted 全栈还是窄帧接口（C7 只冻结消息形状与任务上下文约束）。
 6. **生成文件**：`build/gen/` 不入库；CI 可复现命令固定。
 7. **Pico 2**：`PC=0xeffffffe` 根因；variant 的 LED/LCD/flash 几何；稳定前不进回归基线。
 8. **goc32**：按 §3.1，goc32 提交 `abi/syscalls.snapshot.csv`（入库，带 TinyOS commit
@@ -299,8 +378,8 @@ Phase B（A 稳定后）
 
 ## 11. 对 NuttX / FreeRTOS 的取舍
 
-- **借 NuttX**：每任务 watchdog → A-6；binfmt handler → A-3；file_operations/mount 表 → C5 的后续；workqueue → 条件项；task group → 条件项。
-- **借 FreeRTOS**：mutex PI → 仅扩优先级时；stack high-water/overflow hook → 已有 `ps`/哨兵，补报告；tickless → 后期电源项。
+- **借 NuttX**：每任务 watchdog 只借"请求级超时"这一半 → B-8；`binfmt` handler → A-3；file_operations/mount 表 → C5 的后续；workqueue → 条件项；task group → 条件项。
+- **借 FreeRTOS**：`configASSERT` 的开关形态 → §0.3 的 `TOS_KASSERT`（但默认开）；mutex PI → 仅扩优先级时；stack high-water/overflow hook → 已有 `ps`/哨兵，补报告；tickless → 后期电源项。
 - **不借**：Kconfig、POSIX 全套、MMU addrenv、event groups/queue sets、动态分配/多种 heap、通用 RPC。
 
 ---
@@ -316,4 +395,4 @@ Phase B（A 稳定后）
 | E-4 ABI | A-2（头/表）/ A-3（exec_format）/ B-3（flags） |
 | E-5 内存域 | A-5（接缝）/ B-7（多域） |
 | E-6 LP/companion | B-6 |
-| 新增 | A-6 等待/超时 |
+| 新增 | A-0 SMP exec、A-6 等待纪律、A-8 KASSERT、C7 远端端点（形状） |
