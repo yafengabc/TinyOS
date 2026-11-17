@@ -4563,3 +4563,21 @@ T0/T1（12 目标 + fs_ro）/T2（smoke 4 + soak 3/3）通过。T3 归 #17 的�
 之后；`gh run rerun --failed` 同一提交 13 个 job 全绿。两个 job 的 kernel 与上一轮全绿的
 提交相比没有变化，失败时 banner 已打印，说明 guest 活着、卡在 msh 打印提示符之前。只出现
 一次，本地未复现，记在这里而不是当成已修。
+
+## 69. 2026-11-17 soak 这条线收口：复核机 3/3（`a8d55b7`）
+
+`3dae711` + `a8d55b7` 之后，复核线程在同一台机器上重跑
+`python scripts/soak.py --cycles 3 --targets rv32,rv32smp,arm`：**3/3 PASS**，日志里没有
+`smoke: no prompt after ...` 行（卡片 `docs/acceptance/2026-11-17-soak-verify-fd3f079.md`）。
+
+他们补的旁证正好回答了"是不是某个端口的问题"：
+
+- 在 `a8d55b7` 之前用旧 harness 重跑两次是 1/3 和 2/3，**失败的 target 会变**
+  （一次 rv32smp、一次 rv32，arm 始终 PASS）；
+- 同一份内核 ELF（rv32smp `51DA5C33…`）在本机与复核机成败不同。
+
+所以结论是"慢主机上的静默命令超时"，不是代码回归。§65 里那句"没在对方那台机器上复测"
+到这里补齐；`HISTORY` 不改旧记录，补记在此。
+
+同一轮他们还顺手确认了 `cat /proc/execfmt`（rp2350rvsmp）：`lz4tos 1` 与 `elf32 1`
+两份注册都在，与 `075a90c` 一致——B-3 第二节的 `/proc` 面在真机上可达。
