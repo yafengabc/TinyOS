@@ -219,7 +219,7 @@ static void rp_flash_park_loop(void);
 static int g_usb_ready;
 
 /* ---- flash-park / tick diagnostics (TOS_DIAG only) ---------------------
- * A dd write on rp2350rvsmp intermittently came back with -1 ("the other hart
+ * A dd write on atk-dnr2350am-rv32-smp intermittently came back with -1 ("the other hart
  * never parked") and, once, the other hart panicked with "no runnable
  * process" at the same moment.  Neither symptom says *why* the hart stopped
  * answering, so record the handshake as it happens, keep the record across a
@@ -915,7 +915,7 @@ extern volatile int cpu_count;
 /* RAM-resident: this runs while the owner has XIP turned off.  The shared
  * loop re-publishes the ack for every generation (littlefs issues several
  * block operations back to back; a publish-once ack is the intermittent
- * "dd: write error at block 0 (-1)" on rp2350rvsmp) and feeds the watchdog,
+ * "dd: write error at block 0 (-1)" on atk-dnr2350am-rv32-smp) and feeds the watchdog,
  * because this hart is parked with interrupts masked and the tick cannot. */
 static RAMFUNC void rp_flash_park_loop(void)
 {

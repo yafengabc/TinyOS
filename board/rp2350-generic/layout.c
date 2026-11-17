@@ -51,7 +51,7 @@ const uint32_t PLAT_LFS_LBA = 0;
 const uint32_t PLAT_LFS_BLOCKS = 75;
 #endif
 
-/* One core unless the build asks for two.  The `rp2350smp` target defines
+/* One core unless the build asks for two.  The `atk-dnr2350am-smp` target defines
  * TOS_MAX_CPUS=2, which also doubles the kernel stack pool in
  * arch/arm/start.S and makes cpu_init() launch core 1 through the SIO FIFO.
  * PLAT_MAX_CPUS and the build define have to agree: cpu_init() panics if the

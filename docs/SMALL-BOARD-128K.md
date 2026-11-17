@@ -1,6 +1,6 @@
 # 128 KiB RAM / 512 KiB flash：能不能跑 TinyOS
 
-（评估，2026-11-16；数字取自当前 `main` 的 rp2040/rp2040smp 构建）
+（评估，2026-11-16；数字取自当前 `main` 的 rp2040/rpi-pico-smp 构建）
 
 ## 结论
 
@@ -29,7 +29,7 @@ RP2040 把 littlefs 放在 **0x80000 = 512 KiB**，正好等于整片 flash 的�
 - `PLAT_LFS_LBA = 0x20000/512 = 256`，`PLAT_LFS_BLOCKS = (0x80000-0x20000)/4096 = 96`
   （384 KiB 分区），内容 ~100–150 KiB，够；
 - 还有一个**看不见的耦合**：`internal/build/uf2.go` 的 `rpLfsOffset = 0x80000` 是
-  硬编码，rp2040 / rp2350 / rp2350rv 共用。新板要把这个常量变成按目标取值，否则
+  硬编码，rp2040 / rp2350 / atk-dnr2350am-rv32 共用。新板要把这个常量变成按目标取值，否则
   UF2 里文件系统会被写到 flash 之外；
 - `RamdiskSectors`（现在 rp2040 是 1200 = 600 KiB）要降到 ≤ 768（384 KiB），
   `checkLayout()` 会核对它和 `PLAT_LFS_BLOCKS` 是否一致。

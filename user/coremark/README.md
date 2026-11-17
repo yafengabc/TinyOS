@@ -20,8 +20,8 @@ The TinyOS-specific files are:
 Build and run:
 
 ```
-go run ./cmd/tos build -target rp2350rv
-# then flash build/rp2350rv.uf2 and at the shell:
+go run ./cmd/tos build -target atk-dnr2350am-rv32
+# then flash build/tinyos-atk-dnr2350am-rv32.uf2 and at the shell:
 coremark
 coremark 6000
 ```

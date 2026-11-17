@@ -479,7 +479,7 @@ void plat_spin_acquire(volatile int *v)
  * around plat_flash_park_poll() and the stuck-lock panic, so a lock wait can
  * answer a flash park request.  It was missing here and the weak default in
  * kernel/cpu.c - "one CPU, the lock is never contended, return 1" - was what
- * every RV32 build linked.  On rp2350rvsmp that made proc_lock a no-op: both
+ * every RV32 build linked.  On atk-dnr2350am-rv32-smp that made proc_lock a no-op: both
  * harts picked the same ST_READY process (the shell banner printed twice, and
  * `[sched] cpu 0 idle: c0=1/1 c1=1/1` in the "no runnable process" panic),
  * and the flash-park handshake raced against itself.  amoswap stores 1

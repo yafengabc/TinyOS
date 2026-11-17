@@ -208,15 +208,15 @@ func targetBlurb(name string) string {
 		return "the PC image, boots in QEMU from a disk with the littlefs image"
 	case "rv32":
 		return "qemu-virt RISC-V, the reference for the MCU ports"
-	case "rv32smp", "rp2350smp", "rp2350rvsmp":
+	case "rv32smp", "atk-dnr2350am-smp", "atk-dnr2350am-rv32-smp":
 		return "both cores"
 	case "esp32c3":
 		return "the only WiFi target"
-	case "rp2040":
+	case "rpi-pico":
 		return "Cortex-M0+, no FPU, no hardware divide"
-	case "rp2350":
-		return "Cortex-M33"
-	case "rp2350rv":
+	case "atk-dnr2350am":
+		return "Cortex-M33, the ATK dev board"
+	case "atk-dnr2350am-rv32":
 		return "RP2350 Hazard3 (RISC-V)"
 	case "arm":
 		return "qemu mps2-an385 Cortex-M3"
@@ -386,7 +386,7 @@ func (a *app) driverPage() page {
 		help: "Adds drivers/wifi/esp32c3 and links the Espressif net80211/pp/phy/coexist blobs with the ROM linker script; the [wifi] paths are filled in on save.  The IPv4 stack has its own switch.",
 	})
 
-	/* RP2040 peripheral drivers live in board/rp2040 (not in a driver
+	/* RP2040 peripheral drivers live in board/rpi-pico (not in a driver
 	 * directory), so they need feature switches rather than DriverExclude.
 	 * Each one is a real #ifdef around the driver; turning it off removes
 	 * the code and the matching user command. */
@@ -766,7 +766,11 @@ func (a *app) rowText(r row, enabled bool) string {
 
 func targetNames() []string {
 	names := make([]string, 0, len(build.Targets))
-	for n := range build.Targets {
+	for n, t := range build.Targets {
+		// Aliases share their target: list the board-named image once.
+		if n != t.Name {
+			continue
+		}
 		names = append(names, n)
 	}
 	sort.Strings(names)

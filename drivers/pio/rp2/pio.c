@@ -27,7 +27,7 @@
  */
 
 #if defined(__arm__)
-#include "arm_memmap.h"        /* board/rp2040 or board/rp2350, per target */
+#include "arm_memmap.h"        /* board/rpi-pico or board/rp2350-generic, per target */
 #else
 #include "rp2350rv_memmap.h"   /* the only RISC-V board with PIO            */
 #endif

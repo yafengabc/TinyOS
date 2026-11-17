@@ -13,7 +13,7 @@
  *
  * Expected results on the real board:
  *   read 0x0       -> 0xE9 image magic, then segment count / entry
- *   read 0x100000  -> 0xFF... (erased) unless build/ramdisk.bin is burned
+ *   read 0x100000  -> 0xFF... (erased) unless build/tinyos-ramdisk-<target>.bin is burned
  */
     .section .text
     .globl _start

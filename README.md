@@ -42,9 +42,9 @@ optional ESP32-C3 WiFi blobs.
 
 | Target | CPU | Board | RAM | Flash | State |
 | --- | --- | --- | --- | --- | --- |
-| `rp2040`, `rp2040smp` | 2× Cortex-M0+ | Raspberry Pi Pico | 264 KiB | 2 MiB | on hardware |
-| `rp2350`, `rp2350smp` | 2× Cortex-M33 | Pico 2 / ATK-DNRP2350AM | 520 KiB | 2–4 MiB | on hardware |
-| `rp2350rv`, `rp2350rvsmp` | 2× Hazard3 (RISC-V) | same board, other ISA | 520 KiB | 2–4 MiB | on hardware |
+| `rpi-pico`, `rpi-pico-smp` | 2× Cortex-M0+ | Raspberry Pi Pico | 264 KiB | 2 MiB | on hardware |
+| `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | Pico 2 / ATK-DNRP2350AM | 520 KiB | 2–4 MiB | on hardware |
+| `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3 (RISC-V) | same board, other ISA | 520 KiB | 2–4 MiB | on hardware |
 | `esp32c3` | RV32IMC | ESP32-C3 devkit | 400 KiB | 4 MiB | on hardware |
 | `rv32`, `rv32smp`, `rv32nc` | RV32IMC(+A) | QEMU virt | 256 KiB heap | — | CI smoke + soak |
 | `arm` | Cortex-M3 | QEMU mps2-an385 | — | — | CI smoke |
@@ -89,11 +89,11 @@ the tree.
 
 ```sh
 # Build any target
-go run ./cmd/tos build -target rp2350        # -> build/rp2350.uf2
-go run ./cmd/tos build -target esp32c3       # -> build/esp32c3.bin + -full.bin
+go run ./cmd/tos build -target atk-dnr2350am        # -> build/tinyos-atk-dnr2350am.uf2
+go run ./cmd/tos build -target esp32c3       # -> build/tinyos-esp32c3.bin + -full.bin
 
 # RP2040 / RP2350: hold BOOTSEL, plug in USB, copy the .uf2 to the drive
-cp build/rp2350.uf2 /media/$USER/RP2350/
+cp build/tinyos-atk-dnr2350am.uf2 /media/$USER/RP2350/
 
 # ESP32-C3: one write, kernel + filesystem together
 python scripts/esp-c3/flash.py --full -p /dev/ttyACM0
@@ -111,7 +111,7 @@ A program is just a file in littlefs, so a one-line change does not need a new
 300 KiB filesystem image — or a reflash:
 
 ```sh
-goc32 user/foo.c -target rp2350 -o build/foo.tos   # C -> LZ4TOS blob
+goc32 user/foo.c -target atk-dnr2350am -o build/foo.tos   # C -> LZ4TOS blob
 tosput-cli COM14 build/foo.tos /bin/foo            # base64 + CRC32 over the console
 tos> foo
 ```
@@ -133,7 +133,7 @@ ten-second cycle.
 ```sh
 go run ./cmd/tostest smoke -target rv32     # QEMU: boot + a command script
 python scripts/esp-c3/accept.py -p COM4     # ESP32-C3: 24 acceptance checks
-python scripts/rp2350/accept33.py --image rp2350rvsmp --uf2 build/rp2350rvsmp.uf2
+python scripts/rp2350/accept33.py --image atk-dnr2350am-rv32-smp --uf2 build/tinyos-atk-dnr2350am-rv32-smp.uf2
 python scripts/soak.py --cycles 8           # exec/heap/segment churn, free must not drift
 ```
 

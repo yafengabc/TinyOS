@@ -12,8 +12,8 @@ func TestBoardConfigsExistForEveryBoard(t *testing.T) {
 	if err != nil {
 		t.Skip("not in the source tree")
 	}
-	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3", "rp2040",
-		"rp2350-generic", "rp2350rv-generic", "atk-dnr2350am", "atk-dnr2350am-rv32", "pico2"} {
+	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3", "rpi-pico",
+		"rp2350-generic", "rp2350rv-generic", "atk-dnr2350am", "atk-dnr2350am-rv32", "rpi-pico2"} {
 		bc, err := LoadBoardConfig(root, board)
 		if err != nil {
 			t.Errorf("%s: %v", board, err)
@@ -31,9 +31,9 @@ func TestApplyConfigRejectsTargetConflict(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 	b := New(root)
-	b.Target = Targets["rp2040"]
+	b.Target = Targets["rpi-pico"]
 	c := &Config{Path: "fake.conf", Explicit: true, Target: "esp32c3"}
-	if err := b.ApplyConfig(c); err == nil || !strings.Contains(err.Error(), "build target is rp2040") {
+	if err := b.ApplyConfig(c); err == nil || !strings.Contains(err.Error(), "build target is rpi-pico") {
 		t.Fatalf("target conflict error = %v", err)
 	}
 }
@@ -44,8 +44,8 @@ func TestApplyConfigRejectsMissingPeripheral(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 	b := New(root)
-	b.Target = Targets["rp2040"]
-	c := &Config{Path: "fake.conf", Target: "rp2040", Features: map[string]bool{"wifi": true}}
+	b.Target = Targets["rpi-pico"]
+	c := &Config{Path: "fake.conf", Target: "rpi-pico", Features: map[string]bool{"wifi": true}}
 	if err := b.ApplyConfig(c); err == nil || !strings.Contains(err.Error(), "no wifi peripheral") {
 		t.Fatalf("missing peripheral error = %v", err)
 	}
@@ -57,10 +57,10 @@ func TestApplyConfigAcceptsBoardFeature(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 	b := New(root)
-	b.Target = Targets["rp2040"]
-	c := &Config{Path: "fake.conf", Target: "rp2040", Features: map[string]bool{"pio": true}}
+	b.Target = Targets["rpi-pico"]
+	c := &Config{Path: "fake.conf", Target: "rpi-pico", Features: map[string]bool{"pio": true}}
 	if err := b.ApplyConfig(c); err != nil {
-		t.Fatalf("pio on rp2040: %v", err)
+		t.Fatalf("pio on rpi-pico: %v", err)
 	}
 	if b.BoardConfig == nil || b.BoardConfig.Chip != "rp2040" {
 		t.Fatalf("board config not loaded: %+v", b.BoardConfig)
@@ -77,12 +77,12 @@ func TestBoardUserExcludes(t *testing.T) {
 	// there; the ATK boards compile the panel driver and keep them.
 	generic := append(append([]string{}, wifi...), "screen", "lcdconsole", "splash", "fb")
 	want := map[string][]string{
-		"rp2040":             append(append([]string{}, wifi...), "prot"),
+		"rpi-pico":           append(append([]string{}, wifi...), "prot"),
 		"rp2350-generic":     generic,
 		"rp2350rv-generic":   generic,
 		"atk-dnr2350am":      wifi,
 		"atk-dnr2350am-rv32": wifi,
-		"pico2":              generic,
+		"rpi-pico2":          generic,
 	}
 	for board, list := range want {
 		bc, err := LoadBoardConfig(root, board)
@@ -151,7 +151,7 @@ func TestBoardHeaderGeneration(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 	b := New(root)
-	b.Target = Targets["rp2040"]
+	b.Target = Targets["rpi-pico"]
 	b.BuildDir = t.TempDir()
 	if err := b.ensureBoardConfig(); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestBoardHeaderGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"#define TOS_BOARD_NAME \"rp2040\"",
+		"#define TOS_BOARD_NAME \"rpi-pico\"",
 		"#define TOS_CHIP_NAME \"rp2040\"",
 		"#define TOS_APP_GRAIN 0x1000u",
 		"#define TOS_HAS_WIFI 0",
@@ -228,7 +228,7 @@ func TestBoardVariantMatchesBaseChip(t *testing.T) {
 		t.Fatalf("base = self was accepted: %v", err)
 	}
 
-	write("orphan", conf("rp2350", "base = nowhere\n"))
+	write("orphan", conf("atk-dnr2350am", "base = nowhere\n"))
 	if _, err := LoadBoardConfig(root, "orphan"); err == nil {
 		t.Fatalf("base = nowhere was accepted")
 	}
@@ -236,7 +236,7 @@ func TestBoardVariantMatchesBaseChip(t *testing.T) {
 
 func TestBoardMissingWindowField(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "board", "rp2040")
+	dir := filepath.Join(root, "board", "rpi-pico")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestBoardMissingWindowField(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "board.conf"), []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadBoardConfig(root, "rp2040")
+	_, err := LoadBoardConfig(root, "rpi-pico")
 	if err == nil {
 		t.Fatal("missing grain was accepted")
 	}
@@ -265,7 +265,7 @@ func TestBoardMissingWindowField(t *testing.T) {
 // filesystem that runs past the end of it.
 func TestBoardFlashGeometry(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "board", "rp2350")
+	dir := filepath.Join(root, "board", "atk-dnr2350am")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestBoardFlashGeometry(t *testing.T) {
 	}
 
 	write("flash_bytes = 4m\nlfs_offset = 512k\n")
-	bc, err := LoadBoardConfig(root, "rp2350")
+	bc, err := LoadBoardConfig(root, "atk-dnr2350am")
 	if err != nil {
 		t.Fatalf("4m/512k rejected: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestBoardFlashGeometry(t *testing.T) {
 	}
 
 	write("flash_bytes = 2m\nlfs_offset = 512k\n")
-	bc, err = LoadBoardConfig(root, "rp2350")
+	bc, err = LoadBoardConfig(root, "atk-dnr2350am")
 	if err != nil {
 		t.Fatalf("2m/512k rejected: %v", err)
 	}
@@ -298,19 +298,19 @@ func TestBoardFlashGeometry(t *testing.T) {
 	}
 
 	write("flash_bytes = 4m\n")
-	if _, err := LoadBoardConfig(root, "rp2350"); err == nil ||
+	if _, err := LoadBoardConfig(root, "atk-dnr2350am"); err == nil ||
 		!strings.Contains(err.Error(), "lfs_offset") {
 		t.Errorf("missing lfs_offset was accepted or misnamed: %v", err)
 	}
 
 	write("flash_bytes = 512k\nlfs_offset = 512k\n")
-	if _, err := LoadBoardConfig(root, "rp2350"); err == nil ||
+	if _, err := LoadBoardConfig(root, "atk-dnr2350am"); err == nil ||
 		!strings.Contains(err.Error(), "no room") {
 		t.Errorf("partition at the end of the chip was accepted or misnamed: %v", err)
 	}
 
 	write("flash_bytes = 256k\nlfs_offset = 64k\n")
-	if _, err := LoadBoardConfig(root, "rp2350"); err == nil ||
+	if _, err := LoadBoardConfig(root, "atk-dnr2350am"); err == nil ||
 		!strings.Contains(err.Error(), "does not fit") {
 		t.Errorf("a ramdisk larger than the flash was accepted or misnamed: %v", err)
 	}
@@ -318,14 +318,14 @@ func TestBoardFlashGeometry(t *testing.T) {
 
 func TestBoardConfigRejectsBadSchema(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "board", "rp2040"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "board", "rpi-pico"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	text := "[board]\nschema = 2\nchip = rp2040\n[window]\ngrain = 4k\nstack = 4k\nguard = 4k\n"
-	if err := os.WriteFile(filepath.Join(dir, "board", "rp2040", "board.conf"), []byte(text), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "board", "rpi-pico", "board.conf"), []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadBoardConfig(dir, "rp2040"); err == nil {
+	if _, err := LoadBoardConfig(dir, "rpi-pico"); err == nil {
 		t.Fatal("schema 2 was accepted")
 	}
 }

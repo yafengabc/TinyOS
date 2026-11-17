@@ -365,7 +365,7 @@ void console_set_color(uint8_t fg, uint8_t bg)
 /* Console output lock.  A task's own output must not be thrown away when the
  * lock is busy: on SMP the holder is usually the other core draining queued
  * echo in its 1 ms tick, and dropping a whole write there is visible as "the
- * command printed nothing at all" - measured on rp2350rvsmp, where any command
+ * command printed nothing at all" - measured on atk-dnr2350am-rv32-smp, where any command
  * line of 16 bytes or more (`cat  /readme.txt`, `ls /proc/xxxxxxx`) lost both
  * the program's output and the following prompt while the command itself ran
  * to completion.  Sixteen bytes of echo fit in the drain that happens before

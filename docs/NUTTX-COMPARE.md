@@ -12,7 +12,7 @@
 
 | 问题 | NuttX | TinyOS |
 | --- | --- | --- |
-| RP2350 双架构 | `arch/arm/rp23xx` 与 `arch/risc-v/rp23xx-riscv` 两套独立端口；RISC-V 端口文档标 *experimental* | `board/rp2350` 与 `board/rp2350rv`，同样两套 |
+| RP2350 双架构 | `arch/arm/rp23xx` 与 `arch/risc-v/rp23xx-riscv` 两套独立端口；RISC-V 端口文档标 *experimental* | `board/rp2350` 与 `board/atk-dnr2350am-rv32`，同样两套 |
 | 无 MMU 的用户态隔离 | `CONFIG_BUILD_PROTECTED`：内核/用户两个 blob + syscall 桩，**只支持 Cortex-M**（M0+ 无 MPU，只能 flat） | 内核 + 每程序一个可变窗口；ARM 用 PMSAv8、Hazard3 用 NAPOT、C3 用 TOR、RP2040 用软件守卫 |
 | 多核下写 flash | `sched_lock()` + `up_cpu_pause()`（IPI 停核） | `rp_flash_park_other()`：标志 + 代际 ack + RAM 自旋环（`board/rp2350/platform.c`） |
 | 程序加载 | 编进镜像的 app；FLAT 下 ELF 模块直接链进 base | `/bin` 里的压缩 ELF，`exec` 时流式解压、PIE 重定位进窗口 |
@@ -23,7 +23,7 @@
 
 两边对 **Hazard3 外部中断** 的处理是同一个机制：`mcause = 11` + XH3IRQ 的
 使能/挂起数组。我们的是 `drivers/usb/rp2350rv/usb_cdc.c` 里置 `meiea` 第 14 位、
-`board/rp2350rv/platform.c` 的 `plat_irq_foreign()` 读 `meipa`。**上真机前值得和
+`board/atk-dnr2350am-rv32/platform.c` 的 `plat_irq_foreign()` 读 `meipa`。**上真机前值得和
 他们的 `rp23xx-riscv` 中断代码逐行对一遍**，这是目前唯一完全盲写、又没验证过的
 路径。
 
@@ -106,7 +106,7 @@ NuttX 把 PMP 藏在和 ARM **同一个** `mpu_configure_region(base, size, flag
    `base` 必须按 `size` 对齐、`size` 必须是 2 的幂，否则直接 `-EINVAL`，因为
    "size 变大时可供编码 base 的位数变少"。我们走的是相反的路线——`pmp_cover()`
    把任意 4 KiB 对齐的区间拆成若干 2 的幂块，所以从不拒绝调用者，代价是消耗条目
-   （`rp2350rv` 的 15 条预算）。两条都成立：他们要求调用者把区间做成 POT，我们
+   （`atk-dnr2350am-rv32` 的 15 条预算）。两条都成立：他们要求调用者把区间做成 POT，我们
    让内核替调用者拆。
 3. **TOR 是易错点**。他们修过两轮：PR #10451（NAPOT 校验）、PR #10724
    "fix broken TOR checks"（−28/+3 行）。根源是 TOR 的 `pmpaddr(N-1)` 耦合，以及

@@ -33,7 +33,7 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 
 func TestConfigAcceptsExplicitFalse(t *testing.T) {
 	c, err := build.LoadConfig(writeConfig(t,
-		"[build]\ntarget = rp2040\nheap = 16k\ndevnodes = 0\n"+
+		"[build]\ntarget = rpi-pico\nheap = 16k\ndevnodes = 0\n"+
 			"[features]\npwm = false\n"))
 	if err != nil {
 		t.Fatal(err)

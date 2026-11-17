@@ -53,12 +53,12 @@ jobs:
       matrix:
         target:
           - esp32c3
-          - rp2040
-          - rp2040smp
-          - rp2350
-          - rp2350smp
-          - rp2350rv
-          - rp2350rvsmp
+          - rpi-pico
+          - rpi-pico-smp
+          - atk-dnr2350am
+          - atk-dnr2350am-smp
+          - atk-dnr2350am-rv32
+          - atk-dnr2350am-rv32-smp
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -131,30 +131,30 @@ jobs:
           mkdir -p "$out"
 
           if [ "$target" = "esp32c3" ]; then
-            cp build/esp32c3.bin "$out/"
-            cp build/ramdisk-esp32c3.bin "$out/"
-            cp build/esp32c3-full.bin "$out/"
+            cp build/tinyos-esp32c3.bin "$out/"
+            cp build/tinyos-ramdisk-esp32c3.bin "$out/"
+            cp build/tinyos-esp32c3-full.bin "$out/"
             {
               echo "TinyOS ESP32-C3 flash images"
               echo
               echo "One file, one write - kernel and littlefs together:"
               echo
-              echo "  esptool --chip esp32c3 write-flash 0x0 esp32c3-full.bin"
+              echo "  esptool --chip esp32c3 write-flash 0x0 tinyos-esp32c3-full.bin"
               echo
               echo "Or the split pair, which leaves 0x20000..0x80000 untouched"
               echo "and lets you update the kernel without rewriting the"
               echo "filesystem:"
               echo
-              echo "  esptool.py --chip esp32c3 write-flash 0x0     esp32c3.bin"
-              echo "  esptool.py --chip esp32c3 write-flash 0x80000 ramdisk-esp32c3.bin"
+              echo "  esptool.py --chip esp32c3 write-flash 0x0     tinyos-esp32c3.bin"
+              echo "  esptool.py --chip esp32c3 write-flash 0x80000 tinyos-ramdisk-esp32c3.bin"
               echo
               echo "Both contain the same bytes at every address the split pair"
-              echo "writes; esp32c3-full.bin just pads to the filesystem offset."
+              echo "writes; tinyos-esp32c3-full.bin just pads to the filesystem offset."
               echo
               echo "Put the board in download mode first (hold BOOT, tap RESET)."
             } > "$out/FLASH-$target.txt"
           else
-            cp "build/$target.uf2" "$out/"
+            cp "build/tinyos-$target.uf2" "$out/"
             {
               echo "TinyOS $target UF2 image"
               echo

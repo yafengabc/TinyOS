@@ -73,7 +73,7 @@ go test ./... -count=1
 至少覆盖 CI 的 7 个目标；改构建系统/`Targets`/`config.go` 时跑全部可构建目标：
 
 ```sh
-for t in esp32c3 rp2040 rp2040smp rp2350 rp2350smp rp2350rv rp2350rvsmp \
+for t in esp32c3 rpi-pico rpi-pico-smp atk-dnr2350am atk-dnr2350am-smp atk-dnr2350am-rv32 atk-dnr2350am-rv32-smp \
          rv32 rv32smp rv32nc arm; do
   go run ./cmd/tos build -target "$t" || exit 1
 done
@@ -82,8 +82,8 @@ done
 PowerShell：
 
 ```powershell
-$targets = "esp32c3","rp2040","rp2040smp","rp2350","rp2350smp",
-           "rp2350rv","rp2350rvsmp","rv32","rv32smp","rv32nc","arm"
+$targets = "esp32c3","rpi-pico","rpi-pico-smp","atk-dnr2350am","atk-dnr2350am-smp",
+           "atk-dnr2350am-rv32","atk-dnr2350am-rv32-smp","rv32","rv32smp","rv32nc","arm"
 foreach ($t in $targets) {
   go run ./cmd/tos build -target $t
   if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -186,21 +186,21 @@ python scripts/esp-c3/accept.py -p COM4
 
 ```sh
 # 刷机 + 看启动日志（--port 用 CDC 或 UART）
-python scripts/rp2350/flash.py --uf2 build/rp2350smp.uf2 --smoke -p COM17
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --smoke -p COM17
 
 # 验收：启动、SMP、dd+rm、信号路径
-python scripts/rp2350/accept33.py --image rp2350smp --no-flash -p COM17 --dd-rounds 1000
-python scripts/rp2350/accept33.py --image rp2350rvsmp --no-flash -p COM17 --dd-rounds 100
+python scripts/rp2350/accept33.py --image atk-dnr2350am-smp --no-flash -p COM17 --dd-rounds 1000
+python scripts/rp2350/accept33.py --image atk-dnr2350am-rv32-smp --no-flash -p COM17 --dd-rounds 100
 
 # PIO（自动部分 + 需要人看的 LED/灯带用 --visual --strip）
-python scripts/rp2350/pio_accept.py --image rp2350smp --no-flash -p COM17
-python scripts/rp2350/pio_accept.py --image rp2350smp --no-flash -p COM17 --visual --strip
+python scripts/rp2350/pio_accept.py --image atk-dnr2350am-smp --no-flash -p COM17
+python scripts/rp2350/pio_accept.py --image atk-dnr2350am-smp --no-flash -p COM17 --visual --strip
 
 # SMP 专项（hang/rate/topology），可选 --func 带 shell 检查
 python scripts/rp2350/smptest.py -p COM17 --func
 
 # kernel threads（只有该 feature 打开时）
-python scripts/rp2350/kthread_accept.py --uf2 build/rp2350smp.uf2 --out build/kthread.log
+python scripts/rp2350/kthread_accept.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --out build/kthread.log
 ```
 
 - 启动日志至少要看到 `[A]/[B]/[C]/[D]/[E]`、`2 of 2 CPU(s) online`、USB CDC `2e8a:000a`。
@@ -212,9 +212,9 @@ python scripts/rp2350/kthread_accept.py --uf2 build/rp2350smp.uf2 --out build/kt
 > issue，由板主排期。下面的命令仍保留给专项验收使用。
 
 ```sh
-python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2
+python scripts/rp2040/autoflash.py --uf2 build/tinyos-rpi-pico.uf2
 python scripts/rp2040/heartbeat.py --port COM19
-python scripts/rp2350/pio_accept.py --image rp2040smp --uf2 build/rp2040smp.uf2
+python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-pico-smp.uf2
 ```
 
 - RP2040 的窗口数字与守卫已在 2026-11-17 人工核对（`HISTORY.md` §43）：`wink=16`、`deep 3` 增长、`deep 6` kill；`deep 6 0 8` 也已验证会触发（`deep.c` 现在 sleep(0) 也进入 syscall）。
@@ -224,7 +224,7 @@ python scripts/rp2350/pio_accept.py --image rp2040smp --uf2 build/rp2040smp.uf2
 ### 5.4 Pico 2（暂不支持）
 
 - TinyOS 的 `board/atk-dnr2350am` 是 ATK-DNRP2350AM 板级目标（LED GPIO3、LCD/TF、4 MiB 文件系统假设），**不是 Pico 2 target**。
-- 现状：官方 MicroPython 在 clone 上正常；TinyOS `rp2350smp.uf2` 早期 HardFault。已记在 `OPEN-ITEMS.md` §1b。
+- 现状：官方 MicroPython 在 clone 上正常；TinyOS `atk-dnr2350am-smp.uf2` 早期 HardFault。已记在 `OPEN-ITEMS.md` §1b。
 - 规则：不要把 ATK 镜像刷到 Pico 2；Pico 2 适配要单独立项（独立 board target、正确的 LED/无 LCD/实际 flash 大小），并为它建立 T3 验收后再纳入回归矩阵。
 
 ## 6. T4：压力
@@ -301,7 +301,7 @@ notes:
 当前 `.github/workflows/images.yml` 覆盖：
 
 - `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
-- 7 个发布镜像构建（esp32c3、rp2040/smp、rp2350/smp、rp2350rv/rvsmp）；
+- 7 个发布镜像构建（esp32c3、rpi-pico/smp、atk-dnr2350am/smp、atk-dnr2350am-rv32/smp）；
 - `smoke` 是**按目标并行**的一组 job（每个约 50–95 s）：
   - `configs/rv32-fsro.conf` 的只读镜像构建（只编译，不起机；issue #14 的盲区）；
   - rv32 / rv32smp / arm / x86 各自构建 + 起机 + `ps`、`ls`、`piperace`、`prot stack`、

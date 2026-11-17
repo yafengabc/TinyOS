@@ -223,7 +223,7 @@ def main():
                     help="verify the committed header matches the art")
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.dirname(here)
-    header = os.path.join(root, "board", "rp2350", "font5x7.h")
+    header = os.path.join(root, "drivers", "display", "st7789", "font5x7.h")
     preview = os.path.join(root, "build", "font5x7-preview.png")
     ap.add_argument("--header", default=header)
     args = ap.parse_args()

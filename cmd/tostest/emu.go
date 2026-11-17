@@ -90,7 +90,7 @@ func emuBuild() bool {
 // emuSmoke boots the esp32c3 kernel on RV32EMU-C and checks uptime + ls.
 func emuSmoke() int {
 	elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3.elf")
-	rd := filepath.Join(repoRoot(), "build", "ramdisk-esp32c3.bin")
+	rd := filepath.Join(repoRoot(), "build", "tinyos-ramdisk-esp32c3.bin")
 	for _, p := range []string{elf, rd} {
 		if !fileExists(p) {
 			fmt.Fprintf(os.Stderr, "missing %s: run 'tos build -target esp32c3'\n", p)

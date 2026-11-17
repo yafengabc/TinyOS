@@ -24,7 +24,7 @@ type BoardConfig struct {
 	// so a variant writes only what differs and never copies platform.c.
 	Base string
 	// Bases is Base resolved through any further base links, nearest first.
-	// board/pico2 -> rp2350-generic is one hop; board/atk-rv32 ->
+	// board/rpi-pico2 -> rp2350-generic is one hop; board/atk-dnr2350am-rv32 ->
 	// rp2350rv-generic -> rp2350-generic is two, and the compiler needs the
 	// whole chain to know which files are inherited and which are replaced.
 	Bases       []string

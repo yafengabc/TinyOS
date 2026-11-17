@@ -7,8 +7,8 @@ board's own facts live in `board/<board>/board.conf`, and the chip's facts in
 
 ```ini
 [target]
-name = rp2350smp      # optional; defaults to the file name
-board = rp2350        # board/<board>/board.conf must exist
+name = atk-dnr2350am-smp      # optional; defaults to the file name
+board = atk-dnr2350am # board/<board>/board.conf must exist
 arch = arm            # must be an ISA of that board's chip
 march = rv32imac      # optional; the chip table supplies the default
 cpus = 2              # optional, 1 when absent
@@ -34,13 +34,13 @@ have to read them from somewhere anyway.
   the task window, the peak is much smaller than it used to be; the numbers
   here are still the ones the boards were validated with, and shrinking them
   needs its own measurement, not a guess.
-- **rp2040 / rp2040smp**: `max_procs = 8`, `kstack = 8k` - a proc_t is ~792 B
+- **rpi-pico / rpi-pico-smp**: `max_procs = 8`, `kstack = 8k` - a proc_t is ~792 B
   and the shell only ever runs a few tasks; the four slots it drops return
   3 KiB of .bss.
 - **esp32c3**: `max_procs = 8` and an 80 KiB heap; `board/esp32c3/board.conf`
   supplies `xip_flash_base`, which is what selects `kernel-xip.ld`.
 - **rp2350 family**: 60 KiB on ARM (validated size), 32 KiB on the RISC-V
-  image.  `rp2350rvsmp` keeps the same 32 KiB: the second kernel stack comes
+  image.  `atk-dnr2350am-rv32-smp` keeps the same 32 KiB: the second kernel stack comes
   out of .bss, not the heap.
 - **rv32nc** exists so the cost of RVC can be measured; it is `rv32im`, no C
   extension, everything else identical to `rv32`.

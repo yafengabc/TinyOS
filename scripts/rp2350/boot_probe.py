@@ -24,7 +24,7 @@ init.  If the probe is silent too -> the ROM is not booting our image at all
 (or the board is not powered / not reset), and the image format is suspect.
 
 Usage:
-    python scripts/rp2350/boot_probe.py            # build build/rp2350-probe.uf2
+    python scripts/rp2350/boot_probe.py            # build build/tinyos-rp2350-probe.uf2
     python scripts/rp2350/boot_probe.py --flash   # also wait for the RP2350
                                                 # BOOTSEL drive and copy it
 
@@ -42,7 +42,7 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORK = os.path.join(ROOT, ".tmp", "rp2350_probe")
-OUT = os.path.join(ROOT, "build", "rp2350-probe.uf2")
+OUT = os.path.join(ROOT, "build", "tinyos-rp2350-probe.uf2")
 
 FLASH_BASE = 0x10000000
 UF2_FAMILY = 0xE48BFF59       # RP2350 ARM Secure

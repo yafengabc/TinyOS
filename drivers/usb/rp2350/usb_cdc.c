@@ -409,7 +409,7 @@ static void usb_lk_select(void)
  * then wedged forever inside the state machine.  With interrupts masked
  * from sched_idle's console poll it stopped ticking, stopped answering the
  * flash park handshake, and every flash write from core 1 timed out with
- * -1.  Measured on rp2350smp: the mask probe pinned core 0 to the masked
+ * -1.  Measured on atk-dnr2350am-smp: the mask probe pinned core 0 to the masked
  * section entered right before tty_poll (site 2, LR in sched_idle), frozen
  * for good.
  *

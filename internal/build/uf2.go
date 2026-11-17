@@ -262,7 +262,7 @@ func rp2350NextBlockWord(flat []byte, markerOff, limit int) (int, error) {
 	return 0, fmt.Errorf("no PICOBIN LAST item in the IMAGE_DEF")
 }
 
-// buildBoot2 loads the prebuilt 2nd-stage bootloader (board/rp2040/boot2.bin,
+// buildBoot2 loads the prebuilt 2nd-stage bootloader (board/rpi-pico/boot2.bin,
 // the official Pico SDK W25Q080 boot2 assembled to a position-independent
 // blob), pads it to 252 bytes and appends the CRC-32/MPEG-2 the boot ROM
 // verifies, returning the final 256 bytes.
@@ -271,7 +271,11 @@ func rp2350NextBlockWord(flat []byte, markerOff, limit int) (int, error) {
 // we vendor the assembled artifact and only compute the CRC here. The stage-2
 // enables XIP and vectors through the table at 0x10000100 (our kernel).
 func (b *Builder) buildBoot2() ([]byte, error) {
-	src := filepath.Join(b.Root, "board", "rp2040", "boot2.bin")
+	// boot2 is the RP2040 chip's stage-2, so it belongs to the RP2040 board
+	// directory rather than to a board name spelled out here: a second
+	// RP2040 board inherits it through `base =`, and renaming the Pico board
+	// cannot lose it again.
+	src := b.boardFile("boot2.bin")
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return nil, fmt.Errorf("boot2 missing (%s); run a full build first", src)
@@ -279,7 +283,7 @@ func (b *Builder) buildBoot2() ([]byte, error) {
 	if len(data) > 252 {
 		return nil, fmt.Errorf("boot2 too large: %d bytes (max 252)", len(data))
 	}
-	b.logf("      boot2  board/rp2040/boot2.bin (%d bytes)\n", len(data))
+	b.logf("      boot2  board/rpi-pico/boot2.bin (%d bytes)\n", len(data))
 	padded := make([]byte, 252)
 	copy(padded, data)
 	crc := crc32mpeg2(padded)
@@ -319,7 +323,7 @@ func (b *Builder) emitRP2040UF2(elfPath string) error {
 	copy(flat[fsOff:fsOff+len(ramdisk)], ramdisk)
 
 	uf2 := flatToUF2(flat, rp2040UF2Family)
-	out := filepath.Join(b.BuildDir, b.Target.Name+".uf2")
+	out := filepath.Join(b.BuildDir, "tinyos-"+b.Target.Name+".uf2")
 	if err := os.WriteFile(out, uf2, 0o644); err != nil {
 		return err
 	}
@@ -400,7 +404,7 @@ func (b *Builder) emitRP2350UF2(elfPath string) error {
 	b.logf("      picobin: IMAGE_DEF @0x%x -> ignored end block @0x%x\n", markerOff, endOff)
 
 	uf2 := append(rp2350AbsBlock(), flatToUF2(flat, rp2350UF2Family)...)
-	out := filepath.Join(b.BuildDir, b.Target.Name+".uf2")
+	out := filepath.Join(b.BuildDir, "tinyos-"+b.Target.Name+".uf2")
 	if err := os.WriteFile(out, uf2, 0o644); err != nil {
 		return err
 	}
@@ -493,7 +497,7 @@ func (b *Builder) emitRP2350RVUF2(elfPath string) error {
 		markerOff, endOff, entry, sp)
 
 	uf2 := append(rp2350AbsBlock(), flatToUF2(flat, rp2350RVUF2Family)...)
-	out := filepath.Join(b.BuildDir, b.Target.Name+".uf2")
+	out := filepath.Join(b.BuildDir, "tinyos-"+b.Target.Name+".uf2")
 	if err := os.WriteFile(out, uf2, 0o644); err != nil {
 		return err
 	}

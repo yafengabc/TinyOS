@@ -6,7 +6,7 @@
  *
  * The pins and the polarity are board data (board_data.c, one table per
  * board or variant); this file only knows how to turn a row into a pin
- * operation.  That split is what lets board/pico2 reuse it: its LED is on
+ * operation.  That split is what lets board/rpi-pico2 reuse it: its LED is on
  * GPIO25 and active high, which is a different row, not different code.
  *
  * Both are written on top of platform.h's pin layer rather than poking

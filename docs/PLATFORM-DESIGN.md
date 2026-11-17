@@ -34,7 +34,7 @@ board/pc/        板级：内存布局、启动
 board/qemu-virt/ QEMU rv32 virt：0x80000000 启动、16550、CLINT
 board/qemu-mps2/ QEMU Cortex-M 参考板
 board/esp32c3/   ESP32-C3：ESP 镜像、SPI flash、UART0
-board/rp2040/    RP2040：boot2、UF2、XIP、UART0
+board/rpi-pico/    RP2040：boot2、UF2、XIP、UART0
 ```
 
 规则：
@@ -1023,7 +1023,7 @@ nibble 是真的**。于是 entries < 0x10000000 时永远打出 `00000000`，�
 #### 8.7 SPI flash 块设备（已验证，2026-11-01）
 
 littlefs 分区烧在 flash 偏移 0x80000（`PLAT_LFS_LBA=1024`，前 512 KiB 留给内核；3.5 MiB = 896 块），
-`esptool write-flash 0x80000 build/ramdisk-esp32c3.bin`（脚本：`scripts/esp-c3/flash.py`）。
+`esptool write-flash 0x80000 build/tinyos-ramdisk-esp32c3.bin`（脚本：`scripts/esp-c3/flash.py`）。
 块设备三层组合，全部真机验证：
 
 - **读 = ROM `esp_rom_spiflash_read`（0x40000130）**。ROM bootloader 已探测好芯片，
@@ -1152,7 +1152,7 @@ unused        34128  ( 33 KiB)   ← 原 2,048
 早就有）。在此之前，内核 `.bss` 再长 240 字节可以链接成功，运行期表现为 pid 1 的
 映像被内核全局变量覆盖——症状是"用户程序随机崩"，没人会往链接脚本上想。
 
-**同一轮还修掉一个更难看的**：`build/ramdisk.bin` 是所有目标共用的名字，循环构建
+**同一轮还修掉一个更难看的**：`build/tinyos-ramdisk-<target>.bin` 是所有目标共用的名字，循环构建
 时最后那个目标会覆盖它。于是「构建 rv32 → 构建 rp2040 → 烧 esp32c3」这条最常见的
 顺序会把 **ARM 用户程序**烧进 C3，内核列出 14 个文件、然后拒绝每一个，报
 "not a valid ELF32 program"，屏幕上没有任何线索指向文件系统不是它的。现在镜像按
@@ -1767,7 +1767,7 @@ readdir 快照全都是全局的。所以互斥的粒度不是块，是**一次 
 
 ### 13.9 还没做的
 
-- **RP2350 / RP2040 的 core1**：`board/rp2040` 还是 `PLAT_MAX_CPUS = 1`。
+- **RP2350 / RP2040 的 core1**：`board/rpi-pico` 还是 `PLAT_MAX_CPUS = 1`。
   需要的是 SIO 自旋锁（`SIO_SPINLOCK0`）+ 把 core1 从 bootrom 的 `wfe` 循环里
   拉起来（写 `SIO_FIFO` 或走 PSM）。`plat_spin_acquire()` 换成 SIO 版本即可，
   其余层不用动。

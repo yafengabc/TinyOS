@@ -3,7 +3,7 @@
 
 PIO has run on the RP2350 (17/17 on both images, OPEN-ITEMS 32.2); the RP2040
 uses the same HAL with two blocks instead of three, so the same run applies
-with --image rp2040 and the LED on GP25.
+with --image rpi-pico and the LED on GP25.
 
 What can be checked without eyes or wires is checked exactly:
 
@@ -19,9 +19,9 @@ The two checks that need eyes (`blink`, `ws2812`) only run with --visual,
 which prints the expectation and asks; without it they are reported as
 "assembled and loaded", which is what a script can honestly claim.
 
-    scripts/rp2350/pio_accept.py --image rp2350 --uf2 build/rp2350.uf2
-    scripts/rp2350/pio_accept.py --image rp2350rvsmp --no-flash
-    scripts/rp2350/pio_accept.py --image rp2350 --no-flash --visual --strip
+    scripts/rp2350/pio_accept.py --image atk-dnr2350am --uf2 build/tinyos-atk-dnr2350am.uf2
+    scripts/rp2350/pio_accept.py --image atk-dnr2350am-rv32-smp --no-flash
+    scripts/rp2350/pio_accept.py --image atk-dnr2350am --no-flash --visual --strip
 
 This board's own LED is GP3, not the Pico's GP25, so the blink check defaults
 to /pio/blink3.pio and --led-pin 25 switches back to the Pico program.
@@ -152,7 +152,7 @@ def asm(con, results, path, block, sm, table, pins=None):
 
 def run_checks(con, results, opts):
     if opts.led_pin < 0:
-        opts.led_pin = 25 if opts.image.startswith("rp2040") else 3
+        opts.led_pin = 25 if opts.image.startswith("rpi-pico") else 3
     # The RP2040 has two PIO blocks; the RP2350's third one is what makes the
     # ws2812 check exercise FUNCSEL 8 and the pad ISO bit, so it stays there
     # when it exists.  On the RP2040, put ws2812 on PIO0: instruction memory is
@@ -160,7 +160,7 @@ def run_checks(con, results, opts):
     # would overwrite the blink program that the visual check is about to
     # start.  (Symptom: `pio start 1 1` reports ok, `addr` sticks at 4, and
     # the LED stays dark until blink is reloaded.)
-    ws_block, ws_sm = (0, 3) if opts.image.startswith("rp2040") else (2, 2)
+    ws_block, ws_sm = (0, 3) if opts.image.startswith("rpi-pico") else (2, 2)
 
     # 1. The files the build packs.  blink3 only exists once this board's LED
     #    pin was noticed, so an old image failing this is information.
@@ -278,8 +278,8 @@ def report(results, image):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True, choices=[
-        "rp2350", "rp2350smp", "rp2350rv", "rp2350rvsmp",
-        "rp2040", "rp2040smp"])
+        "atk-dnr2350am", "atk-dnr2350am-smp", "atk-dnr2350am-rv32", "atk-dnr2350am-rv32-smp",
+        "rpi-pico", "rpi-pico-smp"])
     ap.add_argument("-p", "--port", default="COM14")
     ap.add_argument("--dtr", action="store_true", help="assert DTR (CDC console)")
     ap.add_argument("--uf2", help="flash this image first")

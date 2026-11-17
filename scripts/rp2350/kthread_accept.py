@@ -7,8 +7,8 @@ is a one-shot stream), then drives the shell one command at a time and writes
 the complete transcript.  Usage:
 
     python -u scripts/rp2350/kthread_accept.py \
-        --uf2 build/rp2350smp.uf2 --port COM14 \
-        --out build/test-logs/gate-h-rp2350smp.txt
+        --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --port COM14 \
+        --out build/test-logs/gate-h-atk-dnr2350am-smp.txt
 """
 
 import argparse

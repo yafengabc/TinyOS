@@ -10,7 +10,7 @@ import (
 
 // The board tree has three layers: a chip baseline (rp2350-generic), an ISA
 // overlay for the other core (rp2350rv-generic), and concrete boards that add
-// wiring (atk-dnr2350am, atk-dnr2350am-rv32, pico2).  A concrete board that
+// wiring (atk-dnr2350am, atk-dnr2350am-rv32, rpi-pico2).  A concrete board that
 // starts carrying silicon code, or a second copy of the ATK device table,
 // means the split has collapsed back into per-board forks.
 func TestBoardLayering(t *testing.T) {
@@ -33,7 +33,7 @@ func TestBoardLayering(t *testing.T) {
 		"rp2350rv-generic":   {"rp2350-generic"},
 		"atk-dnr2350am":      {"rp2350-generic"},
 		"atk-dnr2350am-rv32": {"rp2350rv-generic", "atk-dnr2350am", "rp2350-generic"},
-		"pico2":              {"rp2350-generic"},
+		"rpi-pico2":          {"rp2350-generic"},
 	}
 	for board, wantChain := range want {
 		got := chain(board)
@@ -73,8 +73,8 @@ func TestBoardLayering(t *testing.T) {
 	if got := cFiles("atk-dnr2350am-rv32"); len(got) != 0 {
 		t.Errorf("atk-dnr2350am-rv32 carries %v; it should get everything from its bases", got)
 	}
-	if got := cFiles("pico2"); strings.Join(got, ",") != "board_data.c" {
-		t.Errorf("pico2 carries %v, want only board_data.c", got)
+	if got := cFiles("rpi-pico2"); strings.Join(got, ",") != "board_data.c" {
+		t.Errorf("rpi-pico2 carries %v, want only board_data.c", got)
 	}
 
 	// The chip baselines own the port: every non-data C file of the tree's

@@ -8,9 +8,9 @@ the second core still worth 1.8x.  Asking them by hand is how the last round
 ended up with three different answers to "which reset path was that?", so this
 script asks them in one order and keeps the raw log.
 
-    scripts/rp2350/accept33.py --image rp2350rv --uf2 build/rp2350rv.uf2
-    scripts/rp2350/accept33.py --image rp2350smp --no-flash
-    scripts/rp2350/accept33.py --image rp2350rv --replay build/sizeprobe/x.log
+    scripts/rp2350/accept33.py --image atk-dnr2350am-rv32 --uf2 build/tinyos-atk-dnr2350am-rv32.uf2
+    scripts/rp2350/accept33.py --image atk-dnr2350am-smp --no-flash
+    scripts/rp2350/accept33.py --image atk-dnr2350am-rv32 --replay build/sizeprobe/x.log
 
 The interesting part is the first boot.  --uf2 flashes over the BOOTSEL drive
 with the serial port already open, and then *never touches RTS and never
@@ -38,10 +38,10 @@ BAD = ("KERNEL PANIC", "System halted", "MSTKERR", "HardFault")
 # Per-image expectations: cpus drives the smpbench check, rv switches the
 # Hazard3-only boot marker (the [A] clock snapshot).
 IMAGES = {
-    "rp2350":      dict(cpus=1, rv=False),
-    "rp2350smp":   dict(cpus=2, rv=False),
-    "rp2350rv":    dict(cpus=1, rv=True),
-    "rp2350rvsmp": dict(cpus=2, rv=True),
+    "atk-dnr2350am":       dict(cpus=1, rv=False),
+    "atk-dnr2350am-smp":   dict(cpus=2, rv=False),
+    "atk-dnr2350am-rv32":    dict(cpus=1, rv=True),
+    "atk-dnr2350am-rv32-smp": dict(cpus=2, rv=True),
 }
 
 SNAPSHOT = re.compile(r"\[A\] pre-pll ok sys=(0x[0-9A-Fa-f]+) "

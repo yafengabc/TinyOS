@@ -1,7 +1,7 @@
 /* TinyOS RP2040 kernel linker script.
  *
  * The RP2040 boots from external QSPI flash (XIP) at 0x10000000.  The boot
- * ROM loads a 256-byte stage-2 (board/rp2040/boot2.bin) from flash offset 0,
+ * ROM loads a 256-byte stage-2 (board/rpi-pico/boot2.bin) from flash offset 0,
  * verifies a CRC-32/MPEG-2 over its first 252 bytes and jumps to 0x10000100.
  * That address is therefore where this kernel's vector table must live, so the
  * XIP FLASH region begins at 0x10000100 and the first 256 bytes of flash are

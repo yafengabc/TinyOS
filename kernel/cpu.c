@@ -334,7 +334,7 @@ void spin_lock(spin_t *s)
          * never reaches a tick or an idle poll.  The two then deadlock against
          * each other: the writer holds the lock we are waiting for and waits
          * for us to park, we hold nothing and wait for the writer to finish.
-         * That is the "[spin] cpu 0 stuck on lock" freeze seen on rp2350smp.
+         * That is the "[spin] cpu 0 stuck on lock" freeze seen on atk-dnr2350am-smp.
          * Park first, then try the lock again - we are holding nothing, so
          * there is nothing to release first. */
         plat_flash_park_poll();

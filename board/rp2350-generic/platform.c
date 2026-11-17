@@ -427,7 +427,7 @@ static struct rp_park_state park = RP_PARK_STATE_INIT;
  * checks must never park the initiator: it sits in a thread-context wait
  * loop that is the ONLY code which will ever clear the flag, and once its
  * SysTick catches the flag both cores spin in the RAM loop forever - the
- * first dd on rp2350smp froze the machine exactly that way. */
+ * first dd on atk-dnr2350am-smp froze the machine exactly that way. */
 /* Set before the ROM bootloader takes the chip: the secondary core has to
  * stop for good.  The ROM does not reset it, so it would still be running
  * the old kernel when the new image starts - two kernels sharing one .bss,
@@ -1321,7 +1321,7 @@ void plat_flash_park_poll(void)
          * XIP - and the writer has already put QMI into serial command mode.
          * The fetch then bus-faults inside an exception whose own handler is
          * also in flash: silent dead core, no ticks, no output, watchdog
-         * reset two seconds later.  That is the rp2350smp dd wedge.
+         * reset two seconds later.  That is the atk-dnr2350am-smp dd wedge.
          *
          * The tick path already ran masked, which is why only the idle and
          * spin-wait callers ever hit this. */
@@ -1335,7 +1335,7 @@ void plat_flash_park_poll(void)
 /* Mask interrupts for the whole handshake: with them on, the tick can land in
  * this wait loop and reschedule the caller onto the other core, which then is
  * no longer the one that will unpark - both cores park and the flag is never
- * cleared (the intermittent rp2350smp dd freeze).  The shared sequence keeps
+ * cleared (the intermittent atk-dnr2350am-smp dd freeze).  The shared sequence keeps
  * the mask on success; on timeout it restores and returns -1. */
 static int rp_flash_park_other(void)
 {

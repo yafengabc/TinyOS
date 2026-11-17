@@ -9,7 +9,7 @@ TinyOS 把这件事拆成两层：
 
 | 位置 | 作用 |
 | --- | --- |
-| `board/rp2040/pio.c` | 内核 HAL：校验、装载指令、配置 SM、启停、FIFO、引脚 mux、进程退出清理 |
+| `board/rpi-pico/pio.c` | 内核 HAL：校验、装载指令、配置 SM、启停、FIFO、引脚 mux、进程退出清理 |
 | `user/pio.c` | 用户态汇编器 + 控制台命令（`pio asm/start/stop/tx/rx/rel`） |
 | `files/pio/*.pio` | 随镜像打包的示例程序 |
 | `SYS_PIO` / `struct pio_req` | 唯一的 ABI，用户程序和内核之间只传这个结构 |
@@ -128,8 +128,8 @@ struct pio_req {
 真机验收按 `docs/HW-ACCEPTANCE.md` 的关卡 B–D 走，`scripts/rp2350/pio_accept.py`
 一条命令跑完；详细记录在 `docs/HISTORY.md` §32 / §43。
 
-- **`rp2350`（ARM）17/17、`rp2350rvsmp`（RV32）17/17**（2026-11-15）；
-- **`rp2040` 17/17**（2026-11-17），日志 `build/pio-rp2040-deepfix-1117.log`；
+- **`atk-dnr2350am`（ARM）17/17、`atk-dnr2350am-rv32-smp`（RV32）17/17**（2026-11-15）；
+- **`rpi-pico` 17/17**（2026-11-17），日志 `build/pio-rp2040-deepfix-1117.log`；
   GP25 板载 LED 目视约 2 Hz；WS2812 因没有灯带，视觉项仍未验；
 - `loopback.pio`：`pio asm` → `start` → `tx 0 0 1 0 1 1` → `rx 0 0 4`，读回
   `80000000 00000000 80000000 80000000`——一位的 `in pins` 落在 ISR 的 bit31

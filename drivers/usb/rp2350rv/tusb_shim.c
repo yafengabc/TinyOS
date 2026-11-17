@@ -46,7 +46,7 @@ void irq_set_enabled(uint num, bool enabled)
     (void)enabled;
     /* USB runs in IRQ mode since TOS_RV_USB_IRQ=1: the trap handler's
      * plat_irq_foreign() hands line 14 to usb_cdc_irq_task() (see
-     * board/rp2350rv/platform.c).  The controller's INTE register is still
+     * board/rp2350rv-generic/platform.c).  The controller's INTE register is still
      * programmed by dcd_init(); usb_hw->ints is the polled fallback's
      * liveness probe. */
 }

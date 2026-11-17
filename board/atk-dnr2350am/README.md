@@ -1,4 +1,4 @@
-# RP2350 / Pico 2 / ATK-DNRP2350AM（`-target rp2350` / `rp2350smp`）
+# RP2350 / Pico 2 / ATK-DNRP2350AM（`-target atk-dnr2350am` / `atk-dnr2350am-smp`）
 
 Cortex-M33（ARMv8-M Secure）真机目标，也是目前功能最完整的一块板：USB CDC 与
 UART0 双控制台、ST7789 屏做控制台镜像、MPU 真正隔离任务、flash 上的 littlefs 可写。
@@ -7,11 +7,11 @@ UART0 双控制台、ST7789 屏做控制台镜像、MPU 真正隔离任务、fla
 
 | 项 | 值 |
 | --- | --- |
-| CPU | 双 Cortex-M33（ARMv8-M，Secure 态），PLL_SYS 150 MHz；`rp2350smp` 才拉 core 1 |
+| CPU | 双 Cortex-M33（ARMv8-M，Secure 态），PLL_SYS 150 MHz；`atk-dnr2350am-smp` 才拉 core 1 |
 | SRAM | 520 KiB @ `0x20000000`：前 128 KiB 内核，其后 384 KiB = 24 个 16 KiB 窗口 |
 | Flash | 4 MiB QSPI（W25Q32，实测确认），XIP @ `0x10000000` |
 | 启动 | ROM 自己配 XIP，扫前 4 KiB 找 **PICOBIN IMAGE_DEF**（`board/atk-dnr2350am/image_def.S`），从 flash 偏移 0 的向量表取 MSP/PC |
-| UF2 | family `0xe48bff59`（ARM Secure EXE），产物 `build/rp2350.uf2` |
+| UF2 | family `0xe48bff59`（ARM Secure EXE），产物 `build/tinyos-atk-dnr2350am.uf2` |
 | 文件系统 | littlefs @ flash `0x80000`，首挂载从 300 KiB 拉伸到 3.5 MiB |
 | 任务窗口 | 16 KiB 粒度，栈 8 KiB、护栏 4 KiB |
 | 内存保护 | **有**：PMSAv8 MPU（`TOS_ARM_MPU_V8`）：代码 RO+X、数据+堆 RW、栈 RW、栈下护栏；第一次任务切换时打开 |
@@ -23,10 +23,10 @@ UART0 双控制台、ST7789 屏做控制台镜像、MPU 真正隔离任务、fla
 ## 构建与烧写
 
 ```bash
-go run ./cmd/tos build -target rp2350
-# -> build/kernel-rp2350.elf, build/ramdisk-rp2350.bin, build/rp2350.uf2
+go run ./cmd/tos build -target atk-dnr2350am
+# -> build/kernel-atk-dnr2350am.elf, build/tinyos-ramdisk-atk-dnr2350am.bin, build/tinyos-atk-dnr2350am.uf2
 
-go run ./cmd/tos build -target rp2350smp    # 双核
+go run ./cmd/tos build -target atk-dnr2350am-smp    # 双核
 ```
 
 烧写入口是 mask ROM 的 **BOOTSEL 盘**（`2e8a:000f`），没有 UART 下载协议：
@@ -65,9 +65,9 @@ echo hello > /dev/lcd0
 `main`）：
 
 ```bash
-go run ./cmd/tos build -config configs/rp2350smp-kthreads.conf    # Cortex-M33 x2
-go run ./cmd/tos build -config configs/rp2350rvsmp-kthreads.conf  # Hazard3 x2
-python scripts/rp2350/flash.py --uf2 build/rp2350smp.uf2 --smoke  # 或 ...rvsmp.uf2
+go run ./cmd/tos build -config configs/atk-dnr2350am-smp-kthreads.conf    # Cortex-M33 x2
+go run ./cmd/tos build -config configs/atk-dnr2350am-rv32-smp-kthreads.conf  # Hazard3 x2
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --smoke  # 或 ...-rv32-smp.uf2
 ```
 
 ```sh
@@ -90,7 +90,7 @@ ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 
 | USB CDC + UART0 双控制台 | ✅ 实机 | `help` 3 KB、管道输出完整 |
 | littlefs on flash（ROM flash API + ramfunc） | ✅ 实机 | `dd` 写 4 KiB、读回、pattern 校验 |
 | PMSAv8 MPU 每任务四区域 | ✅ 实机 | `prot rodata/heap/stack/null` 四条全部当场拦下 |
-| 双核 SMP（`rp2350smp`） | ✅ 实机 | SIO FIFO 握手、per-core 内核栈、`smpbench` 1.89–2.01x |
+| 双核 SMP（`atk-dnr2350am-smp`） | ✅ 实机 | SIO FIFO 握手、per-core 内核栈、`smpbench` 1.89–2.01x |
 | ST7789 屏 / 按键 / LED / `/proc/dev` | ✅ 实机 | 屏是控制台镜像 |
 | PIO（3 块 / 12 个 SM + 用户态汇编器） | ✅ 实机 | 回环四字往返、`blink3` 装入、`ws2812` 编码核对：`pio_accept.py` 17/17（见 `docs/PIO.md`） |
 | 线程、邮箱、`poll`、管道、`py`、CoreMark | ✅ | 与其它目标同源 |
@@ -108,7 +108,7 @@ ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 
   「跟时钟有关」。`plat_block_erase/write` 现在走 `flash_enable_xip_via_boot2`。
 - 512 KiB 里 128 KiB 固定给内核；屏的 DMA 行缓冲（~3.8 KiB）也在内核 `.bss`。
 - littlefs 分区从 `0x80000` 到 flash 末尾，内核必须留在前 512 KiB。
-- `rp2350` / `rp2350smp` 的堆仍是 60 KiB（历史上按"exec 同时持有压缩+解压缓冲"定的），
+- `atk-dnr2350am` / `atk-dnr2350am-smp` 的堆仍是 60 KiB（历史上按"exec 同时持有压缩+解压缓冲"定的），
   现在 exec 是流式的，可以再压，但还没有实测数据支撑。
 - `prot` 在这里是真保护，别在产线上乱跑。
 

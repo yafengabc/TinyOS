@@ -3,7 +3,7 @@
 
 The RP2350's mask ROM is the bootloader: hold BOOTSEL while plugging the USB
 data cable (or press BOOTSEL + RESET) and it mounts a small FAT volume named
-"RP2350" (older ROMs call it "RPI-RP2").  Dropping build/rp2350.uf2 onto that
+"RP2350" (older ROMs call it "RPI-RP2").  Dropping build/tinyos-atk-dnr2350am.uf2 onto that
 volume writes the flash and reboots.
 
 TinyOS exposes TWO consoles at once: its own USB CDC-ACM COM port (2e8a:000a,
@@ -486,7 +486,7 @@ def main():
 
     if not args.no_flash:
         if not os.path.isfile(args.uf2):
-            print(f"missing {args.uf2}; run: go run ./cmd/tos build -target rp2350",
+            print(f"missing {args.uf2}; run: go run ./cmd/tos build -target atk-dnr2350am",
                   file=sys.stderr)
             return 2
         root = wait_drive(args.timeout, tick)

@@ -38,7 +38,7 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 /* littlefs starts 512 KiB into the flash (the same offset as the ESP32-C3
  * and RP2350, see rpLfsOffset in internal/build/uf2.go) and runs to the end
  * of the chip.  How big the chip is and where the partition starts are board
- * facts now, written down in board/rp2040/board.conf: a 2 MiB part gives the
+ * facts now, written down in board/rpi-pico/board.conf: a 2 MiB part gives the
  * 1.5 MiB / 384-block partition this port was calibrated on, and a board with
  * a different flash part only changes the conf.  The flashed image is still
  * 300 KiB; ramdisk_init() grows the mounted filesystem over the rest.
@@ -48,7 +48,7 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 const uint32_t PLAT_LFS_LBA = TOS_LFS_OFFSET / 512u;
 const uint32_t PLAT_LFS_BLOCKS = TOS_LFS_BLOCKS;
 
-/* One CPU by default; the rp2040smp target builds with TOS_MAX_CPUS=2 and
+/* One CPU by default; the rpi-pico-smp target builds with TOS_MAX_CPUS=2 and
  * start.S brings the second core up from the ROM's FIFO wait loop (the
  * board's plat_start_cpu). */
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1

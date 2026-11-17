@@ -59,16 +59,16 @@ CH343 的 DTR/RTS 没接 BOOTSEL/RESET，**打开串口不会复位板子**，�
 ### 1.1 构建与烧写
 
 ```sh
-go run ./cmd/tos build -config configs/rp2040.conf
-# -> build/kernel-rp2040.elf, build/rp2040.uf2 (约 2.2 MiB)
+go run ./cmd/tos build -config configs/rpi-pico.conf
+# -> build/kernel-rp2040.elf, build/tinyos-rpi-pico.uf2 (约 2.2 MiB)
 
-python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2     # 按住 BOOTSEL 上电
+python scripts/rp2040/autoflash.py --uf2 build/tinyos-rpi-pico.uf2     # 按住 BOOTSEL 上电
 ```
 
 `autoflash.py` 只扫盘符（Windows 专用）。Linux 上手动：
 
 ```sh
-cp build/rp2040.uf2 /media/$USER/RPI-RP2/ && sync
+cp build/tinyos-rpi-pico.uf2 /media/$USER/RPI-RP2/ && sync
 ```
 
 ### 1.2 关卡 A：镜像自检
@@ -182,11 +182,11 @@ ls /ddfile              # 重启后还在 -> flash 写/擦路径可信
 如果 `/ddfile` 重启后不见了，说明写还在 RAM 层或擦除路径有问题，把 `dd` 和 `ls`
 的输出都贴回来。
 
-### 1.7 关卡 F：`rp2040smp`
+### 1.7 关卡 F：`rpi-pico-smp`
 
 ```sh
-go run ./cmd/tos build -target rp2040smp
-python scripts/rp2040/autoflash.py --uf2 build/rp2040smp.uf2
+go run ./cmd/tos build -target rpi-pico-smp
+python scripts/rp2040/autoflash.py --uf2 build/tinyos-rpi-pico-smp.uf2
 ```
 
 ```
@@ -208,7 +208,7 @@ RP2350 的大部分功能已经是 ✅ 实机（USB CDC + UART0 双控制台、l
 ### 2.1 构建与烧写
 
 ```sh
-go run ./cmd/tos build -target rp2350
+go run ./cmd/tos build -target atk-dnr2350am
 python scripts/rp2350/flash.py --smoke
 ```
 
@@ -218,11 +218,11 @@ BOOTSEL + RESET）出现 `RP2350` 盘时脚本会自动拷贝。
 
 `python scripts/rp2350/flash.py --list` 可以先看串口和盘符。
 
-### 2.2 关卡 G：SMP 回归（`rp2350smp`，已有基线）
+### 2.2 关卡 G：SMP 回归（`atk-dnr2350am-smp`，已有基线）
 
 ```sh
-go run ./cmd/tos build -target rp2350smp
-python scripts/rp2350/flash.py --uf2 build/rp2350smp.uf2 --smoke
+go run ./cmd/tos build -target atk-dnr2350am-smp
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --smoke
 ```
 
 ```
@@ -236,18 +236,18 @@ smpbench
 同一条链路在 RISC-V 核上也验一遍：
 
 ```sh
-go run ./cmd/tos build -target rp2350rvsmp
-python scripts/rp2350/flash.py --uf2 build/rp2350rvsmp.uf2 --smoke
+go run ./cmd/tos build -target atk-dnr2350am-rv32-smp
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-rv32-smp.uf2 --smoke
 ```
 
 ### 2.3 关卡 H：内核线程 + SMP（重点，从未上过真机）
 
-`configs/rp2350smp-kthreads.conf`（Cortex-M33 ×2）和
-`configs/rp2350rvsmp-kthreads.conf`（Hazard3 ×2）目前**只构建过**。
+`configs/atk-dnr2350am-smp-kthreads.conf`（Cortex-M33 ×2）和
+`configs/atk-dnr2350am-rv32-smp-kthreads.conf`（Hazard3 ×2）目前**只构建过**。
 
 ```sh
-go run ./cmd/tos build -config configs/rp2350smp-kthreads.conf
-python scripts/rp2350/flash.py --uf2 build/rp2350smp.uf2 --smoke
+go run ./cmd/tos build -config configs/atk-dnr2350am-smp-kthreads.conf
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --smoke
 ```
 
 ```
@@ -266,8 +266,8 @@ prodcons        # 期望校验和一致，无阻塞卡死
 然后同样跑一遍 RISC-V 双核：
 
 ```sh
-go run ./cmd/tos build -config configs/rp2350rvsmp-kthreads.conf
-python scripts/rp2350/flash.py --uf2 build/rp2350rvsmp.uf2 --smoke
+go run ./cmd/tos build -config configs/atk-dnr2350am-rv32-smp-kthreads.conf
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-rv32-smp.uf2 --smoke
 ```
 
 ### 2.4 关卡 I：板载件（只看一眼，均已实机通过）
@@ -298,7 +298,7 @@ ls /x /y
 ```
 
 **PASS**：两次 `dd` 都成功，`reboot` 之后还能回到 `tos>`，`/x`、`/y` 都在。
-`rp2350`、`rp2350smp`、`rp2350rv`、`rp2350rvsmp` 四个镜像都要过。
+`atk-dnr2350am`、`atk-dnr2350am-smp`、`atk-dnr2350am-rv32`、`atk-dnr2350am-rv32-smp` 四个镜像都要过。
 
 ### 2.6 关于 PIO
 

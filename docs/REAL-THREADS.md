@@ -129,7 +129,7 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
   （先写 `regs_t.r0`，再写硬件异常帧 `hw[0]`）。M 核会把 32 B 硬件帧压在初始 sp
   之下，所以线程的启动记录（fn/arg）放在**堆里**而不是栈顶——第一版放在栈顶，
   正好覆盖 lr/pc/xpsr，线程一跳就 MemManage。QEMU mps2（Cortex-M3）17/17 通过；
-  `rp2350smp` / `rp2350rvsmp` 已构建，真机待测。
+  `atk-dnr2350am-smp` / `atk-dnr2350am-rv32-smp` 已构建，真机待测。
 - **已知简化**：线程栈不参与爆栈自动翻倍（栈在堆里，没有窗口顶部那段护栏）；
   `ps` 里线程是独立 pid，但 `ppid` 就是组长，能看出分组；线程槽仍然带着一份自己
   用不到的 `fds[12]`（432 B）——进程表是静态数组，拆表只能省表项、省不了 .bss。
@@ -208,7 +208,7 @@ kthreadtest: all ok (0 failure(s))
 被回收、槽和窗口都没有泄漏。C3 的 6 槽 = 8 个进程槽 − shell − 被测程序。
 
 ARM（QEMU mps2-an385，Cortex-M3）同一套检查 17/17 通过，`prodcons` 53 ms；
-`rp2350smp` / `rp2350rvsmp` 已构建，等真机。
+`atk-dnr2350am-smp` / `atk-dnr2350am-rv32-smp` 已构建，等真机。
 
 ## 4.8 阻塞并发 demo（`prodcons`）
 
@@ -224,7 +224,7 @@ prodcons: all bytes delivered, both threads blocked and woke
 单核上这个数字不是吞吐纪录，而是**语义证明**：生产者和消费者互相唤醒、一个阻塞
 不影响另一个，校验和一致说明没有丢/重字节。`rv32smp`（QEMU，2 hart）上同一程序
 也能通过；`threadbench` 在 2 hart 上是 3 线程 4.9 s vs 单线程 36 s，但 QEMU 的
-TCG 单核基线本身受双 vCPU 影响，这个比例不可当真——真实并行数字等 `rp2350rvsmp`。
+TCG 单核基线本身受双 vCPU 影响，这个比例不可当真——真实并行数字等 `atk-dnr2350am-rv32-smp`。
 
 ## 5. 阶段计划
 
@@ -234,7 +234,7 @@ TCG 单核基线本身受双 vCPU 影响，这个比例不可当真——真实�
 - **P2（进行中）**：fd 表已共享、信号已按组、SMP 锁已加；剩下 `exec` 按 POSIX
   杀掉兄弟线程、可选的 `ps` tgid 列，以及阻塞 I/O 与 `close()` 的引用计数。
 - **P3（已完成）**：C3 与 QEMU mps2（Cortex-M3）实测；RP2350 的两个双核目标
-  （`rp2350smp` Cortex-M33、`rp2350rvsmp` Hazard3）已构建，真机待测。
+  （`atk-dnr2350am-smp` Cortex-M33、`atk-dnr2350am-rv32-smp` Hazard3）已构建，真机待测。
 - **P4**：决策——保留协作线程库（零内核成本）还是用真线程替换 `thread_*` API。
 
 ## 6. 必须提前想清楚的坑

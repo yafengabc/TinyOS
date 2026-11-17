@@ -34,8 +34,8 @@ from pathlib import Path
 import serial
 
 ROOT = Path(__file__).resolve().parents[2]
-KERNEL = ROOT / "build" / "esp32c3.bin"
-FS = ROOT / "build" / "ramdisk-esp32c3.bin"
+KERNEL = ROOT / "build" / "tinyos-esp32c3.bin"
+FS = ROOT / "build" / "tinyos-ramdisk-esp32c3.bin"
 FULL = ROOT / "build" / "esp32c3-full.bin"     # kernel padded to FS_OFFSET + fs
 FS_OFFSET = 0x80000
 
@@ -53,7 +53,7 @@ def main():
     ap.add_argument("--build", action="store_true", help="run 'tos build -target esp32c3' first")
     ap.add_argument("--keep-fs", action="store_true", help="do not rewrite the littlefs image")
     ap.add_argument("--full", action="store_true",
-                    help="flash build/esp32c3-full.bin at 0x0 (kernel + fs in one"
+                    help="flash build/tinyos-esp32c3-full.bin at 0x0 (kernel + fs in one"
                          " write, the way MicroPython ships); the split pair stays"
                          " the default")
     ap.add_argument("--wait", type=float, default=20.0, help="seconds to wait for the prompt")

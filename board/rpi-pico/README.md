@@ -1,4 +1,4 @@
-# Raspberry Pi Pico / RP2040（`-target rp2040` / `rp2040smp`）
+# Raspberry Pi Pico / RP2040（`-target rpi-pico` / `rpi-pico-smp`）
 
 Cortex-M0+（ARMv6-M）真机目标。内核 XIP 在 flash 里原地跑，文件系统在 QSPI flash
 上，控制台目前以 UART0 为主、USB CDC 同步在接。
@@ -7,14 +7,14 @@ Cortex-M0+（ARMv6-M）真机目标。内核 XIP 在 flash 里原地跑，文件
 
 | 项 | 值 |
 | --- | --- |
-| CPU | 双 Cortex-M0+，125 MHz（PLL_SYS）；`rp2040smp` 才拉起 core 1 |
+| CPU | 双 Cortex-M0+，125 MHz（PLL_SYS）；`rpi-pico-smp` 才拉起 core 1 |
 | SRAM | 264 KiB @ `0x20000000`，内核栈在顶部 |
 | Flash | 2 MiB QSPI，XIP 映射在 `0x10000000` |
-| 启动 | ROM 把 256 B stage-2（`board/rp2040/boot2.bin`）搬进 SRAM 并校验 CRC-32/MPEG-2；stage-2 配好 XIP 后跳到 `0x10000100` 取 MSP/reset；VTOR 由我们自己设 |
-| UF2 | family `0xe48bff56`，产物 `build/rp2040.uf2` |
+| 启动 | ROM 把 256 B stage-2（`board/rpi-pico/boot2.bin`）搬进 SRAM 并校验 CRC-32/MPEG-2；stage-2 配好 XIP 后跳到 `0x10000100` 取 MSP/reset；VTOR 由我们自己设 |
+| UF2 | family `0xe48bff56`，产物 `build/tinyos-rpi-pico.uf2` |
 | 文件系统 | littlefs @ flash `0x80000`，1.5 MiB（384 块）；随镜像发布 300 KiB，首挂载拉伸 |
 | 任务窗口 | 16 KiB 粒度，默认栈 8 KiB、栈下护栏 4 KiB |
-| 内核堆 / 进程表 / 内核栈 | 16 KiB / 8 槽 / 8 KiB（`configs/rp2040.conf` 可改） |
+| 内核堆 / 进程表 / 内核栈 | 16 KiB / 8 槽 / 8 KiB（`configs/rpi-pico.conf` 可改） |
 | 内存保护 | **没有**（M0+ 无 MPU/MMU），只有非特权态，`prot` 默认不打包 |
 
 时钟：ROM 交接时 clk_sys 在 ROSC 上（~5 MHz），`clocks_init()` 打开 XOSC、把
@@ -24,33 +24,33 @@ clk_ref 切到晶振、再把 clk_sys 切到 PLL_SYS 125 MHz；UART 分频、Sys
 ## 构建
 
 ```bash
-go run ./cmd/tos build -target rp2040
+go run ./cmd/tos build -target rpi-pico
 # -> build/kernel-rp2040.elf
-# -> build/ramdisk-rp2040.bin
-# -> build/rp2040.uf2
+# -> build/tinyos-ramdisk-rpi-pico.bin
+# -> build/tinyos-rpi-pico.uf2
 
-go run ./cmd/tos build -target rp2040smp   # 双核，其余相同
+go run ./cmd/tos build -target rpi-pico-smp   # 双核，其余相同
 ```
 
 默认打开 `pwm/uart1/spi/i2c/dma` 五个外设特性；用 menuconfig 或配置文件关掉任意
 一个，驱动代码和对应命令一起不编译：
 
 ```bash
-go run ./cmd/tos menuconfig -config configs/rp2040.conf
+go run ./cmd/tos menuconfig -config configs/rpi-pico.conf
 ```
 
-`configs/rp2040.conf` 额外排除了 WiFi/网络命令和 `prot`。
+`configs/rpi-pico.conf` 额外排除了 WiFi/网络命令和 `prot`。
 
 ## 烧写与看日志
 
 1. 拔掉 USB，按住 **BOOTSEL** 再插上（或按住 BOOTSEL 点 RESET），出现 `RPI-RP2` 盘。
-2. 把 `build/rp2040.uf2` 拖到盘上，板子自动重启。
+2. 把 `build/tinyos-rpi-pico.uf2` 拖到盘上，板子自动重启。
 
 一块板反复烧的时候用 watcher，按一次键完成"烧写 + 打开串口 + 抓启动日志"：
 
 ```bash
-python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2          # 一次性
-python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2 --watch  # 常驻，之后每次按键都烧
+python scripts/rp2040/autoflash.py --uf2 build/tinyos-rpi-pico.uf2          # 一次性
+python scripts/rp2040/autoflash.py --uf2 build/tinyos-rpi-pico.uf2 --watch  # 常驻，之后每次按键都烧
 python scripts/rp2040/autoflash.py --uf2 a.uf2 --uf2 b.uf2 --watch # 队列：每次烧下一张
 ```
 
@@ -74,7 +74,7 @@ workaround 开/关）、Ctrl-B（直接测 ROM 调用）。
 
 ## 外设与用户命令
 
-`board/rp2040/board_devs.c` 是这块板的"设备树"（30 GPIO、UART0/1、SPI0/1、
+`board/rpi-pico/board_devs.c` 是这块板的"设备树"（30 GPIO、UART0/1、SPI0/1、
 I2C0/1、ADC0..3 + 片内温度 ADC4、16 通道 PWM、两个 PIO、12 通道 DMA、USB 1.1、
 2 MiB QSPI）。`cat /proc/dev` 看整张表。
 
@@ -109,8 +109,8 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 | littlefs @ flash 0x80000（ROM flash API） | ✅ 实机 | 挂载、32 KiB 写入/读回、`reboot` 后持久化、100 轮 `dd`+`rm` 均通过 |
 | USB CDC（TinyUSB，IRQ 5） | ✅ 实机 | COM17 `2e8a:000a` 枚举并可交互（2026-11-17）；UART0 = COM19 同时可用。已按 erratum RP2040-E15 做 forced-J，Ctrl-E/W 可 A/B；Ctrl-D 在本板是**故意禁用**的（ROM 的 `reset_usb_boot()` 不可靠，用 BOOTSEL 按钮） |
 | PWM / UART1 / SPI0-1 / I2C0-1 / DMA | ◐ | 驱动 + 用户命令已接，menuconfig 可裁；实机覆盖以自测为准 |
-| PIO（2 块 / 8 个 SM + 用户态汇编器） | ✅ 实机 | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；RP2040 `pio_accept.py --image rp2040` **17/17**（2026-11-17），GP25 `blink` 目视约 2 Hz；WS2812 因无灯带只验了字表/装入。清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
-| `rp2040smp`（core 1） | ✅ 实机 | `cpus=2`；`smpbench` **2.04x**；`smp -s 2 400` / `smp -t 4 2 300` 双核均衡；`piperace 2 64`、100 轮 `dd`+`rm`、heartbeat 6/6（UART 与 USB CDC）通过 |
+| PIO（2 块 / 8 个 SM + 用户态汇编器） | ✅ 实机 | HAL + `SYS_PIO` + `pio asm/start/tx/rx/rel/regs/exec`；RP2040 `pio_accept.py --image rpi-pico` **17/17**（2026-11-17），GP25 `blink` 目视约 2 Hz；WS2812 因无灯带只验了字表/装入。清 FIFO 的 `FJOIN_RX` 位在这块板上是 bit 14（RP2350 是 bit 31） |
+| `rpi-pico-smp`（core 1） | ✅ 实机 | `cpus=2`；`smpbench` **2.04x**；`smp -s 2 400` / `smp -t 4 2 300` 双核均衡；`piperace 2 64`、100 轮 `dd`+`rm`、heartbeat 6/6（UART 与 USB CDC）通过 |
 | BOOTSEL 回退（Ctrl-D） | ◐ | ROM 调用路径已实现，含看门狗 scratch 标记 |
 | 内存保护 | ☐ | 硬件没有，`prot` 在本板会真的写穿；默认不打包 |
 | `reboot`（watchdog + PSM_WDSEL） | ✅ 实机 | 2026-11-17 `dd` 32 KiB 后 `reboot`，文件仍可读、USB CDC/串口重新枚举；不是 AIRCR.SYSRESETREQ |
@@ -122,7 +122,7 @@ ABI、生命周期（进程退出自动停 SM 并交回引脚；重启会丢失�
 
 1. 烧 `build/rp2040-blink.uf2`（432 B，不碰 USB/UART/littlefs）：GP0 闪 → boot2/向量/
    链接都对，问题在 OS；不闪 → 先查镜像层，别往下看；
-2. 烧 `build/rp2040.uf2`：启动本身已经确认过。看启动探针确认走完全程
+2. 烧 `build/tinyos-rpi-pico.uf2`：启动本身已经确认过。看启动探针确认走完全程
    （`[A]`..`[E]` 都在），再按 §30.3 的表量窗口数字——`ps` 里 msh 与 `sleep` 这类
    任务的 `wink` 应为 **16 KiB**（原来是 24/32），并发窗口数应明显变多；
 3. 文件系统：这一版 `PLAT_LFS_BLOCKS = 384`（1.5 MiB）而映像只有 600 KiB，所以
@@ -149,8 +149,8 @@ python scripts/rp2040-blink/build.py \
 
 ## 相关文件
 
-- `board/rp2040/{platform.c,layout.c,kernel.ld,arm_memmap.h,boot2.bin,board_devs.c}`
-- `board/rp2040/{uart_dbg.c,uart1.c,spi.c,i2c.c,dma.c}`：外设与调试串口
+- `board/rpi-pico/{platform.c,layout.c,kernel.ld,arm_memmap.h,boot2.bin,board_devs.c}`
+- `board/rpi-pico/{uart_dbg.c,uart1.c,spi.c,i2c.c,dma.c}`：外设与调试串口
 - `drivers/usb/rp2040/`：TinyUSB 设备栈与 CDC-ACM
 - `drivers/gpio/rp2040/`：GPIO/ADC
 - `internal/build/uf2.go`：`emitRP2040UF2()`、boot2 CRC、布局校验

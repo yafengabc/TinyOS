@@ -58,7 +58,7 @@ def uptime_seconds(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-p", "--port", required=True)
-    ap.add_argument("--target", default="rp2040",
+    ap.add_argument("--target", default="rpi-pico",
                     help="recorded in the report; the script itself is board-agnostic")
     ap.add_argument("--dtr", action="store_true", help="assert DTR (USB CDC console)")
     args = ap.parse_args()

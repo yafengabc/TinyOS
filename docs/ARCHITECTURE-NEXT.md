@@ -108,7 +108,7 @@ LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错
 | B-6 bounce buffer | 所有读经 4 KiB bounce | **已修**（`fea309f`） | 存储路径的性能基线已变，回归时注意 |
 | CI Go 检查 | 无 `go test`/`go vet` | **已加**（`82a3c53`） | C1/C2 的验收可进 CI |
 | goc32 | 未初始化 | **已初始化/自包含**（子模块 `7a17826`），feature 宏从 `build-config-<target>.txt` 导入 | C2 的黄金向量可做；生成表需保留快照 |
-| Pico 2 | 未记录 | **`OPEN-ITEMS.md` §1b**：`rp2350smp` 早期 HardFault（`PC=0xeffffffe`），MicroPython 正常 | C1 必须支持同芯片 variant；`board/rp2350` 不能假设 ATK 的 LED/LCD/4MiB |
+| Pico 2 | 未记录 | **`OPEN-ITEMS.md` §1b**：`atk-dnr2350am-smp` 早期 HardFault（`PC=0xeffffffe`），MicroPython 正常 | C1 必须支持同芯片 variant；`board/rp2350` 不能假设 ATK 的 LED/LCD/4MiB |
 | `-target`/conf 冲突 | 静默套用 features | **仍存在**（`ApplyConfig()` 只在命令行未选 target 时读 conf target） | **C1 第一个要做的** |
 | flash park | 三块板各一套 | **已收敛**：状态、握手顺序与进入/退出序列都在 `rp_park.h`（B-2a/B-2b） | C3 |
 | ABI 布局 | `stat/meminfo/...` 只在 `user/lib.h` | 仍如此 | C2 |
@@ -211,8 +211,8 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - `ApplyConfig()` 在套用 conf features/drivers 前校验目标能力；不相容直接报错。
 - 能力校验的覆盖范围要说清楚：`featurePeripheral()` 目前只映射 `wifi`/`pio`/`lcd`；
   其余 feature 暂时静默通过，A-1 的注释里写明，或改成按 `peripherals` 反推。
-- `chip=` 的校验用 `boardChips` 策略表（board → 允许的物理 chip 集合）：`rp2350rv`
-  与 `rp2350` 共用 rp2350 的两种 ISA，其余一对一；不匹配在 `LoadBoardConfig` 构建期报错，
+- `chip=` 的校验用 `boardChips` 策略表（board → 允许的物理 chip 集合）：`atk-dnr2350am-rv32`
+  与 `atk-dnr2350am` 共用 rp2350 的两种 ISA，其余一对一；不匹配在 `LoadBoardConfig` 构建期报错，
   不再有"能构建但起不来"的镜像（`HISTORY` §56）。
 - `WindowGeometry()` 从 `board.conf` 派生（`applyBoard()` 写回 Target），`geometry_test`
   遍历所有 `board/*/layout.c`，新增板只改 conf + layout.c 即自动纳入三方一致检查。
@@ -252,7 +252,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - **tick 就绪后**：跨硬件/跨核的等待用 `deadline = plat_ticks() + ms_to_ticks(ms)`，
   超时返回 `-ETIMEDOUT`（或驱动约定的错误）。
 - **tick 就绪前**（XOSC/PLL/clock mux/UART FIFO 等早期初始化）：保留迭代上限，但必须
-  按 `plat_cpu_hz()` 或板级常量折算，并注明 `pre-tick`；不得直接抄 `1e6`。`board/rp2040`
+  按 `plat_cpu_hz()` 或板级常量折算，并注明 `pre-tick`；不得直接抄 `1e6`。`board/rpi-pico`
   的 `(g_cpu_hz / 3000u) * 200u` 是现成先例；`board/rp2350rv-generic` 的 1e6 循环就是待折算样本。
 - 超时是**上限**，不是延时替代：正常路径仍轮询状态位，不得为了"有超时"改成 sleep 固定
   毫秒。
@@ -318,7 +318,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 
 **B-1a 已落地（2026-11-17）**：`UserExclude` 的"硬件不存在"列表已从 `Targets`
 移到 `board.conf [user] exclude`（`prot` 只在 RP2040 上排除；WiFi 程序在四块 RP 板上
-排除）；`configs` 的排除仍是可逆的"本镜像不带"。改前/改后用 `configs/rp2040.conf`
+排除）；`configs` 的排除仍是可逆的"本镜像不带"。改前/改后用 `configs/rpi-pico.conf`
 构建的 ramdisk 字节相同（HISTORY §47）。剩余：chip/arch/驱动列表/镜像默认值仍在 Go，
 B-1b 处理。
 

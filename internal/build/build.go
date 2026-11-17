@@ -43,7 +43,11 @@ const (
 // the build defaults (heap/procs/kstack).  A field that is both board truth
 // and image policy belongs to configs, not here.
 type Target struct {
-	Name    string // "x86", "rv32" or "esp32c3"
+	Name string // "atk-dnr2350am-smp", "rpi-pico2", "rv32"
+	// Aliases are the old names this image answered to before it was named
+	// after its board.  `-target` accepts them; the output keeps the
+	// canonical name, so build/tinyos-atk-dnr2350am-smp.uf2 is the only artifact.
+	Aliases []string
 	Arch    string // arch subdirectory
 	Board   string // board subdirectory
 	Triple  string // clang target triple
@@ -1123,7 +1127,7 @@ func (b *Builder) buildKernel() error {
 	}
 
 	// Targets without a disk carry the filesystem inside the kernel image:
-	// a generated assembly file .incbin's build/ramdisk.bin into a writable
+	// a generated assembly file .incbin's build/tinyos-ramdisk-<target>.bin into a writable
 	// section, which plat_block_* then serves as a RAM disk.  The esp32c3
 	// target reads the partition from flash instead (board/esp32c3).
 	if b.Target.FSBacking == "embedded" {
@@ -1221,7 +1225,7 @@ func (b *Builder) buildKernel() error {
 				if err != nil {
 					return err
 				}
-				out := filepath.Join(b.BuildDir, "esp32c3.bin")
+				out := filepath.Join(b.BuildDir, "tinyos-esp32c3.bin")
 				if err := os.WriteFile(out, img, 0o644); err != nil {
 					return err
 				}
@@ -1246,7 +1250,7 @@ func (b *Builder) buildKernel() error {
 				}
 				copy(full, img)
 				copy(full[fsOff:], fs)
-				fullPath := filepath.Join(b.BuildDir, "esp32c3-full.bin")
+				fullPath := filepath.Join(b.BuildDir, "tinyos-esp32c3-full.bin")
 				if err := os.WriteFile(fullPath, full, 0o644); err != nil {
 					return err
 				}
@@ -1313,14 +1317,14 @@ func (b *Builder) buildKernel() error {
 //
 // The name carries the target because every target packs its own user
 // programs into it, and a single shared name made the last build win:
-// build rv32 then rp2040 and build/ramdisk.bin holds ARM programs, so
+// build rv32 then rp2040 and build/tinyos-ramdisk-<target>.bin holds ARM programs, so
 // flashing an esp32c3 kernel beside it gives a board that lists 14 files and
 // then rejects every one of them ("not a valid ELF32 program") with nothing
 // on screen to say the filesystem is somebody else's.
 func (b *Builder) fsImage() string {
 	name := "ramdisk.bin"
 	if b.Target.Name != "" {
-		name = "ramdisk-" + b.Target.Name + ".bin"
+		name = "tinyos-ramdisk-" + b.Target.Name + ".bin"
 	}
 	return filepath.Join(b.BuildDir, name)
 }

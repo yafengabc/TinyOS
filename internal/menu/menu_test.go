@@ -89,7 +89,7 @@ func TestTargetGuards(t *testing.T) {
 	if !st.WiFi() || !st.Net() {
 		t.Fatal("wifi/net did not enable on esp32c3")
 	}
-	st.SetTarget("rp2040")
+	st.SetTarget("rpi-pico")
 	if st.WiFi() || st.Net() {
 		t.Fatal("wifi/net survived a target change")
 	}
@@ -136,21 +136,21 @@ func TestSubmenus(t *testing.T) {
 	a := &app{st: st, progs: []string{"hello"}}
 	a.stack = []page{a.mainPage()}
 
-	/* Target submenu: pick rp2350. */
+	/* Target submenu: pick atk-dnr2350am. */
 	a.push(a.targetPage())
 	found := false
 	for i, r := range a.curPage().rows {
-		if r.label == "rp2350" {
+		if r.label == "atk-dnr2350am" {
 			a.cur = i
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatal("rp2350 missing from the target list")
+		t.Fatal("atk-dnr2350am missing from the target list")
 	}
 	a.handle([]byte{'\r'})
-	if st.Target != "rp2350" {
+	if st.Target != "atk-dnr2350am" {
 		t.Fatalf("target = %q", st.Target)
 	}
 	if len(a.stack) != 1 {
@@ -219,7 +219,7 @@ func TestSubmenus(t *testing.T) {
 		t.Fatal("read-only switch did not change")
 	}
 
-	/* Drivers page: turn off the display driver on rp2350. */
+	/* Drivers page: turn off the display driver on atk-dnr2350am. */
 	a.push(a.driverPage())
 	found = false
 	for i, r := range a.curPage().rows {
@@ -230,7 +230,7 @@ func TestSubmenus(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("display driver missing on rp2350")
+		t.Fatal("display driver missing on atk-dnr2350am")
 	}
 	a.handle([]byte{' '})
 	if len(st.DriverExclude) == 0 {

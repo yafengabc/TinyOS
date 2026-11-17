@@ -9,7 +9,7 @@
 
 ## 1b. Pico 2 上的 TinyOS 启动失败（2026-11-16）
 
-同一块 RP2350 上换成 **Pico 2** 后，GitHub v0.3.0 发布版和本轮 `rp2350smp` 都在
+同一块 RP2350 上换成 **Pico 2** 后，GitHub v0.3.0 发布版和本轮 `atk-dnr2350am-smp` 都在
 启动早期 HardFault（`PC=0xeffffffe`），USB CDC 不枚举；官方 MicroPython Pico 2 UF2
 则能正常枚举。ATK-DNRP2350AM 上同一轮镜像通过 USB、1000 轮 `dd/rm` 和屏幕命令，
 所以这不是 USB 线材/供电问题，也不能用这次 review 的 SMP/锁补丁解释。
@@ -40,12 +40,12 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 `kernel/elf.c` 的窗口边界和 `kernel/syscall.c::do_exec` 的 `path` 缓冲已改为 per-call
 （HISTORY §44），QEMU `rv32smp` 上通过。
 
-- **rp2040smp**（2026-11-17，`7453bd6`）：10 轮双后台 `piperace 1 8 &`，
+- **rpi-pico-smp**（2026-11-17，`7453bd6`）：10 轮双后台 `piperace 1 8 &`，
   **20/20 `piperace: ok`**；10 轮 `dd`+`rm` bad=0；无 `exec failed`/panic。
-- **rp2350rvsmp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Hazard3）：10 轮并发
+- **atk-dnr2350am-rv32-smp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Hazard3）：10 轮并发
   exec **20/20 ok**；10 轮 `dd`+`rm` bad=0；heartbeat UART/USB 6/6；
   `smpbench` 2.00x。
-- **rp2350smp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Cortex-M33）：UART0 上
+- **atk-dnr2350am-smp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Cortex-M33）：UART0 上
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
 

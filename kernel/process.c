@@ -69,7 +69,7 @@ static uint32_t stack_used(const struct proc *p);
  * is rounded up to a power of two and its base is aligned to that size, so
  * one NAPOT entry isolates the task from the kernel and from every other
  * task.  The cost is that the code/data/guard split inside the window is
- * not enforced there; the build defines this for rp2350rv only. */
+ * not enforced there; the build defines this for atk-dnr2350am-rv32 only. */
 
 /* Ticks a task may run before the timer takes the CPU away.  One tick at
    1000 Hz (main.c) makes a slice 1 ms.
@@ -836,7 +836,7 @@ static regs_t *sched_switch(regs_t *r)
                  * picks the same task, on this core, while the other core
                  * may be picking it too: both cores ran the same shell on two
                  * kernel stacks and the console line went to the copy that
-                 * lost (measured on rp2350rvsmp: `cur0=1 cur1=1`, the slot
+                 * lost (measured on atk-dnr2350am-rv32-smp: `cur0=1 cur1=1`, the slot
                  * stuck in WAIT_INPUT, and every command of 16+ characters
                  * silently swallowed).
                  *
@@ -981,7 +981,7 @@ void process_console_kick(void)
     /* The scan, the user-buffer write and the state change have to be one
      * critical section.  On SMP the other core can retire or reuse a slot
      * between the scan and tty_take_line(), and the stale in_buf then points
-     * into a dead task's stack - measured on rp2040smp as `sh` resuming with
+     * into a dead task's stack - measured on rpi-pico-smp as `sh` resuming with
      * its saved PC pointing at its own help string.  make_ready() cannot be
      * called here because it takes proc_lock itself; do the same three
      * stores inline. */
@@ -1031,7 +1031,7 @@ void process_tick(regs_t *r)
      * the dereference that follows used to be two separate loads, and a tick
      * that lands while the slot is being cleared (exit, kill, a task killed
      * from the other core) dereferenced NULL at current->state.  Measured on
-     * rp2040smp as a HardFault at `ldrb r0,[r0,#0x74]` in process_tick, with
+     * rpi-pico-smp as a HardFault at `ldrb r0,[r0,#0x74]` in process_tick, with
      * r0 = 0, roughly every few hundred dd/rm rounds. */
     proc_t *cur = current;
     uint64_t now;

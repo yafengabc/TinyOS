@@ -34,7 +34,7 @@ func TestRpParkUsesSharedState(t *testing.T) {
 		}
 	}
 
-	for _, board := range []string{"rp2040", "rp2350-generic", "rp2350rv-generic"} {
+	for _, board := range []string{"rpi-pico", "rp2350-generic", "rp2350rv-generic"} {
 		body, err := os.ReadFile(filepath.Join(root, "board", board, "platform.c"))
 		if err != nil {
 			t.Fatal(err)

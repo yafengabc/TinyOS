@@ -1,4 +1,4 @@
-# RP2350 Hazard3 / RISC-V（`-target rp2350rv` / `rp2350rvsmp`）
+# RP2350 Hazard3 / RISC-V（`-target atk-dnr2350am-rv32` / `atk-dnr2350am-rv32-smp`）
 
 同一块 RP2350 板子，把它切成两颗 **Hazard3 RV32IMAC** 核来跑。ARM 与 RISC-V 是
 **两张不同的镜像**：PICOBIN 的 IMAGE_TYPE 决定 ROM 从哪套入口起，不是运行时切换。
@@ -10,8 +10,8 @@
 | CPU | Hazard3 RV32IMAC（M 模式唯一），单 hart 或双 hart |
 | SRAM | 520 KiB：前 128 KiB 内核，其后 384 KiB = 24 个 16 KiB 窗口 |
 | Flash | 4 MiB QSPI，XIP @ `0x10000000`；`.data` 由 `_start` 从 LMA 拷到 SRAM |
-| 启动 | ROM 扫前 4 KiB 找 `board/atk-dnr2350am-rv32/image_def.S` 的 PICOBIN（IMAGE_TYPE `0x1101` = EXE\|CPU_RISCV\|CHIP_RP2350），只跳到 ENTRY_POINT，**不搬任何段** |
-| UF2 | family `0xe48bff5a`（RISC-V Secure EXE），产物 `build/rp2350rv.uf2` |
+| 启动 | ROM 扫前 4 KiB 找 `board/rp2350rv-generic/image_def.S` 的 PICOBIN（IMAGE_TYPE `0x1101` = EXE\|CPU_RISCV\|CHIP_RP2350），只跳到 ENTRY_POINT，**不搬任何段** |
+| UF2 | family `0xe48bff5a`（RISC-V Secure EXE），产物 `build/tinyos-atk-dnr2350am-rv32.uf2` |
 | 文件系统 | littlefs @ flash `0x80000`，镜像仍是 300 KiB（75 块），暂不拉伸 |
 | 任务窗口 | 16 KiB 粒度；窗口必须 2 的幂对齐（Hazard3 PMP 不支持 TOR） |
 | 内存保护 | **有**：PMP NAPOT，每任务一个对齐窗口，U-mode 只能碰自己的 code/data/heap/stack |
@@ -20,18 +20,18 @@
 ## 构建与烧写
 
 ```bash
-go run ./cmd/tos build -target rp2350rv
-# -> build/kernel-rp2350rv.elf, build/ramdisk-rp2350rv.bin, build/rp2350rv.uf2
+go run ./cmd/tos build -target atk-dnr2350am-rv32
+# -> build/kernel-atk-dnr2350am-rv32.elf, build/tinyos-ramdisk-atk-dnr2350am-rv32.bin, build/tinyos-atk-dnr2350am-rv32.uf2
 
-go run ./cmd/tos build -target rp2350rvsmp   # 双 hart
+go run ./cmd/tos build -target atk-dnr2350am-rv32-smp   # 双 hart
 ```
 
 烧写和 ARM 镜像完全一样（BOOTSEL 盘、`scripts/rp2350/flash.py`）；只是 UF2 family
-不同，所以**必须用 `build/rp2350rv.uf2`**，把 ARM 的 `build/rp2350.uf2` 拖进去
+不同，所以**必须用 `build/tinyos-atk-dnr2350am-rv32.uf2`**，把 ARM 的 `build/tinyos-atk-dnr2350am.uf2` 拖进去
 ROM 会接受块但不启动。
 
 ```bash
-python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
+python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-rv32.uf2 --smoke
 ```
 
 ## 控制台
@@ -53,10 +53,10 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
 | PMP NAPOT 每任务窗口 | ✅ 实机 | `prot stack` 越界写进 shell 窗口被杀，证明边界生效 |
 | UART0 + USB CDC 双控制台 | ✅ 实机 | COM6 = UART0，COM7 = USB CDC |
 | littlefs on flash（ROM RISC-V 表 0x7dfa） | ✅ 实机 | `ls`/`df`、`dd` 写读校验、`rm` 后 df 复原 |
-| 单 hart `rp2350rv` | ✅ 实机 | 46 个文件、`py pytest.py` 54 项全过 |
-| 双 hart `rp2350rvsmp` | ✅ 实机 | `[smp] 2 of 2 CPU(s) online`、`smpbench` 1.89–2.01x |
+| 单 hart `atk-dnr2350am-rv32` | ✅ 实机 | 46 个文件、`py pytest.py` 54 项全过 |
+| 双 hart `atk-dnr2350am-rv32-smp` | ✅ 实机 | `[smp] 2 of 2 CPU(s) online`、`smpbench` 1.89–2.01x |
 | 管道、`sleep`、`reboot`、`piperace` | ✅ 实机 | 见 `docs/OPEN-ITEMS.md` §25 验收表 |
-| PIO（同一驱动，RV32 侧） | ✅ 实机 | `pio_accept.py --image rp2350rvsmp` 17/17，回环四字往返与 ARM 侧一致 |
+| PIO（同一驱动，RV32 侧） | ✅ 实机 | `pio_accept.py --image atk-dnr2350am-rv32-smp` 17/17，回环四字往返与 ARM 侧一致 |
 | 分区拉伸到 3.5 MiB | ☐ | 现在固定 75 块，拉伸是后续工作 |
 
 ## 已知限制
@@ -68,7 +68,7 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
   `flash_range_*` 就是这么恢复的。ARM 端口同样处理。
 - 窗口内部不再细分 code/data/guard（要细分得让镜像的 `wx` 落在对齐边界上）；
   和 RP2040 的 flat 模型同一个粒度。
-- `rp2350rvsmp` 的第二 hart 从 ROM 的 SIO-FIFO 等待循环里拉起来，握手是
+- `atk-dnr2350am-rv32-smp` 的第二 hart 从 ROM 的 SIO-FIFO 等待循环里拉起来，握手是
   pico-sdk 的 `{0,0,1,mtvec,sp,_start}`，`sev` 在 Hazard3 上是 `h3.unblock`
   （`slt x0,x0,x1`），写成普通 fence 会超时只上线 1 个核。
 - 没有 MMU；内核始终在 M 模式，用户程序在 U 模式。
@@ -76,7 +76,8 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
 
 ## 相关文件
 
-- `board/atk-dnr2350am-rv32/{platform.c,layout.c,kernel.ld,image_def.S,board_devs.c,board_internal.h,rp2350rv_memmap.h}`
+- `board/rp2350rv-generic/{platform.c,kernel.ld,image_def.S,rp2350rv_memmap.h}`：ISA 相关，两个 RV32 板共用
+- `board/atk-dnr2350am-rv32/board.conf`：本板只留板级事实；设备表来自 `board/atk-dnr2350am`
 - `drivers/gpio/rp2350rv/`、`drivers/spi/rp2350rv/`、`drivers/display/st7789/`（两个 ISA 共用）、`drivers/usb/rp2350rv/`
 - `arch/rv32/start.S`（`TOS_COPY_DATA`、第二 hart 分支）、`arch/rv32/platform.c`（PMP NAPOT 分支）
 - `internal/build/uf2.go`：`emitRP2350RVUF2()`、family `0xe48bff5a`、ENTRY_POINT item

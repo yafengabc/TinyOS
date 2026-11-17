@@ -41,8 +41,8 @@ exclude = ping,net,dhcp
   define) and `opt = -Oz` (compiler optimisation; `TOS_OPT` still wins).
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
-  A target can also declare default features: `rp2040` starts with
-  `pwm`, `uart1`, `spi` and `i2c` on, so `tos build -target rp2040` needs no
+  A target can also declare default features: `rpi-pico` starts with
+  `pwm`, `uart1`, `spi` and `i2c` on, so `tos build -target rpi-pico` needs no
   config; writing `pwm = false` (what menuconfig saves) compiles that driver
   and its user command out.
 - Both numeric runtimes are always linked: `user/fix16.c` provides the
@@ -83,12 +83,12 @@ Examples:
 | `configs/esp32c3-wifi.conf` | C3 + WiFi + DHCP/ICMP, all commands |
 | `configs/esp32c3-wifi-softmin.conf` | the same, with the saturating float runtime |
 | `configs/esp32c3-wifi-nonet.conf` | C3 + WiFi association only |
-| `configs/rp2040.conf` | RP2040, WiFi commands excluded |
+| `configs/rpi-pico.conf` | RP2040, WiFi commands excluded |
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |
-| `configs/rp2350rv.conf` | RP2350 Hazard3, WiFi commands excluded |
+| `configs/atk-dnr2350am-rv32.conf` | RP2350 Hazard3, WiFi commands excluded |
 | `configs/x86-threads.conf` | x86 with the cooperative thread library (`swcost`, `threadtest`) |
 | `configs/c3-kthreads.conf` | ESP32-C3 with the experimental kernel-thread API (`threadbench`) |
 | `configs/esp32c3-16k.conf` | ESP32-C3 without WiFi, 16 KiB heap and 16 task slots (measured peak 1.5 KiB; 12 background jobs) |
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
-| `configs/rp2350smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
-| `configs/rp2350rvsmp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |
+| `configs/atk-dnr2350am-smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
+| `configs/atk-dnr2350am-rv32-smp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |

@@ -24,22 +24,31 @@ func TestTargetsLoadFromConf(t *testing.T) {
 		cpus  int
 		heap  int
 	}{
-		"x86":         {"pc", "x86", "", 0, 256 * 1024},
-		"rv32":        {"qemu-virt", "rv32", "rv32imc", 0, 256 * 1024},
-		"esp32c3":     {"esp32c3", "rv32", "rv32imc", 0, 80 * 1024},
-		"arm":         {"qemu-mps2", "arm", "", 0, 128 * 1024},
-		"rp2040":      {"rp2040", "arm", "", 0, 8 * 1024},
-		"rp2040smp":   {"rp2040", "arm", "", 2, 8 * 1024},
-		"rp2350":      {"atk-dnr2350am", "arm", "", 0, 60 * 1024},
-		"rp2350smp":   {"atk-dnr2350am", "arm", "", 2, 60 * 1024},
-		"rp2350rv":    {"atk-dnr2350am-rv32", "rv32", "rv32imac", 0, 32 * 1024},
-		"rp2350rvsmp": {"atk-dnr2350am-rv32", "rv32", "rv32imac", 2, 32 * 1024},
-		"rp2350pico2": {"pico2", "arm", "", 0, 60 * 1024},
-		"rv32smp":     {"qemu-virt", "rv32", "rv32imac", 2, 256 * 1024},
-		"rv32nc":      {"qemu-virt", "rv32", "rv32im", 0, 256 * 1024},
+		"x86":                    {"pc", "x86", "", 0, 256 * 1024},
+		"rv32":                   {"qemu-virt", "rv32", "rv32imc", 0, 256 * 1024},
+		"esp32c3":                {"esp32c3", "rv32", "rv32imc", 0, 80 * 1024},
+		"arm":                    {"qemu-mps2", "arm", "", 0, 128 * 1024},
+		"rpi-pico":               {"rpi-pico", "arm", "", 0, 8 * 1024},
+		"rpi-pico-smp":           {"rpi-pico", "arm", "", 2, 8 * 1024},
+		"atk-dnr2350am":          {"atk-dnr2350am", "arm", "", 0, 60 * 1024},
+		"atk-dnr2350am-smp":      {"atk-dnr2350am", "arm", "", 2, 60 * 1024},
+		"atk-dnr2350am-rv32":     {"atk-dnr2350am-rv32", "rv32", "rv32imac", 0, 32 * 1024},
+		"atk-dnr2350am-rv32-smp": {"atk-dnr2350am-rv32", "rv32", "rv32imac", 2, 32 * 1024},
+		"rpi-pico2":              {"rpi-pico2", "arm", "", 0, 60 * 1024},
+		"rv32smp":                {"qemu-virt", "rv32", "rv32imac", 2, 256 * 1024},
+		"rv32nc":                 {"qemu-virt", "rv32", "rv32im", 0, 256 * 1024},
 	}
-	if len(Targets) != len(want) {
-		t.Errorf("%d targets loaded, want %d", len(Targets), len(want))
+
+	// The map also carries the old names as aliases; only entries whose key
+	// is their own Name are images.
+	canonical := 0
+	for key, tgt := range Targets {
+		if key == tgt.Name {
+			canonical++
+		}
+	}
+	if canonical != len(want) {
+		t.Errorf("%d canonical targets, want %d", canonical, len(want))
 	}
 	for name, w := range want {
 		tgt, ok := Targets[name]
@@ -54,6 +63,7 @@ func TestTargetsLoadFromConf(t *testing.T) {
 				w.board, w.arch, w.march, w.cpus, w.heap)
 		}
 	}
+
 }
 
 // A target must name a board that exists and an ISA that board's chip has.

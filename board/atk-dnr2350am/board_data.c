@@ -11,7 +11,7 @@
  *
  * This file is the board's data and nothing else: the LED and key code that
  * reads it lives in board_devs.c, which is shared with any variant of the
- * same board (board/pico2/board_data.c replaces only this file).
+ * same board (board/rpi-pico2/board_data.c replaces only this file).
  *
  * The pin numbers come from the schematic (docs/ATK-DNRP2350AM_V1.0.PDF,
  * sheets 1-2) and were checked against the vendor wiki:

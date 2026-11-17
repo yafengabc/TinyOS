@@ -12,16 +12,16 @@ flash，`layout.c` 给出内存与文件系统分区，`kernel.ld` 决定镜像�
 | [`qemu-virt/`](qemu-virt/README.md) | `rv32`、`rv32smp`、`rv32nc` | QEMU virt，RV32IM(C) | `tos run` | ✅ 完整（含 SMP） |
 | [`qemu-mps2/`](qemu-mps2/README.md) | `arm` | QEMU mps2-an385，Cortex-M3 | `tos run` | ✅ 完整 |
 | [`esp32c3/`](esp32c3/README.md) | `esp32c3` | ESP32-C3，XIP flash | esptool / `scripts/esp-c3/flash.py` | ✅ 实机（含 WiFi）；I2C/SPI/PWM 已接、待实机验收 |
-| [`rp2040/`](rp2040/README.md) | `rp2040`、`rp2040smp` | Pico，Cortex-M0+ | BOOTSEL UF2 | ◐ UART 控制台可用，USB CDC 调试中 |
-| [`rp2350/`](rp2350/README.md) | `rp2350`、`rp2350smp` | Pico 2 / ATK-DNRP2350AM，Cortex-M33 | BOOTSEL UF2 | ✅ 实机（USB + 屏 + MPU） |
-| [`rp2350rv/`](rp2350rv/README.md) | `rp2350rv`、`rp2350rvsmp` | 同一块 RP2350 的 Hazard3 RISC-V | BOOTSEL UF2 | ✅ 实机（含双 hart） |
+| [`rp2040/`](rp2040/README.md) | `rpi-pico`、`rpi-pico-smp` | Pico，Cortex-M0+ | BOOTSEL UF2 | ◐ UART 控制台可用，USB CDC 调试中 |
+| [`rp2350/`](rp2350/README.md) | `atk-dnr2350am`、`atk-dnr2350am-smp` | Pico 2 / ATK-DNRP2350AM，Cortex-M33 | BOOTSEL UF2 | ✅ 实机（USB + 屏 + MPU） |
+| [`atk-dnr2350am-rv32/`](atk-dnr2350am-rv32/README.md) | `atk-dnr2350am-rv32`、`atk-dnr2350am-rv32-smp` | 同一块 RP2350 的 Hazard3 RISC-V | BOOTSEL UF2 | ✅ 实机（含双 hart） |
 
 ## 选哪个目标
 
 - 只想跑一下 / 改内核：`x86`（默认）或 `rv32`，QEMU 里最快，`make run` 就是 x86。
-- 验证 PMP：`rv32` / `esp32c3`；验证 ARMv7-M MPU：`arm`；验证 PMSAv8 MPU：`rp2350`。
-- 验证"没有 MPU 的 MCU"：`rp2040`（任务之间没有硬件隔离）。
-- 验证 SMP：`rv32smp`、`rp2350smp`、`rp2350rvsmp`。
+- 验证 PMP：`rv32` / `esp32c3`；验证 ARMv7-M MPU：`arm`；验证 PMSAv8 MPU：`atk-dnr2350am`。
+- 验证"没有 MPU 的 MCU"：`rpi-pico`（任务之间没有硬件隔离）。
+- 验证 SMP：`rv32smp`、`atk-dnr2350am-smp`、`atk-dnr2350am-rv32-smp`。
 - 真机：C3 走串口烧写；三块 RP 系列都是 BOOTSEL 拖 UF2。
 
 ## 公共约定

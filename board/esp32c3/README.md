@@ -24,8 +24,8 @@
 ```bash
 go run ./cmd/tos build -target esp32c3
 # -> build/kernel-esp32c3.elf
-# -> build/esp32c3.bin          (烧到 flash 0x0)
-# -> build/ramdisk-esp32c3.bin  (烧到 flash 0x80000)
+# -> build/tinyos-esp32c3.bin          (烧到 flash 0x0)
+# -> build/tinyos-ramdisk-esp32c3.bin  (烧到 flash 0x80000)
 ```
 
 用脚本一条龙（自动进下载模式、烧完自己复位并抓 banner）：
@@ -39,8 +39,8 @@ python scripts/esp-c3/flash.py --keep-fs -p COM4   # 只更新内核，保留文
 手工用 esptool 时就是 build 输出里提示的两条：
 
 ```bash
-esptool.py write-flash 0x0     build/esp32c3.bin
-esptool.py write-flash 0x80000 build/ramdisk-esp32c3.bin
+esptool.py write-flash 0x0     build/tinyos-esp32c3.bin
+esptool.py write-flash 0x80000 build/tinyos-ramdisk-esp32c3.bin
 ```
 
 CH343 的 DTR/RTS 接了自动下载电路，不需要手按 BOOT。`-target esp32c3` 没有 QEMU
@@ -73,7 +73,7 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 | 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 | 9 |
 | 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） | 2（余 48 KiB） |
 | 进程槽（`max_procs`） | 8 | 8 | **16** |
-| `esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
+| `tinyos-esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
 
 - 前两列的内核堆都是 target 默认的 **80 KiB**（`[build] heap=` 可覆盖）；WiFi 吃掉的是
   它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。

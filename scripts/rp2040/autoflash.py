@@ -10,10 +10,10 @@ a round trip through the assistant.
 Typical use:
 
     # one shot: press BOOTSEL, script flashes as soon as F: appears
-    python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2
+    python scripts/rp2040/autoflash.py --uf2 build/tinyos-pico.uf2
 
     # resident: every future button press flashes the same image
-    python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2 --watch
+    python scripts/rp2040/autoflash.py --uf2 build/tinyos-pico.uf2 --watch
 
     # resident with a queue: each press flashes the next image in order
     python scripts/rp2040/autoflash.py --uf2 a.uf2 --uf2 b.uf2 --watch

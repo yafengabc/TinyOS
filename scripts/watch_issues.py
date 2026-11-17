@@ -41,7 +41,7 @@ LOG = os.path.join(STATE_DIR, "watch.log")
 GH_CMD = os.environ.get("GH_CMD", "gh")
 
 ATTACH = re.compile(r"https://github\.com/user-attachments/files/\d+/[^\s)\]]+")
-IMAGES = ("rp2350rvsmp", "rp2350rv", "rp2350smp", "rp2350")
+IMAGES = ("atk-dnr2350am-rv32-smp", "atk-dnr2350am-rv32", "atk-dnr2350am-smp", "atk-dnr2350am")
 
 
 def log(msg):
@@ -143,8 +143,8 @@ def judge(log_path, comment_text):
 
     if "pio:" in text:
         r = subprocess.run([sys.executable,
-                            os.path.join(ROOT, "scripts", "rp2350", "pio_accept.py"),
-                            "--image", "rp2350", "--replay", log_path],
+                            os.path.join(ROOT, "scripts", "atk-dnr2350am", "pio_accept.py"),
+                            "--image", "atk-dnr2350am", "--replay", log_path],
                            capture_output=True, text=True, cwd=ROOT,
                            timeout=180)
         verdicts.append(("pio_accept", r.returncode == 0, r.stdout.strip()))
@@ -154,7 +154,7 @@ def judge(log_path, comment_text):
         image = next((i for i in IMAGES if i in comment_text), None)
         if image:
             r = subprocess.run([sys.executable,
-                                os.path.join(ROOT, "scripts", "rp2350", "accept33.py"),
+                                os.path.join(ROOT, "scripts", "atk-dnr2350am", "accept33.py"),
                                 "--image", image, "--replay", log_path],
                                capture_output=True, text=True)
             verdicts.append(("accept33 %s" % image, r.returncode == 0,

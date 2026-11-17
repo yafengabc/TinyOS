@@ -66,7 +66,7 @@
  * ONE hart; the other hart's producer (usb_cdc_putc feeds the ring, its
  * tick drains it) raced this hart's tud_task()/write_flush across cores
  * and could corrupt tu_fifo bookkeeping - the same failure that wedged
- * rp2350smp's idle core forever inside tty_poll.  Hold times are bounded:
+ * atk-dnr2350am-smp's idle core forever inside tty_poll.  Hold times are bounded:
  * tud_task() drains the event queue and returns; nothing inside waits on
  * the other hart. */
 static uint32_t usb_critical_enter(void)

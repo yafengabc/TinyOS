@@ -24,7 +24,7 @@ drivers/
     esp32c3/            GPIO/ADC
     rp2040/             GPIO/ADC
     rp2350/             GPIO/ADC
-    rp2350rv/           GPIO/ADC (Hazard3)
+    rp2350rv/                     GPIO/ADC (Hazard3)
   serial/esp32c3/       USB-Serial/JTAG console
   spi/
     rp2350/             SPI + spi.h

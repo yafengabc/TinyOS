@@ -499,9 +499,9 @@ void usb_cdc_console_init(uint32_t clk_hz)
 /* ---- cross-core USB exclusion ------------------------------------------- */
 
 /* TinyUSB state used to be guarded by PRIMASK only - per core.  On an SMP
- * build (rp2040smp) the console writer on one core raced the other core's
+ * build (rpi-pico-smp) the console writer on one core raced the other core's
  * tud_task()/write_flush/dcd handler, corrupting tu_fifo bookkeeping; the
- * same failure wedged rp2350smp's idle core forever inside tty_poll.  The
+ * same failure wedged atk-dnr2350am-smp's idle core forever inside tty_poll.  The
  * SIO hardware spinlock is cross-core by construction, and PRIMASK around
  * it keeps this core's USB interrupt from taking the lock again on a core
  * that already holds it (the ISR pre-empts only unmasked code, and a lock

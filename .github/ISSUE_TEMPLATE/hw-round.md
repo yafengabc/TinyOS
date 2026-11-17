@@ -22,11 +22,11 @@ single source of truth; this ticket is the hand-off.
 
 | image | backend | flashed | booted without RESET |
 | --- | --- | --- | --- |
-| `rp2350` | PMSAv8 | | |
-| `rp2350smp` | PMSAv8 | | |
-| `rp2350rv` | NAPOT | | |
-| `rp2350rvsmp` | NAPOT | | |
-| `rp2040` / `rp2040smp` | none (software guard) | | |
+| `atk-dnr2350am` | PMSAv8 | | |
+| `atk-dnr2350am-smp` | PMSAv8 | | |
+| `atk-dnr2350am-rv32` | NAPOT | | |
+| `atk-dnr2350am-rv32-smp` | NAPOT | | |
+| `rpi-pico` / `rpi-pico-smp` | none (software guard) | | |
 | `esp32c3` | TOR | | |
 
 **What was run** (commands, one per line):

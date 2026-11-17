@@ -32,7 +32,7 @@ static uint32_t g_reload;
  * HardFault (no CFSR/MMFAR/BFAR), so fault reporting just prints the PC.
  *
  * Boot flow: the on-chip boot ROM loads the 256-byte stage-2
- * (board/rp2040/boot2.bin) from flash offset 0, verifies a CRC-32/MPEG-2 over
+ * (board/rpi-pico/boot2.bin) from flash offset 0, verifies a CRC-32/MPEG-2 over
  * its first 252 bytes and jumps to 0x10000100 (the reset vector in our vector
  * table).  A flash boot leaves XOSC off and clk_sys on ROSC (~5 MHz here),
  * NOT the 12 MHz crystal: clocks_init() in plat_board_early() enables XOSC,

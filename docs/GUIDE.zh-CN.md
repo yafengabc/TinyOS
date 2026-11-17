@@ -136,12 +136,12 @@ RP2040 的具体含义：
   `apply_protection()` 不会产生任何硬件效果。
 - 任务窗口（`exec` 分配的那段 SRAM）只是分配结果，不是硬件边界。一个任务写穿到
   另一个任务或内核不会触发 fault；`prot heap/stack/rodata/null` 在 RP2040 上会打印
-  `survived: this machine cannot stop us`。因此 `rp2040` / `rp2040smp` 的默认
+  `survived: this machine cannot stop us`。因此 `rpi-pico` / `rpi-pico-smp` 的默认
   `UserExclude` 里包含 `prot`：它在这块板上不是保护测试，而是一次真的越界写，
   默认镜像不把它放进 `/bin`。
 - 用户任务仍是非特权（`nPRIV=1`）：不能执行 `cpsid`、不能直接访问 NVIC/SCB 等系统
   控制空间，只能通过 `svc` 进内核；但 SRAM 和所有外设寄存器仍然全部可读写。
-- **SMP 不改变这一点**：`rp2040smp` 的 SIO 自旋锁保护的是内核共享数据结构
+- **SMP 不改变这一点**：`rpi-pico-smp` 的 SIO 自旋锁保护的是内核共享数据结构
   （进程表、文件系统等），不是用户任务的内存。两个核上的任务仍然能互相看到整片
   地址空间。
 - 栈守卫（`PLAT_HEAP_GUARD`）和爆栈自动翻倍都是软件约定，不是硬件保护。
@@ -167,11 +167,11 @@ kernel/              架构无关内核（C）
   heap.c lz4.c libgcc.c console.c string.c
   lfs_config.h        littlefs 的裁剪与配置
 drivers/              按构建配置加入的驱动
-  gpio/{esp32c3,rp2040,rp2350,rp2350rv}/   GPIO/ADC
+  gpio/{esp32c3,rp2040,rp2350,atk-dnr2350am-rv32}/   GPIO/ADC
   serial/esp32c3/     USB-Serial/JTAG 控制台
-  spi/{rp2350,rp2350rv}/                   SPI
-  display/st7789/{rp2350,rp2350rv}/        ST7789 面板
-  usb/{rp2040,rp2350,rp2350rv}/            USB CDC
+  spi/{rp2350,atk-dnr2350am-rv32}/                   SPI
+  display/st7789/{rp2350,atk-dnr2350am-rv32}/        ST7789 面板
+  usb/{rp2040,rp2350,atk-dnr2350am-rv32}/            USB CDC
   wifi/esp32c3/       ESP32-C3 WiFi/PHY/WPA2/小型 IPv4 栈 + 预编译 blob
 configs/              构建配置（target / features / drivers / user 排除）
 arch/x86/            x86 实现：entry.S isr.S gdt idt ata serial timer keyboard platform.c
@@ -378,9 +378,9 @@ go run ./cmd/tos menuconfig -print -config configs/esp32c3-wifi.conf   # 只输�
 
 ### ESP32-C3 联网（WiFi + 小型 IPv4 栈）
 
-烧写分体两份：`build/esp32c3.bin` 到 `0x0`、`build/ramdisk-esp32c3.bin` 到 `0x80000`
+烧写分体两份：`build/tinyos-esp32c3.bin` 到 `0x0`、`build/tinyos-ramdisk-esp32c3.bin` 到 `0x80000`
 （`scripts/esp-c3/flash.py`，默认就是这两步）。构建还会输出一份**合体镜像**
-`build/esp32c3-full.bin`：内核补齐到 `0x80000` 后接上 littlefs，**一次写到 `0x0`**
+`build/tinyos-esp32c3-full.bin`：内核补齐到 `0x80000` 后接上 littlefs，**一次写到 `0x0`**
 即可，和 MicroPython 那种"刷一个文件"一样：
 
 ```
@@ -498,7 +498,7 @@ go run ./cmd/tostest smoke -target rv32smp   # 双核：同一批命令，两个
 内核、用户程序、littlefs 镜像，全部用同一份源码，不需要第二套实现。
 
 ```powershell
-go run ./cmd/tos build -target rv32   # -> build/kernel-rv32.elf (+ build/ramdisk-rv32.bin)
+go run ./cmd/tos build -target rv32   # -> build/kernel-rv32.elf (+ build/tinyos-ramdisk-rv32.bin)
 go run ./cmd/tos run   -target rv32
 ```
 
@@ -532,7 +532,7 @@ qemu-system-riscv32 -machine virt -m 256M -bios none -kernel build/kernel-rv32.e
 | PMP | 每任务 4 条：空条目（下界）+ code RX + data/heap RW + stack NAPOT RW，切换时重写；条目 0 只能从地址 0 起，所以下界靠“上一条的 `pmpaddr` 即使 OFF 也生效”来表达 |
 | 用户态入口 | `rv32_enter_user()` 复用 trap 返回路径，`mret` 进 U-mode |
 | 缺的运行时 | `kernel/libgcc.c` 补 `__lshrdi3/__ashldi3/__ashrdi3`（RV32 无 64 位移位指令） |
-| 块设备 | `build/ramdisk-rv32.bin` 由生成的 `.S` 用 `.incbin` 嵌进 `.data.ramdisk`，`plat_block_*` 直接内存拷贝 |
+| 块设备 | `build/tinyos-ramdisk-rv32.bin` 由生成的 `.S` 用 `.incbin` 嵌进 `.data.ramdisk`，`plat_block_*` 直接内存拷贝 |
 
 工具链：`clang --target=riscv32-unknown-elf` 编译，`ld.lld -m elf32lriscv` 直接链接
 （走 clang 驱动会强行拉入硬浮点 ABI 的 `compiler_rt`，和我们的 ilp32 对象冲突）。
@@ -640,11 +640,11 @@ Handler 模式靠 `PRIVDEFENA` 访问整片 RAM/MMIO，非特权访问默认映�
 
 ## RP2350 真机目标（Pico 2 / Cortex-M33）
 
-`-target rp2350` 构建同一套内核、用户程序和 littlefs，但换成 RP2350 的板级实现：
+`-target atk-dnr2350am` 构建同一套内核、用户程序和 littlefs，但换成 RP2350 的板级实现：
 
 ```bash
-go run ./cmd/tos build -target rp2350
-# -> build/kernel-rp2350.elf, build/ramdisk-rp2350.bin, build/rp2350.uf2
+go run ./cmd/tos build -target atk-dnr2350am
+# -> build/kernel-rp2350.elf, build/tinyos-ramdisk-rp2350.bin, build/tinyos-atk-dnr2350am.uf2
 ```
 
 和 RP2040 的差别不是"换个 CPU 型号"那么简单，几乎每个外设地址都变了：
@@ -668,7 +668,7 @@ flash 操作期间 XIP 会进入串行命令模式，调用者不能留在 flash
 
 ### 板载外设：一张表 + 一组类钩子
 
-`-target rp2350` 现在针对**正点原子 ATK-DNRP2350AM**（板载 1.14 寸 ST7789 屏、
+`-target atk-dnr2350am` 现在针对**正点原子 ATK-DNRP2350AM**（板载 1.14 寸 ST7789 屏、
 TF 卡座、CH343P 串口、按键、LED）。板子用一张 `board_dev_t` 表描述自己
 （`board/rp2350-generic/board_devs.c`），`kernel/hwdev.c` 把 LED / 按键 / 屏变成
 `/dev/led0`、`/dev/key0`、`/dev/lcd0`，其余设备至少出现在 `/proc/dev` 里：
@@ -685,8 +685,8 @@ echo hello > /dev/lcd0         # 屏就是终端：换行、滚动、40x16 字�
 就能看到启动日志和 shell 提示符而不需要串口。实现细节、引脚表和踩过的坑见
 `docs/BOARD-ATK-DNRP2350AM.md`。
 
-`-target rp2040` 针对 **Raspberry Pi Pico**。TinyOS 没有 Linux 那种 DTS/FDT
-解析器，等价的设备树就是 `board/rp2040/board_devs.c` 里的 `board_dev_t` 表：
+`-target rpi-pico` 针对 **Raspberry Pi Pico**。TinyOS 没有 Linux 那种 DTS/FDT
+解析器，等价的设备树就是 `board/rpi-pico/board_devs.c` 里的 `board_dev_t` 表：
 30 个 GPIO（Pico 排针引出 26 个）、UART0/1、SPI0/1、I2C0/1、ADC0..3 加片内温度
 传感器 ADC4、16 通道 PWM、两个 PIO（8 个状态机）、12 通道 DMA、USB 1.1、2 MiB
 QSPI flash，以及 PLL、整数除法器、插值器、LDO 和 SWD。`cat /proc/dev` 看整张
@@ -1115,7 +1115,7 @@ LBA 常量由板级提供（`board/pc/layout.c` 的 `PLAT_LFS_LBA = 201`），
 `boot/stage1.S` 与 `internal/build/build.go` 的 `KernelSectors` 需保持同步；
 构建时对内核镜像大小和 `.bss` 结尾都有检查。
 
-RV32 没有磁盘，构建工具把 `build/ramdisk-rv32.bin` 用生成的 `.S`（`.incbin`）
+RV32 没有磁盘，构建工具把 `build/tinyos-ramdisk-rv32.bin` 用生成的 `.S`（`.incbin`）
 嵌进内核的 `.data.ramdisk`，板级给 `PLAT_LFS_LBA = 0`，`plat_block_*` 就是内存拷贝。
 
 ## 内存布局

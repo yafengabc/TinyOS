@@ -35,7 +35,7 @@ func cmdEmutest(args []string) int {
 		return 1
 	}
 	elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3.elf")
-	rd := filepath.Join(repoRoot(), "build", "ramdisk-esp32c3.bin")
+	rd := filepath.Join(repoRoot(), "build", "tinyos-ramdisk-esp32c3.bin")
 	if !fileExists(elf) {
 		fmt.Fprintf(os.Stderr, "build artifact missing: %s (run 'tos build -target esp32c3')\n", elf)
 		return 1

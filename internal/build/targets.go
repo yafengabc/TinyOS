@@ -58,6 +58,21 @@ func LoadTargets() error {
 		}
 		loaded[t.Name] = t
 	}
+	// Aliases are input-only: the map holds them so `-target <old name>`
+	// still works, but each alias resolves to the canonical Target, so the
+	// artifacts keep the board name.  A menu that lists Targets must skip
+	// entries whose key differs from Name.
+	for _, t := range loaded {
+		for _, a := range t.Aliases {
+			if a == t.Name {
+				continue
+			}
+			if other, exists := loaded[a]; exists && other.Name != t.Name {
+				return fmt.Errorf("targets/: alias %q of %q collides with target %q", a, t.Name, other.Name)
+			}
+			loaded[a] = t
+		}
+	}
 	if len(loaded) == 0 {
 		return fmt.Errorf("targets/: no *.conf files")
 	}
@@ -83,10 +98,11 @@ func loadTargetFile(path string) (Target, error) {
 		name = strings.TrimSuffix(filepath.Base(path), ".conf")
 	}
 	t := Target{
-		Name:  name,
-		Board: strings.TrimSpace(s["board"]),
-		Arch:  strings.TrimSpace(s["arch"]),
-		March: strings.TrimSpace(s["march"]),
+		Name:    name,
+		Aliases: splitList(s["aliases"]),
+		Board:   strings.TrimSpace(s["board"]),
+		Arch:    strings.TrimSpace(s["arch"]),
+		March:   strings.TrimSpace(s["march"]),
 	}
 	if t.Board == "" {
 		return Target{}, fmt.Errorf("%s: board is required", path)
