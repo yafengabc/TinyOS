@@ -21,6 +21,10 @@ Adding an image is a new file here.  Adding a board is a `board/<name>/`
 directory with a `board.conf` (and, if it is a variant of another board,
 `base = <board>` plus the files it replaces).  Neither needs a Go change.
 
+`go run ./cmd/tos build all` builds every file in this directory (15 images
+today, the two chip baselines included).  It ignores `-config` on purpose:
+an image's config names the target it was written for.
+
 ## Why the files are not generated
 
 They are source, not build output: heap sizes and process slots are decisions

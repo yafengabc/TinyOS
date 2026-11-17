@@ -91,6 +91,7 @@ the tree.
 # Build any target
 go run ./cmd/tos build -target atk-dnr2350am        # -> build/tinyos-atk-dnr2350am.uf2
 go run ./cmd/tos build -target esp32c3       # -> build/tinyos-esp32c3.bin + -full.bin
+go run ./cmd/tos build all                   # every target in targets/*.conf (15 images)
 
 # RP2040 / RP2350: hold BOOTSEL, plug in USB, copy the .uf2 to the drive
 cp build/tinyos-atk-dnr2350am.uf2 /media/$USER/RP2350/

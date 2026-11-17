@@ -12,8 +12,11 @@ flash，`layout.c` 给出内存与文件系统分区，`kernel.ld` 决定镜像�
 | [`qemu-virt/`](qemu-virt/README.md) | `rv32`、`rv32smp`、`rv32nc` | QEMU virt，RV32IM(C) | `tos run` | ✅ 完整（含 SMP） |
 | [`qemu-mps2/`](qemu-mps2/README.md) | `arm` | QEMU mps2-an385，Cortex-M3 | `tos run` | ✅ 完整 |
 | [`esp32c3/`](esp32c3/README.md) | `esp32c3` | ESP32-C3，XIP flash | esptool / `scripts/esp-c3/flash.py` | ✅ 实机（含 WiFi）；I2C/SPI/PWM 已接、待实机验收 |
-| [`rp2040/`](rp2040/README.md) | `rpi-pico`、`rpi-pico-smp` | Pico，Cortex-M0+ | BOOTSEL UF2 | ◐ UART 控制台可用，USB CDC 调试中 |
-| [`rp2350/`](rp2350/README.md) | `atk-dnr2350am`、`atk-dnr2350am-smp` | Pico 2 / ATK-DNRP2350AM，Cortex-M33 | BOOTSEL UF2 | ✅ 实机（USB + 屏 + MPU） |
+| [`rpi-pico/`](rpi-pico/README.md) | `rpi-pico`、`rpi-pico-smp` | Pico，Cortex-M0+ | BOOTSEL UF2 | ◐ UART 控制台可用，USB CDC 调试中 |
+| `rp2350-generic/` | `rp2350-generic` | RP2350 芯片基线，Cortex-M33，无面板/无卡槽 | BOOTSEL UF2 | 新目标：只有 UART/USB 控制台，文件系统在 RAM |
+| [`atk-dnr2350am/`](atk-dnr2350am/README.md) | `atk-dnr2350am`、`atk-dnr2350am-smp` | ATK-DNRP2350AM，Cortex-M33 | BOOTSEL UF2 | ✅ 实机（USB + 屏 + MPU） |
+| [`rpi-pico2/`](rpi-pico2/README.md) | `rpi-pico2` | Raspberry Pi Pico 2，Cortex-M33 | BOOTSEL UF2 | ◐ 启动排查中（#7） |
+| `rp2350rv-generic/` | `rp2350rv-generic` | 同一颗 RP2350 的 Hazard3 芯片基线 | BOOTSEL UF2 | 新目标：RISC-V 控制台，文件系统在 RAM |
 | [`atk-dnr2350am-rv32/`](atk-dnr2350am-rv32/README.md) | `atk-dnr2350am-rv32`、`atk-dnr2350am-rv32-smp` | 同一块 RP2350 的 Hazard3 RISC-V | BOOTSEL UF2 | ✅ 实机（含双 hart） |
 
 ## 选哪个目标
@@ -26,7 +29,8 @@ flash，`layout.c` 给出内存与文件系统分区，`kernel.ld` 决定镜像�
 
 ## 公共约定
 
-- 构建：`go run ./cmd/tos build -target <target>`；产物都在 `build/`。
+- 构建：`go run ./cmd/tos build -target <target>`；产物都在 `build/`。`go run ./cmd/tos build all`
+  一次构建 `targets/*.conf` 里的全部目标（不应用 `-config`）。
 - 配置：`tos.conf` 或 `-config configs/<name>.conf`；`tos menuconfig` 交互编辑。
 - QEMU 目标：`go run ./cmd/tos run -target <target> [-headless] [-debug]`。
 - 真机目标：**没有** `tos run`，用各自 README 里的烧写脚本。

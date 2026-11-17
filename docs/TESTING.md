@@ -73,25 +73,14 @@ go test ./... -count=1
 至少覆盖 CI 的 7 个目标；改构建系统/`Targets`/`config.go` 时跑全部可构建目标：
 
 ```sh
-for t in esp32c3 rpi-pico rpi-pico-smp atk-dnr2350am atk-dnr2350am-smp atk-dnr2350am-rv32 atk-dnr2350am-rv32-smp \
-         rv32 rv32smp rv32nc arm; do
-  go run ./cmd/tos build -target "$t" || exit 1
-done
+go run ./cmd/tos build all          # 15 个目标逐个构建；失败会汇总后非零退出
 ```
 
-PowerShell：
+`build all` 不应用 `-config`/`tos.conf`：镜像配置是逐目标的，要带 config 就单独
+`-target` 构建。等价的老写法是逐个 `-target` 循环，现在只是把它收进工具里。
 
-```powershell
-$targets = "esp32c3","rpi-pico","rpi-pico-smp","atk-dnr2350am","atk-dnr2350am-smp",
-           "atk-dnr2350am-rv32","atk-dnr2350am-rv32-smp","rv32","rv32smp","rv32nc","arm"
-foreach ($t in $targets) {
-  go run ./cmd/tos build -target $t
-  if ($LASTEXITCODE -ne 0) { exit 1 }
-}
-```
-
-- **x86 单独处理**：它在 CI/发行版工具链上仍失败（`OPEN-ITEMS.md` §5）。除非本次改动就是 x86，否则不要把 x86 失败算作回归；本机如果构建成功，记录结果。
-- 每个目标检查产物：`build/<target>.uf2`、`build/esp32c3*.bin`、`build/kernel-<target>.elf`、`build/build-config-<target>.txt`。
+- 每个目标检查产物：`build/tinyos-<target>.uf2`、`build/tinyos-esp32c3*.bin`、
+  `build/kernel-<target>.elf`、`build/build-config.txt`。
 - 记录 `build-config-<target>.txt` 的 `target`/`features`/`user-defines`，尤其是构建系统改动。
 - **只读镜像也算一个目标**：只要碰了 `kernel/ramdisk.c`、`TOS_LFS_RO` 或“某段代码在
   `#ifdef` 块里外”的边界，就额外跑 `go run ./cmd/tos build -config configs/rv32-fsro.conf`

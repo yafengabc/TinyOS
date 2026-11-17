@@ -77,6 +77,7 @@ SDK 要装：板子需要的一切都在仓库里。
 # 构建任意目标
 go run ./cmd/tos build -target atk-dnr2350am        # -> build/tinyos-atk-dnr2350am.uf2
 go run ./cmd/tos build -target esp32c3       # -> build/tinyos-esp32c3.bin + -full.bin
+go run ./cmd/tos build all                   # 一次构建 targets/*.conf 里的全部 15 个镜像
 
 # RP2040 / RP2350：按住 BOOTSEL 插 USB，把 .uf2 拷进 U 盘
 cp build/tinyos-atk-dnr2350am.uf2 /media/$USER/RP2350/

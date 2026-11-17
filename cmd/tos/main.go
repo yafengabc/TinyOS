@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"tinyos/internal/build"
 	"tinyos/internal/menu"
@@ -19,9 +21,13 @@ usage:
                             build the kernel and filesystem for a target.
                             Targets are the files in targets/*.conf; -target
                             takes the file name without the extension.  The
-                            flash-backed boards also emit build/<target>.uf2.
+                            RP2 boards also emit build/tinyos-<target>.uf2.
                             -config selects features/drivers from a file; the
                             default is tos.conf when it exists (see configs/).
+  tos build all [-v]        build every target in targets/*.conf, one after
+                            the other, and stop with a per-target summary if
+                            any of them failed.  Config files are not applied:
+                            an image's config belongs to that image.
   tos run   [-headless] [-debug] [-no-build] [-target <target>] [-config <file>]
                             build (unless -no-build) and boot in QEMU
   tos menuconfig [-config <file>] [-print]
@@ -99,6 +105,21 @@ func main() {
 		config := fs.String("config", "", "build config file (default: tos.conf)")
 		fs.Parse(os.Args[2:])
 		b.Verbose = *verbose
+		if *target == "all" || (len(fs.Args()) == 1 && fs.Args()[0] == "all") {
+			if *config != "" {
+				fmt.Fprintln(os.Stderr, "tos: build all does not take -config; run the target you want with its config")
+				os.Exit(2)
+			}
+			if err := buildAll(root, *verbose); err != nil {
+				fmt.Fprintln(os.Stderr, "\ntos:", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(os.Stderr, "tos: unexpected argument %q (see 'tos help')\n", fs.Arg(0))
+			os.Exit(2)
+		}
 		if err := configure(b, root, *config, *target); err != nil {
 			fmt.Fprintln(os.Stderr, "tos:", err)
 			os.Exit(2)
@@ -262,4 +283,60 @@ func configure(b *build.Builder, root, configPath, target string) error {
 		b.Target = t
 	}
 	return b.ApplyConfig(cfg)
+}
+
+// buildAll builds every canonical target in targets/*.conf, one after the
+// other.  A config file is deliberately not applied: configs are per-image
+// policy, and tos.conf names the target it was written for.  Failures are
+// collected so one broken board does not hide the ones behind it.
+func buildAll(root string, verbose bool) error {
+	names := make([]string, 0, len(build.Targets))
+	for name, t := range build.Targets {
+		if name == t.Name { // skip aliases, if any are ever configured
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	var failed []string
+	for i, name := range names {
+		fmt.Printf("\n=== [%d/%d] %s\n", i+1, len(names), name)
+		one := build.New(root)
+		one.Verbose = verbose
+		one.Target = build.Targets[name]
+		if err := one.ApplyConfig(nil); err != nil {
+			failed = append(failed, name+": "+err.Error())
+			fmt.Fprintf(os.Stderr, "tos: %s: %v\n", name, err)
+			continue
+		}
+		if err := one.Build(); err != nil {
+			failed = append(failed, name+": "+err.Error())
+			fmt.Fprintf(os.Stderr, "tos: %s: %v\n", name, err)
+			continue
+		}
+		fmt.Printf("build ok -> %s\n", artifactFor(one))
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d targets failed:\n  %s",
+			len(failed), len(names), strings.Join(failed, "\n  "))
+	}
+	fmt.Printf("\nall %d targets built\n", len(names))
+	return nil
+}
+
+// artifactFor names the file a human would flash; QEMU-only images have no
+// artifact, so they report the kernel ELF instead.
+func artifactFor(b *build.Builder) string {
+	for _, name := range []string{
+		"tinyos-" + b.Target.Name + ".uf2",
+		"tinyos-" + b.Target.Name + ".bin",
+	} {
+		if _, err := os.Stat(filepath.Join(b.Root, "build", name)); err == nil {
+			return "build/" + name
+		}
+	}
+	if b.Target.Name == "x86" {
+		return "build/tinyos.img"
+	}
+	return "build/kernel-" + b.Target.Name + ".elf"
 }
