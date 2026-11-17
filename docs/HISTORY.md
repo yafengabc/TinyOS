@@ -4746,4 +4746,44 @@ ATK-DNRP2350AM 一直占着 `rp2350smp`，Pico 2 只能叫 `rp2350pico2`，而 R
   `PC=0xeffffffe`，本次未动。
 
 **下一步**：`rpi-pico2` 的 8 MiB flash 事实要等 #7 A 轨启动修好后改；generic 目标
-（`rp2350-generic`/`rp2350rv-generic`）仍按 §74 的分层落地。
+（`rp2350-generic`/`rp2350rv-generic`）见 §76。
+
+## 76. 2026-11-18 generic 镜像与 `tos build all`
+
+**背景**：`board/rp2350-generic` / `board/rp2350rv-generic` 作为芯片基线已经分出来，
+但 `targets/` 里没有对应镜像；而且构建只在 `fs_backing = flash` 时打包 UF2，嵌入式
+文件系统的板子只得到 ELF——没有东西可以拖进 BOOTSEL。加上两台板子的块设备仍按
+XIP 读 `LBA 0`，而 RAM disk 根本没有被链接进来，所以“generic 能构建”和“generic
+能启动”之间还差两处。
+
+**改动**：
+
+- `targets/rp2350-generic.conf`（Cortex-M33，`heap = 60k`）和
+  `targets/rp2350rv-generic.conf`（Hazard3，`march = rv32imac`，`heap = 32k`）。
+- 镜像格式改由**硅片**决定：`rp2040` / `rp2350 + ISA` 一律出 UF2；打包器自己判断
+  是“在 flash 分区里拼上 littlefs”还是“RAM disk 已经在镜像里”。ESP32-C3 仍走
+  `esptool` 的线性 bin。
+- `plat_block_read/erase/write` 按 `TOS_HAS_FLASH` 分成两条：有 flash 时是原来的
+  ROM 调用，没有时直接读写链接进来的 `.data.ramdisk`；`plat_block_count()` 保持
+  `PLAT_LFS_BLOCKS * 8`（flash 3.5 MiB / embedded 600 扇区）。
+- 两个 `platform.c` 补上 `#include "board_config.h"`。没有它 `TOS_HAS_FLASH` 在
+  这个编译单元里是未定义（=0），所有 flash 板子都会编到 RAM 分支、引用不存在的
+  `__ramdisk_start`，链接期报错——这是本轮先失败 6 个目标的直接原因。
+- `tos build all`（也可写 `-target all`）：按名字顺序构建 `targets/*.conf` 里的
+  全部**规范**目标，失败不中断、最后汇总并以非零退出；不应用 `-config`/`tos.conf`，
+  因为镜像是逐目标的。`cmd/tos` 的帮助和 `docs/TESTING.md` 的 T1 已经改成这一条。
+
+**验证**（Windows，go 1.27.3 / clang 23.1.4 / qemu 11.1.3）：
+
+- `go vet ./...`、`go test ./... -count=1` 全绿；
+- `go run ./cmd/tos build all`：**15/15**，含两台 generic（ARM UF2 834,560 B、
+  RV32 UF2 813,056 B，RAM disk 已在内）；
+- flash 后端未受影响：`atk-dnr2350am-smp.uf2` 与改动前**逐字节相同**
+  （sha256 `b30be458…`）；
+- `configs/rv32-fsro.conf` 构建通过；
+- QEMU smoke 4/4（`arm`、`rv32`、`rv32smp`、`x86`），命令 `ps, deep 3, rselftest`；
+- 硬件 **`NOT RUN`**：两台 generic 镜像都**没有上板**，启动与 RAM disk 挂载未验证；
+  它们没有 flash 分区，重启后文件系统回到镜像里的初始状态。（芯片基线代码在 ATK 上
+  以临时 `generic-flash` 目标跑过 6/6，见
+  `docs/acceptance/2026-11-18-atk-review-rename-2d87ded.md`；那是另一条 flash 后端
+  路径，不是这里的 embedded 镜像。）

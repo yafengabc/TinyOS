@@ -125,3 +125,19 @@ PSRAM 本身还在 §7 的"先不做"里，但**形态和升级门槛先记下�
 所以实时任务的栈和热路径不能放进去。计划里的 C3/C4 接缝
 （`plat_dcache_clean/invalidate`、`mem_domain.flags`）就是为这三件事留的位置，
 相关契约见 [`ARCHITECTURE-NEXT.md`](ARCHITECTURE-NEXT.md) 的 C3/C4 与 B-7。
+
+## 10. generic RP2350 镜像未上板（2026-11-18）
+
+`rp2350-generic` / `rp2350rv-generic` 现在能构建、能产出 UF2（文件系统作为 RAM
+disk 链接在镜像里），但两台都**没有上板**：启动、`mount`、`ps` 仍是 `NOT RUN`。
+芯片基线代码本身在 ATK 上跑过 6/6，但用的是临时 `generic-flash` 目标（4 MiB flash
+分区，见 [`2026-11-18-atk-review-rename-2d87ded.md`](acceptance/2026-11-18-atk-review-rename-2d87ded.md)）；
+本节的 RAM-disk 路径还没有真机证据。
+
+验证路径：把 `build/tinyos-rp2350-generic.uf2` 或
+`build/tinyos-rp2350rv-generic.uf2` 拖进 ATK 的 BOOTSEL（generic 不认板级外设，
+只有 UART0/USB 控制台），记录 UART 启动日志；ARM 与 RV32 是两种 UF2 family，
+不能混刷。RAM disk 重启即回到镜像初始状态，这是预期行为，不是掉盘。
+
+关闭条件：两台在 ATK-DNRP2350AM 上各一次启动 + `ls`，结果写进
+`docs/acceptance/`，并记到 issue #7 的后续里。
