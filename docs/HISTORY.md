@@ -4087,3 +4087,33 @@ WiFi 硬件"——都是硬件事实，却和 `configs` 里"本镜像不带某�
 
 **剩余（B-1b）**：`Targets` 的 chip/arch、驱动目录、镜像默认值（heap/kstack/ramdisk 扇区）
 仍在 Go；生成 `build/gen/board_config.h` 与把 `Targets` 完全从 conf 派生留到下一半。
+
+## 48. 2026-11-17 B-1b：chip 表 + 生成 board_config.h + 启动交叉校验
+
+**背景**：B-1a 把用户排除搬进了 `board.conf`。B-1b 处理编译器事实与生成物：`Targets`
+里每块板重复写 triple/mcpu，板级事实在 Go 里还有一份。
+
+**改动**：
+
+- 新增 `internal/build/chip.go`：`Chip{Name, ISAs map[arch]{Triple, Machine}}`。
+  RP2350 同时有 `arm` 与 `rv32` 两项，所以 `board.conf` 的 `chip = rp2350` 对
+  `rp2350`/`rp2350rv` 都成立；`-march` 留在 target（`rv32` 与 `rv32nc` 是同一 hart 的
+  不同镜像选择，不是芯片事实）。
+- `LoadBoardConfig()` 的 `chip=` 改为查 `Chips`；`ensureBoardConfig()` 校验
+  target 的 triple/mcpu 与 chip 一致，不一致直接拒绝构建。
+- 每次构建写 `build/gen/board_config.h`：board/chip/variant、窗口三个数、
+  `TOS_HAS_*` 外设位。生成物不入库。
+- 新增 `kernel/board_check.c`：启动时比较生成值与 `layout.c` 的
+  `PLAT_APP_GRAIN`/`PLAT_STACK_BYTES`/`PLAT_HEAP_GUARD`，不一致 `panic` 并打印两侧数字。
+
+**验收**：
+
+- `go test ./internal/build`：`TestTargetsMatchChipFacts`（12 个 target 的 triple/mcpu
+  与 chip 表一致）、`TestBoardHeaderGeneration`（内容 + 两次生成字节一致）；
+- 故意把 `board/qemu-virt/board.conf` 的 `guard` 改成 8k 重建 `rv32`，启动即
+  `*** KERNEL PANIC *** board_config.h (qemu-virt) disagrees with layout.c:
+  grain 65536/65536 stack 32768/32768 guard 8192/16384`；恢复后 smoke 通过；
+- T0、11 目标 + x86 构建、`rv32`/`rv32smp`/`arm` smoke 通过。
+
+**剩余（B-1c）**：`Targets` 仍手写 chip/arch、驱动目录与镜像默认值；下一步从
+`board.conf` + `chip` 表派生，`Targets` 只保留"这块板有哪些镜像（单核/双核）"。

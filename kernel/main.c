@@ -44,6 +44,9 @@ static void screen_banner(void)
     screen_puts("----------------------------------------\n");
 }
 
+/* kernel/board_check.c: generated board.conf numbers vs layout.c constants. */
+void board_config_check(void);
+
 void kmain(void)
 {
     plat_early_init();
@@ -76,6 +79,7 @@ void kmain(void)
 
     process_init();
 
+    board_config_check();
     banner();
     screen_banner();
 

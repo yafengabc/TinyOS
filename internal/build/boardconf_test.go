@@ -110,6 +110,72 @@ func TestBoardUserExcludes(t *testing.T) {
 	}
 }
 
+func TestTargetsMatchChipFacts(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skip("not in the source tree")
+	}
+	for name, tgt := range Targets {
+		bc, err := LoadBoardConfig(root, tgt.Board)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		isa, ok := isaFor(bc.Chip, tgt.Arch)
+		if !ok {
+			t.Errorf("%s: chip %s has no %s image", name, bc.Chip, tgt.Arch)
+			continue
+		}
+		if isa.Triple != tgt.Triple || isa.Machine != tgt.Machine {
+			t.Errorf("%s: target triple/mcpu %q/%q, chip %s/%s says %q/%q",
+				name, tgt.Triple, tgt.Machine,
+				bc.Chip, tgt.Arch, isa.Triple, isa.Machine)
+		}
+	}
+}
+
+func TestBoardHeaderGeneration(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skip("not in the source tree")
+	}
+	b := New(root)
+	b.Target = Targets["rp2040"]
+	b.BuildDir = t.TempDir()
+	if err := b.ensureBoardConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.writeBoardHeader(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(b.BuildDir, "gen", "board_config.h")
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"#define TOS_BOARD_NAME \"rp2040\"",
+		"#define TOS_CHIP_NAME \"rp2040\"",
+		"#define TOS_APP_GRAIN 0x1000u",
+		"#define TOS_HAS_WIFI 0",
+		"#define TOS_HAS_PIO 1",
+	} {
+		if !strings.Contains(string(first), want) {
+			t.Errorf("generated header missing %q", want)
+		}
+	}
+	if err := b.writeBoardHeader(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatal("generation is not deterministic")
+	}
+}
+
 func TestBoardConfigRejectsBadSchema(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "board", "rp2040"), 0o755); err != nil {

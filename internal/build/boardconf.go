@@ -25,27 +25,6 @@ type BoardConfig struct {
 	WindowGuard int
 }
 
-// chipForBoard is the single board->chip mapping used while the tree still has
-// flat board directories.  A board that shares a chip (rp2350 and rp2350rv)
-// must still declare the same chip in board.conf.
-func chipForBoard(board string) string {
-	switch board {
-	case "pc":
-		return "pc"
-	case "qemu-virt":
-		return "qemu-virt"
-	case "qemu-mps2":
-		return "qemu-mps2"
-	case "esp32c3":
-		return "esp32c3"
-	case "rp2040":
-		return "rp2040"
-	case "rp2350", "rp2350rv":
-		return "rp2350"
-	}
-	return ""
-}
-
 // LoadBoardConfig reads board/<board>/board.conf.  The schema is checked here
 // so a future key addition cannot silently change existing builds.
 func LoadBoardConfig(root, board string) (*BoardConfig, error) {
@@ -70,11 +49,8 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if chip == "" {
 		return nil, fmt.Errorf("%s: chip is required", relName(root, path))
 	}
-	if want := chipForBoard(board); want == "" {
-		return nil, fmt.Errorf("%s: no chip mapping for board %q", relName(root, path), board)
-	} else if chip != want {
-		return nil, fmt.Errorf("%s: chip = %q, but board %q is chip %q",
-			relName(root, path), chip, board, want)
+	if _, ok := Chips[chip]; !ok {
+		return nil, fmt.Errorf("%s: unknown chip %q", relName(root, path), chip)
 	}
 	bc := &BoardConfig{
 		Path:        path,
@@ -131,6 +107,18 @@ func (b *Builder) ensureBoardConfig() error {
 	bc, err := LoadBoardConfig(b.Root, b.Target.Board)
 	if err != nil {
 		return err
+	}
+	/* The chip layer owns the compiler facts.  Until Targets is generated
+	 * (B-1c) the target still carries a copy; refuse to build if the two
+	 * disagree, so a stale literal cannot quietly target the wrong ISA. */
+	isa, ok := isaFor(bc.Chip, b.Target.Arch)
+	if !ok {
+		return fmt.Errorf("board %s: chip %s has no %q image", b.Target.Board, bc.Chip, b.Target.Arch)
+	}
+	if isa.Triple != b.Target.Triple || isa.Machine != b.Target.Machine {
+		return fmt.Errorf("target %s: compiler facts disagree with chip %s/%s: target triple=%q mcpu=%q chip triple=%q mcpu=%q",
+			b.Target.Name, bc.Chip, b.Target.Arch,
+			b.Target.Triple, b.Target.Machine, isa.Triple, isa.Machine)
 	}
 	b.BoardConfig = bc
 	return nil

@@ -293,6 +293,18 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 构建的 ramdisk 字节相同（HISTORY §47）。剩余：chip/arch/驱动列表/镜像默认值仍在 Go，
 B-1b 处理。
 
+**B-1b 已落地（2026-11-17）**：
+
+- `internal/build/chip.go` 保存 chip→ISA 的 triple/`-mcpu`（RP2350 同时有 arm/rv32）；
+  `board.conf` 的 `chip=` 改为查表校验，`ensureBoardConfig()` 拒绝 target 与 chip 的
+  triple/mcpu 不一致（`-march` 仍属于 target：rv32 与 rv32nc 是同一 hart 的镜像选择）。
+- 每次构建从 `board.conf` 生成 `build/gen/board_config.h`（board/chip/variant、窗口三数、
+  `TOS_HAS_*` 外设位），只由内核消费。
+- `kernel/board_check.c` 在启动时比较生成值与 `layout.c` 常量，不一致直接 panic；
+  已用故意把 `qemu-virt` 的 guard 改成 8k 验证会触发（HISTORY §48）。
+- 剩余 B-1c：把 `Targets` 的 chip/arch/驱动目录/镜像默认值也从 conf/chip 表派生，
+  届时 `Targets` 只剩"这块板有哪些镜像"（单核/双核）这一层。
+
 #### B-5 的三级台阶
 
 | 台阶 | 内容 | 通过标准 |

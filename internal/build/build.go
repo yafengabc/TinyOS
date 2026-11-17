@@ -802,6 +802,9 @@ func (b *Builder) Build() error {
 	if err := b.validateConfig(b.Config); err != nil {
 		return err
 	}
+	if err := b.writeBoardHeader(); err != nil {
+		return err
+	}
 	b.ensureDriverDirs()
 	b.TC, err = DetectToolchain(b.Target)
 	if err != nil {
@@ -995,6 +998,7 @@ func (b *Builder) buildKernel() error {
 	// build config and are added both as source roots and include roots.
 	incs := []string{
 		filepath.Join(b.Root, "include"),
+		filepath.Join(b.BuildDir, "gen"),
 		kdir,
 		lfsDir,
 		filepath.Join(b.Root, "board", b.Target.Board),
