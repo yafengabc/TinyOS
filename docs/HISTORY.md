@@ -4874,3 +4874,34 @@ generic 在 ATK 上启动并 heartbeat **6/6**；同一轮 7 个 RP2350 目标�
 
 这条修复关闭了 `OPEN-ITEMS.md` 原来的 §10（generic 未上板），也说明 §76 里
 “generic 未上板”的 `NOT RUN` 已由真机证据取代。
+
+## 80. 2026-11-18 Pico 2：先跑标准 XIP 设置，再升 clk_sys
+
+**现象**：`tinyos-rpi-pico2.uf2` 刷进真正的 Pico 2 后无反应、USB 不枚举。同一镜像
+在 ATK（同硅 RP2350A）上 6/6，所以镜像格式、PICOBIN、M33 flags 和启动链都没问题，
+差异在板子焊的 flash 部件。
+
+**对照**：MicroPython 的 RP2 端口在 `ports/rp2/CMakeLists.txt` 里设
+`PICO_EMBED_XIP_SETUP=1`（注释：“to put flash into continuous read mode”）。pico-sdk
+的 RP2350 `crt0.S` 在这项打开时，把 `boot_stage2/boot2_w25q080.S` 拷到 SRAM 执行，
+把 QMI 从 ROM 的保守模式（03h、CLKDIV=12）切到 **EBh+A0h 连续四线读、
+CLKDIV=2、RXDELAY=2**。我们自己的 `platform.c` 注释早就写明 ROM 那套延迟按
+clk_sys 周期计、150 MHz 下短 12.5 倍——但只在 flash 写完恢复 XIP 时用了，启动路径
+没有。
+
+**改动**（`d16f949`）：
+
+- `board/rp2350-generic/boot2_w25q080.S`：pico-sdk boot2 的 ARM 部分（BSD-3，RPi），
+  自包含常量，必须从 SRAM 执行；
+- `arch/arm/start.S`：`_start` 在 **.data 拷贝之前**把它拷到 `__boot2_ram` 并执行
+  ——那一步 .data 拷贝本身就是切时序后的第一次批量 flash 读；
+- `board.conf` 新键 `xip_setup`（板级事实：用不用取决于 flash 部件），未知值在加载
+  时拒绝；只有 `board/rpi-pico2` 设 `boot2-w25q080`。
+
+**验证**：`go vet`、`go test ./...`、`build all` 15/15；pico2 编译命令含
+`-DTOS_RP2350_BOOT2`，ATK 不含，**ATK-SMP 的 UF2 与改动前逐字节相同**。
+
+**未验证**：硬件 `NOT RUN`——本机没有 RP2350 板。需要把
+`build/tinyos-rpi-pico2.uf2` 刷到 Pico 2 一次；进 shell 就收敛 #7 A 轨，仍黑屏则用
+SWD 在切时钟前后读 QMI `M0_TIMING`/SCK。卡片：
+`docs/acceptance/2026-11-18-pico2-xip-setup-d16f949.md`。

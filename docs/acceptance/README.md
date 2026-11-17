@@ -93,3 +93,4 @@
 | 2026-11-18 | ESP32-C3 改名 `esp32c3-generic` | `c77319d` | ESP32-C3 / COM4 + 15 目标 + QEMU 4 | T0–T3 PASS：真机 boot + 24/24；T4 `NOT RUN` | [C3 generic](2026-11-18-c3-generic-c77319d.md) |
 | 2026-11-18 | ATK 全 RP2350 目标 + embedded UF2 修复 | `199339d`+fix | ATK-DNRP2350AM (COM14) | `build all` 15/15；7 个 RP2350 目标真机 6/6；修 rp2350-generic/rv-generic UF2 扇区不对齐不启动 | [all RP2350](2026-11-18-atk-rp2350-all-targets.md) |
 | 2026-11-18 | soak 假 FAIL 修复（#23） | `5f0eb55` | QEMU rv32/rv32smp/arm ×3 轮 + smoke 4 | T0–T2 PASS：soak 连续 3 次 3/3；T3/T4 `NOT RUN` | [soak flake](2026-11-18-soak-flake-5f0eb55.md) |
+| 2026-11-18 | Pico 2：标准 XIP 设置（boot2） | `d16f949` | 15 目标构建；ATK 镜像逐字节不变 | T0–T1 PASS；Pico 2 真机 `NOT RUN`（待刷） | [XIP setup](2026-11-18-pico2-xip-setup-d16f949.md) |
