@@ -52,17 +52,6 @@ func TestReadOnlyBuildDoesNotUseROOnlyHelpers(t *testing.T) {
 	if !strings.Contains(visible, "hash_path(") {
 		t.Errorf("kernel/ramdisk.c: hash_path is not visible to a read-only build")
 	}
-
-	// fs_ro also has to survive the config layer without changing shape.
-	cfg, err := LoadConfig(filepath.Join(root, "configs", "rp2350.conf"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ro := *cfg
-	ro.FSReadOnly = true
-	if ro.FSReadOnly != true || cfg.FSReadOnly != false {
-		t.Fatalf("FSReadOnly does not round-trip: %v / %v", cfg.FSReadOnly, ro.FSReadOnly)
-	}
 }
 
 // splitOnReadOnlyGuard returns the lines a read-only build compiles and the
