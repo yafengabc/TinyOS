@@ -535,6 +535,23 @@ static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
     return 0;
 }
 
+/* FNV-1a; see the ofile_t.path_hash comment for the collision direction.
+ *
+ * Defined unconditionally, unlike unlink_locked(): open_with() records the
+ * hash on every open, including a read-only build, and a read-only build used
+ * to fail with "call to undeclared function 'hash_path'" (issue #14).  In a
+ * RO build nothing compares it - unlink_locked() is the only reader - but the
+ * handle still leaves with the same invariant as a read-write one. */
+static uint32_t hash_path(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (uint8_t)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
 /* Remove a file.  Two refusals, both for good reason:
  *
  *   - directories: lfs_remove() deletes a directory *recursively*, so a
@@ -548,17 +565,6 @@ static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
  * The snapshot is dropped: a listing taken before the removal must not
  * survive it. */
 #ifndef TOS_LFS_RO
-/* FNV-1a; see the ofile_t.path_hash comment for the collision direction. */
-static uint32_t hash_path(const char *s)
-{
-    uint32_t h = 2166136261u;
-    while (*s) {
-        h ^= (uint8_t)*s++;
-        h *= 16777619u;
-    }
-    return h;
-}
-
 static int unlink_locked(const char *path)
 {
     if (!ok)
