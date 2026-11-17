@@ -4626,3 +4626,40 @@ RP2040 无自动 BOOTSEL（CH343 的 DTR/RTS 未接复位），它不是任何�
 **结论**：四条判据全部通过，#12 关闭，OPEN-ITEMS §2g 移入本条。RP2040 仍不进自动回归
 矩阵（无自动 BOOTSEL），需要时再由板主人工安排。证据：
 `docs/acceptance/2026-11-17-rp2040-accept-2be39bd.md`。
+
+## 73. 2026-11-17 板组合（`base =`）与 `board/pico2`（#7 的 B1/B2）
+
+**动机**：Pico 2 与 ATK 板是同一颗 RP2350，差别只在板级：LED 在 GP25 且**高电平点亮**
+（ATK 是 GP3 低电平）、没有屏、没有 TF 槽、没有用户按键。`ARCHITECTURE-NEXT` 的 C1
+把“同一 chip 多块板”列成了 variant 的验收点，而在此之前 `variant` 只是一个字符串，改它
+不改变任何行为。
+
+**做法**（`b6be508`）：
+
+```ini
+[board]
+base = rp2350          # 复用该板目录的 platform.c / layout.c / ld / PICOBIN
+```
+
+构建规则只有一条：**variant 目录里同名文件遮蔽 base 的文件**，且 variant 的 include
+目录排在 base 和 `arch/<arch>` 之前。于是 `board/pico2/` 只有一个新的 C 文件——
+`board_data.c`（设备表），没有第二份 `platform.c`，内核零改动。
+
+为了做到这一点，`board/rp2350/board_devs.c` 里 LED/按键的实现被改成**读设备表**：极性来自
+表里的 `TOS_DEV_ACTIVE_LOW`，引脚来自行里的 `pin`。这样“高电平点亮的 LED”是一行数据，
+不是一条代码路径——这也是 pico2 能只写 40 行数据的原因。
+
+顺带拆掉两处按板名硬编码的清单：TinyUSB 的 include 路径和 UF2 打包器的 switch 现在跟
+**chip**（rp2040/rp2350）走，而不是跟板名走。新板落在同一颗硅上时，这两处不需要再改。
+
+**产物**：`rp2350pico2`（单核，故意的——它是 bring-up 探针，SMP 会把早期 fault 搅浑）：
+`build/rp2350pico2.uf2` 1,769,984 B，`build-config` 里 board=pico2、chip=rp2350。
+
+**没有证的**：
+
+- **Pico 2 没有上板**：`PC=0xeffffffe` 的 A 轨一点没动，这张卡只证明“同一 chip 的第二块板
+  可以零内核改动地构建出来”；
+- **ATK 的 LED/按键路径改了实现**（表驱动），`.text`/`.data` 哈希变化、尺寸不变
+  （197540/143972 与改前相同），需要一次真机 heartbeat + LED/按键冒烟；
+- `rp2350rv` 仍保留自己那份 `board_devs.c`（它的 `platform.c` 是 RISC-V，走不了
+  `base =`），所以两份板文件在结构上暂时不对等——记在这里，不假装已经统一。
