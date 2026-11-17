@@ -15,7 +15,8 @@ flash，`layout.c` 给出内存与文件系统分区，`kernel.ld` 决定镜像�
 | [`rpi-pico/`](rpi-pico/README.md) | `rpi-pico`、`rpi-pico-smp` | Pico，Cortex-M0+ | BOOTSEL UF2 | ◐ UART 控制台可用，USB CDC 调试中 |
 | `rp2350-generic/` | `rp2350-generic` | RP2350 芯片基线，Cortex-M33，无面板/无卡槽 | BOOTSEL UF2 | 新目标：只有 UART/USB 控制台，文件系统在 RAM |
 | [`atk-dnr2350am/`](atk-dnr2350am/README.md) | `atk-dnr2350am`、`atk-dnr2350am-smp` | ATK-DNRP2350AM，Cortex-M33 | BOOTSEL UF2 | ✅ 实机（USB + 屏 + MPU） |
-| [`rpi-pico2/`](rpi-pico2/README.md) | `rpi-pico2` | Raspberry Pi Pico 2，Cortex-M33 | BOOTSEL UF2 | ◐ 启动排查中（#7） |
+| [`rpi-pico2/`](rpi-pico2/README.md) | `rpi-pico2`、`rpi-pico2-smp` | Raspberry Pi Pico 2，Cortex-M33 | BOOTSEL UF2 | ◐ 启动排查中（#7） |
+| `rpi-pico2-rv32/` | `rpi-pico2-rv32`、`rpi-pico2-rv32-smp` | 同一块 Pico 2 的 Hazard3 | BOOTSEL UF2 | 新目标：RISC-V 对照镜像（#7） |
 | `rp2350rv-generic/` | `rp2350rv-generic` | 同一颗 RP2350 的 Hazard3 芯片基线 | BOOTSEL UF2 | 新目标：RISC-V 控制台，文件系统在 RAM |
 | [`atk-dnr2350am-rv32/`](atk-dnr2350am-rv32/README.md) | `atk-dnr2350am-rv32`、`atk-dnr2350am-rv32-smp` | 同一块 RP2350 的 Hazard3 RISC-V | BOOTSEL UF2 | ✅ 实机（含双 hart） |
 

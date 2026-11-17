@@ -4905,3 +4905,29 @@ clk_sys 周期计、150 MHz 下短 12.5 倍——但只在 flash 写完恢复 XI
 `build/tinyos-rpi-pico2.uf2` 刷到 Pico 2 一次；进 shell 就收敛 #7 A 轨，仍黑屏则用
 SWD 在切时钟前后读 QMI `M0_TIMING`/SCK。卡片：
 `docs/acceptance/2026-11-18-pico2-xip-setup-d16f949.md`。
+
+## 81. 2026-11-18 Pico 2 补 RISC-V 与 SMP 对照镜像
+
+**结果**：`d16f949` 的 XIP 设置在真机 Pico 2 上**没有效果**——仍然无反应、USB 不
+枚举。所以不能再拿“ARM + flash 时序”一个假设往下押；需要把 ARM 启动链和共同路径
+（flash/XIP/板级）分开。
+
+**改动**（`4fd6857`）：
+
+- 新板目录 `board/rpi-pico2-rv32/`：`base = rp2350rv-generic, rpi-pico2`，
+  只写 `board.conf`，不复制任何 C 文件（和 `atk-dnr2350am-rv32` 同一分层写法）；
+- 四个目标：`rpi-pico2`、`rpi-pico2-smp`、`rpi-pico2-rv32`、`rpi-pico2-rv32-smp`；
+- `build all` 现在 18 个目标；UF2 family 随 ISA 不同（ARM `...59` / RISC-V `...5a`），
+  不能混刷。
+
+**怎么用**（诊断矩阵，全部待真机）：
+
+| 镜像 | 结果的含义 |
+|---|---|
+| `tinyos-rpi-pico2.uf2` | ARM 单核；当前：Pico 2 不启动、ATK 6/6 |
+| `tinyos-rpi-pico2-smp.uf2` | ARM 双核；确认同一启动入口与 SMP 构建 |
+| `tinyos-rpi-pico2-rv32.uf2` | **能启动 → 问题在 ARM 启动链（M33/secure/boot2）；不能 → 共同路径** |
+| `tinyos-rpi-pico2-rv32-smp.uf2` | Hazard3 双 hart |
+
+**验证**：`go test ./...`、`build all` **18/18**。硬件 **`NOT RUN`**；卡片：
+`docs/acceptance/2026-11-18-pico2-isa-matrix-4fd6857.md`。
