@@ -85,6 +85,21 @@ Phase A 的收口条件只含 A-0..A-4/A-6/A-8。`ARCHITECTURE-NEXT.md` §7 的�
 的度量表已按这个口径写明，避免再被读成"Phase A 还没完"。此条不需要板子，
 B-4/B-5 启动后即可删除。
 
+## 2f. RP park 共享状态重构：三块板未上板（2026-11-17）
+
+`board/rp_park.h` 现在持有请求号/ack/flag/parked/owner 五元组，rp2040、rp2350、
+rp2350rv 三块板改为 `static struct rp_park_state park = RP_PARK_STATE_INIT;`；
+entry/exit 序列（IRQ 屏蔽、屏障、sev、超时恢复）**没有动**。UP 目标整段编译掉，
+SMP 目标编译通过，但 QEMU 不跑 RP park，必须上板。
+
+各板跑一次（`rp2040smp`、`rp2350smp`、`rp2350rvsmp`）：
+
+- 1000 轮 `dd of=/x bs=512 count=1` + `rm /x`，确认无 `[flash] park timeout`、无复位；
+- `reboot` 后文件仍在；
+- heartbeat 6/6。
+
+记录镜像/端口/命令；通过后建 `docs/acceptance/` 卡片，并把本条移进 `HISTORY.md`。
+
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
 `internal/build/build.go::WindowGeometry()` 返回 16 KiB grain / 8 KiB stack /

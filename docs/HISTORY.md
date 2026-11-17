@@ -4168,3 +4168,27 @@ ramdisk 扇区、XIP 基址、驱动目录与默认 feature——同一事实在
 - QEMU `rv32`/`rv32smp`/`arm` smoke（`ps`、`piperace`、`deep 3`、`hello`）通过；
 - `go test ./internal/build` 含新的结构测试；
 - **运行级 mock 没有做**：`OPEN-ITEMS` §2d 记录了它需要的开关与测试文件生成器。
+
+## 51. 2026-11-17 B-2a：三块 RP 板共享 park 状态
+
+**背景**：rp2040 / rp2350 / rp2350rv 各自维护五项 park 状态（请求号、ack、flag、
+parked、owner）和两三条谓词，四处抄同一套不变式；A-4 已经给了内核侧
+`plat_flash_exclusive_begin/end`，缺的是板级去重。
+
+**改动**：
+
+- 新增 `board/rp_park.h`：`struct rp_park_state`、`RP_PARK_STATE_INIT`、
+  `rp_park_should_park()`、`rp_park_acked()`、`rp_park_release()`。
+- 三块板改为一个 `static struct rp_park_state park = RP_PARK_STATE_INIT;`，
+  删除十来个 `g_flash_park*` / `g_park_*` 全局；`board/` 加入内核 include 路径。
+- `internal/build/rppark_test.go` 钉住"三块板都 include 共享头、无旧全局"。
+
+**没有动的**：进入/退出序列（IRQ 屏蔽与恢复、`dmb`/`fence`、`sev`、超时恢复、
+诊断相位）。它们和架构、RAM 函数段、调试输出耦合，QEMU 不跑 RP park，抽错会直接把
+XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2f）。
+
+**验收**：
+
+- 六个 RP 目标（单核 + SMP × 三块板）全部构建通过；11 目标 + x86 通过；
+- `go test ./...` 含新增结构测试；QEMU `rv32/rv32smp/arm` smoke 通过；
+- **真机 NOT RUN**：QEMU 只验证编译与调度路径，park 只在 RP flash 写时触发。

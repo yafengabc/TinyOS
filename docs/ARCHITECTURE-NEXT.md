@@ -260,7 +260,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 | 项 | 内容 | 依赖/验收 |
 |---|---|---|
 | B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
-| B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench |
+| B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态已共享 `board/rp_park.h`，序列待上板后再抽（OPEN-ITEMS §2f）** |
 | B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归 |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |

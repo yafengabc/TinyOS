@@ -987,6 +987,7 @@ func (b *Builder) buildKernel() error {
 		kdir,
 		lfsDir,
 		filepath.Join(b.Root, "board", b.Target.Board),
+		filepath.Join(b.Root, "board"),
 		filepath.Join(b.Root, "arch", b.Target.Arch),
 	}
 

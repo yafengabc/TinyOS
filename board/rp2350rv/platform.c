@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "rp_park.h"
 #include "board.h"
 #include "board_internal.h"
 #include "rp2350rv_memmap.h"
@@ -118,19 +119,15 @@ static uint32_t g_clk_hz = 12000000u;
  * Defined outside the SMP conditional because the reset-surviving step
  * marker (flash_step) records them even in a uniprocessor build, where they
  * simply stay zero. */
-static volatile uint32_t g_park_req;
-static volatile uint32_t g_park_ack;
+static struct rp_park_state park = RP_PARK_STATE_INIT;
 
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
 /* Set by core 0 before it takes XIP away for a ROM flash call; the parking
  * block next to plat_block_erase is what acts on it. */
-static volatile int g_flash_park;
-static volatile int g_flash_parked;
 /* PARK-FIX: which core called rp_flash_park_other().  The tick and idle
  * checks must never park the initiator - it is inside the thread wait that
  * is the only code which will ever clear the flag, and once its tick catches
  * the flag both harts spin in the RAM loop forever. */
-static volatile int g_flash_park_owner = -1;
 static void rp_flash_park_loop(void);
 #endif
 
@@ -614,7 +611,7 @@ void plat_timer_tick(void)
     /* Core 0 is about to turn XIP off for a ROM flash call: park here, in
      * RAM, before the next instruction fetch can touch flash.  Never park
      * the hart that initiated the flash call. */
-    if (g_flash_park && (int)plat_cpu_id() != g_flash_park_owner)
+    if (rp_park_should_park(&park, (int)plat_cpu_id()))
         rp_flash_park_loop();
 #endif
     /* Only the boot CPU counts time.  With one hart this is always true; it
@@ -778,7 +775,7 @@ static void diag_prev_report(void)
 static RAMFUNC void flash_step(uint32_t code)
 {
     mmio_write32(WATCHDOG_SCRATCH(0), code);
-    mmio_write32(WATCHDOG_SCRATCH(1), g_park_req);
+    mmio_write32(WATCHDOG_SCRATCH(1), park.req);
     mmio_write32(WATCHDOG_SCRATCH(2), g_tk[1]);
 }
 #else
@@ -844,7 +841,7 @@ static RAMFUNC void rp_flash_park_loop(void)
         g_pk_phase = 2;               /* acking */
     }
 #endif
-    g_flash_parked = 1;
+    park.parked = 1;
     __asm__ volatile("fence rw, rw" ::: "memory");
     /* Busy-spin, not wfe: clearing the flag and signalling is not atomic with
      * entering wfe, and a lost wakeup would park this core for good with
@@ -860,17 +857,17 @@ static RAMFUNC void rp_flash_park_loop(void)
      * flag is still up is safe: the flag is only cleared after XIP is back,
      * so "flag clear" is exactly "you may return to flash". */
     for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
-        if (!g_flash_park)
+        if (!park.flag)
             break;
         __asm__ volatile("fence rw, rw" ::: "memory");
-        if (g_park_ack != g_park_req) {
-            g_park_ack = g_park_req;
+        if (park.ack != park.req) {
+            park.ack = park.req;
             __asm__ volatile("fence rw, rw" ::: "memory");
         }
         if ((spins & 0xfffffu) == 0xfffffu)
             wdt_feed();         /* parked with interrupts masked: tick cannot */
     }
-    g_flash_parked = 0;
+    park.parked = 0;
 }
 
 void plat_flash_park_poll(void)
@@ -878,7 +875,7 @@ void plat_flash_park_poll(void)
 #if TOS_DIAG
     g_site[(uint32_t)plat_cpu_id() & 1u] = 2;  /* idle/spin poll */
 #endif
-    if (g_flash_park && (int)plat_cpu_id() != g_flash_park_owner) {
+    if (rp_park_should_park(&park, (int)plat_cpu_id())) {
         /* Mask interrupts BEFORE publishing the acknowledgement.  The park
          * loop tells the writer "I am in RAM now"; anything that preempts
          * this core after that point resumes in flash while the writer has
@@ -908,9 +905,9 @@ static int rp_flash_park_other(void)
      * saving it again here would only see the zero this csrci just wrote. */
     __asm__ volatile("csrci mstatus, 8" ::: "memory");
 
-    myreq = ++g_park_req;                    /* new generation first */
-    g_flash_parked = 0;
-    g_flash_park_owner = (int)plat_cpu_id();
+    myreq = ++park.req;                    /* new generation first */
+    park.parked = 0;
+    park.owner = (int)plat_cpu_id();
 #if TOS_DIAG
     g_pk_writer = (uint32_t)plat_cpu_id();
     g_wr_enter[(uint32_t)plat_cpu_id() & 1u]++;
@@ -919,11 +916,11 @@ static int rp_flash_park_other(void)
     g_pk_req++;
 #endif
     __asm__ volatile("fence rw, rw" ::: "memory");
-    g_flash_park = 1;
+    park.flag = 1;
     __asm__ volatile("slt x0, x0, x1" ::: "memory");
     for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
         /* Only this request's acknowledgement counts. */
-        if (g_park_ack == myreq) {
+        if (rp_park_acked(&park, myreq)) {
             /* Stay masked: the caller restores mstatus.MIE after the ROM
              * call and the unpark. */
 #if TOS_DIAG
@@ -935,8 +932,7 @@ static int rp_flash_park_other(void)
         if ((i & 0xfffffu) == 0xfffffu)
             wdt_feed();                      /* this wait runs masked too */
     }
-    g_flash_park = 0;
-    g_flash_park_owner = -1;
+    rp_park_release(&park);
 #if TOS_DIAG
     g_pk_to++;                               /* timeout */
     g_wr_live &= ~(1u << ((uint32_t)plat_cpu_id() & 1u));
@@ -988,8 +984,7 @@ static int rp_flash_park_other(void)
 
 static void rp_flash_unpark_other(void)
 {
-    g_flash_park = 0;
-    g_flash_park_owner = -1;
+    rp_park_release(&park);
     __asm__ volatile("slt x0, x0, x1" ::: "memory");
 }
 #endif
