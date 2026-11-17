@@ -17,38 +17,69 @@ import (
 // Compiling both ways is the real check, but it needs a toolchain and a config
 // file, so this pins the shape instead: a function that only exists in a
 // read-write build must not be referenced from code a read-only build compiles.
-// It walks kernel/ramdisk.c, keeps the lines a -DTOS_LFS_RO build would see and
-// looks for read-write-only helpers in them.
+// Every source file that mentions TOS_LFS_RO is walked, so the next helper that
+// lands on the wrong side of the guard is caught wherever it is written.
 func TestReadOnlyBuildDoesNotUseROOnlyHelpers(t *testing.T) {
 	root, err := FindRoot()
 	if err != nil {
 		t.Skip("not in the source tree")
 	}
-	body, err := os.ReadFile(filepath.Join(root, "kernel", "ramdisk.c"))
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	visible, hidden := splitOnReadOnlyGuard(stripCComments(string(body)))
-
-	// A definition is "read-write only" when it sits in a hidden region.
+	// One definition pattern: a file-scope function.  Locals cannot be
+	// "read-write only", so matching definitions inside functions is enough.
 	def := regexp.MustCompile(`(?m)^static\s+[A-Za-z_][A-Za-z0-9_ \t*]*\b([a-z_][a-z0-9_]*)\s*\(`)
-	roOnly := map[string]bool{}
-	for _, m := range def.FindAllStringSubmatch(hidden, -1) {
-		roOnly[m[1]] = true
-	}
-	if len(roOnly) == 0 {
-		t.Fatalf("parser found no read-write-only helpers in ramdisk.c; the guard scan is broken")
-	}
 
-	for name := range roOnly {
-		if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*\(`).MatchString(visible) {
-			t.Errorf("kernel/ramdisk.c: %s is defined only when !TOS_LFS_RO but used by a read-only build", name)
+	checked := 0
+	// Only the trees that are compiled into an image: walking the whole repo
+	// (docs, goc32, tools) would make this test slower than the thing it
+	// protects.
+	for _, dir := range []string{"kernel", "board", "arch", "drivers", "include", "user"} {
+		err = filepath.Walk(filepath.Join(root, dir), func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			if !strings.HasSuffix(p, ".c") && !strings.HasSuffix(p, ".h") {
+				return nil
+			}
+			body, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			text := string(body)
+			if !strings.Contains(text, "TOS_LFS_RO") {
+				return nil
+			}
+			checked++
+			rel, _ := filepath.Rel(root, p)
+			visible, hidden := splitOnReadOnlyGuard(stripCComments(text))
+
+			roOnly := map[string]bool{}
+			for _, m := range def.FindAllStringSubmatch(hidden, -1) {
+				roOnly[m[1]] = true
+			}
+			for name := range roOnly {
+				if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*\(`).MatchString(visible) {
+					t.Errorf("%s: %s is defined only when !TOS_LFS_RO but used by a read-only build",
+						filepath.ToSlash(rel), name)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
+	}
+	if checked == 0 {
+		t.Fatalf("no file mentions TOS_LFS_RO; the fs_ro build is unreachable and this test proves nothing")
 	}
 
 	// The other half of issue #14: the hash is recorded on every open, so its
 	// helper must exist in both builds.
+	body, err := os.ReadFile(filepath.Join(root, "kernel", "ramdisk.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible, _ := splitOnReadOnlyGuard(stripCComments(string(body)))
 	if !strings.Contains(visible, "hash_path(") {
 		t.Errorf("kernel/ramdisk.c: hash_path is not visible to a read-only build")
 	}
