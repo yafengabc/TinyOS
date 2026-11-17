@@ -5,6 +5,7 @@
 #include "spi.h"
 #include "cpu.h"
 #include "font5x7.h"
+#include "../lcd_proto.h"
 
 /* ST7789V2 panel on the ATK-DNRP2350AM.
  *
@@ -269,13 +270,6 @@ static void lcd_data_phase(void)
     lcd_cs(0);
 }
 
-static void lcd_cmd_data(uint8_t cmd, const uint8_t *d, size_t n)
-{
-    lcd_cmd(cmd);
-    if (n)
-        lcd_data(d, n);
-}
-
 static void lcd_delay_ms(uint32_t ms)
 {
     /* RP2350 TIMER0 is a free-running 1 MHz counter, independent of the
@@ -293,51 +287,27 @@ static void lcd_delay_ms(uint32_t ms)
         spins++;
 }
 
+/* ---- shared ST7789 protocol (drivers/display/st7789/lcd_proto.h) ------ */
+
+static void proto_cmd(uint8_t c) { lcd_cmd(c); }
+static void proto_data(const uint8_t *d, uint32_t n) { lcd_data(d, n); }
+static void proto_delay(uint32_t ms) { lcd_delay_ms(ms); }
+
+static const struct lcd_proto_ops proto_ops = {
+    proto_cmd, proto_data, proto_delay
+};
+
 /* ---- geometry --------------------------------------------------------- */
 
 static void lcd_window(int x, int y, int w, int h)
 {
-    uint8_t b[4];
-
-    if (w <= 0 || h <= 0)
-        return;
-    b[0] = (uint8_t)((x + LCD_XOFF) >> 8);
-    b[1] = (uint8_t)(x + LCD_XOFF);
-    b[2] = (uint8_t)((x + LCD_XOFF + w - 1) >> 8);
-    b[3] = (uint8_t)(x + LCD_XOFF + w - 1);
-    lcd_cmd_data(0x2a, b, 4);           /* CASET */
-
-    b[0] = (uint8_t)((y + LCD_YOFF) >> 8);
-    b[1] = (uint8_t)(y + LCD_YOFF);
-    b[2] = (uint8_t)((y + LCD_YOFF + h - 1) >> 8);
-    b[3] = (uint8_t)(y + LCD_YOFF + h - 1);
-    lcd_cmd_data(0x2b, b, 4);           /* RASET */
-
-    lcd_cmd(0x2c);                      /* RAMWR */
+    lcd_proto_window(&proto_ops, x, y, w, h, LCD_XOFF, LCD_YOFF);
 }
 
 /* ---- init ------------------------------------------------------------- */
 
 static void lcd_init_hw(void)
 {
-    static const uint8_t porch[]    = { 0x0c, 0x0c, 0x00, 0x33, 0x33 };
-    static const uint8_t gctrl[]    = { 0x35 };
-    static const uint8_t vcom[]     = { 0x19 };
-    static const uint8_t lcmctl[]   = { 0x2c };
-    static const uint8_t vdvvrhen[] = { 0x01 };
-    static const uint8_t vrhs[]     = { 0x12 };
-    static const uint8_t vdvs[]     = { 0x20 };
-    static const uint8_t frctrl[]   = { 0x01 };
-    static const uint8_t pwrctl[]   = { 0xa4, 0xa1 };
-    static const uint8_t pvgam[]    = { 0xd0, 0x04, 0x0d, 0x11, 0x13, 0x2b,
-                                        0x3f, 0x54, 0x4c, 0x18, 0x0d, 0x0b,
-                                        0x1f, 0x23 };
-    static const uint8_t nvgam[]    = { 0xd0, 0x04, 0x0c, 0x11, 0x13, 0x2c,
-                                        0x3f, 0x44, 0x51, 0x2f, 0x1f, 0x1f,
-                                        0x20, 0x23 };
-    static const uint8_t colmod[]   = { 0x05 };   /* 16 bits per pixel */
-    static const uint8_t madctl[]   = { 0x70 };   /* landscape, RGB order */
-
     if (lcd_up)
         return;
 
@@ -350,33 +320,9 @@ static void lcd_init_hw(void)
     pin_out(LCD_PIN_BL, 1);         /* PNP: high keeps the backlight off */
     pins_ready = 1;
 
-    lcd_delay_ms(20);
-
-    lcd_cmd(0x01);                      /* SWRESET */
-    lcd_delay_ms(150);
-    lcd_cmd(0x11);                      /* SLPOUT  */
-    lcd_delay_ms(120);
-
-    lcd_cmd_data(0x36, madctl, sizeof(madctl));
-    lcd_cmd_data(0x3a, colmod, sizeof(colmod));
-    lcd_cmd_data(0xb2, porch, sizeof(porch));
-    lcd_cmd_data(0xb7, gctrl, sizeof(gctrl));
-    lcd_cmd_data(0xbb, vcom, sizeof(vcom));
-    lcd_cmd_data(0xc0, lcmctl, sizeof(lcmctl));
-    lcd_cmd_data(0xc2, vdvvrhen, sizeof(vdvvrhen));
-    lcd_cmd_data(0xc3, vrhs, sizeof(vrhs));
-    lcd_cmd_data(0xc4, vdvs, sizeof(vdvs));
-    lcd_cmd_data(0xc6, frctrl, sizeof(frctrl));
-    lcd_cmd_data(0xd0, pwrctl, sizeof(pwrctl));
-    lcd_cmd_data(0xe0, pvgam, sizeof(pvgam));
-    lcd_cmd_data(0xe1, nvgam, sizeof(nvgam));
-
-    lcd_cmd(0x21);                      /* INVER = on: this panel is IPS
-                                         * and needs it, the vendor init
-                                         * sequence turns it on too */
-    lcd_cmd(0x29);                      /* DISPON */
-    lcd_delay_ms(20);
-
+    /* The panel sequence itself is shared with the ARM lower; only the bus
+     * bring-up above is board/ISA specific. */
+    lcd_proto_panel_init(&proto_ops);
     lcd_up = 1;
 }
 
