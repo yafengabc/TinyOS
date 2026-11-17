@@ -65,3 +65,4 @@
 | 2026-11-17 | B-2a + B-3 hardware smoke | `a16513b` | RP2350 ARM + RV32（COM14） | T0/T2/T3/T4 PASS；T1 x86 FAIL；RP2040 `NOT RUN` | [B-2a/B-3 RP2350](2026-11-17-b2a-b3-rp2350-a16513b.md) |
 | 2026-11-17 | current HEAD smoke | `63f336a` | RP2350 ARM + RV32 (COM14) | T0/T2/T3 PASS; T1 x86 FAIL; T4 `NOT RUN` | [current HEAD](2026-11-17-head63f336a-rp2350-63f336a.md) |
 | 2026-11-17 | B-8 heap/ofile 收缩 | `f4bafc0` | rv32smp 对比 + QEMU + ESP32-C3 | T0–T3 PASS；kernel 省 224 B | [B-8](2026-11-17-b8-shrink-f4bafc0.md) |
+| 2026-11-17 | B-1c 漏迁修复（#8–#11） | `81411d4` | 12 目标 + QEMU + doctor | T0–T2 PASS；C3 字节相同 | [B-1c fixes](2026-11-17-b1c-fixes-81411d4.md) |
