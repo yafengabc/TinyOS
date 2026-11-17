@@ -4530,3 +4530,30 @@ clang 23 更小，所以一直没踩到。预算抬到 200 扇区（100 KiB）�
 
 **为什么不改内核**：`free` 的前后数字在慢主机上也是稳定的（他们的卡里 `tasks` 数值与
 本机一致），失败只发生在解析阶段。修内核等于给一个不存在的问题加代码。
+
+## 67. 2026-11-17 B-2b 前半：park 握手顺序共享，循环仍分板（#17）
+
+**共享的是顺序，不是循环。** 三块板各自手写同一套握手：新代号 → 归属 → 屏障 → flag，
+被挂起的一侧每轮重新发布 ack。这两条恰好是历史两个 bug 的所在——ack 只发一次
+（`dd: write error at block 0 (-1)`，§35）与代号错配。现在它们在 `board/rp_park.h` 里各
+只有一份：`rp_park_begin()` 与 `rp_park_ack()`，屏障按架构拼写（ARM `dmb`、RISC-V
+`fence rw, rw`）。
+
+**循环没有动**，因为它们已经分叉，而且分叉的地方都是安全性取舍：rp2040 的 park 循环不
+喂狗、没有"core1 不许回来"（那台没有 BOOTSEL 前的 ROM 跳转路径），rp2350 与 rp2350rv
+的诊断变量组不同，RISC-V 的"唤醒"是一条编译器绊线而不是 `sev`。把循环合并意味着在
+XIP 关键路径上引入回调钩子——这件事需要台面时间，不是桌面改动（issue #17 保持打开）。
+
+**等价性**：六个目标的 `platform.o` 对比，SMP 的差异只落在被改的两处
+（`.text.plat_flash_exclusive_begin`，rp2350smp 上 164 → 168 B；以及内联了
+`rom_stop_other_core` 的 `rom_enter_bootsel`）。`rp_flash_park_loop` 与
+`plat_flash_park_poll` 逐字节相同；三个单核目标整份对象相同。变的是屏障之前几条 store
+的排序，屏障与 store 的相对位置没变。
+
+**把规则变成可执行的**：`internal/build/testdata/rppark_model.c` 用 host 编译器把
+`rp_park.h` 编进来，模拟两核跑 15 条断言（一次握手、过期 ack、连续两代且挂起侧仍在循环、
+手写一个过期 ack 值）。把 `rp_park_ack()` 改回"只发一次"，三条断言立刻失败——正是 §35
+记录的那个缺陷。这条测试只在桌面跑，不替代 1000 轮 soak。
+
+**证据**：`docs/acceptance/2026-11-17-b2b-park-ordering-1120aac.md`（`1120aac`）；
+T0/T1（12 目标 + fs_ro）/T2（smoke 4 + soak 3/3）通过。T3 归 #17 的双端 soak。
