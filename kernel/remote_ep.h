@@ -9,7 +9,10 @@
  *   - remote_ep_send/recv: task context only.
  *   - remote_ep_poll/link_state: task or tick context; may touch the lower.
  *   - remote_ep_irq: the only ISR entry; it sets `pending` and does no I/O.
- *     The tick drains it and wakes waiters with the state already updated.
+ *     The contract says the tick drains it with remote_ep_poll() and wakes
+ *     waiters with the state already updated.  Today there is no real lower,
+ *     so only the self-test drives poll; the tick hook lands with the first
+ *     real lower (P4 LP / C6).
  *
  * Capacity is per-lower (remote_ep_caps), never a macro: the LP mailbox and a
  * C6 SPI frame do not have the same limits.  A capability bit may only be

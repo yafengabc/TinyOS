@@ -1,6 +1,7 @@
 #include "platform.h"
 #include "console.h"
 #include "board_config.h"
+#include "mem_domain.h"
 
 /* The generated header (from board.conf) and layout.c's constants are two
  * declarations of the same numbers.  layout.c is what the window allocator,
@@ -14,6 +15,8 @@
  * values directly. */
 void board_config_check(void)
 {
+    const struct mem_domain *d = mem_domain_exec();
+
     if (PLAT_APP_GRAIN != TOS_APP_GRAIN ||
         PLAT_STACK_BYTES != TOS_APP_STACK ||
         PLAT_HEAP_GUARD != TOS_APP_GUARD) {
@@ -22,5 +25,12 @@ void board_config_check(void)
               (unsigned)TOS_APP_GRAIN, (unsigned)PLAT_APP_GRAIN,
               (unsigned)TOS_APP_STACK, (unsigned)PLAT_STACK_BYTES,
               (unsigned)TOS_APP_GUARD, (unsigned)PLAT_HEAP_GUARD);
+    }
+    /* C4 seam: the allocator's domain is a view over the same layout. */
+    if (!d || d->base != PLAT_APP_BASE ||
+        d->size != PLAT_APP_MAX - PLAT_APP_BASE ||
+        d->grain != PLAT_APP_GRAIN ||
+        !(d->flags & DOMAIN_EXEC)) {
+        panic("mem_domain disagrees with platform layout");
     }
 }

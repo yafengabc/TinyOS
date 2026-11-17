@@ -4204,11 +4204,16 @@ XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2
   `poll/link_state`（任务或 tick 上下文，可碰 lower）、`remote_ep_irq()` 只置
   `pending`；liveness 是 `last_rx_tick` 属性，不是 `heartbeat()` 命令；容量由
   `remote_ep_get_caps()` 返回，不写成宏。
-- 一个 loopback mock lower（4 帧 × 64 B）：`SYS_REMOTE_TEST` 跑
-  send → recv 顺序、空队列返回、IRQ 只置 pending、`poll` 清 pending 并更新链路。
+- 一个 loopback mock lower（4 帧 × 64 B，自旋锁保护，SMP 上两核同时 send/recv 也安全）：
+  `SYS_REMOTE_TEST` 跑 send → recv 顺序、空队列返回、IRQ 只置 pending、`poll` 清
+  pending 并更新链路。
 - `include/tos.h` 追加 `SYS_REMOTE_TEST = 53`，`abi/syscalls.csv` 同步；用户侧
   `remote_selftest()` + `user/rselftest.c`。
 - `TESTING.md` §4.1 的 smoke 命令加上 `rselftest`。
+
+**范围说明**：`remote_ep_poll`/`remote_ep_irq` 目前**只由 selftest 驱动**——还没有真 lower，
+也就没有 tick/ISR 挂载点。C7 的契约要求真 lower 接入时在 tick 里调用 `poll`、在 ISR 里
+只调 `irq`；这半句等 B-6b。
 
 **验收**：
 
@@ -4216,3 +4221,28 @@ XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2
   目标与 **C3 真机**都通过；
 - 11 目标 + x86 构建通过；T0 全绿；
 - 真 lower 未实现，`OPEN-ITEMS` 没有新增阻塞（mock 不需要板子）。
+
+## 53. 2026-11-17 A-5：mem_domain 接缝
+
+**背景**：C4 要求内存域成为类型，而不是散落的 `PLAT_APP_*` 读取；P4 的 PSRAM 将来只能
+作为数据域，不能被 `exec`。
+
+**改动**：
+
+- `kernel/mem_domain.h/.c`：`struct mem_domain {name, base, size, grain, flags}`，
+  `mem_domain_init()` 从 `PLAT_APP_BASE/MAX/GRAIN` 填充唯一的 `DOMAIN_EXEC` 域；
+  `mem_domain_exec()` 返回它。
+- `win_alloc(p, dom, bytes)` 与 `win_largest_free(dom)` 改为吃域参数；分配器拒绝非
+  `DOMAIN_EXEC` 的域，所以"PSRAM 不能执行"以后是代码约束。
+- `proc_create_claim()` 的窗口尺寸/取整/失败信息改用 `dom->size`/`dom->grain`。
+- `board_check.c` 启动时比对域与 `PLAT_APP_*`，不一致直接 panic。
+- `kmain()` 在 `plat_init()` 之后、`process_init()` 之前 `mem_domain_init()`。
+
+**验收**：
+
+- 11 目标 + x86 构建；T0 全绿；
+- QEMU `rv32`/`rv32smp`/`arm` smoke（`ps`/`piperace`/`deep 3`/`rselftest`）与
+  `soak.py --cycles 3` 通过；
+- **C3 真机**：`accept.py` 24/24、`rselftest` ok；
+- 窗口几何未改：`win_alloc` 的 base/size/grain 与 `PLAT_APP_*` 相同（域是视图，不是
+  第二个真相），`geometry_test` 与 `prot heap/stack` 路径未动。

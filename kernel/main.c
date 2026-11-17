@@ -3,6 +3,7 @@
 #include "console.h"
 #include "ramdisk.h"
 #include "heap.h"
+#include "mem_domain.h"
 #include "process.h"
 #include "cpu.h"
 #include "devfs.h"
@@ -51,6 +52,7 @@ void kmain(void)
 {
     plat_early_init();
     plat_init();
+    mem_domain_init();
 
     /* The scheduler runs off this tick: it is what preempts a task, wakes
        sleepers and hands console input to whoever is reading.  1000 Hz so

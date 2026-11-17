@@ -5,6 +5,7 @@
 #include "console.h"
 #include "string.h"
 #include "heap.h"
+#include "mem_domain.h"
 #include "lz4.h"
 #include "exec_format.h"
 #include "kassert.h"
@@ -1388,12 +1389,17 @@ int process_user_ok(uint32_t addr, uint32_t len)
  * window is recorded in the proc_t *inside* that lock - reserving it after
  * the lock is dropped would let two concurrent execs pick the same gap,
  * each seeing a table that does not yet mention the other. */
-static int win_alloc(proc_t *p, uint32_t bytes)
+static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
 {
-    uint32_t cand = PLAT_APP_BASE;
-    uint32_t end = PLAT_APP_MAX;
-    uint32_t align;
+    uint32_t cand, end, align;
     int ok = 0;
+
+    if (!dom || dom->grain == 0 || !(dom->flags & DOMAIN_EXEC))
+        return -1;
+    if (dom->size == 0 || dom->base + dom->size < dom->base)
+        return -1;
+    cand = dom->base;
+    end = dom->base + dom->size;
 
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
@@ -1405,7 +1411,7 @@ static int win_alloc(proc_t *p, uint32_t bytes)
          * instead would put every non-power-of-two size on a boundary no
          * allocator can reach. */
         align = 1u;
-        while (align * 2u <= bytes && align * 2u <= end - PLAT_APP_BASE)
+        while (align * 2u <= bytes && align * 2u <= end - dom->base)
             align *= 2u;
         cand = align_up(cand, align);
         if (cand >= end)
@@ -1444,11 +1450,14 @@ static int win_alloc(proc_t *p, uint32_t bytes)
 /* Longest contiguous free run, for the "no room" message: without it a
  * fragmented area reports "out of task windows" on a machine with 40 KiB
  * free, and the next person looks for a leak. */
-static uint32_t win_largest_free(void)
+static uint32_t win_largest_free(const struct mem_domain *dom)
 {
-    uint32_t cand = PLAT_APP_BASE;
-    uint32_t end = PLAT_APP_MAX;
-    uint32_t best = 0;
+    uint32_t cand, end, best = 0;
+
+    if (!dom || dom->size == 0 || dom->base + dom->size < dom->base)
+        return 0;
+    cand = dom->base;
+    end = dom->base + dom->size;
 
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
@@ -1943,7 +1952,13 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     uint32_t raw_size = 0;
     lz4_window_hint_t hint = {0, 0, 0};
     const struct exec_format *cfmt = NULL;
+    const struct mem_domain *dom = mem_domain_exec();
     uint32_t hdr = 0;
+
+    if (!dom) {
+        kprintf("exec: no executable memory domain\n");
+        return NULL;
+    }
 
     for (int i = 0; exec_formats[i]; i++) {
         hdr = exec_formats[i]->probe(path, &raw_size, &hint);
@@ -1984,7 +1999,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        where it might not. */
     uint32_t img = hint.span > raw_size ? hint.span : raw_size;
     uint32_t win_need = img;
-    uint32_t app_total = PLAT_APP_MAX - PLAT_APP_BASE;
+    uint32_t app_total = dom->size;
     uint32_t grow = hint.stack_ask ? 0 : plat_window_grow_reserve();
     if (add_u32_ok(win_need, stk, &win_need) < 0 ||
         add_u32_ok(win_need, grow, &win_need) < 0 ||
@@ -2001,16 +2016,16 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
         return NULL;
     }
     uint32_t win;
-    if (align_up_ok(win_need, PLAT_APP_GRAIN, &win) < 0) {
+    if (align_up_ok(win_need, dom->grain, &win) < 0) {
         kprintf("exec: '%s' window alignment overflows\n", path);
         proc_retire(p);
         return NULL;
     }
-    if (win < PLAT_APP_GRAIN)
-        win = PLAT_APP_GRAIN;
-    if (win_alloc(p, win) != 0) {
+    if (win < dom->grain)
+        win = dom->grain;
+    if (win_alloc(p, dom, win) != 0) {
         kprintf("exec: '%s' needs a %u KiB window, the largest free block is %u KiB\n",
-                path, win / 1024u, win_largest_free() / 1024u);
+                path, win / 1024u, win_largest_free(dom) / 1024u);
         proc_retire(p);
         return NULL;
     }
@@ -2075,13 +2090,13 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     if (add_u32_ok(win_elf, stk, &win_elf) < 0 ||
         add_u32_ok(win_elf, asked_heap, &win_elf) < 0 ||
         add_u32_ok(win_elf, HEAP_GUARD, &win_elf) < 0 ||
-        align_up_ok(win_elf, PLAT_APP_GRAIN, &win_elf) < 0) {
+        align_up_ok(win_elf, dom->grain, &win_elf) < 0) {
         kprintf("exec: '%s' ELF window overflows\n", path);
         proc_retire(p);
         return NULL;
     }
-    if (win_elf < PLAT_APP_GRAIN)
-        win_elf = PLAT_APP_GRAIN;
+    if (win_elf < dom->grain)
+        win_elf = dom->grain;
     if (span != hint.span || asked_stack != hint.stack_ask ||
         asked_heap != hint.heap_ask || win_elf > win || raw_size > win) {
         kprintf("exec: '%s' window hint disagrees with its ELF\n", path);

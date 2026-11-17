@@ -1,5 +1,6 @@
 #include "remote_ep.h"
 #include "platform.h"
+#include "cpu.h"
 #include "string.h"
 
 /* Loopback mock lower: a tiny frame queue with no hardware behind it.  It is
@@ -15,6 +16,12 @@ static uint32_t mock_head;
 static uint32_t mock_tail;
 static uint32_t mock_count;
 
+/* send/recv are task context, and two cores can be in them at once: the mock
+ * queue needs the same exclusion a real lower would.  irqsave (not just a
+ * spin) because a tick landing on this core must not switch to another task
+ * that re-enters the same queue. */
+static spin_t mock_lock = SPIN_INIT;
+
 static int mock_link_state(void)
 {
     return 1;
@@ -22,27 +29,43 @@ static int mock_link_state(void)
 
 static int mock_send(const void *buf, uint32_t len)
 {
-    if (!buf || len == 0 || len > MOCK_FRAME || mock_count == MOCK_FRAMES)
+    uint32_t irq;
+
+    if (!buf || len == 0 || len > MOCK_FRAME)
         return -1;
+    irq = plat_spin_lock_irqsave(&mock_lock);
+    if (mock_count == MOCK_FRAMES) {
+        plat_spin_unlock_irqrestore(&mock_lock, irq);
+        return -1;
+    }
     memcpy(mock_q[mock_tail], buf, len);
     mock_len[mock_tail] = len;
     mock_tail = (mock_tail + 1u) % MOCK_FRAMES;
     mock_count++;
+    plat_spin_unlock_irqrestore(&mock_lock, irq);
     return (int)len;
 }
 
 static int mock_recv(void *buf, uint32_t cap)
 {
-    uint32_t len;
+    uint32_t len, irq;
 
-    if (!buf || mock_count == 0)
+    if (!buf)
         return -1;
+    irq = plat_spin_lock_irqsave(&mock_lock);
+    if (mock_count == 0) {
+        plat_spin_unlock_irqrestore(&mock_lock, irq);
+        return -1;
+    }
     len = mock_len[mock_head];
-    if (len > cap)
-        return -1;                  /* leave the frame queued */
+    if (len > cap) {                    /* leave the frame queued */
+        plat_spin_unlock_irqrestore(&mock_lock, irq);
+        return -1;
+    }
     memcpy(buf, mock_q[mock_head], len);
     mock_head = (mock_head + 1u) % MOCK_FRAMES;
     mock_count--;
+    plat_spin_unlock_irqrestore(&mock_lock, irq);
     return (int)len;
 }
 

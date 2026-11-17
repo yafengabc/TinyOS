@@ -218,10 +218,14 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - 加 `plat_icache_sync()`、`plat_dcache_clean/invalidate(range)`、`PLAT_CACHE_LINE`；现有板 no-op。
 - **不做**：通用 `plat_core_pause/resume`；不做三块板协议合并（Phase B）。
 
-### A-5｜内存域接缝（C4）
-- `struct mem_domain {base, size, grain, protect, flags}`，现在 `domains[1]`。
-- `win_alloc` 加域参数；`process_user_ok`/`plat_task_protect` 走域选择，但单域行为完全一致。
-- **不做**：PSRAM 第二域、cache 维护实现。
+### A-5｜内存域接缝（C4）——已落地（2026-11-17）
+- `kernel/mem_domain.h/.c`：`struct mem_domain {name, base, size, grain, flags}`，
+  `mem_domain_exec()` 返回唯一的可执行域；`mem_domain_init()` 从 `PLAT_APP_*` 填充，
+  `board_check.c` 在启动时比对两者。
+- `win_alloc(p, dom, bytes)` / `win_largest_free(dom)` 走域参数；分配器只接受
+  `DOMAIN_EXEC`，所以"以后 PSRAM 不能执行"是代码约束，不是注释。
+- `process_user_ok` 仍按任务自己的 `win_base/win_size` 检查；单域行为不变。
+- **不做**：PSRAM 第二域、cache 维护实现（B-7，条件性）。
 
 ### A-6｜等待纪律（C6）
 不引入 `wd_start`。这里冻结的是**规则**，不是一个定时器 API：
@@ -387,8 +391,7 @@ Phase A（可并行、每项独立提交）
   A-2 ABI 头     ├─> A-3 exec_format（表 + 循环）
   A-6 等待纪律   └─> A-8 KASSERT
 
-Phase A 收口条件只含上面六项。以下两项**推迟**，不计入 Phase A：
-  A-5 内存域接缝   -> 与 B-5/B-7 一起（P4 到板后）
+Phase A 收口条件只含上面六项，A-5 已于 2026-11-17 落地。以下一项**推迟**：
   A-7 LCD lowops   -> 与 B-4 一起（LCD 板适配时）
 
 Phase B（A 稳定后）
@@ -448,7 +451,7 @@ Phase B（A 稳定后）
 | 等待 | 迭代数当时钟，部分在锁内 | tick 后毫秒上限、tick 前按主频折算；不在锁内长等 |
 | 断言 | `assert()` 无条件 no-op | 内部不变量 halt、外部数据返回错误；`TOS_KASSERT` 默认开 |
 | 远端端点 | 无 | C7 形状 + mock lower（参数由 caps 提供） |
-| 单域→多域 | 无接缝 | B-7（条件，P4 到板后） |
+| 单域→多域 | 单域 | 接缝已落地（`domains[1]`，A-5）；第二域 B-7（条件，P4 到板后） |
 | 新板验收 | 手工 | 心跳级 6 项（`scripts/<board>/heartbeat.py`） |
 | 平权验收 | 24 项全过或口头子集 | 24/24 或具名 N/24，两种不入项都要 OPEN-ITEMS |
 
