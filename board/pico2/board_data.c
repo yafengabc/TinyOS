@@ -3,11 +3,11 @@
 
 /* Raspberry Pi Pico 2, as data.
  *
- * The only file this board replaces from board/rp2350: the device table.
+ * The only file this board replaces from board/rp2350-generic: the device table.
  * Everything else - platform.c, layout.c, the linker script, the PICOBIN
  * header - is the silicon's and is compiled from the base directory through
  * `base = rp2350` in board.conf.  The LED/key code that reads this table
- * lives in board/rp2350/board_devs.c and is shared.
+ * lives in board/rp2350-generic/board_devs.c and is shared.
  *
  * Pin facts (Pico 2 datasheet, the "Pinout" section):
  *

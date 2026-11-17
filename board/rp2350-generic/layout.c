@@ -5,7 +5,7 @@
  *
  * Code runs in place from XIP flash at 0x10000000.  Unlike RP2040 there is
  * no stage-2: the boot ROM reads the vector table from flash offset 0 and
- * finds our PICOBIN IMAGE_DEF in the first 4 KiB (board/rp2350/image_def.S).
+ * finds our PICOBIN IMAGE_DEF in the first 4 KiB (board/rp2350-generic/image_def.S).
  *
  * The chip has 520 KiB of SRAM at 0x20000000.  The first 128 KiB holds the
  * kernel's .data/.bss/stack, and the striped banks up to 0x20080000 (512 KiB)
@@ -32,15 +32,24 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
  * internal/build/uf2.go) and runs to the end of the chip.  The ATK board's
  * W25Q32 is 4 MiB, measured by XIP address wrap-around (+2 MiB reads 0xFF,
  * +4 MiB reads the vector table again), which gives 896 blocks.  That is a
- * board fact now, in board/rp2350/board.conf: a Pico 2 - or any board with a
+ * board fact now, in board/rp2350-generic/board.conf: a Pico 2 - or any board with a
  * different flash part - changes two numbers instead of editing this file.
  * The flashed image stays 300 KiB (75 blocks); ramdisk_init() grows the
  * mounted filesystem to this count on first boot.
  *
  * TOS_LFS_OFFSET/TOS_LFS_BLOCKS come from the generated board_config.h and
  * board_config_check() refuses to boot if they disagree with these two. */
+#if TOS_HAS_FLASH
 const uint32_t PLAT_LFS_LBA = TOS_LFS_OFFSET / 512u;
 const uint32_t PLAT_LFS_BLOCKS = TOS_LFS_BLOCKS;
+#else
+/* A board with no flash claim (board/rp2350-generic) mounts a RAM disk that
+ * is linked into the kernel: there is no flash LBA, and the block count is
+ * the image's own 300 KiB.  The numbers mirror board/qemu-virt, which is the
+ * other embedded-filesystem board in the tree. */
+const uint32_t PLAT_LFS_LBA = 0;
+const uint32_t PLAT_LFS_BLOCKS = 75;
+#endif
 
 /* One core unless the build asks for two.  The `rp2350smp` target defines
  * TOS_MAX_CPUS=2, which also doubles the kernel stack pool in

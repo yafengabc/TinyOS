@@ -5,7 +5,7 @@
 
 /* Memory map and clock constants for the RP2350's Hazard3 RISC-V cores.
  *
- * The chip is the same one board/rp2350/arm_memmap.h describes; what moves
+ * The chip is the same one board/rp2350-generic/arm_memmap.h describes; what moves
  * is the CPU and the timer.  The ARM SysTick does not exist here: Hazard3
  * has the standard machine timer, with mtime/mtimecmp supplied by the SIO
  * block.  Every other peripheral (UART0, CLOCKS, RESETS, XOSC, IO_BANK0,
@@ -61,7 +61,7 @@
 #define RESET_IO_BANK0  (1u << 6)
 #define RESET_PLL_SYS   (1u << 14)
 
-/* XOSC enable, exactly as board/rp2350/platform.c measures it: ENABLE is
+/* XOSC enable, exactly as board/rp2350-generic/platform.c measures it: ENABLE is
  * 0xfab << 12 and FREQ_RANGE 0xaa0 selects the 1-15 MHz crystal range. */
 #define XOSC_CTRL               (XOSC_BASE + 0x00u)
 #define XOSC_STATUS             (XOSC_BASE + 0x04u)

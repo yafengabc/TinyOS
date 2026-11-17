@@ -10,7 +10,7 @@ UART0 双控制台、ST7789 屏做控制台镜像、MPU 真正隔离任务、fla
 | CPU | 双 Cortex-M33（ARMv8-M，Secure 态），PLL_SYS 150 MHz；`rp2350smp` 才拉 core 1 |
 | SRAM | 520 KiB @ `0x20000000`：前 128 KiB 内核，其后 384 KiB = 24 个 16 KiB 窗口 |
 | Flash | 4 MiB QSPI（W25Q32，实测确认），XIP @ `0x10000000` |
-| 启动 | ROM 自己配 XIP，扫前 4 KiB 找 **PICOBIN IMAGE_DEF**（`board/rp2350/image_def.S`），从 flash 偏移 0 的向量表取 MSP/PC |
+| 启动 | ROM 自己配 XIP，扫前 4 KiB 找 **PICOBIN IMAGE_DEF**（`board/atk-dnr2350am/image_def.S`），从 flash 偏移 0 的向量表取 MSP/PC |
 | UF2 | family `0xe48bff59`（ARM Secure EXE），产物 `build/rp2350.uf2` |
 | 文件系统 | littlefs @ flash `0x80000`，首挂载从 300 KiB 拉伸到 3.5 MiB |
 | 任务窗口 | 16 KiB 粒度，栈 8 KiB、护栏 4 KiB |
@@ -114,7 +114,7 @@ ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 
 
 ## 相关文件
 
-- `board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c}`
+- `board/atk-dnr2350am/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c}`
 - `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、`drivers/display/st7789/`（两个 ISA 共用）、`drivers/usb/rp2350/`
 - `internal/build/uf2.go`：`emitRP2350UF2()`、family / IMAGE_DEF / MSP 校验
 - `scripts/rp2350/flash.py`：烧写 + 抓日志 + smoke

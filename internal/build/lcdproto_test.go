@@ -77,7 +77,7 @@ func TestLcdIsSharedBetweenRPVariants(t *testing.T) {
 			t.Errorf("drivers/display/st7789/%s: a per-ISA copy is back", e.Name())
 		}
 	}
-	for _, board := range []string{"rp2350", "rp2350rv"} {
+	for _, board := range []string{"atk-dnr2350am", "atk-dnr2350am-rv32"} {
 		body, err := os.ReadFile(filepath.Join(root, "board", board, "board.conf"))
 		if err != nil {
 			t.Fatal(err)

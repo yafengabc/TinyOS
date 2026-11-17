@@ -22,7 +22,12 @@ type BoardConfig struct {
 	// same silicon, different wiring.  Files in this board's directory
 	// shadow same-named files in the base (board_devs.c, board_data.c, ...),
 	// so a variant writes only what differs and never copies platform.c.
-	Base        string
+	Base string
+	// Bases is Base resolved through any further base links, nearest first.
+	// board/pico2 -> rp2350-generic is one hop; board/atk-rv32 ->
+	// rp2350rv-generic -> rp2350-generic is two, and the compiler needs the
+	// whole chain to know which files are inherited and which are replaced.
+	Bases       []string
 	Peripherals map[string]bool
 	UserExclude []string
 	// Board-layer build facts.  ensureBoardConfig() copies these into the
@@ -93,17 +98,47 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 		Base:        strings.TrimSpace(s["base"]),
 		Peripherals: map[string]bool{},
 	}
+	/* base may name more than one board: the ISA overlay and the board-data
+	 * overlay are orthogonal, so board/atk-dnr2350am-rv32 is
+	 * "rp2350rv-generic, atk-dnr2350am" - the RISC-V port's code plus the
+	 * ATK wiring - instead of a third copy of both.  Each name expands
+	 * through its own chain; earlier names win, like include paths. */
 	if bc.Base != "" {
-		if bc.Base == board {
-			return nil, fmt.Errorf("%s: base = %q is this board", relName(root, path), bc.Base)
-		}
-		base, err := LoadBoardConfig(root, bc.Base)
-		if err != nil {
-			return nil, fmt.Errorf("%s: base = %q: %w", relName(root, path), bc.Base, err)
-		}
-		if base.Chip != bc.Chip {
-			return nil, fmt.Errorf("%s: chip = %q but base %q is %q silicon",
-				relName(root, path), bc.Chip, bc.Base, base.Chip)
+		/* base may name more than one board: the ISA overlay and the board
+		 * data are orthogonal, so board/atk-dnr2350am-rv32 is
+		 * "rp2350rv-generic, atk-dnr2350am" - the RISC-V port's code plus the
+		 * ATK wiring - instead of a third copy of both.
+		 *
+		 * The walk is breadth-first so depth means priority: every direct
+		 * base comes before its own base, which keeps a board's file ahead of
+		 * the chip baseline's file of the same name.  `seen` also makes a
+		 * diamond (two bases sharing a parent) resolve once and a loop
+		 * terminate. */
+		seen := map[string]bool{board: true}
+		queue := splitList(bc.Base)
+		for len(queue) > 0 {
+			name := queue[0]
+			queue = queue[1:]
+			if name == board {
+				return nil, fmt.Errorf("%s: base = %q is this board", relName(root, path), name)
+			}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			base, err := LoadBoardConfig(root, name)
+			if err != nil {
+				return nil, fmt.Errorf("%s: base = %q: %w", relName(root, path), name, err)
+			}
+			if base.Chip != bc.Chip {
+				return nil, fmt.Errorf("%s: chip = %q but base %q is %q silicon",
+					relName(root, path), bc.Chip, name, base.Chip)
+			}
+			bc.Bases = append(bc.Bases, name)
+			queue = append(queue, splitList(base.Base)...)
+			if len(bc.Bases) > 8 {
+				return nil, fmt.Errorf("%s: base chain is deeper than 8 boards", relName(root, path))
+			}
 		}
 	}
 	for _, p := range splitList(s["peripherals"]) {
@@ -221,10 +256,12 @@ func (b *Builder) boardFile(name string) string {
 	if _, err := os.Stat(variant); err == nil {
 		return variant
 	}
-	if b.BoardConfig != nil && b.BoardConfig.Base != "" {
-		base := filepath.Join(b.Root, "board", b.BoardConfig.Base, name)
-		if _, err := os.Stat(base); err == nil {
-			return base
+	if b.BoardConfig != nil {
+		for _, base := range b.BoardConfig.Bases {
+			p := filepath.Join(b.Root, "board", base, name)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
 		}
 	}
 	return variant

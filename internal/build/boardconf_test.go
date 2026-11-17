@@ -12,7 +12,8 @@ func TestBoardConfigsExistForEveryBoard(t *testing.T) {
 	if err != nil {
 		t.Skip("not in the source tree")
 	}
-	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3", "rp2040", "rp2350", "rp2350rv"} {
+	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3", "rp2040",
+		"rp2350-generic", "rp2350rv-generic", "atk-dnr2350am", "atk-dnr2350am-rv32", "pico2"} {
 		bc, err := LoadBoardConfig(root, board)
 		if err != nil {
 			t.Errorf("%s: %v", board, err)
@@ -72,10 +73,16 @@ func TestBoardUserExcludes(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 	wifi := []string{"wifiscan", "wificonn", "ping", "net", "dhcp", "host", "http"}
+	// The generic baselines claim no panel, so the display programs are out
+	// there; the ATK boards compile the panel driver and keep them.
+	generic := append(append([]string{}, wifi...), "screen", "lcdconsole", "splash", "fb")
 	want := map[string][]string{
-		"rp2040":   append(append([]string{}, wifi...), "prot"),
-		"rp2350":   wifi,
-		"rp2350rv": wifi,
+		"rp2040":             append(append([]string{}, wifi...), "prot"),
+		"rp2350-generic":     generic,
+		"rp2350rv-generic":   generic,
+		"atk-dnr2350am":      wifi,
+		"atk-dnr2350am-rv32": wifi,
+		"pico2":              generic,
 	}
 	for board, list := range want {
 		bc, err := LoadBoardConfig(root, board)

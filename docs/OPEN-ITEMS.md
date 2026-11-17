@@ -14,7 +14,7 @@
 则能正常枚举。ATK-DNRP2350AM 上同一轮镜像通过 USB、1000 轮 `dd/rm` 和屏幕命令，
 所以这不是 USB 线材/供电问题，也不能用这次 review 的 SMP/锁补丁解释。
 
-`board/rp2350/README.md` 目前写"同一套代码也能跑在 Pico 2 上"，需要按 Pico 2 的
+`board/atk-dnr2350am/README.md` 目前写"同一套代码也能跑在 Pico 2 上"，需要按 Pico 2 的
 实际 flash/时钟/板级外设重新验证；在修好之前不要把这句话当验收结论。
 
 ## 2. PIO 的"眼睛两项"（已关闭 2026-11-17）

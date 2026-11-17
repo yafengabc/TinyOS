@@ -104,7 +104,7 @@ static void early_put_hex(uint32_t v);
  *
  * Booting is much simpler than on the ARM side: there is no vector table
  * and no stage-2.  The boot ROM finds our PICOBIN IMAGE_DEF at flash offset
- * 0 (board/rp2350rv/image_def.S), jumps to the ENTRY_POINT it carries, and
+ * 0 (board/rp2350rv-generic/image_def.S), jumps to the ENTRY_POINT it carries, and
  * gets out of the way.  The kernel then runs in place from the XIP window
  * at 0x10000000, with .data/.bss in SRAM at 0x20000000.
  *

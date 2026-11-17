@@ -943,7 +943,7 @@ int plat_console_tx_room(void)
 /* TinyUSB's state machine needs real thread context.  tty_poll() is also
  * called with interrupts masked, from the tick and from the block device
  * while a task waits for flash; letting it call usb_cdc_poll() was the RV32
- * port's boot hang (see the matching comment in board/rp2350rv).  Run the
+ * port's boot hang (see the matching comment in board/rp2350rv-generic).  Run the
  * state machine from the scheduler's idle loop instead and let the console
  * read path touch only the completed-byte queue. */
 extern void (*g_idle_poll)(void);

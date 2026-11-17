@@ -10,7 +10,7 @@
 | CPU | Hazard3 RV32IMAC（M 模式唯一），单 hart 或双 hart |
 | SRAM | 520 KiB：前 128 KiB 内核，其后 384 KiB = 24 个 16 KiB 窗口 |
 | Flash | 4 MiB QSPI，XIP @ `0x10000000`；`.data` 由 `_start` 从 LMA 拷到 SRAM |
-| 启动 | ROM 扫前 4 KiB 找 `board/rp2350rv/image_def.S` 的 PICOBIN（IMAGE_TYPE `0x1101` = EXE\|CPU_RISCV\|CHIP_RP2350），只跳到 ENTRY_POINT，**不搬任何段** |
+| 启动 | ROM 扫前 4 KiB 找 `board/atk-dnr2350am-rv32/image_def.S` 的 PICOBIN（IMAGE_TYPE `0x1101` = EXE\|CPU_RISCV\|CHIP_RP2350），只跳到 ENTRY_POINT，**不搬任何段** |
 | UF2 | family `0xe48bff5a`（RISC-V Secure EXE），产物 `build/rp2350rv.uf2` |
 | 文件系统 | littlefs @ flash `0x80000`，镜像仍是 300 KiB（75 块），暂不拉伸 |
 | 任务窗口 | 16 KiB 粒度；窗口必须 2 的幂对齐（Hazard3 PMP 不支持 TOR） |
@@ -76,7 +76,7 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
 
 ## 相关文件
 
-- `board/rp2350rv/{platform.c,layout.c,kernel.ld,image_def.S,board_devs.c,board_internal.h,rp2350rv_memmap.h}`
+- `board/atk-dnr2350am-rv32/{platform.c,layout.c,kernel.ld,image_def.S,board_devs.c,board_internal.h,rp2350rv_memmap.h}`
 - `drivers/gpio/rp2350rv/`、`drivers/spi/rp2350rv/`、`drivers/display/st7789/`（两个 ISA 共用）、`drivers/usb/rp2350rv/`
 - `arch/rv32/start.S`（`TOS_COPY_DATA`、第二 hart 分支）、`arch/rv32/platform.c`（PMP NAPOT 分支）
 - `internal/build/uf2.go`：`emitRP2350RVUF2()`、family `0xe48bff5a`、ENTRY_POINT item

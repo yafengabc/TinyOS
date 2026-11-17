@@ -223,7 +223,7 @@ python scripts/rp2350/pio_accept.py --image rp2040smp --uf2 build/rp2040smp.uf2
 
 ### 5.4 Pico 2（暂不支持）
 
-- TinyOS 的 `board/rp2350` 是 ATK-DNRP2350AM 板级目标（LED GPIO3、LCD/TF、4 MiB 文件系统假设），**不是 Pico 2 target**。
+- TinyOS 的 `board/atk-dnr2350am` 是 ATK-DNRP2350AM 板级目标（LED GPIO3、LCD/TF、4 MiB 文件系统假设），**不是 Pico 2 target**。
 - 现状：官方 MicroPython 在 clone 上正常；TinyOS `rp2350smp.uf2` 早期 HardFault。已记在 `OPEN-ITEMS.md` §1b。
 - 规则：不要把 ATK 镜像刷到 Pico 2；Pico 2 适配要单独立项（独立 board target、正确的 LED/无 LCD/实际 flash 大小），并为它建立 T3 验收后再纳入回归矩阵。
 

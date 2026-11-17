@@ -55,7 +55,26 @@ func TestWindowGeometryMatchesLayouts(t *testing.T) {
 				}
 			}
 			if tg.Name == "" {
-				t.Fatalf("no Target for board %q", board)
+				/* A chip baseline (board/rp2350-generic) has no target of its
+				 * own: its boards are the concrete ones.  Validate its conf
+				 * with a synthetic target.  The ISA has to be one the chip
+				 * has, or ensureBoardConfig rejects the target before the
+				 * geometry is read. */
+				bc0, err := LoadBoardConfig(root, board)
+				if err != nil {
+					t.Fatal(err)
+				}
+				arch := ""
+				if isas := Chips[bc0.Chip].ISAs; len(isas) > 0 {
+					arch = "arm"
+					if _, ok := isas[arch]; !ok {
+						for name := range isas {
+							arch = name
+							break
+						}
+					}
+				}
+				tg = Target{Name: board, Board: board, Arch: arch}
 			}
 			b := New(root)
 			b.Target = tg

@@ -646,13 +646,13 @@ func (b *Builder) linkPIE(objs []string, script, out string) error {
 	return err
 }
 
-// shadowed drops the files in list whose name also exists in overlay: the
-// overlay's copy is compiled instead.  Used by the base/variant board
-// composition (board.conf `base =`).
-func shadowed(list []string, overlay string) []string {
+// filterNames drops the files whose name is already taken by a nearer board
+// layer.  Used by the base/variant composition (board.conf `base =`): the
+// nearest definition wins, exactly like an include path.
+func filterNames(list []string, seen map[string]bool) []string {
 	kept := list[:0]
 	for _, f := range list {
-		if _, err := os.Stat(filepath.Join(overlay, filepath.Base(f))); err == nil {
+		if seen[filepath.Base(f)] {
 			continue
 		}
 		kept = append(kept, f)
@@ -912,10 +912,12 @@ func (b *Builder) buildKernel() error {
 	}
 	/* A variant board (base = <board> in board.conf) reuses the silicon's
 	 * sources.  Its directory goes right after the variant's own, and before
-	 * the arch default: board/rp2350/board.h must win over arch/arm/board.h
+	 * the arch default: board/rp2350-generic/board.h must win over arch/arm/board.h
 	 * for a variant with no board.h of its own. */
-	if bc := b.BoardConfig; bc != nil && bc.Base != "" {
-		incs = append(incs, filepath.Join(b.Root, "board", bc.Base))
+	if bc := b.BoardConfig; bc != nil {
+		for _, base := range bc.Bases {
+			incs = append(incs, filepath.Join(b.Root, "board", base))
+		}
 	}
 	incs = append(incs,
 		filepath.Join(b.Root, "board"),
@@ -945,7 +947,7 @@ func (b *Builder) buildKernel() error {
 		}
 	}
 
-	// The RP2350 console is a TinyUSB CDC-ACM device (board/rp2350/usb_cdc.c).
+	// The RP2350 console is a TinyUSB CDC-ACM device (drivers/usb/rp2350/tusb_shim.c).
 	// third_party/tinyusb holds a trimmed upstream tree - device stack, CDC
 	// class, RP2040 controller port - and port_rp2/ is the pico-sdk facade
 	// that lets those upstream files compile unchanged.  The board directory
@@ -970,20 +972,25 @@ func (b *Builder) buildKernel() error {
 	// the build target.
 	var srcs []string
 	variantDir := filepath.Join(b.Root, "board", b.Target.Board)
-	var baseDir string
-	if bc := b.BoardConfig; bc != nil && bc.Base != "" {
-		baseDir = filepath.Join(b.Root, "board", bc.Base)
+	// Nearest directory first: the variant, then its base, then the base's
+	// base.  Each layer's files are dropped when a nearer layer has a file
+	// with the same name, so board/atk-rv32's platform.c replaces the one it
+	// would otherwise inherit from rp2350rv-generic.
+	var boardDirs []string
+	boardDirs = append(boardDirs, variantDir)
+	if bc := b.BoardConfig; bc != nil {
+		for _, base := range bc.Bases {
+			boardDirs = append(boardDirs, filepath.Join(b.Root, "board", base))
+		}
 	}
 	dirs := []string{
 		kdir,
 		filepath.Join(b.Root, "arch", b.Target.Arch),
 	}
-	if baseDir != "" {
-		dirs = append(dirs, baseDir)
-	}
-	dirs = append(dirs, variantDir)
+	dirs = append(dirs, boardDirs...)
 	dirs = append(dirs, driverDirs...)
-	for _, dir := range dirs {
+	seenNames := map[string]bool{}
+	for i, dir := range dirs {
 		cs, err := globFiles(dir, "*.c")
 		if err != nil {
 			return err
@@ -992,13 +999,16 @@ func (b *Builder) buildKernel() error {
 		if err != nil {
 			return err
 		}
-		/* Composition rule: a file in the variant directory replaces the
-		 * base file with the same name.  Without this, board/pico2's
-		 * board_data.c would be a duplicate definition of the ATK table
-		 * rather than a replacement of it. */
-		if baseDir != "" && dir == baseDir {
-			cs = shadowed(cs, variantDir)
-			ss = shadowed(ss, variantDir)
+		if i >= 2 && i < 2+len(boardDirs) {
+			srcs = append(srcs, filterNames(ss, seenNames)...)
+			srcs = append(srcs, filterNames(cs, seenNames)...)
+			for _, f := range cs {
+				seenNames[filepath.Base(f)] = true
+			}
+			for _, f := range ss {
+				seenNames[filepath.Base(f)] = true
+			}
+			continue
 		}
 		srcs = append(srcs, ss...)
 		srcs = append(srcs, cs...)

@@ -670,7 +670,7 @@ flash 操作期间 XIP 会进入串行命令模式，调用者不能留在 flash
 
 `-target rp2350` 现在针对**正点原子 ATK-DNRP2350AM**（板载 1.14 寸 ST7789 屏、
 TF 卡座、CH343P 串口、按键、LED）。板子用一张 `board_dev_t` 表描述自己
-（`board/rp2350/board_devs.c`），`kernel/hwdev.c` 把 LED / 按键 / 屏变成
+（`board/rp2350-generic/board_devs.c`），`kernel/hwdev.c` 把 LED / 按键 / 屏变成
 `/dev/led0`、`/dev/key0`、`/dev/lcd0`，其余设备至少出现在 `/proc/dev` 里：
 
 ```sh
@@ -730,9 +730,9 @@ python scripts/rp2350/flash.py --list
 cat /proc/uptime / gpio / reboot`；若打开串口时启动提示已打印完，会补一个空行让
 shell 重发提示符。启动两行分别打印 ROM 留下的 `clk=` 值（UART 与 USB 各一行），
 用来核对 115200 的分频。littlefs 镜像放在 flash 偏移 `0x80000`（512 KiB），内核在它之前，
-分区一直用到 flash 末尾；详见 `board/rp2350/README.md`。
+分区一直用到 flash 末尾；详见 `board/atk-dnr2350am/README.md`。
 
-板级文件：`board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c,board_internal.h}`；
+板级文件：`board/rp2350-generic/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c,board_internal.h}`；
 驱动位于 `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、
 `drivers/display/st7789/`、`drivers/usb/rp2350/`；
 打包器 `internal/build/uf2.go` 的 `emitRP2350UF2()` 会在写出 UF2 前校验初始 MSP、
