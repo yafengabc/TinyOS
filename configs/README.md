@@ -66,7 +66,7 @@ exclude = ping,net,dhcp
 - `[drivers]` lists directories to add to the source/include paths.  Every
   `*.c`/`*.S` in that directory is compiled.  These are **in addition to** the
   target's board-default drivers (`Targets[..].Drivers`).  A special key
-  `exclude = drivers/display/st7789/rp2350` removes directories from the
+  `exclude = drivers/display/st7789` removes directories from the
   target's default list (GPIO, serial/USB console and SPI are required).
 - `[wifi]` supplies the Espressif blob directory, the ROM symbol linker
   script and the symbol that keeps `wifi_probe` alive.

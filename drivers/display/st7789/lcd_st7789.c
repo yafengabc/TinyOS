@@ -1,11 +1,28 @@
 #include "platform.h"
 #include "hwdev.h"
+/* One implementation for both RP2350 images.  Cortex-M33 and Hazard3 differ
+ * in exactly three places and all three are selected here: which memory map
+ * header names the timer, the barrier spelling, and how a millisecond is
+ * measured before the tick exists.  Everything else - pins, SPI, DMA, the
+ * pixel layer - is the same silicon behind a different ISA. */
+#if defined(__riscv)
 #include "rp2350rv_memmap.h"
+#else
+#include "arm_memmap.h"
+#endif
 #include "board.h"
 #include "spi.h"
 #include "cpu.h"
 #include "font5x7.h"
-#include "../lcd_proto.h"
+#include "lcd_proto.h"
+
+/* Publish "armed" before the DMA trigger without letting the core or the
+ * compiler reorder the store past it. */
+#if defined(__riscv)
+#define LCD_FENCE() __asm__ volatile("fence rw, rw" ::: "memory")
+#else
+#define LCD_FENCE() __asm__ volatile("dmb" ::: "memory")
+#endif
 
 /* ST7789V2 panel on the ATK-DNRP2350AM.
  *
@@ -82,7 +99,7 @@ static void pin_func(int pin, uint32_t fn)
 
     mmio_write32(RP_GPIO_CTRL(pin), fn);
     /* ISO resets to 1 on every RP2350 pad: clearing it is what actually
-     * connects the pin (see rp2350rv_memmap.h). */
+     * connects the pin (see the port's memmap header). */
     mmio_write32(RP_GPIO_PAD(pin),
                  (pad | RP_PAD_IE) & ~(RP_PAD_OD | RP_PAD_ISO));
 }
@@ -137,11 +154,11 @@ static int dma_armed;           /* pixels still in flight                 */
 static uint8_t rowbuf[LCD_COLS * LCD_CELL_W * LCD_CELL_H * 2];  /* 3840 B */
 static uint8_t cellbuf[LCD_CELL_W * LCD_CELL_H * 2];           /* 96 B   */
 
-/* Same lock as the ARM port: screen.c serialises its own buffer, but
- * /dev/lcd0 reaches this driver through hwdev and can run on the other
- * hart.  The critical section is data_phase -> kick -> sync; masking
- * interrupts keeps a tick's console mirror out of a half-built command
- * on this core. */
+/* The screen layer has its own lock, but /dev/lcd0 goes through hwdev and
+ * can be opened by another task: rowbuf, cellbuf, CS and the single DMA
+ * channel are shared by both paths.  Take one driver lock for the whole
+ * data-phase -> kick -> sync sequence, with local interrupts masked so a
+ * tick cannot nest into a half-built command. */
 static spin_t lcd_lock = SPIN_INIT;
 
 static uint32_t lcd_enter(void)
@@ -230,12 +247,13 @@ static void lcd_dma_kick(const void *buf, uint32_t n)
     mmio_write32(ch + DMA_CH_WRITE_ADDR, SPI1_BASE + RP_SPI_DR);
     mmio_write32(ch + DMA_CH_TRANS_COUNT, n);   /* MODE bits [31:28] = 0  */
 
-    /* Publish "armed" before the trigger, as the ARM port does.  The old
-     * order let a nested console path see dma_armed == 0 after the DMA was
-     * already walking rowbuf, return from sync, and start a second
-     * transfer on the same CS/channel. */
+    /* Publish "armed" before the trigger.  The old order left a window in
+     * which the DMA was already walking rowbuf while a nested caller saw
+     * dma_armed == 0, returned from lcd_dma_sync() immediately, and started
+     * a second transfer under the same CS.  The barrier keeps the store
+     * before the trigger from being reordered by the compiler or core. */
     dma_armed = 1;
-    __asm__ volatile("fence rw, rw" ::: "memory");
+    LCD_FENCE();
     mmio_write32(ch + DMA_CH_CTRL_TRIG,
                  DMA_CTRL_EN | DMA_CTRL_DATA_BYTE | DMA_CTRL_INCR_READ |
                  DMA_CTRL_TREQ(DREQ_SPI1_TX));
@@ -270,14 +288,17 @@ static void lcd_data_phase(void)
     lcd_cs(0);
 }
 
+/* The panel is initialised before plat_irq_enable(), so g_ticks is frozen and
+ * plat_uptime_ms() would never advance.  Both halves poll a free-running
+ * counter instead; the spin bound is a safety net for a stopped timer, not
+ * the delay mechanism.
+ *
+ * Cortex-M33: SysTick counts down, so a wrap means one tick period elapsed.
+ * Hazard3: RP2350 TIMER0 is a 1 MHz counter that runs whatever the core is
+ * doing, so the elapsed microseconds are read directly. */
+#if defined(__riscv)
 static void lcd_delay_ms(uint32_t ms)
 {
-    /* RP2350 TIMER0 is a free-running 1 MHz counter, independent of the
-     * core and of MIE.  The panel is initialised before plat_irq_enable(),
-     * so g_ticks is frozen and plat_uptime_ms() would never advance; this
-     * is the RISC-V counterpart of the ARM port polling SysTick's
-     * down-counter.  The spin bound is a safety net for a stopped timer,
-     * not the delay mechanism. */
     uint32_t start = mmio_read32(TIMER0_BASE + TIMERAWL_OFFSET);
     uint32_t want = ms * 1000u;
     uint32_t spins = 0;
@@ -286,6 +307,22 @@ static void lcd_delay_ms(uint32_t ms)
            && spins < plat_pre_tick_spins(200000000u))
         spins++;
 }
+#else
+static void lcd_delay_ms(uint32_t ms)
+{
+    uint32_t last = mmio_read32(ARM_SYSTICK_VAL) & 0xFFFFFFu;
+    uint32_t elapsed = 0;
+    uint32_t spins = 0;
+
+    while (elapsed < ms && spins < plat_pre_tick_spins(20000000u)) {
+        uint32_t now = mmio_read32(ARM_SYSTICK_VAL) & 0xFFFFFFu;
+        if (now > last)
+            elapsed++;          /* wrapped: one period has gone by */
+        last = now;
+        spins++;
+    }
+}
+#endif
 
 /* ---- shared ST7789 protocol (drivers/display/st7789/lcd_proto.h) ------ */
 
@@ -320,8 +357,9 @@ static void lcd_init_hw(void)
     pin_out(LCD_PIN_BL, 1);         /* PNP: high keeps the backlight off */
     pins_ready = 1;
 
-    /* The panel sequence itself is shared with the ARM lower; only the bus
-     * bring-up above is board/ISA specific. */
+    /* The panel sequence itself lives in lcd_proto.h (shared with anything
+     * else that drives this controller); only the bus bring-up above is
+     * board specific. */
     lcd_proto_panel_init(&proto_ops);
     lcd_up = 1;
 }

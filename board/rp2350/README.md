@@ -115,7 +115,7 @@ ARM 上有一处架构细节：Cortex-M 会把 32 B 硬件异常帧压在初始 
 ## 相关文件
 
 - `board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c}`
-- `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、`drivers/display/st7789/rp2350/`、`drivers/usb/rp2350/`
+- `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、`drivers/display/st7789/`（两个 ISA 共用）、`drivers/usb/rp2350/`
 - `internal/build/uf2.go`：`emitRP2350UF2()`、family / IMAGE_DEF / MSP 校验
 - `scripts/rp2350/flash.py`：烧写 + 抓日志 + smoke
 - `docs/BOARD-ATK-DNRP2350AM.md`：引脚表与踩坑记录

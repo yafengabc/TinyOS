@@ -77,6 +77,6 @@ python scripts/rp2350/flash.py --uf2 build/rp2350rv.uf2 --smoke
 ## 相关文件
 
 - `board/rp2350rv/{platform.c,layout.c,kernel.ld,image_def.S,board_devs.c,board_internal.h,rp2350rv_memmap.h}`
-- `drivers/gpio/rp2350rv/`、`drivers/spi/rp2350rv/`、`drivers/display/st7789/rp2350rv/`、`drivers/usb/rp2350rv/`
+- `drivers/gpio/rp2350rv/`、`drivers/spi/rp2350rv/`、`drivers/display/st7789/`（两个 ISA 共用）、`drivers/usb/rp2350rv/`
 - `arch/rv32/start.S`（`TOS_COPY_DATA`、第二 hart 分支）、`arch/rv32/platform.c`（PMP NAPOT 分支）
 - `internal/build/uf2.go`：`emitRP2350RVUF2()`、family `0xe48bff5a`、ENTRY_POINT item

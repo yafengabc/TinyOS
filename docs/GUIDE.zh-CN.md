@@ -734,7 +734,7 @@ shell 重发提示符。启动两行分别打印 ROM 留下的 `clk=` 值（UART
 
 板级文件：`board/rp2350/{platform.c,layout.c,kernel.ld,arm_memmap.h,image_def.S,board_devs.c,board_internal.h}`；
 驱动位于 `drivers/gpio/rp2350/`、`drivers/spi/rp2350/`、
-`drivers/display/st7789/rp2350/`、`drivers/usb/rp2350/`；
+`drivers/display/st7789/`、`drivers/usb/rp2350/`；
 打包器 `internal/build/uf2.go` 的 `emitRP2350UF2()` 会在写出 UF2 前校验初始 MSP、
 复位向量的 Thumb 位，以及前 4 KiB 里是否真的有 IMAGE_DEF 魔数——BOOTSEL 对"镜像
 不合法"唯一的反馈是"什么都没发生"，所以这个校验放在构建期。
