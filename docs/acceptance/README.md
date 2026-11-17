@@ -52,3 +52,4 @@
 | 2026-11-17 | W1/W2 combined check | `d15fe16` | RP2350 Hazard3 RV32 SMP（COM14） | T0–T2 PASS；deep 6 FAIL；T4 PASS | [W1/W2 RV32](2026-11-17-w1w2-rp2350rvsmp-d15fe16.md) |
 | 2026-11-17 | goc32 shared-header compatibility | `4fc1c74` | host / goc32 + native32 | T0–T2 PASS；T3/T4 `NOT RUN` | [goc32](2026-11-17-goc32-host-4fc1c74.md) |
 | 2026-11-17 | A-3/A-8 组合回归 | `0b7b4fe` | ESP32-C3（COM4） | T0–T3 PASS；priotest 5/5（宿主空闲）；soak 5 轮无复位 | [C3 A-3/A-8](2026-11-17-a3-a8-c3-0b7b4fe.md) |
+| 2026-11-17 | B-3 LZ4TOS V1 | `d0a3cee` | QEMU rv32/rv32smp/arm；11 目标 | T0–T2 PASS；V0/V1 两分支都过；T3 `NOT RUN` | [B-3](2026-11-17-b3-lz4tos-v1-rv32smp-d0a3cee.md) |
