@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// The three RP boards share the park protocol state; the entry/exit sequences
-// stay per-board until a bench session (OPEN-ITEMS 2f).  This pins the shared
-// part so a board cannot quietly grow its own copy of the globals again.
+// The three RP boards share the park protocol state; the loops stay per-board
+// until a bench session (#17).  This pins both halves so a board cannot quietly
+// grow its own copy of the globals, or go back to hand-rolling the ordering
+// that rp_park_begin()/rp_park_ack() own.
 func TestRpParkUsesSharedState(t *testing.T) {
 	root, err := FindRoot()
 	if err != nil {
@@ -30,6 +31,19 @@ func TestRpParkUsesSharedState(t *testing.T) {
 		for _, old := range []string{"g_flash_park", "g_park_req", "g_park_ack", "g_flash_parked"} {
 			if strings.Contains(text, old) {
 				t.Errorf("%s: still declares/uses %s", board, old)
+			}
+		}
+		// The ordering rules live in the header, not in each board: a request
+		// is raised with rp_park_begin() and acknowledged with rp_park_ack(),
+		// both of which carry the barrier in the right place.
+		for _, want := range []string{"rp_park_begin(&park", "rp_park_ack(&park"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: no %s - the handshake went back to being hand-rolled", board, want)
+			}
+		}
+		for _, gone := range []string{"++park.req", "park.ack = park.req"} {
+			if strings.Contains(text, gone) {
+				t.Errorf("%s: still open-codes %q instead of the shared helper", board, gone)
 			}
 		}
 	}

@@ -859,11 +859,8 @@ static RAMFUNC void rp_flash_park_loop(void)
     for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
         if (!park.flag)
             break;
-        __asm__ volatile("fence rw, rw" ::: "memory");
-        if (park.ack != park.req) {
-            park.ack = park.req;
-            __asm__ volatile("fence rw, rw" ::: "memory");
-        }
+        RP_PARK_BARRIER();
+        rp_park_ack(&park);
         if ((spins & 0xfffffu) == 0xfffffu)
             wdt_feed();         /* parked with interrupts masked: tick cannot */
     }
@@ -905,9 +902,6 @@ static int rp_flash_park_other(void)
      * saving it again here would only see the zero this csrci just wrote. */
     __asm__ volatile("csrci mstatus, 8" ::: "memory");
 
-    myreq = ++park.req;                    /* new generation first */
-    park.parked = 0;
-    park.owner = (int)plat_cpu_id();
 #if TOS_DIAG
     g_pk_writer = (uint32_t)plat_cpu_id();
     g_wr_enter[(uint32_t)plat_cpu_id() & 1u]++;
@@ -915,8 +909,7 @@ static int rp_flash_park_other(void)
     g_pk_phase = 1;                          /* request raised */
     g_pk_req++;
 #endif
-    __asm__ volatile("fence rw, rw" ::: "memory");
-    park.flag = 1;
+    myreq = rp_park_begin(&park, (int)plat_cpu_id());
     __asm__ volatile("slt x0, x0, x1" ::: "memory");
     for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
         /* Only this request's acknowledgement counts. */

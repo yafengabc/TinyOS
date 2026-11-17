@@ -897,11 +897,8 @@ rp_flash_park_loop(void)
     for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
         if (!park.flag)
             break;
-        __asm__ volatile("dmb" ::: "memory");
-        if (park.ack != park.req) {
-            park.ack = park.req;
-            __asm__ volatile("dmb" ::: "memory");
-        }
+        RP_PARK_BARRIER();
+        rp_park_ack(&park);
     }
     park.parked = 0;
 }
@@ -941,11 +938,7 @@ static int rp_flash_park_other(void)
     __asm__ volatile("mrs %0, primask" : "=r"(primask));
     __asm__ volatile("cpsid i" ::: "memory");
 
-    myreq = ++park.req;
-    park.parked = 0;
-    park.owner = (int)plat_cpu_id();
-    __asm__ volatile("dmb" ::: "memory");
-    park.flag = 1;
+    myreq = rp_park_begin(&park, (int)plat_cpu_id());
     __asm__ volatile("sev" ::: "memory");
     for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++)
         if (rp_park_acked(&park, myreq)) {

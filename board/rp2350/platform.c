@@ -725,11 +725,7 @@ static void rom_stop_other_core(void)
         return;
 
     g_core1_stopped = 1;
-    park.parked = 0;
-    park.owner = (int)plat_cpu_id();
-    uint32_t myreq = ++park.req;
-    __asm__ volatile("dmb" ::: "memory");
-    park.flag = 1;
+    uint32_t myreq = rp_park_begin(&park, (int)plat_cpu_id());
     __asm__ volatile("sev" ::: "memory");
 
     for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
@@ -1245,11 +1241,8 @@ static RAMFUNC void rp_flash_park_loop(void)
     for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
         if (!park.flag)
             break;
-        __asm__ volatile("dmb" ::: "memory");
-        if (park.ack != park.req) {
-            park.ack = park.req;        /* published from RAM */
-            __asm__ volatile("dmb" ::: "memory");
-        }
+        RP_PARK_BARRIER();
+        rp_park_ack(&park);
         /* Parked with interrupts masked, so the tick cannot feed the watchdog
          * either.  A writer that never clears the flag (it timed out and
          * returned) must not turn a recoverable error into a silent reset. */
@@ -1324,14 +1317,10 @@ static int rp_flash_park_other(void)
         g_mask_in[id]   = 1;
     }
 #endif
-    park.parked = 0;
-    park.owner = (int)plat_cpu_id();
 #if TOS_DIAG
     g_park_phase = 1;                       /* request raised */
 #endif
-    myreq = ++park.req;
-    __asm__ volatile("dmb" ::: "memory");
-    park.flag = 1;
+    myreq = rp_park_begin(&park, (int)plat_cpu_id());
     __asm__ volatile("sev" ::: "memory");
     for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
         /* Only this request's acknowledgement counts.  An ack left over from
