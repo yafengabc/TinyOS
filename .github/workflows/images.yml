@@ -25,6 +25,14 @@ jobs:
         with:
           go-version: stable
           cache: true
+      # The syscall-snapshot test compares goc32/abi/syscalls.snapshot.csv with
+      # abi/syscalls.csv; without the submodule the test skips, and a skipped
+      # gate is not a gate.  .gitmodules names an ssh URL, which a runner
+      # cannot use, so rewrite it to https for this one fetch.
+      - name: Fetch the goc32 submodule
+        run: |
+          git -c url."https://github.com/".insteadOf="git@github.com:" \
+            submodule update --init goc32
       - name: Unit tests
         run: go test ./...
       - name: Vet
