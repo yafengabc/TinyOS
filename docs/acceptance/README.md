@@ -56,3 +56,4 @@
 | 2026-11-17 | B-3 + 复核修正在 C3 | `736173c` | ESP32-C3（COM4） | T0–T3 PASS；soak 5 轮 resets 0 / errors 0 | [C3](2026-11-17-b3-c3-736173c.md) |
 | 2026-11-17 | B-1a 用户排除进 board.conf | `0b1bbb1` | rp2040 构建 + 11 目标 | T0/T1 PASS；ramdisk 字节相同 | [B-1a](2026-11-17-b1a-rp2040-0b1bbb1.md) |
 | 2026-11-17 | B-1b chip 表 + 生成头 | `e783748` | QEMU + 11 + x86 + ESP32-C3 | T0–T3 PASS；不一致时启动 panic 已验证 | [B-1b](2026-11-17-b1b-qemu-c3-e783748.md) |
+| 2026-11-17 | B-1c Targets 只剩镜像选择 | `c56cc5c` | 12 目标 + QEMU | T0–T2 PASS；rp2040/C3 镜像字节相同 | [B-1c](2026-11-17-b1c-hash-c56cc5c.md) |
