@@ -4817,4 +4817,7 @@ XIP 读 `LBA 0`，而 RAM disk 根本没有被链接进来，所以“generic �
   这是改名后镜像仍可运行的证据；
 - 镜像不再与改名前逐字节相同：板名字符串长了 8 字节，代码地址随之平移。功能以 emu
   smoke 为准，不做“字节相同”的声明。
-- 硬件 **`NOT RUN`**：C3 真机本轮未刷；按政策 C3 由上板侧记录。
+- **C3 真机（COM4）**：`flash.py --full --build -p COM4` 刷入
+  `tinyos-esp32c3-generic-full.bin`，到 shell（`uptime: 0.112 s`）；
+  `scripts/esp-c3/accept.py -p COM4` **24/24 PASS**——PMP 四个隔离项、crash 隔离、
+  文件写入/读取/source、^C、reset/reboot 后文件系统保持。T4 soak 未跑。

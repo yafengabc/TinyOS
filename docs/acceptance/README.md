@@ -90,4 +90,4 @@
 | 2026-11-18 | 目标/板名改名 + `tinyos-` 前缀 | `e52ad7d` | 13 目标 + fs_ro + QEMU 4 | T0–T2 PASS；chip flag 回归已修；硬件 `NOT RUN` | [rename](2026-11-18-rename-boards-e52ad7d.md) |
 | 2026-11-18 | ATK ?????board ??? + generic ?? | `2d87ded` | ATK-DNRP2350AM (COM14) ARM+RV32?generic ?? | T0/T1 PASS??? heartbeat 6/6?LED/????generic-flash ?? 6/6 | [ATK review](2026-11-18-atk-review-rename-2d87ded.md) |
 | 2026-11-18 | generic 镜像 + `tos build all` | `a06be75`、`a499be8` | 15 目标 + fs_ro + QEMU 4 | T0–T2 PASS；ATK UF2 逐字节相同；generic 上板 `NOT RUN` | [generic + all](2026-11-18-generic-targets-build-all-a499be8.md) |
-| 2026-11-18 | ESP32-C3 改名 `esp32c3-generic` | `c77319d` | 15 目标 + C3 emu + QEMU 4 | T0–T2 PASS；镜像功能性验证通过；C3 真机 `NOT RUN` | [C3 generic](2026-11-18-c3-generic-c77319d.md) |
+| 2026-11-18 | ESP32-C3 改名 `esp32c3-generic` | `c77319d` | ESP32-C3 / COM4 + 15 目标 + QEMU 4 | T0–T3 PASS：真机 boot + 24/24；T4 `NOT RUN` | [C3 generic](2026-11-18-c3-generic-c77319d.md) |
