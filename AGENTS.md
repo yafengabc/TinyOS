@@ -68,8 +68,9 @@ Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
 - When a test fails, first check whether it also fails on the baseline commit.
   A pre-existing failure is recorded in `docs/OPEN-ITEMS.md`, not silently
   ignored.
-- CI green is not a full regression: CI does not run `go test`/`go vet`, x86,
-  hardware, or Pico 2. See `docs/TESTING.md` section 11.
+- CI green is not a full regression: it runs `go test`/`go vet`, the seven
+  release images, one read-only build and QEMU smoke on rv32/rv32smp/arm, but
+  not x86, hardware, or Pico 2. See `docs/TESTING.md` section 11.
 
 ## Before you commit
 

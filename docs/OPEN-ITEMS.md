@@ -71,21 +71,6 @@ RP2040 无自动 BOOTSEL，不能作为其它 issue 的关闭依据；确需 RP2
 `dd`+`rm`），由板主人工安排。`rp2040smp` 是唯一的 Cortex-M0+ SMP 目标，park 证据值得
 单独跑一次（HISTORY §35 的竞态就是在这块板上暴露的）。关闭 #12 时把本条移进 HISTORY。
 
-## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
-
-`internal/build/build.go::WindowGeometry()` 返回 16 KiB grain / 8 KiB stack /
-4 KiB guard，而四块板早就是 4K/4K/4K。它只影响 `checkWindow()` 对
-`TOS_WINDOW()`/`TOS_ONE_GRAIN()` 的校验（不影响运行时），所以 `msh` 的
-`TOS_ONE_GRAIN()` 其实名不副实。
-
-修法两行：把返回值改成 4K/4K/4K，把 `msh` 的注解换成 `TOS_WINDOW(16*1024)`；改完
-重新确认 `msh`/`sh`/`py` 的承诺仍然成立。单独一次提交，别和别的混。
-
-> **2026-11-16 已修。** `WindowGeometry()` 改为 4K/4K/4K；`msh` 在 4K 板上声明
-> `TOS_WINDOW(16 KiB)`，在 64 KiB grain 的 QEMU/PC 上仍用 `TOS_ONE_GRAIN()`。
-> 构建把 grain 作为 `TOS_APP_GRAIN` 传给用户程序，`internal/build/geometry_test.go`
-> 直接解析四块板的 `layout.c` 比对，防止再次漂移。
-
 ## 5. x86 从来没在 CI 里构建过（§37）
 
 发布矩阵里没有 `x86`，所以它在发行版工具链上直接失败：

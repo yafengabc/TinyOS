@@ -93,10 +93,10 @@ foreach ($t in $targets) {
 - **x86 单独处理**：它在 CI/发行版工具链上仍失败（`OPEN-ITEMS.md` §5）。除非本次改动就是 x86，否则不要把 x86 失败算作回归；本机如果构建成功，记录结果。
 - 每个目标检查产物：`build/<target>.uf2`、`build/esp32c3*.bin`、`build/kernel-<target>.elf`、`build/build-config-<target>.txt`。
 - 记录 `build-config-<target>.txt` 的 `target`/`features`/`user-defines`，尤其是构建系统改动。
-- **`fs_ro = true` 的镜像也算一个目标**：只要碰了 `kernel/ramdisk.c`、`TOS_LFS_RO`
-  或“某段代码在 `#ifdef` 块里外”的边界，就额外用一份 `fs_ro = true` 的临时 config
-  构建一次（x86 + 一个嵌入式目标）。默认 configs 都不开 `fs_ro`，否则这条只在别人
-  分支上炸（issue #14）。临时 config 放 `build/`，不入库。
+- **只读镜像也算一个目标**：只要碰了 `kernel/ramdisk.c`、`TOS_LFS_RO` 或“某段代码在
+  `#ifdef` 块里外”的边界，就额外跑 `go run ./cmd/tos build -config configs/rv32-fsro.conf`
+  （x86 能建就再跑一次 x86 的 RO 构建）。默认 configs 都不开 `fs_ro`，否则这条只在别人
+  分支上炸（issue #14）。这个 config 随仓库走，CI 每次 push 也会构建它。
 
 ## 4. T2：QEMU
 
@@ -300,16 +300,18 @@ notes:
 
 当前 `.github/workflows/images.yml` 覆盖：
 
+- `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
 - 7 个镜像构建（esp32c3、rp2040/smp、rp2350/smp、rp2350rv/rvsmp）；
-- rv32/rv32smp/arm 的 QEMU smoke + `scripts/soak.py`；
-- tag 触发的 Release（`release` 依赖 `[build, smoke]`）。
+- `configs/rv32-fsro.conf` 的只读镜像构建（issue #14 的盲区）；
+- rv32/rv32smp/arm 的 QEMU smoke（含 `rselftest`）+ `scripts/soak.py` 3 轮；
+- tag 触发的 Release（`release` 依赖 `[checks, build, smoke]`）。
 
 **不覆盖**：
 
-- `go test ./...`、`go vet ./...`（review F-06/C-5 的遗留半项）；
-- x86（`OPEN-ITEMS.md` §5）；
+- x86 构建与链接（`OPEN-ITEMS.md` §5：发行版 lld 拒绝 i386 PIE 的 16 位重定位）；
+- `rv32nc`：整个目标不在 CI 里构建（T1 本地跑）；
 - 任何真机、Pico 2、PIO 目视项；
-- 长时间 SMP/flash soak。
+- 长时间 SMP/flash soak（CI 只有 3 轮）。
 
 所以 **CI 绿 ≠ 回归通过**；按本手册的 T0–T4 执行并在说明里注明哪些是本地/硬件结果。
 
