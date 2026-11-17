@@ -208,9 +208,12 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - `abi/syscalls.csv` + 生成/比对；**先不改 flags、不改结构布局**。
 - **不做**：LZ4TOS 版本位（放 Phase B）。
 
-### A-3｜exec_format 接缝（C2）
-- `struct exec_format {name, probe, load, note}`；LZ4TOS 和 ELF 各注册一个；`process.c` 走 handler，旧路径兜底。
-- 为 P4 新格式、goc32 产物、格式版本化提供单点。
+### A-3｜exec_format 接缝（C2）——已落地（2026-11-17）
+- 两张以 NULL 结尾的表：`exec_formats[]` / `exec_image_formats[]`；`exec()` 按 `probe`
+  顺序尝试、命中后 `load` 走同一指针，不再直接调用具体 handler。
+- LZ4TOS 与 ELF32 各一项；测试配置 `configs/rv32-mock.conf` 打开 `exec_mock` 后
+  `mocktos` 成为第二项，`hello.mock` 在 QEMU 里加载成功（HISTORY §54）。
+- `internal/build/execformat_test.go` 静态钉住"表 + 循环、无直接调用"。
 - **不做**：新的 loader 实现；只搬现有逻辑。
 
 ### A-4｜flash 独占 + cache/DMA 钩子（C3）

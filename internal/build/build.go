@@ -1655,6 +1655,36 @@ func (b *Builder) buildFSImage(bins []string) error {
 		files = append(files, RamFile{Name: "bin/" + prog, Data: data})
 	}
 
+	/* #5: with `exec_mock` on, also stage one MOCKTOS container so a QEMU run
+	 * can prove that a second container handler loads through the same table.
+	 * Production builds never define the feature, so neither the file nor the
+	 * handler exists there. */
+	if b.feature("exec_mock") {
+		data, err := os.ReadFile(filepath.Join(b.BuildDir, "user", "bin", "hello"))
+		if err != nil {
+			return err
+		}
+		mock := make([]byte, 24+len(data))
+		copy(mock, "MOCKTOS\x00")
+		n := uint32(len(data))
+		mock[8] = byte(n)
+		mock[9] = byte(n >> 8)
+		mock[10] = byte(n >> 16)
+		mock[11] = byte(n >> 24)
+		if w, ok := windowNote(data); ok {
+			le := []uint32{w.span, w.stack, w.heap}
+			for i, v := range le {
+				off := 12 + i*4
+				mock[off] = byte(v)
+				mock[off+1] = byte(v >> 8)
+				mock[off+2] = byte(v >> 16)
+				mock[off+3] = byte(v >> 24)
+			}
+		}
+		copy(mock[24:], data)
+		files = append(files, RamFile{Name: "bin/hello.mock", Data: mock})
+	}
+
 	extra, err := collectFiles(b.Root)
 	if err != nil {
 		return err

@@ -16,6 +16,11 @@
 #include "cpu.h"
 #include "tos.h"
 
+/* Off by default; `exec_mock = true` in a test config defines it to 1. */
+#ifndef TOS_EXEC_MOCK
+#define TOS_EXEC_MOCK 0
+#endif
+
 /* Per-target: sizeof(proc_t) is 856 bytes on the C3 (measured with
  * -fdump-record-layouts: fds[12] alone is 432, the saved trap frame 144,
  * cwd 64), so procs[8] is 6,848 B of .bss, not the 11,648 a 16-slot table
@@ -1926,12 +1931,86 @@ static int stream_load(const char *path, uint32_t hdr, uint8_t *dst,
  * appending an entry here; exec() probes in order and never names a concrete
  * handler, so adding a format is data, not a new branch.  The NULL sentinel
  * keeps the loops obvious and makes a forgotten entry a compile error. */
+
+#if TOS_EXEC_MOCK
+/* Test-only container, compiled only when the config asks for `exec_mock`:
+ * "MOCKTOS\0" + u32le size + span/stack/heap (the same hint shape LZ4TOS
+ * carries) + raw ELF.  Its only job is to prove that a new format is one
+ * table entry and no change to exec(). */
+#define MOCK_HDR 24
+static uint32_t mock_probe(const char *path, uint32_t *raw_size,
+                           lz4_window_hint_t *hint)
+{
+    uint8_t hdr[MOCK_HDR];
+    uint32_t got = 0, rs;
+    int h;
+
+    *raw_size = 0;
+    memset(hint, 0, sizeof(*hint));
+    h = ramdisk_open(path);
+    if (h < 0)
+        return 0;
+    while (got < MOCK_HDR) {
+        int n = ramdisk_read(h, hdr + got, MOCK_HDR - got);
+        if (n <= 0)
+            break;
+        got += (uint32_t)n;
+    }
+    uint32_t fsize = ramdisk_size(h);
+    ramdisk_close(h);
+    if (got < MOCK_HDR || memcmp(hdr, "MOCKTOS\0", 8) != 0)
+        return 0;
+    rs = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) |
+         ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
+    if (rs == 0 || rs != fsize - MOCK_HDR)
+        return 0;
+    *raw_size = rs;
+    hint->span      = (uint32_t)hdr[12] | ((uint32_t)hdr[13] << 8) |
+                      ((uint32_t)hdr[14] << 16) | ((uint32_t)hdr[15] << 24);
+    hint->stack_ask = (uint32_t)hdr[16] | ((uint32_t)hdr[17] << 8) |
+                      ((uint32_t)hdr[18] << 16) | ((uint32_t)hdr[19] << 24);
+    hint->heap_ask  = (uint32_t)hdr[20] | ((uint32_t)hdr[21] << 8) |
+                      ((uint32_t)hdr[22] << 16) | ((uint32_t)hdr[23] << 24);
+    return MOCK_HDR;
+}
+
+static int mock_load(const char *path, uint32_t header, uint8_t *dst,
+                     uint32_t raw_size)
+{
+    uint32_t got = 0;
+    int h = ramdisk_open(path);
+    if (h < 0)
+        return -1;
+    int rc = -1;
+    if (ramdisk_seek(h, header) == 0) {
+        while (got < raw_size) {
+            int n = ramdisk_read(h, dst + got, raw_size - got);
+            if (n <= 0)
+                break;
+            got += (uint32_t)n;
+        }
+        if (got == raw_size)
+            rc = 0;
+    }
+    ramdisk_close(h);
+    return rc;
+}
+
+static const struct exec_format mock_exec = {
+    "mocktos", mock_probe, mock_load,
+    "test-only MOCKTOS envelope (raw ELF payload)"
+};
+#endif
+
 static const struct exec_format lz4tos_exec = {
     "lz4tos", envelope_probe, stream_load,
     "LZ4TOS envelope with 28-byte hint"
 };
 
 static const struct exec_format *const exec_formats[] = {
+#if TOS_EXEC_MOCK
+    &mock_exec,
+#endif
     &lz4tos_exec,
     NULL
 };
