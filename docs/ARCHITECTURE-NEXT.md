@@ -110,7 +110,7 @@ LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错
 | goc32 | 未初始化 | **已初始化/自包含**（子模块 `7a17826`），feature 宏从 `build-config-<target>.txt` 导入 | C2 的黄金向量可做；生成表需保留快照 |
 | Pico 2 | 未记录 | **`OPEN-ITEMS.md` §1b**：`rp2350smp` 早期 HardFault（`PC=0xeffffffe`），MicroPython 正常 | C1 必须支持同芯片 variant；`board/rp2350` 不能假设 ATK 的 LED/LCD/4MiB |
 | `-target`/conf 冲突 | 静默套用 features | **仍存在**（`ApplyConfig()` 只在命令行未选 target 时读 conf target） | **C1 第一个要做的** |
-| flash park | 三块板各一套 | 仍如此（超时已修，协议未收敛） | C3 |
+| flash park | 三块板各一套 | **已收敛**：状态、握手顺序与进入/退出序列都在 `rp_park.h`（B-2a/B-2b） | C3 |
 | ABI 布局 | `stat/meminfo/...` 只在 `user/lib.h` | 仍如此 | C2 |
 | 内存域 | 单一连续窗口区 | 仍如此 | C4，保持条件性 |
 
@@ -289,7 +289,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 | 项 | 内容 | 依赖/验收 |
 |---|---|---|
 | B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
-| B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态（§57）与握手顺序（§67）已共享，循环仍分板，台面后再抽（#17）** |
+| B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态（§57）、握手顺序（§67）与进入/退出序列（§70）已全部共享，#17 关闭** |
 | B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归。**B-4a 协议层共享 + 真机目视（HISTORY §64）；B-4b 两 ISA 合并成一份驱动（§66）** |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |

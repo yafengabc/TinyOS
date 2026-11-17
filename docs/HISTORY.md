@@ -4581,3 +4581,26 @@ T0/T1（12 目标 + fs_ro）/T2（smoke 4 + soak 3/3）通过。T3 归 #17 的�
 
 同一轮他们还顺手确认了 `cat /proc/execfmt`（rp2350rvsmp）：`lz4tos 1` 与 `elf32 1`
 两份注册都在，与 `075a90c` 一致——B-3 第二节的 `/proc` 面在真机上可达。
+
+## 70. 2026-11-17 B-2b 收尾：park 进入/退出序列也共享（#17 关闭）
+
+§67 把**握手顺序**（`rp_park_begin/ack`）收进 `board/rp_park.h`，循环仍分板，留给台面。
+这一轮把循环也收进去： `RP_PARK_OWNER_TAKE`（取 flash 的一侧）与
+`RP_PARK_PARKED_LOOP`（挂起的一侧）现在是两份宏，三块板只保留芯片/策略差异。
+
+**为什么是宏不是函数**：parked loop 在 XIP 关闭时从 SRAM 执行，必须展开进调用者的
+`.data.ramfunc`/`.data.flash_ram`；函数指针 hook 会回调进 flash，正是要避免的总线错误。
+板级在 include 前只定义 watchdog 节奏、`g_core1_stopped`、诊断与 timeout 提示；屏障、
+唤醒、IRQ 屏蔽按 ARM/RV32 在头文件里选。
+
+**等价性**：三块板的 `.data` 段（RAM 中的 park loop + 内联进 `plat_block_erase/write`
+的 owner）与改前**逐字节相同**，`rp_flash_park_loop` 与 `plat_flash_park_poll` 反汇编
+相同，符号名 793 个一致。`.text` 小 10–12 字节，差异落在地址常量/布局，不在 park 代码。
+`rppark_test.go` 改成钉住共享宏（`RP_PARK_OWNER_TAKE(&park` / `RP_PARK_PARKED_LOOP(&park`），
+并确认 `rp_park.h` 里才有 `rp_park_begin/ack`——守卫更严了，不是放宽。
+
+**真机**：ATK-DNRP2350AM 两镜像各跑 1000 轮 `dd`+`rm`，`bad=0 timeouts=0 restarts=0`，
+32 KiB 回读 pattern verified，`smpbench` 2.02x / 1.99x；T2 soak 3/3。RP2040 无板，
+按 AGENTS.md 不作关闭依据（其 RAM 段对象级相同）。证据：
+`docs/acceptance/2026-11-17-b2b-park-merge-rp2350.md`（`73b7914`）。§67 里“循环仍分板”
+的悬置到此结清，#17 关闭。
