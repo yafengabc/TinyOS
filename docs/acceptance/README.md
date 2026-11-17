@@ -72,3 +72,4 @@
 | 2026-11-17 | CI smoke 并行化 + soak 移出 | `0207150` | CI `44017659699`：rv32/rv32smp/arm/x86 + fs_ro | T0–T2 PASS；295 s → ≤94 s/leg | [CI smoke](2026-11-17-ci-smoke-matrix-0207150.md) |
 | 2026-11-17 | B-3 第二节 `exec_format.version` + `/proc/execfmt` | `075a90c` | 12 目标 + fs_ro + QEMU 4（CI `44024533427`） | T0–T2 PASS；soak 3 轮通过 | [B-3 two](2026-11-17-b3-execfmt-version-075a90c.md) |
 | 2026-11-17 | A-2 收尾：goc32 syscall 快照（#19） | `f4e1b27`（goc32 `d3b6cd0`） | host + goc32；CI `44030431025` | T0 PASS；T1/T2 `NOT RUN`（未改构建输入） | [snapshot](2026-11-17-a2-goc32-snapshot-f4e1b27.md) |
+| 2026-11-17 | current HEAD regression | `167db55` | RP2350 ARM + RV32 (COM14) | T0/T1/T3 PASS; T2 soak 1/3 (RV32 output capture flake); LCD visual `NOT RUN` | [current 167db55](2026-11-17-current167db55-rp2350.md) |
