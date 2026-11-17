@@ -4490,3 +4490,19 @@ clang 23 更小，所以一直没踩到。预算抬到 200 扇区（100 KiB）�
 **证据**：`docs/acceptance/2026-11-17-a2-goc32-snapshot-a02fe47.md`；goc32 的
 `go build/test/vet`、`internal/native32` 测试与 `go run . ../user/hello.c` 单文件编译
 均通过（`goc32-hello.tos` 1242 B）。
+
+## 64. 2026-11-17 B-4a LCD 真机目视确认（issue #15 关闭）
+
+§2e 留下的"屏幕没亮过"现在有人的眼睛作数了。板子持有者在 ATK-DNRP2350AM 上
+分别刷了 `rp2350smp`（Cortex-M33）与 `rp2350rvsmp`（Hazard3）的当前 `main` 镜像
+（`0751f9d`），用 `flash.py --boot-uart COM14` 切 BOOTSEL，逐项目视确认：
+
+- 开机 banner 与 `tos>` prompt 可见、可交互（心跳 6/6 同时在两块板通过）；
+- 静态蓝底 + 左上角 `LCD OK` + 背光：方向/颜色/反色与改动前一致；
+- `screen mirror on` + `ls /bin` 多行输出无撕裂、无错位（DMA 相位）；
+- 背光开关正常。
+
+两块板都正常，没有刷 `b57f89f` 做 A/B——方向与颜色既然与已知表现一致，
+就按 issue #15「效果变了才刷基线」的约定跳过对比。目视结论由板子持有者给出，
+串口命令只作指令记录，不替代肉眼。证据：
+`docs/acceptance/2026-11-17-lcd-visual-0751f9d-rp2350.md`。#15 据此关闭。

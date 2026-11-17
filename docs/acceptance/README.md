@@ -74,3 +74,4 @@
 | 2026-11-17 | A-2 收尾：goc32 syscall 快照（#19） | `f4e1b27`（goc32 `d3b6cd0`） | host + goc32；CI `44030431025` | T0 PASS；T1/T2 `NOT RUN`（未改构建输入） | [snapshot](2026-11-17-a2-goc32-snapshot-f4e1b27.md) |
 | 2026-11-17 | current HEAD regression | `167db55` | RP2350 ARM + RV32 (COM14) | T0/T1/T3 PASS; T2 soak 1/3 (RV32 output capture flake); LCD visual `NOT RUN` | [current 167db55](2026-11-17-current167db55-rp2350.md) |
 | 2026-11-17 | current HEAD 0751f9d regression | `0751f9d` | RP2350 ARM + RV32 (COM14) | T0/T1/T3 PASS; T2 soak 1/3 (RV32 flake); LCD visual `NOT RUN` | [current 0751f9d](2026-11-17-current0751f9d-rp2350.md) |
+| 2026-11-17 | B-4a LCD ???????issue #15? | `0751f9d` | RP2350 ARM + RV32 (COM14) | T3 LCD ?? PASS???????/LCD OK + ?? ls /bin ????heartbeat 6/6 | [LCD visual](2026-11-17-lcd-visual-0751f9d-rp2350.md) |
