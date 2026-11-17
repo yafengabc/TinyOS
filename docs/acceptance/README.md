@@ -60,3 +60,4 @@
 | 2026-11-17 | A-3 表分派补齐 | `30cd699` | QEMU + 11 + ESP32-C3 | T0–T3 PASS；mock 运行验证见 §2d | [A-3](2026-11-17-a3-table-30cd699.md) |
 | 2026-11-17 | B-2a RP park 共享状态 | `20004a5` | 6 个 RP 目标 + QEMU | T0–T2 PASS；T3 `NOT RUN`（§2f） | [B-2a](2026-11-17-b2a-park-state-20004a5.md) |
 | 2026-11-17 | B-6a C7 接口 + loopback lower | `9889c89` | QEMU 3 + 11 + ESP32-C3 | T0–T3 PASS；rselftest ok | [B-6a](2026-11-17-b6a-remote-ep-9889c89.md) |
+| 2026-11-17 | A-5 mem_domain 接缝 | `51f561c` | QEMU 3 + 11 + x86 + ESP32-C3 | T0–T3 PASS；窗口数值未变 | [A-5](2026-11-17-a5-mem-domain-51f561c.md) |
