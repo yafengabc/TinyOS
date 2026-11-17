@@ -324,6 +324,14 @@ func (sc *socketConn) read(timeout time.Duration) ([]byte, bool) {
 func (sc *socketConn) waitFor(needle []byte, timeout time.Duration) (bool, time.Duration) {
 	start := time.Now()
 	deadline := start.Add(timeout)
+	// A command that keeps printing is not a hung command.  `piperace` pushes
+	// 64 KiB through a pipe and on a single-core TCG guest that can outlast
+	// the window while making steady progress; cutting it off sent the next
+	// command into the middle of its output, which the soak saw as "lost
+	// command output" (rp2350 review thread, 2026-11-17).  The deadline
+	// therefore slides while bytes arrive, up to a hard cap so a guest that
+	// prints forever still returns.
+	hard := start.Add(3 * timeout)
 	sc.mu.Lock()
 	from := sc.mark
 	sc.mu.Unlock()
@@ -335,9 +343,18 @@ func (sc *socketConn) waitFor(needle []byte, timeout time.Duration) (bool, time.
 		if remaining > 200*time.Millisecond {
 			remaining = 200 * time.Millisecond
 		}
-		_, ok := sc.read(remaining)
+		b, ok := sc.read(remaining)
 		if !ok {
 			break
+		}
+		if len(b) > 0 {
+			next := time.Now().Add(timeout)
+			if next.After(hard) {
+				next = hard
+			}
+			if next.After(deadline) {
+				deadline = next
+			}
 		}
 		sc.mu.Lock()
 		if from > len(sc.buf) {

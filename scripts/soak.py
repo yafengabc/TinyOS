@@ -107,11 +107,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--targets", default="x86,rv32,arm,rv32smp")
     ap.add_argument("--cycles", type=int, default=6)
-    ap.add_argument("--commandwait-ms", type=int, default=1500,
+    ap.add_argument("--commandwait-ms", type=int, default=4000,
                     help="per-command output window passed to tostest smoke."
-                         "  1500 is enough on a fast host; a single-core rv32"
-                         " needs more because piperace pushes 64 KiB through a"
-                         " pipe and the next command lands before it finishes")
+                         "  piperace pushes 64 KiB through a pipe and prints"
+                         " nothing while it does it, so a slow host can sit"
+                         " quiet past the window and the next command lands in"
+                         " the middle of the output (the rp2350 review thread"
+                         " hit this at 1500 ms on 2026-11-17).  The wait ends"
+                         " as soon as the prompt returns, so a larger window"
+                         " costs nothing on a fast host.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
