@@ -4373,3 +4373,36 @@ PASS（11 目标 + QEMU arm/rv32/rv32smp），**T3/T4 NOT RUN**——屏要人�
 
 **另一处口径修正**：`HISTORY` §57 里写的 RP2040 park 专项 #13 与 #12 重复，已关闭并
 统一指向 #12（`OPEN-ITEMS` §2g）。
+
+## 59. 2026-11-17 fs_ro 构建被打断（issue #14）：`hash_path` 回到无条件定义
+
+**现象**：`fs_ro = true` 的内核编译失败——`kernel/ramdisk.c:637` 调用 `hash_path()`，
+而 `hash_path()` 的定义落在 `#ifndef TOS_LFS_RO` 块里。B-8（`f4bafc0`）把
+`ofile_t.path[64]` 换成 `path_hash` 时，`open_with()` 在新的 `#ifndef` 块**之后**，
+helper 却跟着 `unlink_locked()` 一起留在了块内。
+
+**为什么一直绿**：`fs_ro` 是 `configs/*.conf` 的公开选项（`config.go` 的
+`parseOnOff(s["fs_ro"])`），但**没有一个默认 config 开它**。T0/T1 只构建默认配置，
+B-8 的 C3/真机验收也走默认配置，所以编译错误只存在于"别人真的想用只读镜像"的时候。
+
+**修法**：把 `hash_path()` 移到保护块外无条件定义；`unlink_locked()`（唯一的读者）仍是
+读写专属。另一条路——把 637 行的赋值包进 `#ifndef TOS_LFS_RO`——被否掉：只读镜像照样
+`open()`，句柄应该带着和读写镜像一样的 `path_hash` 不变量，而不是让 `ofile_t` 的含义
+随构建选项漂移。碰撞方向没变：哈希只用于"同名就当同一个文件、拒绝删除"，最坏是假拒绝。
+
+**等价性**：读写路径产物逐字节相同（`rp2350smp`：`.text` 70864 / `.data` 584 /
+`.bss` 55520，前后一致），所以这条不需要真机。`fs_ro = true` 的 x86、`rp2350smp`、
+`esp32c3` 三个构建通过。
+
+**防回退**：`internal/build/fsro_test.go` 不需要编译器——它只保留 `-DTOS_LFS_RO`
+构建会看到的行，若这些行调用了"只在读写块里定义"的函数就 FAIL。对旧 `ramdisk.c`
+立刻报 `hash_path is defined only when !TOS_LFS_RO but used by a read-only build`。
+
+**流程补丁**：`TESTING.md` §3 明确 `fs_ro = true` 也算一个 T1 目标——碰
+`kernel/ramdisk.c`、`TOS_LFS_RO` 或"某段代码在 `#ifdef` 块里外"的边界时必须跑一次。
+这比给 CI 加一条构建便宜，也比"下次记得"可靠。
+
+**已知未修**：`stat_locked()` 注释里的 `*size/*type` 触发 `-Wcomment`，是旧问题，
+按 issue 边界另记，不混进本次提交。
+
+**证据**：`docs/acceptance/2026-11-17-fsro-ramdisk-a271253.md`（`a271253`）。

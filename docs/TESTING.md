@@ -93,6 +93,10 @@ foreach ($t in $targets) {
 - **x86 单独处理**：它在 CI/发行版工具链上仍失败（`OPEN-ITEMS.md` §5）。除非本次改动就是 x86，否则不要把 x86 失败算作回归；本机如果构建成功，记录结果。
 - 每个目标检查产物：`build/<target>.uf2`、`build/esp32c3*.bin`、`build/kernel-<target>.elf`、`build/build-config-<target>.txt`。
 - 记录 `build-config-<target>.txt` 的 `target`/`features`/`user-defines`，尤其是构建系统改动。
+- **`fs_ro = true` 的镜像也算一个目标**：只要碰了 `kernel/ramdisk.c`、`TOS_LFS_RO`
+  或“某段代码在 `#ifdef` 块里外”的边界，就额外用一份 `fs_ro = true` 的临时 config
+  构建一次（x86 + 一个嵌入式目标）。默认 configs 都不开 `fs_ro`，否则这条只在别人
+  分支上炸（issue #14）。临时 config 放 `build/`，不入库。
 
 ## 4. T2：QEMU
 
