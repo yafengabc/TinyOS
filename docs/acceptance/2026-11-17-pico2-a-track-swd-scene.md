@@ -119,19 +119,10 @@ double fault lockup——用户代码在到达可调试状态前就 fault，故�
   移植到 ARMv8-M (M33) 时遗漏。**做了修复实验**（`_start` 加这两步，`__ARM_ARCH>=8`
   条件编译），重建刷入 → **仍 fault**，已回退该实验改动（`arch/arm/start.S` 干净）。
   所以 MSPLIM/VTOR 不是（唯一）根因。
-- **故障类型寄存器**：在 fault 后、double-fault lockup 前抢读到：
-  ```
-  CFSR  = 0x00000000
-  HFSR  = 0x00000000
-  SFAR  = 0x200196e4      (Secure Fault Address Register)
-  ```
-  CFSR/HFSR 全 0 而 SFAR 指向 **栈区**（初始 MSP=0x20019698，SFAR=MSP-0x14），
-  强烈指向 **SecureFault（安全属性冲突）** 而非普通 MemManage/BusFault。
-- **栈安全属性假设**：RP2350 bootROM 在 Secure 态配置 SAU，把 SRAM 分区为
-  Secure/Non-secure。MicroPython 初始 SP=0x20082000（SRAM 顶部），TinyOS
-  SP=0x20019698（低区）。若 TinyOS 的栈落在 Non-secure 属性区、而 CPU 在
-  Secure 态访问（或反之），即触发 SecureFault (AUVIOL/INVIS)，fault handler
-  自身也在 flash → double fault → PC=0xeffffffe。
+- **故障类型寄存器（结论已被后续修正，见末节）**：曾抢读到 CFSR=0、HFSR=0、
+  SFAR=0x200196e4（栈区），一度判断为 SecureFault。但后续用 GDB RSP 正确读取
+  发现 SFSR=0、SFAR 随状态漂移（0x20010450/0x200196e4/0），**该判断未坐实**，
+  不能作为改代码依据。
 
 ## 根因状态
 
@@ -162,3 +153,50 @@ INVER/INVIS）确定具体违规类型，并读 SAU region 配置核对 0x200196
   T0/T1 与 B1 架构判据（board/pico2 两文件、kernel 无 PICO2 ifdef、chip 表注册
   pico2→rp2350），全部成立。
 - `scripts/rp2350/pico2_heartbeat.py`（B2 checklist 交付物）：**尚未实现**（测试侧待补）。
+
+## 第二轮排查与结论修正（用户要求挖 pico-sdk）
+
+按用户要求对照 pico-sdk、并多次断电重试 SWD 寄存器读取，完整结果如下。供 issue #7 分析，**不对根因下最终结论**。
+
+### 确凿事实（交叉验证）
+
+1. **硬件/探针/SWD/刷写全部正常**：MicroPython 同路径启动 + REPL 交互（`1+1=2`）。
+2. **是 TinyOS 软件问题**：用与 MicroPython 完全相同的 UF2 payload bin 方式刷入
+   TinyOS（`pico2-tinyos-full.bin`）仍 double fault。排除刷写方式干扰。
+3. **故障极早**：在 HardFault (0x1000e2ce) 与 SecureFault (0x1000e2ec) 设 2 字节
+   硬件断点，`resume` 后**断点均未命中**就 double fault lockup。说明故障发生在
+   异常向量能取到之前，或异常向量取自 ROM（VTOR 未指向自身）。
+4. **pico-sdk crt0 对照**：`pico_crt0/crt0.S` 早期做 TinyOS 没有的事——
+   `msr msplim,r0`、设 VTOR、从 vector 重载 MSP、以及 **通过 bootrom 重入
+   (`movs r0,#BOOTROM_VTABLE_OFFSET` + `bx`) 让 ROM 完成 XIP 收尾配置**。
+   做了"补 MSPLIM+VTOR"实验（`__ARM_ARCH>=8` 条件编译，只影响 M33）→ **仍 fault**，
+   已回退（`arch/arm/start.S` 干净）。说明 MSPLIM/VTOR 不是（唯一）根因；
+   "bootrom 重入"这一步尚未实验。
+5. **ROM 单步**：从 ROM 入口 `PC=0x88` 单步到 `0xc2→0xc4→0xc6` 后循环（ROM 等
+   flash 条件，单步干扰时序）。
+6. **栈指针差异**：MicroPython 初始 SP=`0x20082000`（SRAM 顶 520KB），TinyOS
+   SP=`0x20019698`（低区）。ATK（能启动）SP=`0x2001d940`，也在低区——所以
+   "低区栈"本身不是充分原因（ATK 同样低区能起）。
+
+### 被修正/未坐实的判断（重要）
+
+- 先前据 CFSR=0/HFSR=0/SFAR≈栈区 判断"SecureFault（栈安全属性冲突）"。
+  后续用 **GDB RSP 正确读取**（修正了字节序与地址：SFSR=SCB+0xE4=0xE000EDE4、
+  SFAR=+0xE8）得到：**SFSR=0、SAU_CTRL=0（SAU 未使能）、SAU_TYPE=8**，
+  且 SFAR 读数随芯片状态漂移（0x20010450 / 0x200196e4 / 0）。
+  **lockup 前后读到的故障寄存器不可信，"SecureFault"结论未坐实，不作为改代码依据**。
+- double fault 后 SWD 完全锁死（DP `cannot read IDR`），必须物理断电恢复；
+  lockup 前时间窗太短，可靠的 fault 类型/SFSR 抓不到。
+
+### 待验证的候选方向（未定论）
+
+- **bootrom 重入**：pico-sdk 在设好 VTOR 后通过 `bx` 回到 ROM 让 ROM 完成 XIP
+  收尾；TinyOS 直接从 vector 跑。可能是 ROM 尚未完成 flash 全速/XIP 配置。
+- **早期时钟/flash 时序**：w25q64fv（8MiB）、QMI/CLK_DIV 在 Pico 2 板上与 ATK
+  不同；`PC=0xeffffffe` 更像向量表取到垃圾。
+- **二分定位**：在 ROM 交棒后逐段插桩（watchdog 喂狗/串口标记）定位首个 fault 指令。
+
+### 状态
+
+A 轨根因**未定**，本卡不宣称修复或 WONTFIX。所有实验改动已回退，代码干净。
+用户将基于本结果分析后决定下一步方向。
