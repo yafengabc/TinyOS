@@ -217,6 +217,14 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	// 60 KiB exec arena is untouched.
 	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", CPUs: 2, HeapBytes: 60 * 1024},
 
+	// rp2350pico2: the same silicon on Raspberry Pi's own board.  The board
+	// directory reuses board/rp2350 through `base =` and replaces only the
+	// device table (LED on GP25, no panel, no card slot) and its board.conf
+	// (4 MiB flash, no lcd peripheral).  Single core first: the point of this
+	// target is a bring-up probe, and an SMP image makes a boot fault harder
+	// to read.  A pico2smp target is one line away once this one boots.
+	"rp2350pico2": {Name: "rp2350pico2", Arch: "arm", Board: "pico2", HeapBytes: 60 * 1024},
+
 	// The SMP build: the same qemu-virt board, two harts, and the only
 	// target that adds the A extension.  Atomic memory operations are what
 	// the spin lock is made of (arch/rv32/platform.c), and the plain rv32
@@ -750,6 +758,20 @@ func (b *Builder) linkPIE(objs []string, script, out string) error {
 	return err
 }
 
+// shadowed drops the files in list whose name also exists in overlay: the
+// overlay's copy is compiled instead.  Used by the base/variant board
+// composition (board.conf `base =`).
+func shadowed(list []string, overlay string) []string {
+	kept := list[:0]
+	for _, f := range list {
+		if _, err := os.Stat(filepath.Join(overlay, filepath.Base(f))); err == nil {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
+
 func globFiles(dir, pattern string) ([]string, error) {
 	m, err := filepath.Glob(filepath.Join(dir, pattern))
 	if err != nil {
@@ -999,9 +1021,18 @@ func (b *Builder) buildKernel() error {
 		kdir,
 		lfsDir,
 		filepath.Join(b.Root, "board", b.Target.Board),
+	}
+	/* A variant board (base = <board> in board.conf) reuses the silicon's
+	 * sources.  Its directory goes right after the variant's own, and before
+	 * the arch default: board/rp2350/board.h must win over arch/arm/board.h
+	 * for a variant with no board.h of its own. */
+	if bc := b.BoardConfig; bc != nil && bc.Base != "" {
+		incs = append(incs, filepath.Join(b.Root, "board", bc.Base))
+	}
+	incs = append(incs,
 		filepath.Join(b.Root, "board"),
 		filepath.Join(b.Root, "arch", b.Target.Arch),
-	}
+	)
 
 	/* Backward compatibility: an old TOS_WIFI_LIB environment build still
 	 * pulls the in-tree WiFi driver directory. */
@@ -1032,7 +1063,12 @@ func (b *Builder) buildKernel() error {
 	// that lets those upstream files compile unchanged.  The board directory
 	// joins the include path so tusb_config.h is found by name.
 	tusbDir := filepath.Join(b.Root, "third_party", "tinyusb")
-	useTinyUSB := b.Target.Board == "rp2040" || b.Target.Board == "rp2350" || b.Target.Board == "rp2350rv"
+	// TinyUSB is a chip capability, not a board name: every RP2040/RP2350
+	// image has the same USB controller, and a new board on that silicon
+	// (board/pico2) must not have to be added to a list here.
+	useTinyUSB := b.Target.Board == "rp2040" || b.Target.Board == "rp2350" ||
+		b.Target.Board == "rp2350rv" ||
+		(b.BoardConfig != nil && (b.BoardConfig.Chip == "rp2040" || b.BoardConfig.Chip == "rp2350"))
 	if useTinyUSB {
 		incs = append(incs,
 			filepath.Join(tusbDir, "src"),
@@ -1045,11 +1081,19 @@ func (b *Builder) buildKernel() error {
 	// driver directories.  Which arch and board directory is used depends on
 	// the build target.
 	var srcs []string
+	variantDir := filepath.Join(b.Root, "board", b.Target.Board)
+	var baseDir string
+	if bc := b.BoardConfig; bc != nil && bc.Base != "" {
+		baseDir = filepath.Join(b.Root, "board", bc.Base)
+	}
 	dirs := []string{
 		kdir,
 		filepath.Join(b.Root, "arch", b.Target.Arch),
-		filepath.Join(b.Root, "board", b.Target.Board),
 	}
+	if baseDir != "" {
+		dirs = append(dirs, baseDir)
+	}
+	dirs = append(dirs, variantDir)
 	dirs = append(dirs, driverDirs...)
 	for _, dir := range dirs {
 		cs, err := globFiles(dir, "*.c")
@@ -1059,6 +1103,14 @@ func (b *Builder) buildKernel() error {
 		ss, err := globFiles(dir, "*.S")
 		if err != nil {
 			return err
+		}
+		/* Composition rule: a file in the variant directory replaces the
+		 * base file with the same name.  Without this, board/pico2's
+		 * board_data.c would be a duplicate definition of the ATK table
+		 * rather than a replacement of it. */
+		if baseDir != "" && dir == baseDir {
+			cs = shadowed(cs, variantDir)
+			ss = shadowed(ss, variantDir)
 		}
 		srcs = append(srcs, ss...)
 		srcs = append(srcs, cs...)
@@ -1210,7 +1262,7 @@ func (b *Builder) buildKernel() error {
 		// the arch default is the fallback.
 		elfPath := filepath.Join(b.BuildDir, "kernel-"+b.Target.Name+".elf")
 		script := filepath.Join(b.Root, "arch", b.Target.Arch, "kernel.ld")
-		boardScript := filepath.Join(b.Root, "board", b.Target.Board, "kernel.ld")
+		boardScript := b.boardFile("kernel.ld")
 		if _, err := os.Stat(boardScript); err == nil {
 			script = boardScript
 		}
@@ -1219,7 +1271,7 @@ func (b *Builder) buildKernel() error {
 		// Keeping it in a separate script means turning XIP off is one
 		// target field, not an edit to the board's normal layout.
 		if b.Target.XipFlashBase != 0 {
-			xip := filepath.Join(b.Root, "board", b.Target.Board, "kernel-xip.ld")
+			xip := b.boardFile("kernel-xip.ld")
 			if _, err := os.Stat(xip); err != nil {
 				return fmt.Errorf("target %s sets XipFlashBase but %s is missing",
 					b.Target.Name, xip)
@@ -1290,7 +1342,10 @@ func (b *Builder) buildKernel() error {
 				if err := b.emitRP2040UF2(elfPath); err != nil {
 					return err
 				}
-			case "rp2350":
+			case "rp2350", "pico2":
+				// Same silicon, same PICOBIN packaging; the switch is still
+				// by board name, which is the next thing to move to the chip
+				// layer (a pico2smp image would need its own row here).
 				if err := b.emitRP2350UF2(elfPath); err != nil {
 					return err
 				}

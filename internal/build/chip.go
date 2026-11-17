@@ -50,6 +50,7 @@ var boardChips = map[string][]string{
 	"rp2040":    {"rp2040"},
 	"rp2350":    {"rp2350"},
 	"rp2350rv":  {"rp2350"},
+	"pico2":     {"rp2350"},
 }
 
 // isaFor returns the chip/ISA pair a target should compile for.

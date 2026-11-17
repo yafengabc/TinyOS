@@ -18,6 +18,11 @@ type BoardConfig struct {
 	Schema      int
 	Chip        string
 	Variant     string
+	// Base names another board directory whose sources this one reuses:
+	// same silicon, different wiring.  Files in this board's directory
+	// shadow same-named files in the base (board_devs.c, board_data.c, ...),
+	// so a variant writes only what differs and never copies platform.c.
+	Base        string
 	Peripherals map[string]bool
 	UserExclude []string
 	// Board-layer build facts.  ensureBoardConfig() copies these into the
@@ -99,7 +104,18 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 		Schema:      schema,
 		Chip:        chip,
 		Variant:     strings.TrimSpace(s["variant"]),
+		Base:        strings.TrimSpace(s["base"]),
 		Peripherals: map[string]bool{},
+	}
+	if bc.Base != "" {
+		if bc.Base == board {
+			return nil, fmt.Errorf("%s: base = %q is this board", relName(root, path), bc.Base)
+		}
+		baseConf := filepath.Join(root, "board", bc.Base, "board.conf")
+		if _, err := os.Stat(baseConf); err != nil {
+			return nil, fmt.Errorf("%s: base = %q has no board.conf (%s)",
+				relName(root, path), bc.Base, relName(root, baseConf))
+		}
 	}
 	for _, p := range splitList(s["peripherals"]) {
 		bc.Peripherals[strings.ToLower(p)] = true
@@ -205,6 +221,24 @@ func featurePeripheral(name string) string {
 		return "lcd"
 	}
 	return ""
+}
+
+// boardFile resolves a board-layer file, letting a variant board fall back to
+// the directory named by board.conf's `base =`.  A file present in the
+// variant directory wins; this is the same rule the compiler applies to
+// sources, just for the files Go reads itself (layout.c, kernel.ld).
+func (b *Builder) boardFile(name string) string {
+	variant := filepath.Join(b.Root, "board", b.Target.Board, name)
+	if _, err := os.Stat(variant); err == nil {
+		return variant
+	}
+	if b.BoardConfig != nil && b.BoardConfig.Base != "" {
+		base := filepath.Join(b.Root, "board", b.BoardConfig.Base, name)
+		if _, err := os.Stat(base); err == nil {
+			return base
+		}
+	}
+	return variant
 }
 
 func (b *Builder) ensureBoardConfig() error {

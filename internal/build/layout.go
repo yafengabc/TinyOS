@@ -52,7 +52,7 @@ func (b *Builder) checkLayout() error {
 	// where the LBA instead follows from the sector counts; embedded images
 	// start at zero.
 	if b.Target.FSBacking == "flash" {
-		layout := filepath.Join(b.Root, "board", b.Target.Board, "layout.c")
+		layout := b.boardFile("layout.c")
 		// layout.c derives these two from the generated header, so the
 		// expression carries macro names; substitute the values board.conf
 		// produced.  The C side repeats the comparison at boot
@@ -83,7 +83,7 @@ func (b *Builder) checkLayout() error {
 	if b.Target.FSBacking != "disk" {
 		return nil
 	}
-	layout := filepath.Join(b.Root, "board", b.Target.Board, "layout.c")
+	layout := b.boardFile("layout.c")
 	lba, err := constFromSource(b.Root, layout, rePlatLFSLBA, "PLAT_LFS_LBA", nil)
 	if err != nil {
 		return err

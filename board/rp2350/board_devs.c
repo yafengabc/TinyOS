@@ -1,113 +1,86 @@
 #include "platform.h"
 #include "hwdev.h"
-#include "arm_memmap.h"
 #include "board.h"
-#include "board_internal.h"
 
-/* The ATK-DNRP2350AM, as data.
+/* LED and key, driven by the board's device table.
  *
- * Every on-board peripheral this port can name is one line below: what it
- * is called, which class it belongs to, which pin it sits on, and how it is
- * wired.  /proc/dev prints this table, the kernel turns the LED / key /
- * display rows into /dev nodes, and nothing else in the tree hard-codes a
- * pin for this board - a caller says "the LED", not "GPIO3".
+ * The pins and the polarity are board data (board_data.c, one table per
+ * board or variant); this file only knows how to turn a row into a pin
+ * operation.  That split is what lets board/pico2 reuse it: its LED is on
+ * GPIO25 and active high, which is a different row, not different code.
  *
- * The pin numbers come from the schematic (docs/ATK-DNRP2350AM_V1.0.PDF,
- * sheets 1-2) and were checked against the vendor wiki:
- *
- *   LED      GPIO3,  active low: the cathode is on the pin, the anode
- *                    through 510R to 3V3, so 0 lights it.
- *   KEY0     GPIO2,  to GND through 1K, so 0 means pressed.  It is the
- *                    BOOT button as well - held at reset it enters the
- *                    ROM bootloader.
- *   LCD      ST7789V2 135x240 on SPI1: SCK 10, MOSI 11, DC 8, CS 9,
- *                    backlight 25 (high = on), reset tied to board RESET.
- *   TF card  SDIO on GPIO10..15 - the same two pins the panel uses for
- *            clock and data, which is why both cannot run at once.
- *   UART0    GPIO0 TX / GPIO1 RX into the on-board CH343P USB-serial.
- *   USB      native USB 1.1 device port (BOOTSEL + CDC console).
- *   ADC0..3  GPIO26..29, 12 bit, 3.3 V reference.
- *   QSPI     W25Q32 4 MiB boot flash, dedicated pins, not on the header.
- *
- * What is described but not driven: the card slot.  A working SD driver is
- * a SPI/SDIO stack of its own, and on this board it would collide with the
- * panel anyway.  It is in the table so /proc/dev tells the truth about the
- * hardware, and so a future driver has one place to claim. */
+ * Both are written on top of platform.h's pin layer rather than poking
+ * PADS_BANK0 directly.  A GPIO class is a pin with a meaning: the pad bits
+ * (pull-up, output-disable, the RP2350 ISO bit) are already right in one
+ * place, and a board file that re-derives them slowly drifts from the one
+ * that is actually tested. */
 
-#define LED_PIN   3
-#define KEY_PIN   2
+#define MAX_LEDS 2
+#define MAX_KEYS 2
 
-static const board_dev_t atk_devs[] = {
-    /* `detail` is written front-loaded and terse: it is the column a
-     * 40-column panel shows and truncates, so the wiring that matters
-     * ("spi1 10/11") comes before the prose.  The long explanations live
-     * in the comment above and in docs/BOARD-ATK-DNRP2350AM.md. */
-    { "led0", "blue LED", TOS_DEV_LED, TOS_DEV_ACTIVE_LOW, LED_PIN, -1,
-      "low = lit" },
-    { "key0", "KEY1 / BOOT", TOS_DEV_KEY, TOS_DEV_ACTIVE_LOW, KEY_PIN, -1,
-      "low = pressed" },
-    { "lcd0", "ST7789V2 135x240", TOS_DEV_DISPLAY, 0, 8, 9,
-      "spi1 10/11 dc8 cs9 bl25" },
-    { "tf0", "TF card slot", TOS_DEV_STORAGE, TOS_DEV_SHARED, 10, -1,
-      "sdio 10-15, shares lcd" },
-    { "uart0", "CH343P USB-serial", TOS_DEV_UART, 0, 0, -1,
-      "tx0 rx1 115200" },
-    { "usb0", "native USB 1.1", TOS_DEV_USB, 0, -1, -1,
-      "bootsel + cdc" },
-    { "adc0", "GPIO26 / ADC0", TOS_DEV_ADC, 0, 26, 0, "12 bit, 3.3 V" },
-    { "adc1", "GPIO27 / ADC1", TOS_DEV_ADC, 0, 27, 1, "12 bit, 3.3 V" },
-    { "adc2", "GPIO28 / ADC2", TOS_DEV_ADC, 0, 28, 2, "12 bit, 3.3 V" },
-    { "adc3", "GPIO29 / ADC3", TOS_DEV_ADC, 0, 29, 3, "12 bit, 3.3 V" },
-    { "flash0", "W25Q32 4 MiB", TOS_DEV_FLASH, 0, -1, -1,
-      "qspi, boot + littlefs" },
-};
-
-const board_dev_t *plat_board_devs(int *count)
-{
-    if (count)
-        *count = (int)(sizeof(atk_devs) / sizeof(atk_devs[0]));
-    return atk_devs;
-}
-
-const char *plat_board_name(void)
-{
-    return "ATK-DNRP2350AM";
-}
-
-/* ---- LED -------------------------------------------------------------- */
-
-/* Both of these are written on top of platform.h's pin layer rather than
- * poking PADS_BANK0 directly.  A GPIO class is a pin with a meaning: the
- * pad bits (pull-up, output-disable, the RP2350 ISO bit) are already
- * right in one place, and a board file that re-derives them slowly drifts
- * from the one that is actually tested.  What is board-specific here is
- * only the polarity and the ownership rule. */
-
-static int led_ready;
-static int key_ready;
-static int led_state;
+static int led_ready[MAX_LEDS];
+static int key_ready[MAX_KEYS];
+static int led_state[MAX_LEDS];
 static int led_owned;           /* user space has taken the LED over */
+
+static const board_dev_t *dev_by_class(uint8_t cls, int idx)
+{
+    int count = 0;
+    const board_dev_t *devs = plat_board_devs(&count);
+
+    if (!devs || idx < 0)
+        return NULL;
+    for (int i = 0; i < count; i++) {
+        if (devs[i].cls != cls)
+            continue;
+        if (idx-- == 0)
+            return &devs[i];
+    }
+    return NULL;
+}
+
+static int dev_count_by_class(uint8_t cls)
+{
+    int count = 0;
+    int n = 0;
+    const board_dev_t *devs = plat_board_devs(&count);
+
+    if (!devs)
+        return 0;
+    for (int i = 0; i < count; i++)
+        if (devs[i].cls == cls)
+            n++;
+    return n;
+}
+
+/* The one place polarity stops: every caller above says "on". */
+static int dev_level(const board_dev_t *d, int on)
+{
+    if (d->flags & TOS_DEV_ACTIVE_LOW)
+        return on ? 0 : 1;
+    return on ? 1 : 0;
+}
 
 int plat_led_count(void)
 {
-    return 1;
+    int n = dev_count_by_class(TOS_DEV_LED);
+    return n > MAX_LEDS ? MAX_LEDS : n;
 }
 
 int plat_led_set(int idx, int on)
 {
-    if (idx != 0)
+    const board_dev_t *d = dev_by_class(TOS_DEV_LED, idx);
+
+    if (!d || d->pin < 0 || idx >= MAX_LEDS)
         return -1;
-    if (!led_ready) {
-        if (plat_gpio_configure(LED_PIN, PLAT_GPIO_OUT) < 0)
+    if (!led_ready[idx]) {
+        if (plat_gpio_configure(d->pin, PLAT_GPIO_OUT) < 0)
             return -1;
-        led_ready = 1;
+        led_ready[idx] = 1;
     }
-    /* Active low: the cathode is on the pin and the anode goes through
-     * 510R to 3V3, so a low pin lights it.  That fact stops here - every
-     * caller above says "on". */
-    if (plat_gpio_write(LED_PIN, on ? 0 : 1) < 0)
+    if (plat_gpio_write(d->pin, dev_level(d, on ? 1 : 0)) < 0)
         return -1;
-    led_state = on ? 1 : 0;
+    led_state[idx] = on ? 1 : 0;
     /* Stop the heartbeat: from here the LED says what user space told it
      * to say, not "the kernel is alive". */
     led_owned = 1;
@@ -116,9 +89,11 @@ int plat_led_set(int idx, int on)
 
 int plat_led_get(int idx)
 {
-    if (idx != 0)
+    if (idx < 0 || idx >= MAX_LEDS)
         return -1;
-    return led_state;
+    if (!dev_by_class(TOS_DEV_LED, idx))
+        return -1;
+    return led_state[idx];
 }
 
 int plat_led_owned(void)
@@ -126,28 +101,30 @@ int plat_led_owned(void)
     return led_owned;
 }
 
-/* ---- key -------------------------------------------------------------- */
-
 int plat_key_count(void)
 {
-    return 1;
+    int n = dev_count_by_class(TOS_DEV_KEY);
+    return n > MAX_KEYS ? MAX_KEYS : n;
 }
 
 int plat_key_read(int idx)
 {
+    const board_dev_t *d = dev_by_class(TOS_DEV_KEY, idx);
     int level;
 
-    if (idx != 0)
+    if (!d || d->pin < 0 || idx >= MAX_KEYS)
         return -1;
-    if (!key_ready) {
-        /* Pull-up, because the schematic puts the switch straight to GND
-         * with nothing on the other side: a released key floats. */
-        if (plat_gpio_configure(KEY_PIN, PLAT_GPIO_IN_PULLUP) < 0)
+    if (!key_ready[idx]) {
+        /* Pull-up: the switch is wired straight to ground, so a released
+         * key floats without it. */
+        if (plat_gpio_configure(d->pin, PLAT_GPIO_IN_PULLUP) < 0)
             return -1;
-        key_ready = 1;
+        key_ready[idx] = 1;
     }
-    level = plat_gpio_read(KEY_PIN);
+    level = plat_gpio_read(d->pin);
     if (level < 0)
         return -1;
-    return level ? 0 : 1;       /* pressed pulls the pin to ground */
+    /* 1 means pressed, whatever the wiring: an active-low key reads 0 when
+     * the button pulls it down. */
+    return (d->flags & TOS_DEV_ACTIVE_LOW) ? (level ? 0 : 1) : (level ? 1 : 0);
 }
