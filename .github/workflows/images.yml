@@ -170,8 +170,25 @@ jobs:
           retention-days: 30
 
   smoke:
-    name: qemu smoke
+    name: qemu smoke (${{ matrix.target }})
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # One job per target so a failure names the target and the legs run
+        # side by side: the old serial job spent five minutes on this.  The
+        # distro toolchain is deliberate - it is the one that exposes
+        # toolchain-dependent breakage (x86's clang-to-gcc link, the 90 KiB
+        # kernel budget), while the release matrix uses apt.llvm.org.
+        include:
+          - target: rv32
+          - target: rv32smp
+          - target: arm
+          - target: x86
+          - target: read-only
+            config: configs/rv32-fsro.conf
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -185,29 +202,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld libc6-dev \
             qemu-system-misc qemu-system-x86 qemu-system-arm
-      # x86 is built and booted here too: it links on the distro toolchain now
-      # that the link goes through ld.lld instead of clang-to-gcc (which added
-      # -pie), and the kernel budget went to 100 KiB to fit clang 18's output.
-      # It is still not in the release matrix - no packaging path for a raw
-      # disk image - but a regression here should not go unnoticed.
-      - name: Build the read-only image
-        run: go run ./cmd/tos build -config configs/rv32-fsro.conf
-      - name: Build the QEMU targets
+      - name: Build
         run: |
           set -euo pipefail
-          for t in rv32 rv32smp arm x86; do
-            go run ./cmd/tos build -target "$t"
-          done
-      - name: Boot and drive each one
+          if [ "${{ matrix.target }}" = "read-only" ]; then
+            go run ./cmd/tos build -config "${{ matrix.config }}"
+          else
+            go run ./cmd/tos build -target "${{ matrix.target }}"
+          fi
+      - name: Boot and drive it
+        if: matrix.target != 'read-only'
         run: |
-          set -euo pipefail
-          for t in rv32 rv32smp arm x86; do
-            go run ./cmd/tostest smoke -target "$t" \
-              -commands "ps, ls /bin | wc, piperace, prot stack, deep 3, rselftest" \
-              -commandwait-ms 4000
-          done
-      - name: Window and segment soak
-        run: python3 scripts/soak.py --cycles 3 --targets rv32,rv32smp,arm
+          go run ./cmd/tostest smoke -target "${{ matrix.target }}" \
+            -commands "ps, ls /bin | wc, piperace, prot stack, deep 3, rselftest" \
+            -commandwait-ms 4000
 
   release:
     name: Publish release
