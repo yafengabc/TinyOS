@@ -62,3 +62,4 @@
 | 2026-11-17 | B-6a C7 接口 + loopback lower | `9889c89` | QEMU 3 + 11 + ESP32-C3 | T0–T3 PASS；rselftest ok | [B-6a](2026-11-17-b6a-remote-ep-9889c89.md) |
 | 2026-11-17 | A-5 mem_domain 接缝 | `51f561c` | QEMU 3 + 11 + x86 + ESP32-C3 | T0–T3 PASS；窗口数值未变 | [A-5](2026-11-17-a5-mem-domain-51f561c.md) |
 | 2026-11-17 | A-3 第二容器 mock | `2ab6745` | QEMU rv32（exec_mock） | T0–T2 PASS；hello.mock 加载成功 | [A-3 mock](2026-11-17-a3-mock-2ab6745.md) |
+| 2026-11-17 | B-2a + B-3 hardware smoke | `a16513b` | RP2350 ARM + RV32（COM14） | T0/T2/T3/T4 PASS；T1 x86 FAIL；RP2040 `NOT RUN` | [B-2a/B-3 RP2350](2026-11-17-b2a-b3-rp2350-a16513b.md) |
