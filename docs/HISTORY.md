@@ -4117,3 +4117,31 @@ WiFi 硬件"——都是硬件事实，却和 `configs` 里"本镜像不带某�
 
 **剩余（B-1c）**：`Targets` 仍手写 chip/arch、驱动目录与镜像默认值；下一步从
 `board.conf` + `chip` 表派生，`Targets` 只保留"这块板有哪些镜像（单核/双核）"。
+
+## 49. 2026-11-17 B-1c：Targets 只剩镜像选择
+
+**背景**：B-1b 建立了 chip 表和生成头，但 `Targets` 仍逐条重复 triple/mcpu、flash 方式、
+ramdisk 扇区、XIP 基址、驱动目录与默认 feature——同一事实在 Go 和 `board.conf` 各一份。
+
+**改动**：
+
+- `board.conf` 增加板级构建事实：`fs_backing`、`ramdisk_sectors`、
+  `xip_flash_base`（仅 C3）、`drivers`、`features`。
+- `Targets` 字面量只保留 `Name/Board/Arch/March/CPUs/HeapBytes/MaxProcs/KStack`。
+- `Target.applyBoard()` 从 chip 表填 triple/`-mcpu`，从 `board.conf` 填其余；
+  `ensureBoardConfig()` 在每次构建前调用；`TargetByName()` 供 menuconfig 这类没有
+  Builder 的调用方使用（菜单测试因此仍能看到 rp2350 的 LCD 驱动）。
+- 删除 `esp32c3Drivers`/`rp2040Drivers`/`rp2350Drivers`/`rp2350rvDrivers` 与三份
+  feature 列表。
+
+**验收**：
+
+- `go test ./...`：`TestTargetsMatchChipFacts` 改为"先 enrich 再比对"，并检查
+  `fs_backing`/`ramdisk_sectors` 已被 conf 填上；`internal/menu` 测试恢复通过；
+- 12 目标构建 + `rv32/rv32smp/arm` smoke 通过；
+- **字节相同**：`configs/rp2040.conf` 的 `ramdisk-rp2040.bin` 仍是
+  `C4BE5C94...5479B94`；`configs/esp32c3.conf` 的 `esp32c3-full.bin` 仍是
+  `9B5A1AFC...ACC386`（与 B-1b 的 5fae53b 构建一致）。
+
+**剩余**：镜像清单（同一块板的单核/双核）仍是 `Targets` 字面量；它既不是 chip 事实
+也不是 board 事实，若将来需要自动化，另行引入一份 targets 清单（B-1d）。

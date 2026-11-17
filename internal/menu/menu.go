@@ -110,7 +110,7 @@ func Load(c *build.Config, path string) *State {
 // keeps working without a config, while menuconfig can still turn one off.
 func (s *State) DefaultFeature(name string) bool {
 	name = strings.ToLower(name)
-	if t, ok := build.Targets[s.Target]; ok {
+	if t, ok := build.TargetByName(s.Target); ok {
 		for _, f := range t.DefaultFeatures {
 			if strings.EqualFold(f, name) {
 				return true
@@ -153,7 +153,7 @@ func (s *State) DriverChoices() []string {
 		seen[d] = true
 		out = append(out, d)
 	}
-	if t, ok := build.Targets[s.Target]; ok {
+	if t, ok := build.TargetByName(s.Target); ok {
 		for _, d := range t.Drivers {
 			add(d)
 		}
@@ -179,7 +179,10 @@ func DriverRequired(d string) bool {
 	return false
 }
 
-func (s *State) target() build.Target { return build.Targets[s.Target] }
+func (s *State) target() build.Target {
+	t, _ := build.TargetByName(s.Target)
+	return t
+}
 
 func (s *State) HeapDefault() int {
 	if h := s.target().HeapBytes; h > 0 {

@@ -116,20 +116,24 @@ func TestTargetsMatchChipFacts(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 	for name, tgt := range Targets {
-		bc, err := LoadBoardConfig(root, tgt.Board)
-		if err != nil {
+		b := New(root)
+		b.Target = tgt
+		if err := b.ensureBoardConfig(); err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		isa, ok := isaFor(bc.Chip, tgt.Arch)
+		isa, ok := isaFor(b.BoardConfig.Chip, b.Target.Arch)
 		if !ok {
-			t.Errorf("%s: chip %s has no %s image", name, bc.Chip, tgt.Arch)
+			t.Errorf("%s: chip %s has no %s image", name, b.BoardConfig.Chip, b.Target.Arch)
 			continue
 		}
-		if isa.Triple != tgt.Triple || isa.Machine != tgt.Machine {
-			t.Errorf("%s: target triple/mcpu %q/%q, chip %s/%s says %q/%q",
-				name, tgt.Triple, tgt.Machine,
-				bc.Chip, tgt.Arch, isa.Triple, isa.Machine)
+		if b.Target.Triple != isa.Triple || b.Target.Machine != isa.Machine {
+			t.Errorf("%s: enriched triple/mcpu %q/%q, chip %s/%s says %q/%q",
+				name, b.Target.Triple, b.Target.Machine,
+				b.BoardConfig.Chip, b.Target.Arch, isa.Triple, isa.Machine)
+		}
+		if b.Target.FSBacking == "" || b.Target.RamdiskSectors <= 0 {
+			t.Errorf("%s: board.conf did not fill fs_backing/ramdisk_sectors", name)
 		}
 	}
 }

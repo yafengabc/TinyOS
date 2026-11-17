@@ -20,9 +20,16 @@ type BoardConfig struct {
 	Variant     string
 	Peripherals map[string]bool
 	UserExclude []string
-	WindowGrain int
-	WindowStack int
-	WindowGuard int
+	// Board-layer build facts.  ensureBoardConfig() copies these into the
+	// Target, so Targets only names the board and the image knobs.
+	FSBacking       string
+	RamdiskSectors  int
+	XipFlashBase    uint32
+	Drivers         []string
+	DefaultFeatures []string
+	WindowGrain     int
+	WindowStack     int
+	WindowGuard     int
 }
 
 // LoadBoardConfig reads board/<board>/board.conf.  The schema is checked here
@@ -69,6 +76,25 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if u := sections["user"]; u != nil {
 		bc.UserExclude = splitList(u["exclude"])
 	}
+	bc.FSBacking = strings.TrimSpace(s["fs_backing"])
+	switch bc.FSBacking {
+	case "disk", "embedded", "flash":
+	default:
+		return nil, fmt.Errorf("%s: fs_backing must be disk, embedded or flash (got %q)",
+			relName(root, path), bc.FSBacking)
+	}
+	if bc.RamdiskSectors, err = strconv.Atoi(strings.TrimSpace(s["ramdisk_sectors"])); err != nil || bc.RamdiskSectors <= 0 {
+		return nil, fmt.Errorf("%s: ramdisk_sectors must be a positive number", relName(root, path))
+	}
+	if v := strings.TrimSpace(s["xip_flash_base"]); v != "" {
+		n, perr := strconv.ParseUint(v, 0, 32)
+		if perr != nil {
+			return nil, fmt.Errorf("%s: xip_flash_base: %v", relName(root, path), perr)
+		}
+		bc.XipFlashBase = uint32(n)
+	}
+	bc.Drivers = splitList(s["drivers"])
+	bc.DefaultFeatures = splitList(s["features"])
 	w := sections["window"]
 	if w == nil {
 		return nil, fmt.Errorf("%s: missing [window]", relName(root, path))
@@ -108,20 +134,52 @@ func (b *Builder) ensureBoardConfig() error {
 	if err != nil {
 		return err
 	}
-	/* The chip layer owns the compiler facts.  Until Targets is generated
-	 * (B-1c) the target still carries a copy; refuse to build if the two
-	 * disagree, so a stale literal cannot quietly target the wrong ISA. */
-	isa, ok := isaFor(bc.Chip, b.Target.Arch)
-	if !ok {
-		return fmt.Errorf("board %s: chip %s has no %q image", b.Target.Board, bc.Chip, b.Target.Arch)
-	}
-	if isa.Triple != b.Target.Triple || isa.Machine != b.Target.Machine {
-		return fmt.Errorf("target %s: compiler facts disagree with chip %s/%s: target triple=%q mcpu=%q chip triple=%q mcpu=%q",
-			b.Target.Name, bc.Chip, b.Target.Arch,
-			b.Target.Triple, b.Target.Machine, isa.Triple, isa.Machine)
+	if err := b.Target.applyBoard(bc); err != nil {
+		return err
 	}
 	b.BoardConfig = bc
 	return nil
+}
+
+// applyBoard fills the derived fields from board.conf and the chip table.
+// Targets literals only name the board and the image knobs (arch/march/cpus/
+// heap/kstack); everything else has one source.
+func (t *Target) applyBoard(bc *BoardConfig) error {
+	isa, ok := isaFor(bc.Chip, t.Arch)
+	if !ok {
+		return fmt.Errorf("board %s: chip %s has no %q image", t.Board, bc.Chip, t.Arch)
+	}
+	t.Triple = isa.Triple
+	t.Machine = isa.Machine
+	t.FSBacking = bc.FSBacking
+	t.RamdiskSectors = bc.RamdiskSectors
+	t.XipFlashBase = bc.XipFlashBase
+	t.Drivers = bc.Drivers
+	t.DefaultFeatures = bc.DefaultFeatures
+	return nil
+}
+
+// TargetByName returns a target with the board-derived fields filled in.
+// Callers without a Builder (menuconfig, small tools) use this instead of
+// reading Targets directly; when no source tree is found the literal is
+// returned unchanged so an installed binary still starts.
+func TargetByName(name string) (Target, bool) {
+	t, ok := Targets[name]
+	if !ok {
+		return t, false
+	}
+	root, err := FindRoot()
+	if err != nil {
+		return t, true
+	}
+	bc, err := LoadBoardConfig(root, t.Board)
+	if err != nil {
+		return t, true
+	}
+	if err := t.applyBoard(bc); err != nil {
+		return t, true
+	}
+	return t, true
 }
 
 // validateConfig rejects a config that contradicts the selected target's

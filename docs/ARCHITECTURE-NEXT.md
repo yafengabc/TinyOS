@@ -305,6 +305,13 @@ B-1b 处理。
 - 剩余 B-1c：把 `Targets` 的 chip/arch/驱动目录/镜像默认值也从 conf/chip 表派生，
   届时 `Targets` 只剩"这块板有哪些镜像"（单核/双核）这一层。
 
+**B-1c 已落地（2026-11-17）**：`Targets` 只剩 board/arch/march/cpus 与镜像默认值
+（heap/maxprocs/kstack）；triple/`-mcpu` 来自 chip 表，fs_backing/ramdisk_sectors/
+xip_flash_base/drivers/default_features 来自 `board.conf`，由 `applyBoard()` 填充；
+`TargetByName()` 给没有 Builder 的调用方（menuconfig）用。构建产物与 B-1b **字节相同**
+（rp2040 ramdisk、C3 full，HISTORY §49）。剩余：镜像清单（单核/双核）仍是 Go 字面量，
+若以后加板需要，B-1d 可从一份 targets 清单生成。
+
 #### B-5 的三级台阶
 
 | 台阶 | 内容 | 通过标准 |
