@@ -29,6 +29,7 @@ import (
 var (
 	reDefineKernelSectors = regexp.MustCompile(`(?m)^\s*#define\s+KERNEL_SECTORS\s+([0-9A-Fa-fx]+)\b`)
 	rePlatLFSLBA          = regexp.MustCompile(`(?m)^\s*(?:static\s+)?const\s+uint32_t\s+PLAT_LFS_LBA\s*=\s*([^;]+);`)
+	rePlatLFSBlocks       = regexp.MustCompile(`(?m)^\s*(?:static\s+)?const\s+uint32_t\s+PLAT_LFS_BLOCKS\s*=\s*([^;]+);`)
 )
 
 // checkLayout cross-checks the sector counts against the sources that are not
@@ -36,7 +37,7 @@ var (
 // second, not a confusing runtime failure.
 func (b *Builder) checkLayout() error {
 	stage1 := filepath.Join(b.Root, "boot", "stage1.S")
-	n, err := constFromSource(b.Root, stage1, reDefineKernelSectors, "KERNEL_SECTORS")
+	n, err := constFromSource(b.Root, stage1, reDefineKernelSectors, "KERNEL_SECTORS", nil)
 	if err != nil {
 		return err
 	}
@@ -52,7 +53,16 @@ func (b *Builder) checkLayout() error {
 	// start at zero.
 	if b.Target.FSBacking == "flash" {
 		layout := filepath.Join(b.Root, "board", b.Target.Board, "layout.c")
-		lba, err := constFromSource(b.Root, layout, rePlatLFSLBA, "PLAT_LFS_LBA")
+		// layout.c derives these two from the generated header, so the
+		// expression carries macro names; substitute the values board.conf
+		// produced.  The C side repeats the comparison at boot
+		// (board_config_check), this one just fails the build instead.
+		syms := map[string]int{}
+		if b.BoardConfig != nil {
+			syms["TOS_LFS_OFFSET"] = b.BoardConfig.LFSOffset
+			syms["TOS_LFS_BLOCKS"] = b.BoardConfig.LFSBlocks()
+		}
+		lba, err := constFromSource(b.Root, layout, rePlatLFSLBA, "PLAT_LFS_LBA", syms)
 		if err != nil {
 			return err
 		}
@@ -60,13 +70,21 @@ func (b *Builder) checkLayout() error {
 			return fmt.Errorf("%s sets PLAT_LFS_LBA = %d but the flash image builder puts littlefs at 0x%x (LBA %d)",
 				relName(b.Root, layout), lba, rpLfsOffset, rpLfsOffset/512)
 		}
+		blocks, err := constFromSource(b.Root, layout, rePlatLFSBlocks, "PLAT_LFS_BLOCKS", syms)
+		if err != nil {
+			return err
+		}
+		if b.BoardConfig != nil && blocks != b.BoardConfig.LFSBlocks() {
+			return fmt.Errorf("%s sets PLAT_LFS_BLOCKS = %d but board/%s/board.conf's flash geometry gives %d",
+				relName(b.Root, layout), blocks, b.Target.Board, b.BoardConfig.LFSBlocks())
+		}
 		return nil
 	}
 	if b.Target.FSBacking != "disk" {
 		return nil
 	}
 	layout := filepath.Join(b.Root, "board", b.Target.Board, "layout.c")
-	lba, err := constFromSource(b.Root, layout, rePlatLFSLBA, "PLAT_LFS_LBA")
+	lba, err := constFromSource(b.Root, layout, rePlatLFSLBA, "PLAT_LFS_LBA", nil)
 	if err != nil {
 		return err
 	}
@@ -81,7 +99,7 @@ func (b *Builder) checkLayout() error {
 // constFromSource returns the value of one integer constant in a C source
 // file.  The expressions used for these are plain arithmetic on decimal or
 // hex literals with an optional u suffix, which is all this needs to handle.
-func constFromSource(root, path string, re *regexp.Regexp, name string) (int, error) {
+func constFromSource(root, path string, re *regexp.Regexp, name string, syms map[string]int) (int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", relName(root, path), err)
@@ -90,7 +108,11 @@ func constFromSource(root, path string, re *regexp.Regexp, name string) (int, er
 	if m == nil {
 		return 0, fmt.Errorf("%s: no definition of %s", relName(root, path), name)
 	}
-	v, err := evalIntExpr(strings.TrimSpace(m[1]))
+	expr := strings.TrimSpace(m[1])
+	for k, v := range syms {
+		expr = strings.ReplaceAll(expr, k, strconv.Itoa(v))
+	}
+	v, err := evalIntExpr(expr)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %s = %q: %w", relName(root, path), name, m[1], err)
 	}

@@ -38,6 +38,15 @@ func (b *Builder) writeBoardHeader() error {
 	fmt.Fprintf(&sb, "#define TOS_APP_STACK %#xu\n", uint32(bc.WindowStack))
 	fmt.Fprintf(&sb, "#define TOS_APP_GUARD %#xu\n", uint32(bc.WindowGuard))
 	sb.WriteString("\n")
+	/* Flash geometry, for boards that mount littlefs straight off the QSPI
+	 * chip.  Same contract as the window numbers above: layout.c declares
+	 * them too and board_config_check() refuses to boot if the two disagree. */
+	if bc.FSBacking == "flash" {
+		fmt.Fprintf(&sb, "#define TOS_FLASH_BYTES %#xu\n", uint32(bc.FlashBytes))
+		fmt.Fprintf(&sb, "#define TOS_LFS_OFFSET %#xu\n", uint32(bc.LFSOffset))
+		fmt.Fprintf(&sb, "#define TOS_LFS_BLOCKS %du\n", uint32(bc.LFSBlocks()))
+		sb.WriteString("\n")
+	}
 	for _, p := range boardPeripherals {
 		v := 0
 		if bc.Peripherals[p] {

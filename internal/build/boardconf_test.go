@@ -194,6 +194,7 @@ func TestBoardChipPolicy(t *testing.T) {
 	conf := func(chip string) string {
 		return "[board]\nschema = 1\nchip = " + chip +
 			"\nfs_backing = flash\nramdisk_sectors = 704\n" +
+			"flash_bytes = 4m\nlfs_offset = 512k\n" +
 			"[window]\ngrain = 4k\nstack = 4k\nguard = 4k\n"
 	}
 
@@ -217,7 +218,8 @@ func TestBoardMissingWindowField(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := "[board]\nschema = 1\nchip = rp2040\nfs_backing = flash\n" +
-		"ramdisk_sectors = 1200\n[window]\nstack = 4k\nguard = 4k\n"
+		"ramdisk_sectors = 1200\nflash_bytes = 2m\nlfs_offset = 512k\n" +
+		"[window]\nstack = 4k\nguard = 4k\n"
 	if err := os.WriteFile(filepath.Join(dir, "board.conf"), []byte(text), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +232,64 @@ func TestBoardMissingWindowField(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "<nil>") {
 		t.Errorf("error still prints <nil>: %v", err)
+	}
+}
+
+// A flash-backed board has to say how big its flash is and where the
+// filesystem starts.  The same silicon ships with 1, 2, 4 and 8 MiB parts, so
+// "4 MiB" is not a safe default: the partition is derived from these two
+// numbers, and a wrong one either wastes most of the chip or mounts a
+// filesystem that runs past the end of it.
+func TestBoardFlashGeometry(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "board", "rp2350")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(flash string) {
+		t.Helper()
+		text := "[board]\nschema = 1\nchip = rp2350\nfs_backing = flash\n" +
+			"ramdisk_sectors = 704\n" + flash +
+			"[window]\ngrain = 4k\nstack = 4k\nguard = 4k\n"
+		if err := os.WriteFile(filepath.Join(dir, "board.conf"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("flash_bytes = 4m\nlfs_offset = 512k\n")
+	bc, err := LoadBoardConfig(root, "rp2350")
+	if err != nil {
+		t.Fatalf("4m/512k rejected: %v", err)
+	}
+	if bc.LFSBlocks() != 896 {
+		t.Errorf("4 MiB with a 512 KiB offset is 896 blocks, got %d", bc.LFSBlocks())
+	}
+
+	write("flash_bytes = 2m\nlfs_offset = 512k\n")
+	bc, err = LoadBoardConfig(root, "rp2350")
+	if err != nil {
+		t.Fatalf("2m/512k rejected: %v", err)
+	}
+	if bc.LFSBlocks() != 384 {
+		t.Errorf("2 MiB with a 512 KiB offset is 384 blocks, got %d", bc.LFSBlocks())
+	}
+
+	write("flash_bytes = 4m\n")
+	if _, err := LoadBoardConfig(root, "rp2350"); err == nil ||
+		!strings.Contains(err.Error(), "lfs_offset") {
+		t.Errorf("missing lfs_offset was accepted or misnamed: %v", err)
+	}
+
+	write("flash_bytes = 512k\nlfs_offset = 512k\n")
+	if _, err := LoadBoardConfig(root, "rp2350"); err == nil ||
+		!strings.Contains(err.Error(), "no room") {
+		t.Errorf("partition at the end of the chip was accepted or misnamed: %v", err)
+	}
+
+	write("flash_bytes = 256k\nlfs_offset = 64k\n")
+	if _, err := LoadBoardConfig(root, "rp2350"); err == nil ||
+		!strings.Contains(err.Error(), "does not fit") {
+		t.Errorf("a ramdisk larger than the flash was accepted or misnamed: %v", err)
 	}
 }
 

@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "board_config.h"
 
 /* Board: ESP32-C3 (any 400 KiB SRAM / 4 MiB flash module).
  *
@@ -80,10 +81,13 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 /* The littlefs partition lives on SPI flash at offset 0x80000 (the
  * kernel keeps the first 512 KiB), served by plat_block_read/write/erase
  * in platform.c (ROM reader + writer, SPI1 hardware erase; see
- * docs/PLATFORM-DESIGN.md ?8.7).  PLAT_LFS_BLOCKS sizes it to the rest of
- * the 4 MiB flash: (0x400000 - 0x80000) / 4096 = 896 blocks = 3.5 MiB. */
-const uint32_t PLAT_LFS_LBA = 0x80000 / 512;   /* 1024 */
-const uint32_t PLAT_LFS_BLOCKS = (0x400000u - 0x80000u) / 4096u;
+ * docs/PLATFORM-DESIGN.md ?8.7).  Chip size and offset are board facts in
+ * board/esp32c3/board.conf, so a module with a different flash part only
+ * changes the conf: 4 MiB with a 512 KiB offset gives 896 blocks = 3.5 MiB.
+ * board_config_check() refuses to boot if these disagree with the generated
+ * header. */
+const uint32_t PLAT_LFS_LBA = TOS_LFS_OFFSET / 512u;
+const uint32_t PLAT_LFS_BLOCKS = TOS_LFS_BLOCKS;
 
 /* One CPU: these boards have a single core.  The SMP build sets 2 and
  * start.S brings the second hart up (see kernel/cpu.c). */

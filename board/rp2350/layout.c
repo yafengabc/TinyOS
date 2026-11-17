@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "board_config.h"
 
 /* Board: Raspberry Pi RP2350 (Cortex-M33, ARMv8-M Secure).
  *
@@ -27,15 +28,19 @@ const uint32_t PLAT_APP_GRAIN  = 0x00001000u;   /* 4 KiB, 96 windows       */
 const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
-/* littlefs starts at flash 0x80000 (512 KiB), same offset as the ESP32-C3
- * and the RP2040 - see rpLfsOffset in internal/build/uf2.go.  The board's
- * W25Q32 is 4 MiB (measured by XIP address wrap-around: +2 MiB reads 0xFF,
- * +4 MiB reads the vector table again), so the partition runs from there
- * to the end of the chip: (0x400000 - 0x80000) / 4096 = 896 blocks =
- * 3.5 MiB.  The flashed image itself stays 300 KiB (75 blocks);
- * ramdisk_init() grows the mounted filesystem to this count on first boot. */
-const uint32_t PLAT_LFS_LBA = 0x80000u / 512u;   /* 1024 */
-const uint32_t PLAT_LFS_BLOCKS = 896;            /* 3.5 MiB */
+/* littlefs starts 512 KiB into the flash (see rpLfsOffset in
+ * internal/build/uf2.go) and runs to the end of the chip.  The ATK board's
+ * W25Q32 is 4 MiB, measured by XIP address wrap-around (+2 MiB reads 0xFF,
+ * +4 MiB reads the vector table again), which gives 896 blocks.  That is a
+ * board fact now, in board/rp2350/board.conf: a Pico 2 - or any board with a
+ * different flash part - changes two numbers instead of editing this file.
+ * The flashed image stays 300 KiB (75 blocks); ramdisk_init() grows the
+ * mounted filesystem to this count on first boot.
+ *
+ * TOS_LFS_OFFSET/TOS_LFS_BLOCKS come from the generated board_config.h and
+ * board_config_check() refuses to boot if they disagree with these two. */
+const uint32_t PLAT_LFS_LBA = TOS_LFS_OFFSET / 512u;
+const uint32_t PLAT_LFS_BLOCKS = TOS_LFS_BLOCKS;
 
 /* One core unless the build asks for two.  The `rp2350smp` target defines
  * TOS_MAX_CPUS=2, which also doubles the kernel stack pool in

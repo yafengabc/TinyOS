@@ -33,4 +33,17 @@ void board_config_check(void)
         !(d->flags & DOMAIN_EXEC)) {
         panic("mem_domain disagrees with platform layout");
     }
+#if TOS_HAS_FLASH
+    /* The flash geometry has the same two declarations as the window numbers:
+     * board.conf says how big the chip is, layout.c derives the partition from
+     * it.  A board built against the wrong part would mount a filesystem that
+     * runs past the end of the chip, so refuse to boot instead. */
+    if (PLAT_LFS_LBA != TOS_LFS_OFFSET / 512u ||
+        PLAT_LFS_BLOCKS != TOS_LFS_BLOCKS) {
+        panic("board_config.h (%s) disagrees with layout.c: lfs lba %u/%u blocks %u/%u",
+              TOS_BOARD_NAME,
+              (unsigned)(TOS_LFS_OFFSET / 512u), (unsigned)PLAT_LFS_LBA,
+              (unsigned)TOS_LFS_BLOCKS, (unsigned)PLAT_LFS_BLOCKS);
+    }
+#endif
 }

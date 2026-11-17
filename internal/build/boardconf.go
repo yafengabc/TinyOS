@@ -22,14 +22,29 @@ type BoardConfig struct {
 	UserExclude []string
 	// Board-layer build facts.  ensureBoardConfig() copies these into the
 	// Target, so Targets only names the board and the image knobs.
-	FSBacking       string
-	RamdiskSectors  int
-	XipFlashBase    uint32
+	FSBacking      string
+	RamdiskSectors int
+	XipFlashBase   uint32
+	// Flash geometry, for boards whose filesystem lives on the QSPI chip.
+	// Both are board facts: the same silicon with a different flash part is a
+	// different board (or a different variant of one), not a different image.
+	FlashBytes      int
+	LFSOffset       int
 	Drivers         []string
 	DefaultFeatures []string
 	WindowGrain     int
 	WindowStack     int
 	WindowGuard     int
+}
+
+// LFSBlocks is the size of the littlefs partition in 4 KiB blocks: from the
+// offset to the end of the flash.  The flashed image is much smaller; the
+// filesystem grows into the rest on first boot.
+func (bc *BoardConfig) LFSBlocks() int {
+	if bc.FlashBytes <= bc.LFSOffset {
+		return 0
+	}
+	return (bc.FlashBytes - bc.LFSOffset) / 4096
 }
 
 // LoadBoardConfig reads board/<board>/board.conf.  The schema is checked here
@@ -105,6 +120,42 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	}
 	if bc.RamdiskSectors, err = strconv.Atoi(strings.TrimSpace(s["ramdisk_sectors"])); err != nil || bc.RamdiskSectors <= 0 {
 		return nil, fmt.Errorf("%s: ramdisk_sectors must be a positive number", relName(root, path))
+	}
+	/* A board that mounts its filesystem straight off the QSPI chip has to
+	 * say how big that chip is and where the partition starts: the same
+	 * silicon ships with 1, 2, 4 or 8 MiB parts, and getting this wrong is
+	 * the difference between a filesystem that stops at the end of the chip
+	 * and one that walks off it. */
+	if bc.FSBacking == "flash" {
+		size := func(key string) (int, error) {
+			raw := strings.TrimSpace(s[key])
+			if raw == "" {
+				return 0, fmt.Errorf("%s: missing [board] %s (required when fs_backing = flash)", relName(root, path), key)
+			}
+			v, perr := parseSize(raw)
+			if perr != nil || v <= 0 {
+				return 0, fmt.Errorf("%s: invalid [board] %s %q", relName(root, path), key, raw)
+			}
+			return v, nil
+		}
+		if bc.FlashBytes, err = size("flash_bytes"); err != nil {
+			return nil, err
+		}
+		if bc.LFSOffset, err = size("lfs_offset"); err != nil {
+			return nil, err
+		}
+		if bc.LFSOffset%4096 != 0 {
+			return nil, fmt.Errorf("%s: lfs_offset %d is not a multiple of 4096",
+				relName(root, path), bc.LFSOffset)
+		}
+		if bc.LFSOffset >= bc.FlashBytes {
+			return nil, fmt.Errorf("%s: lfs_offset %d leaves no room in %d bytes of flash",
+				relName(root, path), bc.LFSOffset, bc.FlashBytes)
+		}
+		if img := bc.RamdiskSectors * 512; img > bc.FlashBytes-bc.LFSOffset {
+			return nil, fmt.Errorf("%s: ramdisk (%d bytes) does not fit after lfs_offset in %d bytes of flash",
+				relName(root, path), img, bc.FlashBytes)
+		}
 	}
 	if v := strings.TrimSpace(s["xip_flash_base"]); v != "" {
 		n, perr := strconv.ParseUint(v, 0, 32)

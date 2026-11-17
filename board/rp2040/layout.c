@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "board_config.h"
 
 /* Board: Raspberry Pi RP2040 (Cortex-M0+).
  *
@@ -34,13 +35,18 @@ const uint32_t PLAT_APP_GRAIN  = 0x00001000u;   /* 4 KiB per step          */
 const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
-/* littlefs starts at flash 0x80000 (512 KiB), the same offset as the
- * ESP32-C3 and RP2350 (rpLfsOffset in internal/build/uf2.go).  A Pico has
- * 2 MiB of QSPI flash, so the partition covers the remaining 1.5 MiB;
- * the shipped image is still only 300 KiB and ramdisk_init() grows the
- * mounted filesystem over the rest. */
-const uint32_t PLAT_LFS_LBA = 0x80000u / 512u;   /* 1024 */
-const uint32_t PLAT_LFS_BLOCKS = 384;            /* 1.5 MiB */
+/* littlefs starts 512 KiB into the flash (the same offset as the ESP32-C3
+ * and RP2350, see rpLfsOffset in internal/build/uf2.go) and runs to the end
+ * of the chip.  How big the chip is and where the partition starts are board
+ * facts now, written down in board/rp2040/board.conf: a 2 MiB part gives the
+ * 1.5 MiB / 384-block partition this port was calibrated on, and a board with
+ * a different flash part only changes the conf.  The flashed image is still
+ * 300 KiB; ramdisk_init() grows the mounted filesystem over the rest.
+ *
+ * TOS_LFS_OFFSET/TOS_LFS_BLOCKS come from the generated board_config.h and
+ * board_config_check() refuses to boot if they disagree with these two. */
+const uint32_t PLAT_LFS_LBA = TOS_LFS_OFFSET / 512u;
+const uint32_t PLAT_LFS_BLOCKS = TOS_LFS_BLOCKS;
 
 /* One CPU by default; the rp2040smp target builds with TOS_MAX_CPUS=2 and
  * start.S brings the second core up from the ROM's FIFO wait loop (the

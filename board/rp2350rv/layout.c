@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "board_config.h"
 
 /* Board: Raspberry Pi RP2350, Hazard3 RISC-V cores.
  *
@@ -39,8 +40,8 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
  * Before this, the packer wrote a 352 KiB image while the partition claimed
  * 300 KiB, and `df` reported 105% used: the superblock's block count and
  * PLAT_LFS_BLOCKS disagreed. */
-const uint32_t PLAT_LFS_LBA = 0x80000u / 512u;   /* 1024 */
-const uint32_t PLAT_LFS_BLOCKS = 896;            /* 3.5 MiB */
+const uint32_t PLAT_LFS_LBA = TOS_LFS_OFFSET / 512u;
+const uint32_t PLAT_LFS_BLOCKS = TOS_LFS_BLOCKS;
 
 /* The first milestone is single-hart.  Hazard3 can do SMP, but that needs
  * the second core's launch protocol and a per-core mtimecmp, so it is a
