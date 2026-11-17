@@ -106,10 +106,41 @@ double fault lockup——用户代码在到达可调试状态前就 fault，故�
   容量不同不足以解释 `PC=0xeffffffe`。
 - **硬件/探针/刷写**：MicroPython 对照已排除。
 
-**根因收敛**：硬件正常、启动链与源码无差异，故障在 TinyOS 用户代码最早的平台
-初始化（pico2 初始 SP/栈布局与 ATK 不同，MSP=0x20019xxx；也可能是早期时钟/XIP）。
-下一步需在 `0x100000d5` 命中断点后抓首个 fault 的 CFSR/BFAR（当前 double-fault
-lockup 下读不到），或对比 pico2 与 ATK 的 `plat` 早期初始化差异。
+## 深挖：SecureFault（本轮新增）
+
+按 pico-sdk 对照思路继续挖 `crt0.S`，并直接读故障状态寄存器：
+
+- **公平对照**：从 `rp2350pico2.uf2` 提取完整 payload（`pico2-tinyos-full.bin`），
+  用与 MicroPython **完全相同**的方式 `flash write_image` 刷入 → 仍 double fault。
+  排除"ELF 写入方式导致镜像不完整"的干扰。
+- **pico-sdk 对照**：`pico_crt0/crt0.S` 在早期做了 TinyOS 没有的两件事：
+  `msr msplim, r0`（清零主栈限制）与 `str r0,[VTOR]`（向量表指向自身）。
+  ARMv7-M (M0+/M3) 无 MSPLIM、VTOR 固定 0x0，所以原 `_start` 在 RP2040 上没问题；
+  移植到 ARMv8-M (M33) 时遗漏。**做了修复实验**（`_start` 加这两步，`__ARM_ARCH>=8`
+  条件编译），重建刷入 → **仍 fault**，已回退该实验改动（`arch/arm/start.S` 干净）。
+  所以 MSPLIM/VTOR 不是（唯一）根因。
+- **故障类型寄存器**：在 fault 后、double-fault lockup 前抢读到：
+  ```
+  CFSR  = 0x00000000
+  HFSR  = 0x00000000
+  SFAR  = 0x200196e4      (Secure Fault Address Register)
+  ```
+  CFSR/HFSR 全 0 而 SFAR 指向 **栈区**（初始 MSP=0x20019698，SFAR=MSP-0x14），
+  强烈指向 **SecureFault（安全属性冲突）** 而非普通 MemManage/BusFault。
+- **栈安全属性假设**：RP2350 bootROM 在 Secure 态配置 SAU，把 SRAM 分区为
+  Secure/Non-secure。MicroPython 初始 SP=0x20082000（SRAM 顶部），TinyOS
+  SP=0x20019698（低区）。若 TinyOS 的栈落在 Non-secure 属性区、而 CPU 在
+  Secure 态访问（或反之），即触发 SecureFault (AUVIOL/INVIS)，fault handler
+  自身也在 flash → double fault → PC=0xeffffffe。
+
+## 根因状态
+
+硬件正常、启动链与源码无分叉、MSPLIM/VTOR 已排除。故障收敛到 **ARMv8-M
+Secure 态下的栈/内存安全属性冲突**（SFAR 指向栈区）。下一步：芯片断电恢复后，
+在 stable 状态用正确地址读 **SFSR @0xE000EDE4**（bit: LSERR/SFARVALID/AUVIOL/
+INVER/INVIS）确定具体违规类型，并读 SAU region 配置核对 0x2001969x 的属性；
+据此决定修法（把内核栈/数据放进 Secure SRAM 区，或镜像改 Non-secure，
+或补 SAU 配置）。本条保持 OPEN，A 轨未关闭。
 
 ## 未定 / 下一步（A 轨尚未关闭）
 
