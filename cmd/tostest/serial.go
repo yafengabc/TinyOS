@@ -322,6 +322,19 @@ func (sc *socketConn) read(timeout time.Duration) ([]byte, bool) {
 }
 
 func (sc *socketConn) waitFor(needle []byte, timeout time.Duration) (bool, time.Duration) {
+	return sc.waitForConsume(needle, timeout, false)
+}
+
+// waitForMark is waitFor, but a match moves the search mark past the matched
+// text.  The smoke driver uses it to consume a command's echo before waiting
+// for the prompt: a prompt from the *previous* command can still be in flight
+// when the next command is written, and matching that stale prompt made the
+// driver send the following command while this one was still printing.
+func (sc *socketConn) waitForMark(needle []byte, timeout time.Duration) (bool, time.Duration) {
+	return sc.waitForConsume(needle, timeout, true)
+}
+
+func (sc *socketConn) waitForConsume(needle []byte, timeout time.Duration, consume bool) (bool, time.Duration) {
 	start := time.Now()
 	deadline := start.Add(timeout)
 	// A command that keeps printing is not a hung command.  `piperace` pushes
@@ -360,9 +373,12 @@ func (sc *socketConn) waitFor(needle []byte, timeout time.Duration) (bool, time.
 		if from > len(sc.buf) {
 			from = len(sc.buf)
 		}
-		hit := bytes.Contains(sc.buf[from:], needle)
+		idx := bytes.Index(sc.buf[from:], needle)
+		if idx >= 0 && consume {
+			sc.mark = from + idx + len(needle)
+		}
 		sc.mu.Unlock()
-		if hit {
+		if idx >= 0 {
 			return true, time.Since(start)
 		}
 	}

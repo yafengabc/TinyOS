@@ -87,6 +87,35 @@ func TestWaitForCapsEndlessOutput(t *testing.T) {
 	}
 }
 
+// A prompt is a synchronisation point only when it belongs to the command
+// that was just sent.  The driver used to search from markSent, so a prompt
+// still in flight from the previous command satisfied the wait immediately;
+// the next command then landed in this one's output (the lost soak cycle).
+// waitForMark consumes the echo, so the stale prompt in front of it cannot be
+// matched.
+func TestWaitForMarkConsumesTheCommandEcho(t *testing.T) {
+	sc, w := testSocket(t)
+
+	sc.markSent()
+	if _, err := w.Write([]byte("tos> cmd\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := sc.waitForMark([]byte("cmd"), time.Second); !ok {
+		t.Fatal("echo of the command was never seen")
+	}
+	// Only the stale prompt is in the buffer; the prompt after this
+	// command's output has not arrived yet, so this must not match.
+	if ok, _ := sc.waitFor([]byte("tos> "), 150*time.Millisecond); ok {
+		t.Fatal("matched the prompt from before the command")
+	}
+	if _, err := w.Write([]byte("out\r\ntos> ")); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := sc.waitFor([]byte("tos> "), time.Second); !ok {
+		t.Fatal("did not see the prompt after the command output")
+	}
+}
+
 func testSocket(t *testing.T) (*socketConn, net.Conn) {
 	t.Helper()
 	client, server := net.Pipe()

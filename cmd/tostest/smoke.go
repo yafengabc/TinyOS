@@ -135,6 +135,15 @@ func runSmoke(opts smokeOpts) (string, error) {
 		// returns to the prompt simply times out here and keeps whatever
 		// output arrived; `exit` ends init on purpose and gets none.
 		if c != "exit" {
+			// Consume this command's echo before looking for the prompt.
+			// The previous prompt can still be in flight when the line is
+			// written (markSent runs before the write, the pump may read the
+			// last prompt after it), and matching that stale prompt sent the
+			// next command into the middle of this one's output - the lost
+			// cycle `scripts/soak.py` reported as a flake.
+			if echoed, _ := client.waitForMark([]byte(c), 5*time.Second); !echoed {
+				fmt.Fprintf(os.Stderr, "smoke: no echo of %q\n", c)
+			}
 			if ok, took := client.waitFor([]byte("tos> "), opts.cmdWait+2*time.Second); !ok {
 				// Name the command: "the transcript lost some output" is not
 				// actionable, "no prompt after piperace for 4.1 s" is.  Only
