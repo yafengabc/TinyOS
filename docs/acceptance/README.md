@@ -87,3 +87,4 @@
 | 2026-11-17 | B-2b 后半 park 序列共享（#17） | `73b7914` | RP2350 ARM + RV32 (COM14) | T0–T4 PASS：两板 1000x dd/rm bad=0，smpbench ~2x；.data 逐字节相同 | [park merge](2026-11-17-b2b-park-merge-rp2350.md) |
 | 2026-11-17 | RP2040 专项验收（#12） | `2be39bd` | rp2040smp / COM19 / F:(RPI-RP2) | 四判据全过：心跳6/6、1000x dd/rm bad=0、reboot 持久化、goc32 V0 .tos 执行 | [RP2040 accept](2026-11-17-rp2040-accept-2be39bd.md) |
 | 2026-11-17 | Pico 2 A ? SWD ?? | `2be39bd` | Pico 2 + Debugprobe (SWD) | ?? PC=0xeffffffe double fault?boot2/vector ??????????? | [A track scene](2026-11-17-pico2-a-track-swd-scene.md) |
+| 2026-11-18 | 目标/板名改名 + `tinyos-` 前缀 | `e52ad7d` | 13 目标 + fs_ro + QEMU 4 | T0–T2 PASS；chip flag 回归已修；硬件 `NOT RUN` | [rename](2026-11-18-rename-boards-e52ad7d.md) |

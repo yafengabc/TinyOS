@@ -4704,3 +4704,46 @@ heap = 60k
 所以 generic 的 embedded 形态需要 `#if TOS_HAS_FLASH` 分支；RV32 的 generic 要自带
 `platform.c`/`kernel.ld`/`image_def.S`，只能从 ARM generic 继承 `board_devs.c` 这类
 与 ISA 无关的文件。
+
+## 75. 2026-11-18 镜像按板名命名，产物加 `tinyos-` 前缀
+
+**背景**：`rp2350smp`、`rp2040` 这些名字是芯片名，但同一颗芯片上有多块板——
+ATK-DNRP2350AM 一直占着 `rp2350smp`，Pico 2 只能叫 `rp2350pico2`，而 RP2040 的
+`rp2040` 又同时是 chip 名和 Pico 板名。MicroPython 的约定正好相反：板名带厂商
+（`RPI_PICO2`），产物带项目（`micropython-rpi_pico2-....uf2`）。
+
+**改动**（`e52ad7d`）：
+
+- 板目录：`board/rp2040` → `board/rpi-pico`，`board/pico2` → `board/rpi-pico2`。
+- 目标名：`rp2040`/`rp2040smp` → `rpi-pico`/`rpi-pico-smp`；
+  `rp2350`/`rp2350smp`/`rp2350rv`/`rp2350rvsmp` →
+  `atk-dnr2350am`/`atk-dnr2350am-smp`/`atk-dnr2350am-rv32`/`atk-dnr2350am-rv32-smp`；
+  `rp2350pico2` → `rpi-pico2`。**不加 alias**：旧名直接 `unknown target`，让旧脚本
+  显式失败，而不是悄悄编出另一块板的镜像。
+- 产物：`build/tinyos-<target>.uf2`、`build/tinyos-<target>.bin`、
+  `build/tinyos-ramdisk-<target>.bin`；`kernel-<target>.elf`、`build/build-config.txt`
+  等中间件保持原名——前缀是给“人会拿去烧写的文件”的。
+- configs：`configs/rp2040.conf` → `configs/rpi-pico.conf`；两个 kthreads 配置同步改名。
+- 脚本、CI 矩阵、文档里的 `--target/--uf2/--image` 全部改到新名。
+
+**踩到的坑**：第一遍批量替换把 **chip 名**也当成了板名——`chip == "rp2040"` 变成
+`"rpi-pico"`，`#include "rp2350rv_memmap.h"` 变成不存在的
+`atk-dnr2350am-rv32_memmap.h`。后者会直接打断 RV32 编译；前者让 ATK 丢掉
+`TOS_ARM_MPU_V8`/`TOS_SYSCALL_TRACE` 等 flag，重新出现
+`[mpu] window needs 5+5 blocks (budget 7)` → pid1 被杀的重启循环（与 §74 结尾那次
+回归同一个症状）。现已按事实恢复：chip 仍叫 `rp2040`/`rp2350`，flag 仍按
+**(chip, ISA)** 选，driver 目录仍是 `drivers/*/rp2350rv`，memmap 头仍是
+`rp2350rv_memmap.h`。`TestNoBoardNameSelectsBuildFlags` 继续守这条线。
+
+**验证**（Windows，go 1.27.3 / clang 23.1.4 / qemu 11.1.3）：
+
+- `go vet ./...`、`go test ./... -count=1` 全绿；
+- 13 个目标全部构建，`configs/rv32-fsro.conf` 构建通过；
+- QEMU smoke 4/4（`arm`、`rv32`、`rv32smp`、`x86`），命令
+  `ps, deep 3, rselftest`；
+- 硬件 **`NOT RUN`**：ATK 可刷 `build/tinyos-atk-dnr2350am-smp.uf2`（与改名前的
+  `rp2350smp` 同源，符号表一致），但本轮未上板；Pico 2 仍停在 #7 A 轨的
+  `PC=0xeffffffe`，本次未动。
+
+**下一步**：`rpi-pico2` 的 8 MiB flash 事实要等 #7 A 轨启动修好后改；generic 目标
+（`rp2350-generic`/`rp2350rv-generic`）仍按 §74 的分层落地。
