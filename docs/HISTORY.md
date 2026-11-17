@@ -4787,3 +4787,34 @@ XIP 读 `LBA 0`，而 RAM disk 根本没有被链接进来，所以“generic �
   以临时 `generic-flash` 目标跑过 6/6，见
   `docs/acceptance/2026-11-18-atk-review-rename-2d87ded.md`；那是另一条 flash 后端
   路径，不是这里的 embedded 镜像。）
+
+## 77. 2026-11-18 ESP32-C3 也按板名命名（`esp32c3-generic`）
+
+**背景**：RP2 的镜像已经改成板名（`atk-dnr2350am` / `rpi-pico` / `rpi-pico2`），
+只有 C3 还叫 `esp32c3`——那又是芯片名。C3 在树里没有厂商命名的板子，参考开发板就是
+这颗芯片的 generic 板，于是按 `rp2350-generic` 的同一规则改名。
+
+**改动**（`c77319d`）：
+
+- 板目录 `board/esp32c3` → `board/esp32c3-generic`，`variant = generic-esp32c3`。
+- 目标 `esp32c3` → `esp32c3-generic`；产物
+  `build/tinyos-esp32c3-generic.bin` / `-full.bin` /
+  `tinyos-ramdisk-esp32c3-generic.bin`。
+- **芯片名保持 `esp32c3`**：chip 表、`board.conf` 的 `chip =`、镜像格式分派、
+  `drivers/{gpio,serial,wifi}/esp32c3` 全部不动。
+- 顺手修了两个按目标名判断的地方：WiFi blob 链接原来问
+  `Target.Name == "esp32c3"`，现在问板子的 chip——同一颗芯片上的第二块板也能拿到
+  WiFi；ESP 镜像文件名原来硬编码，现在和 UF2 一样跟目标名走。
+- `configs/esp32c3*.conf` 文件名不变，内容里的 `target =` 改到新名；脚本、CI 矩阵、
+  `FLASH-<target>.txt` 的路径同步。
+
+**验证**（Windows，go 1.27.3 / clang 23.1.4 / qemu 11.1.3）：
+
+- `go vet ./...`、`go test ./... -count=1` 全绿；
+- `go run ./cmd/tos build all`：**15/15**；
+- QEMU smoke 4/4（`arm`、`rv32`、`rv32smp`、`x86`）；
+- C3 镜像在 RV32EMU-C 上启动：`filesystem: ok` + `SMOKE TEST OK`（`tostest emu`），
+  这是改名后镜像仍可运行的证据；
+- 镜像不再与改名前逐字节相同：板名字符串长了 8 字节，代码地址随之平移。功能以 emu
+  smoke 为准，不做“字节相同”的声明。
+- 硬件 **`NOT RUN`**：C3 真机本轮未刷；按政策 C3 由上板侧记录。
