@@ -667,6 +667,15 @@ func (b *Builder) link(objs []string, script, out string, extra ...string) error
 	}
 
 	args = append(args, "-T", script, "-nostdlib", w("-static"))
+	if driver && b.Target.Arch == "x86" {
+		// A distribution gcc/clang driver defaults to PIE, which turns the
+		// link into a static PIE and rejects the 16-bit absolute relocations
+		// the real-mode boot sector emits (R_386_16 against a local symbol).
+		// Both stage1 and the x86 kernel are loaded at fixed addresses, so
+		// "-static -no-pie" is what the scripts already assume.  This has to
+		// be a driver flag: ld.lld has no --no-pie (OPEN-ITEMS 5).
+		args = append(args, "-no-pie")
+	}
 	if extraEnv := os.Getenv("TOS_LD_EXTRA"); extraEnv != "" {
 		args = append(args, strings.Fields(extraEnv)...)
 	}
