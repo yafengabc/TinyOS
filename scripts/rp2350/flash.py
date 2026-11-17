@@ -39,7 +39,7 @@ import serial
 
 MARK = b"tos> "
 DEFAULT_UF2 = os.path.join("build", "rp2350.uf2")
-TINYOS_USB_VID_PID = "VID_2E8A&PID_000A"   # board/rp2350/usb_cdc.c
+TINYOS_USB_VID_PID = "VID_2E8A&PID_000A"   # drivers/usb/rp2350/tusb_shim.c
 
 
 def serial_ports():
