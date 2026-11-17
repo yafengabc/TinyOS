@@ -124,6 +124,7 @@ func runSmoke(opts smokeOpts) (string, error) {
 		return "", fmt.Errorf("shell prompt never appeared:\n%s", client.text())
 	}
 
+	var timedOut []string
 	for _, c := range opts.commands {
 		_ = client.sendSlow(c, 3*time.Millisecond)
 		// Wait for the shell to come back instead of draining a fixed
@@ -134,7 +135,14 @@ func runSmoke(opts smokeOpts) (string, error) {
 		// returns to the prompt simply times out here and keeps whatever
 		// output arrived; `exit` ends init on purpose and gets none.
 		if c != "exit" {
-			client.waitFor([]byte("tos> "), opts.cmdWait+2*time.Second)
+			if ok, took := client.waitFor([]byte("tos> "), opts.cmdWait+2*time.Second); !ok {
+				// Name the command: "the transcript lost some output" is not
+				// actionable, "no prompt after piperace for 4.1 s" is.  Only
+				// printed when it happens, so a normal run stays quiet.
+				fmt.Fprintf(os.Stderr, "smoke: no prompt after %q (%.1fs)\n",
+					c, took.Seconds())
+				timedOut = append(timedOut, c)
+			}
 		}
 		client.drain(300 * time.Millisecond)
 		// A dead shell must not read as a pass: the prompt had appeared once,
@@ -153,6 +161,10 @@ func runSmoke(opts smokeOpts) (string, error) {
 	s.close()
 
 	out := client.text()
+	if len(timedOut) > 0 {
+		out += fmt.Sprintf("\n--- smoke: %d command(s) never echoed a prompt: %s\n",
+			len(timedOut), strings.Join(timedOut, "; "))
+	}
 	if stderr := s.stderr.String(); stderr != "" {
 		out += "\n--- qemu stderr ---\n" + stderr
 	}
@@ -179,6 +191,9 @@ func cmdSmoke(args []string) int {
 	_ = fs.Parse(args)
 
 	cmdList := strings.Split(*commands, ",")
+	for i := range cmdList {
+		cmdList[i] = strings.TrimSpace(cmdList[i])
+	}
 	if *commands == "" {
 		cmdList = []string{
 			"ls", "cat readme.txt", "hello alpha beta", "hello_printf alpha beta",
