@@ -25,7 +25,7 @@
 | C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位（V0 `0x0001` 特例，见 §0.4） | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
 | C3 | **flash/跨核独占** | `plat_flash_exclusive_begin/end` + 协作式 park poll + `plat_cache_*`/`plat_dma_*` 钩子 | RP 现有 park 包一层，行为不变；cache/DMA 钩子 no-op | 三块 RP 共享骨架；P4 实现自己的独占；不承诺通用 pause |
 | C4 | **内存域/窗口** | `struct mem_domain` 列表（现在 1 个）+ `win_alloc` 带域参数 | 单域，行为与现在完全一致 | P4 PSRAM 需要时加第二域；不提前做多域 |
-| C5 | **驱动接缝** | `dev_ops` + LCD `lcd_lowops` | LCD 的 RP lower 接到 ops；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
+| C5 | **驱动接缝** | `dev_ops` + ST7789 的 `struct lcd_proto_ops {cmd, data, delay_ms}`（`drivers/display/st7789/lcd_proto.h`；§4 A-7 记了为何不是 `lcd_lowops`） | 两个 RP2350 端口共用面板协议层，端口只留总线；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
 | C6 | **等待/超时** | 等待**规则**（不是定时器 API）：tick 就绪后用毫秒上限；tick 前按 `plat_cpu_hz()` 折算迭代上限；不在持锁/关中断状态长等 | 规则 + 一个 helper；`wd_start` 不做 | `wd_start` 只在网络/companion 出现请求级超时时立项（B-8） |
 | C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；`send/recv` 仅任务上下文；`poll`/`link_state` 在任务或 tick 上下文（可做 I/O）；`remote_ep_irq()` 是唯一 ISR 入口（只置 pending，无 I/O）；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
 
@@ -71,13 +71,13 @@ C4（单域形状冻、第二域参数不冻）与 C7（`send/recv/link_state` �
 | 项 | 现在 | 目标 |
 |---|---|---|
 | `board.conf` | `schema=1` | 追加键只升 schema |
-| `tos_abi` | 只有 `sizeof`/`offsetof` 断言，无版本字段 | A-2 加 `TOS_ABI_VERSION`；结构只追加 |
+| `tos_abi` | `TOS_ABI_VERSION 1`（A-2）＋ `sizeof`/`offsetof` 断言 | 结构只追加；改布局必须升版本 |
 | LZ4TOS flags | 内核接受 V0（`0x0001`）与 V1（`0x0101`）；`mklfs` 写 V1，goc32 仍写 V0（作为旧分支样本） | 新能力位只放可忽略项；改变加载语义必须升版本 |
-| `exec_format` | `{name, probe, load, note}`，无版本 | B-3 追加 `version` 字段；旧 handler 不动 |
+| `exec_format` | `{name, probe, load, note}`，无版本 | B-3 追加 `version` 字段；旧 handler 不动（#18） |
 
-"带版本号"在这张表里曾是**目标态**；`board.conf` 的 `schema=1` 与 LZ4TOS 的 V1
-（`0x0101`，`mklfs` 已开始写）现在都是真字段；`tos_abi` 的版本字段仍待 A-2 后续、
-`exec_format` 的 `version` 仍待 B-3 的第二节。
+"带版本号"在这张表里曾是**目标态**；`board.conf` 的 `schema=1`、LZ4TOS 的 V1
+（`0x0101`，`mklfs` 已开始写）与 `tos_abi` 的 `TOS_ABI_VERSION 1` 现在都是真字段；
+只剩 `exec_format` 的 `version` 待 B-3 的第二节（#18）。
 
 LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错位：
 
