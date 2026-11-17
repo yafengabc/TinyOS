@@ -4557,3 +4557,9 @@ XIP 关键路径上引入回调钩子——这件事需要台面时间，不是�
 
 **证据**：`docs/acceptance/2026-11-17-b2b-park-ordering-1120aac.md`（`1120aac`）；
 T0/T1（12 目标 + fs_ro）/T2（smoke 4 + soak 3/3）通过。T3 归 #17 的双端 soak。
+
+**一个未解释的 CI 抖动**：同一次 push（`44043886856`）首跑时 `qemu smoke (rv32)` 与
+`(rv32smp)` 报「shell prompt never appeared」，transcript 停在 `TinyOS shell (pid 1).`
+之后；`gh run rerun --failed` 同一提交 13 个 job 全绿。两个 job 的 kernel 与上一轮全绿的
+提交相比没有变化，失败时 banner 已打印，说明 guest 活着、卡在 msh 打印提示符之前。只出现
+一次，本地未复现，记在这里而不是当成已修。

@@ -79,3 +79,20 @@ MODEL OK
 
 反向验证：把 `rp_park_ack()` 改成"只在第一代发布"，三条断言立刻 FAIL——正是
 HISTORY §35 记录的那个缺陷。
+
+## CI 的一次抖动（同一提交，重跑即绿）
+
+44043886856 首跑 qemu smoke (rv32) 与 (rv32smp) 失败，错误是「shell prompt never
+appeared」：transcript 停在 TinyOS shell (pid 1). 之后，没有 	os> 。gh run rerun
+--failed 之后同一提交 13 个 job 全绿。
+
+两点值得记：
+
+- 两个 job 的 kernel 与上一轮全绿的提交相比没有变化（这段只改了 RP 板的 platform.c
+  与测试），所以不是本轮代码；
+- 失败时 banner 已经打印，说明 guest 活着，卡在 msh 打印提示符之前。
+
+只出现过一次，没有定位到根因，也没有在本地复现（本地 
+v32/
+v32smp smoke 连续通过）。
+按规矩记在这里，不写成 PASS，也不写成已知 bug。
