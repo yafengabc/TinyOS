@@ -5,20 +5,34 @@
 
 /* Compressed file envelope written by tools/mklfs.c:
      offset 0  : magic "LZ4TOS"  (6 bytes)
-     offset 6  : u16 flags; bit0 = a window hint follows (required)
+     offset 6  : u16 flags       (see the two encodings below)
      offset 8  : u32 original_size
      offset 12 : u32 compressed_size
      offset 16 : u32 span, u32 stack_ask, u32 heap_ask
      offset 28 : LZ4 block data
+
+   flags has two encodings:
+
+     V0 (legacy): 0x0001.  No version field; bit0 says the hint follows.
+     V1:          high byte = encoded version (1), low byte = capabilities.
+                  0x0101 = V1 with the hint capability.  A capability bit may
+                  only be something a reader can ignore; anything whose
+                  absence changes loading must bump the version instead.
+
+   Readers accept V0 and V1 and nothing else.  The compatibility promise is
+   one-way: a new kernel reads old files; an old kernel is not promised to
+   read new files.  LZ4_WRAP_HEADER_V1 below is the 28-byte header *shape*,
+   not the format version - it keeps its name to avoid churn in mklfs.c,
+   exec_format.h and process.c.
 
    The hint carries the three numbers exec() needs to size a task window.
    mklfs derives them from the ELF the same way kernel/elf.c does: span is
    the page-rounded PT_LOAD p_vaddr..p_vaddr+p_memsz range, the two asks
    come from .note.tos.  They are deliberately target-independent - the
    kernel still applies its own default stack, guard and grain - so one
-   image stays loadable on every board.  There is no legacy 16-byte shape:
-   the kernel has to know the window size before it can decompress, and a
-   build that cannot derive a hint is an error in mklfs. */
+   image stays loadable on every board.  There is no 16-byte shape: the
+   kernel has to know the window size before it can decompress, and a build
+   that cannot derive a hint is an error in mklfs. */
 typedef struct lz4_window_hint {
     uint32_t span;
     uint32_t stack_ask;   /* 0 means "use the board default" */
@@ -69,6 +83,9 @@ int lz4_stream_decompress(lz4_stream_t *s, uint8_t *dst, uint32_t dst_cap);
 #define LZ4_WRAP_MAGIC      "LZ4TOS"
 #define LZ4_WRAP_HEADER     16
 #define LZ4_WRAP_HINT_BIT   0x0001u
+#define LZ4_WRAP_FLAGS_V0   0x0001u   /* legacy: no version field */
+#define LZ4_WRAP_VERSION_SHIFT 8
+#define LZ4_WRAP_VERSION_1  1u        /* 0x0101 = V1 + hint */
 #define LZ4_WRAP_HINT_SIZE  12
 #define LZ4_WRAP_HEADER_V1  28
 

@@ -72,10 +72,12 @@ C4（单域形状冻、第二域参数不冻）与 C7（`send/recv/link_state` �
 |---|---|---|
 | `board.conf` | `schema=1` | 追加键只升 schema |
 | `tos_abi` | 只有 `sizeof`/`offsetof` 断言，无版本字段 | A-2 加 `TOS_ABI_VERSION`；结构只追加 |
-| LZ4TOS flags | 唯一值 `0x0001`（bit0 = hint，**V0**） | B-3：`0x0001` 继续接受；下一个格式 **V1**，`flags = (1 << 8) \| caps = 0x0101` |
+| LZ4TOS flags | 内核接受 V0（`0x0001`）与 V1（`0x0101`）；`mklfs` 写 V1，goc32 仍写 V0（作为旧分支样本） | 新能力位只放可忽略项；改变加载语义必须升版本 |
 | `exec_format` | `{name, probe, load, note}`，无版本 | B-3 追加 `version` 字段；旧 handler 不动 |
 
-"带版本号"在这张表里是**目标态**，不是现状：现在只有 `board.conf` 的 `schema=1` 是真字段。
+"带版本号"在这张表里曾是**目标态**；`board.conf` 的 `schema=1` 与 LZ4TOS 的 V1
+（`0x0101`，`mklfs` 已开始写）现在都是真字段；`tos_abi` 的版本字段仍待 A-2 后续、
+`exec_format` 的 `version` 仍待 B-3 的第二节。
 
 LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错位：
 
@@ -84,7 +86,7 @@ LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错
 - 判格式只看 flags 高字节，不做"文档名 - 1"这类映射。
 
 `LZ4_WRAP_HEADER_V1`（`kernel/lz4.h`）是**28 字节带 hint 头**的名字，与格式版本号无关，
-**不改名**；B-3 落地时在它旁边加一句注释说明这一点即可。
+**不改名**；注释里已写明这一点。
 
 `caps` 只放**可以安全忽略**的能力提示（hint 是第一个）；任何"忽略就会加载错"的变化必须
 升编码版本，不能靠 caps 位。兼容承诺只覆盖一个方向：**新内核读旧文件**；旧内核读到新

@@ -28,7 +28,16 @@ uint32_t lz4_wrap_info_prefix(const uint8_t *prefix, uint32_t prefix_len,
     if (memcmp(prefix, LZ4_WRAP_MAGIC, 6) != 0)
         return 0;
     uint32_t flags = (uint32_t)prefix[6] | ((uint32_t)prefix[7] << 8);
-    if (flags != LZ4_WRAP_HINT_BIT)
+    uint32_t version = flags >> LZ4_WRAP_VERSION_SHIFT;
+    uint32_t caps = flags & 0xffu;
+    int v0 = (flags == LZ4_WRAP_FLAGS_V0);
+    int v1 = (version == LZ4_WRAP_VERSION_1) && (caps & LZ4_WRAP_HINT_BIT);
+
+    /* V0 is the pre-versioning encoding (0x0001, bit0 = hint).  From V1 the
+       high byte is the version and the low byte is capabilities; the hint is
+       the only capability so far, and it is still required.  Anything else is
+       a format this kernel does not know, so refuse it instead of guessing. */
+    if (!v0 && !v1)
         return 0;
 
     uint32_t orig = wrap_le32(prefix + 8);

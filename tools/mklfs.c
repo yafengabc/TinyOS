@@ -114,6 +114,8 @@ int lz4_compress_block(const uint8_t *src, int src_len, uint8_t *dst);
 #define LZ4_WRAP_HEADER     16
 #define LZ4_WRAP_HINT_BIT   0x01u
 #define LZ4_WRAP_HINT_SIZE  12
+#define LZ4_WRAP_VERSION    1u     /* V1: flags = (version << 8) | caps */
+#define LZ4_WRAP_VERSION_SHIFT 8
 #define LZ4_WRAP_HEADER_V1  (LZ4_WRAP_HEADER + LZ4_WRAP_HINT_SIZE)
 
 static void put_u32(uint8_t *p, uint32_t v)
@@ -296,7 +298,12 @@ static int write_file(const char *name, const char *src)
         uint8_t hdr[LZ4_WRAP_HEADER_V1];
         memset(hdr, 0, sizeof(hdr));
         memcpy(hdr, "LZ4TOS", 6);
-        hdr[6] = LZ4_WRAP_HINT_BIT;
+        {
+            uint16_t flags = (uint16_t)(LZ4_WRAP_HINT_BIT |
+                                        (LZ4_WRAP_VERSION << LZ4_WRAP_VERSION_SHIFT));
+            hdr[6] = (uint8_t)flags;
+            hdr[7] = (uint8_t)(flags >> 8);
+        }
         put_u32(hdr + 16, span);
         put_u32(hdr + 20, stack);
         put_u32(hdr + 24, heap);

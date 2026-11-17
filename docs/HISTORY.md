@@ -4038,3 +4038,26 @@ A-0 刷入 `7453bd6` 后另跑：10 轮、每轮两个后台 `piperace 1 8 &` �
 `build/rp2040smp-review-1117.log`、`build/rp2040smp-dd100-1117.log`、
 `build/heartbeat-rp2040smp-uart.log`、`build/heartbeat-rp2040smp-usb.log`、
 `build/pio-rp2040smp-review.log`、`build/rp2040smp-a0-stress.log`。
+
+## 46. 2026-11-17 LZ4TOS V1：flags 高字节版本（B-3）
+
+**背景**：C2 要求格式版本化。V0 的 `0x0001` 没有版本字段；V1 是
+`(1 << 8) | caps`，即 `0x0101`。兼容承诺是单向的：新内核读旧文件，旧内核不承诺读新文件。
+
+**改动**：
+
+- `kernel/lz4.h` / `kernel/lz4.c`：接受 V0（`0x0001`）与 V1（高字节 = 1，低字节 =
+  capabilities，hint 位仍必须置）；其他版本直接拒绝，不猜。
+- `tools/mklfs.c`：写 `0x0101`（`hdr[6]`/`hdr[7]` 分两字节写）。
+- goc32 的 `internal/lz4tos` 仍写 V0（`hdr[6] = 1`）。内核继续接受它，正好留下旧分支的
+  真实样本；改 goc32 留到它自己的发布节奏，不在这轮扩。
+
+**验收**：
+
+- T0 绿；11 目标构建通过；
+- `build/ramdisk-rv32smp.bin` 里所有 `LZ4TOS` 头都是 `01 01`（前 6 处是实际文件）；
+- QEMU `rv32`/`rv32smp`/`arm` smoke（`ps`、`piperace`、`deep 3`、`deep 6`、`mem`）通过
+  ——走的是 V1 路径；
+- 临时把 `LZ4_WRAP_VERSION` 改 0 重建 `rv32smp`：头部 `01 00`，smoke 通过（V0 路径），
+  随后恢复成 1；
+- 真机 **NOT RUN**，见 `OPEN-ITEMS.md` §2c。

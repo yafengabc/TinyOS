@@ -49,6 +49,21 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
 
+## 2c. LZ4TOS V1 真机未测（2026-11-17）
+
+`tools/mklfs.c` 现在写 V1（`0x0101`），内核接受 V0（`0x0001`）与 V1
+（HISTORY §46）。QEMU 已覆盖两条路径；**真机没跑**。
+
+关掉这条需要：
+
+- **C3**：`go run ./cmd/tos build -target esp32c3 -config configs/esp32c3.conf` →
+  `python scripts/esp-c3/flash.py --full -p COM4` → `accept.py` **24/24**；
+- **RP2350（ARM 与 RV32 各一次）**：刷当前镜像，heartbeat 6/6 + `hello` + `ls /bin`；
+- **RP2040**：启动 + heartbeat 6/6（镜像格式变了，启动路径要确认）；
+- 可选：用 goc32 产一个 V0 `.tos` 放到板上执行一次，确认旧分支在真机也可用。
+
+记录镜像、端口、命令；通过后在 `docs/acceptance/` 建卡并把这条移进 HISTORY。
+
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
 `internal/build/build.go::WindowGeometry()` 返回 16 KiB grain / 8 KiB stack /
