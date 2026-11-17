@@ -71,20 +71,6 @@ RP2040 无自动 BOOTSEL，不能作为其它 issue 的关闭依据；确需 RP2
 `dd`+`rm`），由板主人工安排。`rp2040smp` 是唯一的 Cortex-M0+ SMP 目标，park 证据值得
 单独跑一次（HISTORY §35 的竞态就是在这块板上暴露的）。关闭 #12 时把本条移进 HISTORY。
 
-## 5. x86 从来没在 CI 里构建过（§37）
-
-发布矩阵里没有 `x86`，所以它在发行版工具链上直接失败：
-
-```
-ld.lld: error: relocation R_386_16 cannot be used against local symbol;
-               recompile with -fPIC
-```
-
-i386 的 PIE 链接不接受端口生成的 16 位绝对重定位；本机 MSYS2 的 lld 容忍它们。
-三条路：给 x86 用户程序换非 PIE 装载、把这几处重定位改成 32 位、或者
-`-Wl,-z,notext`（治标）。在那之前 CI 的 `qemu smoke` 只覆盖
-`rv32`/`rv32smp`/`arm`。
-
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在

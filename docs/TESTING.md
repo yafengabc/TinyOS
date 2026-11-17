@@ -301,14 +301,16 @@ notes:
 当前 `.github/workflows/images.yml` 覆盖：
 
 - `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
-- 7 个镜像构建（esp32c3、rp2040/smp、rp2350/smp、rp2350rv/rvsmp）；
+- 7 个发布镜像构建（esp32c3、rp2040/smp、rp2350/smp、rp2350rv/rvsmp）；
 - `configs/rv32-fsro.conf` 的只读镜像构建（issue #14 的盲区）；
-- rv32/rv32smp/arm 的 QEMU smoke（含 `rselftest`）+ `scripts/soak.py` 3 轮；
+- rv32/rv32smp/arm/**x86** 的 QEMU smoke（含 `rselftest`）+ `scripts/soak.py` 3 轮
+  （soak 只跑前三个）；
 - tag 触发的 Release（`release` 依赖 `[checks, build, smoke]`）。
 
 **不覆盖**：
 
-- x86 构建与链接（`OPEN-ITEMS.md` §5：发行版 lld 拒绝 i386 PIE 的 16 位重定位）；
+- **x86 的发布资产**：它能在发行版工具链上构建并起机（HISTORY §60），但没有原始磁盘
+  镜像的打包路径，所以只在 smoke 里跑，不进 Release（`OPEN-ITEMS.md` 已无此条）；
 - `rv32nc`：整个目标不在 CI 里构建（T1 本地跑）；
 - 任何真机、Pico 2、PIO 目视项；
 - 长时间 SMP/flash soak（CI 只有 3 轮）。

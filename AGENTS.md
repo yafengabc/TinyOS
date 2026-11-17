@@ -69,8 +69,9 @@ Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
   A pre-existing failure is recorded in `docs/OPEN-ITEMS.md`, not silently
   ignored.
 - CI green is not a full regression: it runs `go test`/`go vet`, the seven
-  release images, one read-only build and QEMU smoke on rv32/rv32smp/arm, but
-  not x86, hardware, or Pico 2. See `docs/TESTING.md` section 11.
+  release images, one read-only build and QEMU smoke on rv32/rv32smp/arm/x86,
+  but not hardware, Pico 2, rv32nc, or x86 release artifacts. See
+  `docs/TESTING.md` section 11.
 
 ## Before you commit
 

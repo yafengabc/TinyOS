@@ -4406,3 +4406,39 @@ B-8 的 C3/真机验收也走默认配置，所以编译错误只存在于"别�
 按 issue 边界另记，不混进本次提交。
 
 **证据**：`docs/acceptance/2026-11-17-fsro-ramdisk-a271253.md`（`a271253`）。
+
+## 60. 2026-11-17 x86 在发行版工具链上构建并启动（OPEN-ITEMS §5 关闭）
+
+**症状**：CI 与对方的机器上 `-target x86` 直接失败，`ld.lld: error: relocation R_386_16
+cannot be used against local symbol`，所有报错都指向 `build/boot/stage1.o`。本机 MSYS2
+一直能构建，所以这条挂了很久没人推动。
+
+**第一段根因：链接被 clang 转交给 gcc。** 发行版 clang 18 没有自己的 i386-elf 链接器，
+`-fuse-ld=lld` 只是被塞进 `/usr/bin/gcc` 的命令行，真正决定 PIE 的是 gcc 自己的发行版
+默认 `-pie`。而 `-no-pie` 是 clang 的车夫参数，clang 不会转给 gcc（`clang -###` 的输出里
+看得一清二楚）。于是链接变成 static PIE，ld.lld 的 i386 后端按 PIE 规则拒绝引导扇区的
+16 位绝对重定位——引导扇区是实模式代码，这条规则与它无关。
+
+修法不是加链接器开关，而是**不走 clang**：x86 的 `LD` 改成裸 `ld.lld -m elf_i386`，
+和 arm/rv32 一样。链接辅助函数在裸链接器下本来就不加 `-Wl,` 前缀，所以其余不用动。
+本地验证：换之前/之后 `tinyos.img` 与 `stage1.bin` **逐字节相同**，说明只改了链接方式。
+
+**第二段：预算。** 链接好了以后，发行版 clang 18 产出 94012 字节内核，引导扇区只读
+180 扇区（92160）——这正是对方报过、我在 `HISTORY` §57 里记成"观察"的那条。本机
+clang 23 更小，所以一直没踩到。预算抬到 200 扇区（100 KiB），littlefs 从 LBA 181 移到
+201；`boot/stage1.S`、`internal/build`、`board/pc/layout.c` 三处一起改，构建期会去源码里
+读一遍交叉校验，漏改一处就构建失败。
+
+**为什么值得做**：x86 是唯一能在没有板子的情况下跑完整内核的"临时真机"——它是真的
+有 ATA、键盘、定时器、分页。它长期不能构建，等于丢了一台免费的回归机器。
+
+**覆盖**：x86 进了 CI 的 `qemu smoke` job（构建 + 启动 + `ps`/`ls`/`piperace`/`prot stack`/
+`deep 3`/`rselftest`），但仍不进 Release 资产——发布物是 `.uf2`/`.bin`，原始磁盘镜像
+没有打包路径。想发再说。
+
+**证据**：`docs/acceptance/2026-11-17-x86-ci-b2db294.md`（`b2db294`）；CI run
+`44015548419` 的 `qemu smoke` job 里 `qemu-system-i386` 起机并 `SMOKE TEST OK`。
+
+**过程记录**：为了拿到真实诊断，先加了 `workflow_dispatch` 的 `x86-probe.yml`（手工触发、
+不影响 push），两轮后带着日志定位到 gcc 转发与内核预算，再把它删掉——诊断工作流只该
+活到问题解决为止。
