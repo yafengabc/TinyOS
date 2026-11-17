@@ -369,7 +369,7 @@ xip_flash_base/drivers/default_features 来自 `board.conf`，由 `applyBoard()`
   C6 的 SPI 帧容量不同，mock 证明不了；猜错冻进去的是 bug 不是接口。
 - 先做 mock lower + QEMU 的 send/recv 测试，等 B-5b 拿到 LP 真实行为后再评容量与错误码。
 
-**B-8 条件项，不排期**：5 档优先级、workqueue、tickless、task group、通用 RPC。出现具体需求再立项，且先补 PI/aging 等前提。
+**B-8 条件项，不排期**：5 档优先级、workqueue、tickless、task group、通用 RPC。出现具体需求再立项，且先补 PI/aging 等前提。小额收缩（lk_t 头 16→8、ofile_t.path[64]→路径哈希）已完成，见 HISTORY §55。
 
 ---
 

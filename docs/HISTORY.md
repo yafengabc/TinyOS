@@ -4246,3 +4246,25 @@ XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2
 - **C3 真机**：`accept.py` 24/24、`rselftest` ok；
 - 窗口几何未改：`win_alloc` 的 base/size/grain 与 `PLAT_APP_*` 相同（域是视图，不是
   第二个真相），`geometry_test` 与 `prot heap/stack` 路径未动。
+
+## 55. 2026-11-17 B-8 小额收缩：heap 头 8 字节、ofile 用路径哈希
+
+**背景**：review 的 B-8 还剩两处"省字节但不急"的项：`blk_t.pad[8]` 和
+`ofile_t.path[64]`。
+
+**改动**：
+
+- `kernel/heap.c`：`blk_t` 去掉 8 字节 pad，头从 16 变成 8；`_Static_assert(sizeof(blk_t)
+  == 8)` 守住。对齐不靠 pad：arena 16 对齐、大小按 8 取整、块前进 8+size，payload 自然
+  8 字节对齐。
+- `kernel/ramdisk.c`：`ofile_t.path[64]` 换成 `uint32_t path_hash`（FNV-1a）。
+  `unlink_locked()` 比较哈希；碰撞的唯一方向是**误判"仍被打开"而拒绝删除**，不会误删，
+  比继续留 64 字节/句柄更划算。
+
+**验收**：
+
+- 同配置（`target = rv32smp`）改前/改后：`free` 的 kernel 从 **705 712 → 705 488**
+  （省 224 B），unused 对应增加；kernel heap 数字不变；
+- T0、11 目标 + x86 构建；
+- QEMU `rv32`/`rv32smp`/`arm` smoke 与 `soak.py --cycles 3` 通过；
+- **C3 真机**：`accept.py` 24/24、soak 5 轮 `resets 0, errors 0`。

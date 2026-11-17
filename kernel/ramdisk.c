@@ -31,11 +31,11 @@ typedef struct {
     struct lfs_file_config fc;   /* points at `cache` under LFS_NO_MALLOC */
     uint8_t *cache;
     uint32_t size;
-    /* The path this handle was opened with, so unlink() can refuse to
-     * delete a file somebody still holds open (see unlink_locked).  Same
-     * length as the resolve_path() buffer in syscall.c, and copied rather
-     * than pointed at because that buffer is the caller's. */
-    char     path[64];
+    /* FNV-1a of the path this handle was opened with, so unlink() can refuse
+     * to delete a file somebody still holds open (see unlink_locked).  A hash
+     * rather than the 64-byte string: the only direction a collision can take
+     * is a false "still open" refusal, never a false delete. */
+    uint32_t path_hash;
 } ofile_t;
 
 static lfs_t lfs;
@@ -548,6 +548,17 @@ static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
  * The snapshot is dropped: a listing taken before the removal must not
  * survive it. */
 #ifndef TOS_LFS_RO
+/* FNV-1a; see the ofile_t.path_hash comment for the collision direction. */
+static uint32_t hash_path(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (uint8_t)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
 static int unlink_locked(const char *path)
 {
     if (!ok)
@@ -559,8 +570,9 @@ static int unlink_locked(const char *path)
     if (info.type == LFS_TYPE_DIR)
         return -1;
 
+    uint32_t ph = hash_path(path);
     for (int i = 0; i < MAX_OPEN; i++) {
-        if (openfiles[i].used && !strcmp(openfiles[i].path, path))
+        if (openfiles[i].used && openfiles[i].path_hash == ph)
             return -1;
     }
 
@@ -622,8 +634,7 @@ static int open_with(const char *path, int flags)
 
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
-    strncpy(openfiles[h].path, path, sizeof(openfiles[h].path) - 1);
-    openfiles[h].path[sizeof(openfiles[h].path) - 1] = '\0';
+    openfiles[h].path_hash = hash_path(path);
     return h;
 }
 
@@ -695,8 +706,7 @@ static int create_locked(const char *path)
 
     openfiles[h].used = 1;
     openfiles[h].size = (uint32_t)lfs_file_size(&lfs, &openfiles[h].f);
-    strncpy(openfiles[h].path, path, sizeof(openfiles[h].path) - 1);
-    openfiles[h].path[sizeof(openfiles[h].path) - 1] = '\0';
+    openfiles[h].path_hash = hash_path(path);
     return h;
 }
 #endif  /* !TOS_LFS_RO */

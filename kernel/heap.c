@@ -12,9 +12,11 @@
    per-file buffers) while writing, which fragments the arena quickly if
    coalescing is missing.
 
-   Block layout (16 byte header):
-     [size | next | pad]
-   The low bit of `size` marks an allocated block. */
+   Block layout (8 byte header):
+     [size | next]
+   The low bit of `size` marks an allocated block.  Payloads stay 8-byte
+   aligned without a pad: the arena is 16-aligned, sizes are rounded to 8,
+   and every block advances by 8 + size. */
 
 /* The arena is .bss, so its size is a board decision: the build passes
    -DTOS_HEAP_BYTES for boards that say something other than the 32 KiB
@@ -36,8 +38,9 @@ static uint32_t heap_peak;
 typedef struct blk {
     uint32_t    size;            /* payload size | allocated bit */
     struct blk *next;            /* only meaningful while free */
-    uint8_t     pad[8];          /* keep payload 8-byte aligned */
 } blk_t;
+
+_Static_assert(sizeof(blk_t) == 8, "heap header stays 8 bytes and 8-aligned");
 
 #define ALLOC_BIT 0x80000000u
 #define BLK_HEADER ((uint32_t)sizeof(blk_t))
