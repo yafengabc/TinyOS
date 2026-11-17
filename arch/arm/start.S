@@ -130,6 +130,36 @@ _start:
     msr     control, r0
     isb
 
+#ifdef TOS_RP2350_BOOT2
+    /* RP2350: move QMI to continuous quad read before the kernel starts
+       using flash at 150 MHz.  The ROM's conservative 03h/CLKDIV=12 mode is
+       safe at the boot clock but its sampling delay is counted in clk_sys
+       cycles, so it becomes too short once pll_sys_init() switches to
+       150 MHz - on some flash parts the first fetch after the switch reads
+       garbage (issue #7: PC=0xeffffffe, no USB).  MicroPython's RP2350
+       build does the same (PICO_EMBED_XIP_SETUP=1).  boot2 must run from
+       SRAM, so copy it to __boot2_ram first; this happens before the .data
+       copy because that copy is itself a bulk flash read at the new
+       timing. */
+    ldr     r0, =__boot2_ram
+    ldr     r1, =__boot2_start
+    ldr     r2, =__boot2_end
+1:  cmp     r1, r2
+    bhs     2f
+    ldr     r3, [r1]
+    str     r3, [r0]
+    adds    r1, #4
+    adds    r0, #4
+    b       1b
+2:  dsb
+    isb
+    ldr     r0, =__boot2_ram
+    adds    r0, #1                      /* Thumb bit                        */
+    blx     r0
+    dsb
+    isb
+#endif
+
     ldr     r0, =__data_start
     ldr     r1, =__data_end
     ldr     r2, =__data_load
@@ -555,6 +585,16 @@ arm_core1_entry:
     .ltorg
 
 /* -------------------------------------------------------------------- */
+
+#ifdef TOS_RP2350_BOOT2
+/* Scratch for the SRAM-resident XIP setup copied out of .text.boot2.  It
+ * lives in .data so the linker gives it a RAM address; the .data copy that
+ * follows boot2 overwrites it with zeros, which is harmless. */
+    .section .data.boot2, "aw"
+    .align 2
+__boot2_ram:
+    .space 256
+#endif
 
     .section .bss
     .align 3
