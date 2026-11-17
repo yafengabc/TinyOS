@@ -58,12 +58,14 @@ func TestGoc32SyscallSnapshotMatchesTable(t *testing.T) {
 
 	// tinyos_commit is provenance (the tree the copy was taken from), not a
 	// synchronisation guarantee: the snapshot is committed after that commit.
-	// Requiring the object to exist still catches a made-up or truncated sha.
+	// Requiring the object to exist still catches a made-up or truncated sha,
+	// but CI checks out a shallow clone where older commits are simply not
+	// there - that is a property of the checkout, not a stale snapshot.
 	commit := headerField(header, "tinyos_commit")
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(commit) {
 		t.Fatalf("tinyos_commit is not a full sha1: %q", commit)
 	}
-	if _, err := exec.LookPath("git"); err == nil {
+	if _, err := exec.LookPath("git"); err == nil && !shallowRepo(root) {
 		cmd := exec.Command("git", "-C", root, "cat-file", "-t", commit)
 		out, err := cmd.CombinedOutput()
 		if err != nil || strings.TrimSpace(string(out)) != "commit" {
@@ -97,4 +99,12 @@ func headerField(header, key string) string {
 		return ""
 	}
 	return m[1]
+}
+
+// shallowRepo reports whether the checkout only has recent history, which is
+// what actions/checkout does by default.
+func shallowRepo(root string) bool {
+	out, err := exec.Command("git", "-C", root, "rev-parse",
+		"--is-shallow-repository").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
