@@ -518,8 +518,8 @@ static const char *list_name_locked(const char *dirpath, uint32_t index)
 }
 
 /* Stat a path directly (no traversal of the listing snapshot).  Returns 0
-   and fills *size/*type on success, -1 on error (e.g. ENOENT).  Used by the
-   SYS_STAT syscall so `ls` can show per-entry size and type without the
+   and fills *size and *type on success, -1 on error (e.g. ENOENT).  Used by
+   the SYS_STAT syscall so `ls` can show per-entry size and type without the
    kernel walking the tree. */
 static int stat_locked(const char *path, uint32_t *size, uint8_t *type)
 {

@@ -910,8 +910,8 @@ func (b *Builder) writeBuildConfig() error {
 		"opt         " + opt,
 		// The board's real grain/stack/guard live in board/*/layout.c; these
 		// three are what checkWindow() validates TOS_WINDOW/TOS_ONE_GRAIN
-		// against, and they have not followed the 4 KiB migration yet
-		// (OPEN-ITEMS 36), so they are labelled for what they are.
+		// against.  They come from board.conf via WindowGeometry(), not from a
+		// switch here (B-1c, #10), so they are labelled for what they are.
 		"check-grain " + fmt.Sprintf("%d bytes", grain),
 		"check-stack " + fmt.Sprintf("%d bytes", stack),
 		"check-guard " + fmt.Sprintf("%d bytes", guard),
