@@ -37,9 +37,10 @@ jobs:
           clang --version
           ld.lld --version
           go version
+          go run ./cmd/tos doctor
 
       - name: Build x86
-        run: go run ./cmd/tos build -target x86
+        run: go run ./cmd/tos build -target x86 -v
 
       - name: Report what came out
         if: success()
