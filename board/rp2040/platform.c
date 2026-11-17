@@ -1,4 +1,10 @@
 #include "platform.h"
+
+/* Park-skeleton hook (issue #17).  rp2040 has no watchdog feed inside the
+ * loop and no "core 1 must not return" case, so the only override is the
+ * timeout line; the rest fall through to the empty defaults in rp_park.h. */
+#define RP_PARK_OWNER_TIMEOUT() dbg_uart_puts("[flash] park timeout\n")
+
 #include "rp_park.h"
 #include "board.h"
 #include "arm_memmap.h"
@@ -880,27 +886,14 @@ int plat_start_cpu(int id)
  * XIP while the SSI is in serial command mode. */
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
 /* Runs on core 1 from its SysTick handler.  .data.flash_ram is copied to
- * SRAM, so this loop survives core 0 turning XIP off. */
+ * SRAM, so this loop survives core 0 turning XIP off.  The shared loop
+ * re-publishes the ack for every generation: a request raised while this core
+ * is still inside the loop never re-enters it, so an ack written only on
+ * entry would be consumed by the earlier request. */
 static void __attribute__((noinline, section(".data.flash_ram")))
 rp_flash_park_loop(void)
 {
-    park.parked = 1;
-    __asm__ volatile("dsb" ::: "memory");
-    /* Busy-spin, not wfe: clearing park.flag and issuing sev is not
-     * atomic with entering wfe, and a lost wakeup leaves this core asleep
-     * inside the SysTick handler (interrupts masked) forever.  The flash
-     * call is one erase/program, so the burn is short.
-     *
-     * Publish the acknowledgement for every generation: a request raised
-     * while this core is still inside the loop never re-enters it, so an ack
-     * written only on entry would be consumed by the earlier request. */
-    for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
-        if (!park.flag)
-            break;
-        RP_PARK_BARRIER();
-        rp_park_ack(&park);
-    }
-    park.parked = 0;
+    RP_PARK_PARKED_LOOP(&park, plat_pre_tick_spins(200000000u));
 }
 
 /* Called from plat_cpu_idle() on the other core.  That path is needed
@@ -924,40 +917,19 @@ void plat_flash_park_poll(void)
     }
 }
 
+/* Mask interrupts for the handshake: with them on, the tick can land in this
+ * wait loop and reschedule the caller onto the other core, which then is no
+ * longer the core that will unpark - both cores park and the flag is never
+ * cleared.  The shared sequence keeps the mask on success; on timeout it
+ * restores and returns -1. */
 static int rp_flash_park_other(void)
 {
-    uint32_t primask, myreq;
-
-    if (cpu_count <= 1)
-        return 0;
-
-    /* Mask interrupts for the handshake.  With them on, the tick can land
-     * in this wait loop and reschedule the caller onto the other core, which
-     * then is no longer the core that will unpark - both cores park and
-     * nothing clears the flag again. */
-    __asm__ volatile("mrs %0, primask" : "=r"(primask));
-    __asm__ volatile("cpsid i" ::: "memory");
-
-    myreq = rp_park_begin(&park, (int)plat_cpu_id());
-    __asm__ volatile("sev" ::: "memory");
-    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++)
-        if (rp_park_acked(&park, myreq)) {
-            /* Stay masked: the caller restores the interrupt state after the
-             * ROM call and the unpark. */
-            return 0;
-        }
-    rp_park_release(&park);
-    __asm__ volatile("sev" ::: "memory");
-    dbg_uart_puts("[flash] park timeout\n");
-    if (!(primask & 1u))
-        __asm__ volatile("cpsie i" ::: "memory");
-    return -1;                  /* core 1 never parked: do not kill XIP */
+    RP_PARK_OWNER_TAKE(&park, plat_pre_tick_spins(20000000u));
 }
 
 static void rp_flash_unpark_other(void)
 {
-    rp_park_release(&park);
-    __asm__ volatile("sev" ::: "memory");
+    RP_PARK_RELEASE_AND_WAKE(&park);
 }
 #endif
 

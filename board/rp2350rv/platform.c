@@ -1,4 +1,87 @@
 #include "platform.h"
+
+/* Park-skeleton hooks (issue #17).  Defined before rp_park.h so the shared
+ * RP_PARK_OWNER_TAKE / RP_PARK_PARKED_LOOP macros pick them up.  They name
+ * symbols declared later in this file, which is fine: a macro expands only at
+ * its call site, well after those declarations.  See board/rp_park.h. */
+#define RP_PARK_WDT_TICK(spins)                                              \
+    do { if (((spins) & 0xfffffu) == 0xfffffu) wdt_feed(); } while (0)
+#define RP_PARK_OWNER_TICK(spins) RP_PARK_WDT_TICK(spins)
+#if TOS_DIAG
+#define RP_PARK_PARKED_DIAG(entering)                                        \
+    do {                                                                     \
+        uint32_t _rp_d = (uint32_t)plat_cpu_id() & 1u;                       \
+        if (entering) {                                                      \
+            g_site[_rp_d] = 3;              /* parked */                     \
+            g_pk_parker = _rp_d;                                             \
+            g_park_enter[_rp_d]++;                                           \
+            g_pk_phase = 2;                 /* acking */                     \
+        }                                                                    \
+    } while (0)
+#define RP_PARK_OWNER_PREPARE()                                              \
+    do {                                                                     \
+        uint32_t _rp_d = (uint32_t)plat_cpu_id() & 1u;                       \
+        g_pk_writer = (uint32_t)plat_cpu_id();                               \
+        g_wr_enter[_rp_d]++;                                                 \
+        g_wr_live |= 1u << _rp_d;                                            \
+        g_pk_phase = 1;                     /* request raised */             \
+        g_pk_req++;                                                          \
+    } while (0)
+#define RP_PARK_OWNER_ACKED()                                                \
+    do {                                                                     \
+        g_pk_ack++;                                                          \
+        g_wr_live &= ~(1u << ((uint32_t)plat_cpu_id() & 1u));                \
+    } while (0)
+#define RP_PARK_OWNER_TIMEOUT()                                              \
+    do {                                                                     \
+        g_pk_to++;                           /* timeout */                   \
+        g_wr_live &= ~(1u << ((uint32_t)plat_cpu_id() & 1u));                \
+        g_pk_last_to = g_pk_phase;                                           \
+        /* The far hart never answered.  Say so on the wire with its last    \
+         * known state: a caller that sees only -1 cannot tell "slow" from    \
+         * "dead" from "never scheduled". */                                 \
+        {                                                                    \
+            uint32_t _a = g_tk[1];                                           \
+            for (volatile uint32_t _d = 0; _d < 300000u; _d++)               \
+                ;                                                            \
+            early_puts("\r\n[!pk] t1a=");                                    \
+            early_put_hex(_a);                                               \
+            early_puts(" t1b=");                                             \
+            early_put_hex(g_tk[1]);                                          \
+            early_puts(" we=");                                              \
+            early_put_hex(g_wr_enter[0] << 16 | g_wr_enter[1]);              \
+            early_puts(" wl=");                                              \
+            early_put_hex(g_wr_live);                                        \
+        }                                                                    \
+        early_puts("\r\n[!pk] t0=");                                         \
+        early_put_hex(g_tk[0]);                                              \
+        early_puts(" t1=");                                                  \
+        early_put_hex(g_tk[1]);                                              \
+        early_puts(" s0=");                                                  \
+        early_put_hex(g_site[0]);                                            \
+        early_puts(" s1=");                                                  \
+        early_put_hex(g_site[1]);                                            \
+        early_puts(" pen0=");                                                \
+        early_put_hex(g_park_enter[0]);                                      \
+        early_puts(" pen1=");                                                \
+        early_put_hex(g_park_enter[1]);                                      \
+        early_puts(" req=");                                                 \
+        early_put_hex(g_pk_req);                                             \
+        early_puts(" ack=");                                                 \
+        early_put_hex(g_pk_ack);                                             \
+        early_puts(" wr=");                                                  \
+        early_put_hex(g_pk_writer);                                          \
+        early_puts(" park=");                                                \
+        early_put_hex(g_pk_parker);                                          \
+        early_puts("\r\n");                                                  \
+    } while (0)
+#else
+#define RP_PARK_PARKED_DIAG(entering) do { (void)(entering); } while (0)
+#define RP_PARK_OWNER_PREPARE() do { } while (0)
+#define RP_PARK_OWNER_ACKED() do { } while (0)
+#define RP_PARK_OWNER_TIMEOUT() do { } while (0)
+#endif
+
 #include "rp_park.h"
 #include "board.h"
 #include "board_internal.h"
@@ -829,42 +912,14 @@ extern volatile int cpu_count;
  * spin loop, a check in the tick (which preempts whatever core 1 is running)
  * and a check in idle (a core already inside its tick cannot be preempted
  * again, so the tick check alone would never see the flag). */
+/* RAM-resident: this runs while the owner has XIP turned off.  The shared
+ * loop re-publishes the ack for every generation (littlefs issues several
+ * block operations back to back; a publish-once ack is the intermittent
+ * "dd: write error at block 0 (-1)" on rp2350rvsmp) and feeds the watchdog,
+ * because this hart is parked with interrupts masked and the tick cannot. */
 static RAMFUNC void rp_flash_park_loop(void)
 {
-#if TOS_DIAG
-    {
-        uint32_t id = (uint32_t)plat_cpu_id() & 1u;
-
-        g_site[id] = 3;               /* parked */
-        g_pk_parker = id;             /* which hart answered */
-        g_park_enter[id]++;
-        g_pk_phase = 2;               /* acking */
-    }
-#endif
-    park.parked = 1;
-    __asm__ volatile("fence rw, rw" ::: "memory");
-    /* Busy-spin, not wfe: clearing the flag and signalling is not atomic with
-     * entering wfe, and a lost wakeup would park this core for good with
-     * interrupts masked.  One erase/program burst is short.
-     *
-     * The acknowledgement is re-published for every generation, not just on
-     * entry.  littlefs issues several block operations back to back, and a
-     * hart that is still inside this loop when the next request is raised
-     * never re-enters it - with a publish-once ack the writer then waits for
-     * an acknowledgement that was already consumed by the previous request
-     * and gives up after 20M spins, which is the intermittent
-     * "dd: write error at block 0 (-1)" on rp2350rvsmp.  Publishing while the
-     * flag is still up is safe: the flag is only cleared after XIP is back,
-     * so "flag clear" is exactly "you may return to flash". */
-    for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
-        if (!park.flag)
-            break;
-        RP_PARK_BARRIER();
-        rp_park_ack(&park);
-        if ((spins & 0xfffffu) == 0xfffffu)
-            wdt_feed();         /* parked with interrupts masked: tick cannot */
-    }
-    park.parked = 0;
+    RP_PARK_PARKED_LOOP(&park, plat_pre_tick_spins(200000000u));
 }
 
 void plat_flash_park_poll(void)
@@ -887,98 +942,19 @@ void plat_flash_park_poll(void)
     }
 }
 
+/* Mask interrupts for the handshake: with them on, the tick can land in this
+ * wait loop and reschedule the caller onto the other hart, which then is no
+ * longer the one that will unpark - both harts park and the flag is never
+ * cleared.  The caller saved mstatus.MIE and restores it on both paths, so
+ * RP_PARK_OWNER_RESTORE_IRQ is a no-op here. */
 static int rp_flash_park_other(void)
 {
-    uint32_t myreq;
-
-    if (cpu_count <= 1)
-        return 0;
-
-    /* Mask interrupts for the handshake: with them on, the tick can land in
-     * this wait loop and reschedule the caller onto the other hart, which
-     * then is no longer the one that will unpark - both harts park and
-     * nothing clears the flag again.  The caller already saved mstatus.MIE
-     * in was_enabled and restores it on both the success and timeout paths:
-     * saving it again here would only see the zero this csrci just wrote. */
-    __asm__ volatile("csrci mstatus, 8" ::: "memory");
-
-#if TOS_DIAG
-    g_pk_writer = (uint32_t)plat_cpu_id();
-    g_wr_enter[(uint32_t)plat_cpu_id() & 1u]++;
-    g_wr_live |= 1u << ((uint32_t)plat_cpu_id() & 1u);
-    g_pk_phase = 1;                          /* request raised */
-    g_pk_req++;
-#endif
-    myreq = rp_park_begin(&park, (int)plat_cpu_id());
-    __asm__ volatile("slt x0, x0, x1" ::: "memory");
-    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
-        /* Only this request's acknowledgement counts. */
-        if (rp_park_acked(&park, myreq)) {
-            /* Stay masked: the caller restores mstatus.MIE after the ROM
-             * call and the unpark. */
-#if TOS_DIAG
-            g_pk_ack++;
-            g_wr_live &= ~(1u << ((uint32_t)plat_cpu_id() & 1u));
-#endif
-            return 0;
-        }
-        if ((i & 0xfffffu) == 0xfffffu)
-            wdt_feed();                      /* this wait runs masked too */
-    }
-    rp_park_release(&park);
-#if TOS_DIAG
-    g_pk_to++;                               /* timeout */
-    g_wr_live &= ~(1u << ((uint32_t)plat_cpu_id() & 1u));
-    g_pk_last_to = g_pk_phase;
-    /* The far hart never answered.  Say so on the wire with its last known
-     * state, because a caller that sees only -1 cannot tell "slow" from
-     * "dead" from "never scheduled". */
-    {
-        /* Is the far hart merely slow, or has it stopped taking ticks
-         * altogether?  Sample its counter, spend ~20 ms, sample again. */
-        uint32_t a = g_tk[1];
-
-        for (volatile uint32_t d = 0; d < 300000u; d++)
-            ;
-        early_puts("\r\n[!pk] t1a=");
-        early_put_hex(a);
-        early_puts(" t1b=");
-        early_put_hex(g_tk[1]);
-        early_puts(" we=");
-        early_put_hex(g_wr_enter[0] << 16 | g_wr_enter[1]);
-        early_puts(" wl=");
-        early_put_hex(g_wr_live);
-    }
-    early_puts("\r\n[!pk] t0=");
-    early_put_hex(g_tk[0]);
-    early_puts(" t1=");
-    early_put_hex(g_tk[1]);
-    early_puts(" s0=");
-    early_put_hex(g_site[0]);
-    early_puts(" s1=");
-    early_put_hex(g_site[1]);
-    early_puts(" pen0=");
-    early_put_hex(g_park_enter[0]);
-    early_puts(" pen1=");
-    early_put_hex(g_park_enter[1]);
-    early_puts(" req=");
-    early_put_hex(g_pk_req);
-    early_puts(" ack=");
-    early_put_hex(g_pk_ack);
-    early_puts(" wr=");
-    early_put_hex(g_pk_writer);
-    early_puts(" park=");
-    early_put_hex(g_pk_parker);
-    early_puts("\r\n");
-#endif
-    __asm__ volatile("slt x0, x0, x1" ::: "memory");
-    return -1;              /* core 1 never parked: do not kill XIP under it */
+    RP_PARK_OWNER_TAKE(&park, plat_pre_tick_spins(20000000u));
 }
 
 static void rp_flash_unpark_other(void)
 {
-    rp_park_release(&park);
-    __asm__ volatile("slt x0, x0, x1" ::: "memory");
+    RP_PARK_RELEASE_AND_WAKE(&park);
 }
 #endif
 

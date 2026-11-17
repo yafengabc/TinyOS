@@ -1,4 +1,79 @@
 #include "platform.h"
+
+/* Park-skeleton hooks (issue #17).  Defined before rp_park.h so the shared
+ * RP_PARK_OWNER_TAKE / RP_PARK_PARKED_LOOP macros pick them up.  They name
+ * symbols declared later in this file, which is fine: a macro is only expanded
+ * at its call site, well after those declarations.  See board/rp_park.h. */
+#define RP_PARK_WDT_TICK(spins)                                              \
+    do { if (((spins) & 0xfffffu) == 0xfffffu) wdt_feed(); } while (0)
+#define RP_PARK_STOP_FOREVER()                                               \
+    do { if (g_core1_stopped) for (;;) wdt_feed(); } while (0)
+#if TOS_DIAG
+#define RP_PARK_PARKED_DIAG(entering)                                        \
+    do {                                                                     \
+        uint32_t _rp_d = (uint32_t)plat_cpu_id() & 1u;                       \
+        if (entering) { g_park_phase = 2; g_park_in[_rp_d] = 1; }            \
+        else { g_park_in[_rp_d] = 0; }                                       \
+    } while (0)
+#define RP_PARK_OWNER_PREPARE()                                              \
+    do {                                                                     \
+        uint32_t _rp_mid = (uint32_t)plat_cpu_id() & 1u;                     \
+        g_mask_lr[_rp_mid]   = (uint32_t)__builtin_return_address(0);        \
+        g_mask_site[_rp_mid] = TOS_MASKSITE_FLASH_PARK;                      \
+        g_mask_seq[_rp_mid]++;                                               \
+        g_mask_in[_rp_mid]   = 1;                                            \
+        g_park_phase = 1;                                                    \
+    } while (0)
+#define RP_PARK_OWNER_TICK(spins)                                            \
+    do {                                                                     \
+        if (((spins) & 0xfffffu) != 0xfffffu)                                \
+            break;                                                           \
+        wdt_feed();                                                          \
+        diag_char('?');                                                      \
+        diag_str(" c1t=");                                                   \
+        diag_u32(g_c1_ticks);                                                \
+        diag_str(" idle=");                                                  \
+        diag_u32(g_cpu_idle[1]);                                             \
+        diag_str(" pk=");                                                    \
+        diag_u32(g_park_phase);                                              \
+        diag_str(" pn=");                                                    \
+        diag_u32(g_park_poll_n);                                             \
+        diag_str(" pf=");                                                    \
+        diag_u32(g_park_poll_flag);                                          \
+        diag_str(" pi=");                                                    \
+        diag_u32(g_park_poll_id);                                            \
+        diag_str(" po=");                                                    \
+        diag_u32(g_park_poll_owner);                                         \
+        diag_str(" myid=");                                                  \
+        diag_u32((uint32_t)plat_cpu_id());                                   \
+        diag_str(" myown=");                                                 \
+        diag_u32(g_park_poll_owner);                                         \
+        diag_str(" c0pc=");                                                  \
+        diag_u32(g_tick_pc[0]);                                              \
+        diag_str(" c0lr=");                                                  \
+        diag_u32(g_tick_lr[0]);                                              \
+        diag_str(" c1pc=");                                                  \
+        diag_u32(g_tick_pc[1]);                                              \
+        diag_str(" mseq0=");                                                 \
+        diag_u32(g_mask_seq[0]);                                             \
+        diag_str(" mlr0=");                                                  \
+        diag_u32(g_mask_lr[0]);                                              \
+        diag_str(" msite0=");                                                \
+        diag_u32(g_mask_site[0]);                                            \
+        diag_str(" isite=");                                                 \
+        diag_u32(g_idle_site);                                               \
+        diag_str(" us0=");                                                   \
+        diag_u32(g_usb_site[0]);                                             \
+        diag_str(" us1=");                                                   \
+        diag_u32(g_usb_site[1]);                                             \
+        diag_str("\r\n");                                                    \
+    } while (0)
+#else
+#define RP_PARK_PARKED_DIAG(entering) do { (void)(entering); } while (0)
+#define RP_PARK_OWNER_PREPARE() do { } while (0)
+#define RP_PARK_OWNER_TICK(spins) RP_PARK_WDT_TICK(spins)
+#endif
+
 #include "rp_park.h"
 #include "board.h"
 #include "board_internal.h"
@@ -1218,48 +1293,14 @@ static RAMFUNC void flash_enable_xip_via_boot2(void)
  * spin loop, a check in the tick (which preempts whatever core 1 is running)
  * and a check in idle (a core already inside its tick cannot be preempted
  * again, so the tick check alone would never see the flag). */
+/* RAM-resident: this runs while the owner has XIP turned off.  The shared
+ * loop re-publishes the ack for every generation (a publish-once ack is the
+ * "dd: write error at block 0 (-1)" defect) and feeds the watchdog, because
+ * this core is parked with interrupts masked and the tick cannot.  After the
+ * loop, g_core1_stopped keeps the core here for good before a ROM BOOTSEL. */
 static RAMFUNC void rp_flash_park_loop(void)
 {
-#if TOS_DIAG
-    g_park_phase = 2;                       /* the other core parked */
-    g_park_in[plat_cpu_id() & 1u] = 1;
-#endif
-    park.parked = 1;
-    __asm__ volatile("dsb" ::: "memory");
-    /* Busy-spin, not wfe: clearing the flag and signalling is not atomic with
-     * entering wfe, and a lost wakeup would park this core for good with
-     * interrupts masked.  One erase/program burst is short.
-     *
-     * The acknowledgement is re-published for each generation, not once on
-     * entry.  A core that is still inside this loop when the next request is
-     * raised never re-enters it, so a publish-once ack makes that request wait
-     * for an acknowledgement the previous one already consumed, and the write
-     * then fails after the spin budget - the same defect that produced
-     * "dd: write error at block 0 (-1)" on rp2350rvsmp.  Publishing while the
-     * flag is still up is safe: the flag is cleared only after XIP is back, so
-     * "flag clear" means "you may return to flash". */
-    for (volatile uint32_t spins = 0; spins < plat_pre_tick_spins(200000000u); spins++) {
-        if (!park.flag)
-            break;
-        RP_PARK_BARRIER();
-        rp_park_ack(&park);
-        /* Parked with interrupts masked, so the tick cannot feed the watchdog
-         * either.  A writer that never clears the flag (it timed out and
-         * returned) must not turn a recoverable error into a silent reset. */
-        if ((spins & 0xfffffu) == 0xfffffu)
-            wdt_feed();
-    }
-#if TOS_DIAG
-    g_park_in[plat_cpu_id() & 1u] = 0;
-#endif
-    if (g_core1_stopped) {
-        /* The ROM bootloader is about to run on core 0 and the chip is not
-         * reset afterwards, so this core must not come back: the new image
-         * would race it for the shared memory.  Stay here, in RAM. */
-        for (;;)
-            wdt_feed();
-    }
-    park.parked = 0;
+    RP_PARK_PARKED_LOOP(&park, plat_pre_tick_spins(200000000u));
 }
 
 
@@ -1291,106 +1332,19 @@ void plat_flash_park_poll(void)
     }
 }
 
+/* Mask interrupts for the whole handshake: with them on, the tick can land in
+ * this wait loop and reschedule the caller onto the other core, which then is
+ * no longer the one that will unpark - both cores park and the flag is never
+ * cleared (the intermittent rp2350smp dd freeze).  The shared sequence keeps
+ * the mask on success; on timeout it restores and returns -1. */
 static int rp_flash_park_other(void)
 {
-    uint32_t primask;
-    uint32_t myreq;
-
-    if (cpu_count <= 1)
-        return 0;
-
-    /* Mask interrupts for the whole handshake.  With them on, the tick can
-     * land in this wait loop: process_tick() may reschedule, the process can
-     * migrate to the other core, and the core that started the flash call is
-     * no longer the one that will unpark it - the other core then parks as
-     * well and nothing ever clears the flag again.  On rp2350smp that froze
-     * the machine on an intermittent dd, with no output at all. */
-    __asm__ volatile("mrs %0, primask" : "=r"(primask));
-    __asm__ volatile("cpsid i" ::: "memory");
-#if TOS_DIAG
-    {
-        uint32_t id = plat_cpu_id() & 1u;
-
-        g_mask_lr[id]   = (uint32_t)__builtin_return_address(0);
-        g_mask_site[id] = TOS_MASKSITE_FLASH_PARK;
-        g_mask_seq[id]++;
-        g_mask_in[id]   = 1;
-    }
-#endif
-#if TOS_DIAG
-    g_park_phase = 1;                       /* request raised */
-#endif
-    myreq = rp_park_begin(&park, (int)plat_cpu_id());
-    __asm__ volatile("sev" ::: "memory");
-    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
-        /* Only this request's acknowledgement counts.  An ack left over from
-         * an earlier, timed-out handshake must not be read as "the other core
-         * is parked now". */
-        if (rp_park_acked(&park, myreq)) {
-            /* Stay masked: the caller restores the interrupt state once it
-             * has put XIP back and unparked the other core. */
-            return 0;
-        }
-        if ((i & 0xfffffu) == 0xfffffu) {
-            /* The watchdog is fed from the tick, and this loop runs with
-             * interrupts masked - so without this the board would reset
-             * itself while waiting for a core that never answers. */
-            wdt_feed();
-#if TOS_DIAG
-            /* The other core is not answering.  Is it still taking ticks?  Is
-             * it in the idle poll that also looks for the park flag? */
-            diag_char('?');
-            diag_str(" c1t=");
-            diag_u32(g_c1_ticks);
-            diag_str(" idle=");
-            diag_u32(g_cpu_idle[1]);
-            diag_str(" pk=");
-            diag_u32(g_park_phase);
-            diag_str(" pn=");
-            diag_u32(g_park_poll_n);
-            diag_str(" pf=");
-            diag_u32(g_park_poll_flag);
-            diag_str(" pi=");
-            diag_u32(g_park_poll_id);
-            diag_str(" po=");
-            diag_u32(g_park_poll_owner);
-            diag_str(" myid=");
-            diag_u32((uint32_t)plat_cpu_id());
-            diag_str(" myown=");
-            diag_u32(g_park_poll_owner);
-            diag_str(" c0pc=");
-            diag_u32(g_tick_pc[0]);
-            diag_str(" c0lr=");
-            diag_u32(g_tick_lr[0]);
-            diag_str(" c1pc=");
-            diag_u32(g_tick_pc[1]);
-            diag_str(" mseq0=");
-            diag_u32(g_mask_seq[0]);
-            diag_str(" mlr0=");
-            diag_u32(g_mask_lr[0]);
-            diag_str(" msite0=");
-            diag_u32(g_mask_site[0]);
-            diag_str(" isite=");
-            diag_u32(g_idle_site);
-            diag_str(" us0=");
-            diag_u32(g_usb_site[0]);
-            diag_str(" us1=");
-            diag_u32(g_usb_site[1]);
-            diag_str("\r\n");
-#endif
-        }
-    }
-    rp_park_release(&park);
-    __asm__ volatile("sev" ::: "memory");
-    if (!(primask & 1u))
-        __asm__ volatile("cpsie i" ::: "memory");
-    return -1;              /* core 1 never parked: do not kill XIP under it */
+    RP_PARK_OWNER_TAKE(&park, plat_pre_tick_spins(20000000u));
 }
 
 static void rp_flash_unpark_other(void)
 {
-    rp_park_release(&park);
-    __asm__ volatile("sev" ::: "memory");
+    RP_PARK_RELEASE_AND_WAKE(&park);
 }
 #endif
 
