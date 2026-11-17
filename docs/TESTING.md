@@ -157,6 +157,16 @@ x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
   2. **构建了但运行失败/降级**（例：P4 PMP 粒度不足）→ 具名降级，写清硬件原因。
 - 只有第 2 种叫"降级"；两种都不许写成 24/24。
 
+### 5.0.1 硬件验收分工（2026-11-17）
+
+- **关闭 issue 的硬件门槛是 RP2350（ATK-DNRP2350AM）的 Cortex-M33 与 Hazard3 RV32
+  两个 SMP 镜像**；两者都过才算过。
+- **ESP32-C3 由实现侧自测**（命令见 §5.1），结果写 `docs/acceptance/`，不外包、不另开
+  issue。
+- **RP2040 不作为关闭依据**：目前没有自动 BOOTSEL 路径。确实需要 RP2040 证据的改动，
+  单独开一个 RP2040 专项 issue，由板主另行排期；不要写进别的 issue 的关闭条件。
+- **Pico 2 是独立项**（`OPEN-ITEMS.md` §1b），既不是 ATK，也不能假设同镜像能启动。
+
 ### 5.1 ESP32-C3
 
 ```sh
@@ -193,6 +203,9 @@ python scripts/rp2350/kthread_accept.py --uf2 build/rp2350smp.uf2 --out build/kt
 - 信号路径：`sh` 里 `sleep 3000` 后发 `^C`，控制台必须回到 `msh`，无 HardFault/死锁。
 
 ### 5.3 RP2040
+
+> **不是关闭依据**（2026-11-17）：无自动 BOOTSEL 路径。需要 RP2040 证据时单开专项
+> issue，由板主排期。下面的命令仍保留给专项验收使用。
 
 ```sh
 python scripts/rp2040/autoflash.py --uf2 build/rp2040.uf2

@@ -40,6 +40,20 @@ follow it. The detailed matrix, commands and evidence template are in
 
 Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
 
+## Hardware acceptance policy (2026-11-17)
+
+- **RP2350 ATK-DNRP2350AM, both Cortex-M33 and Hazard3 RV32 SMP**, is the
+  closing gate for issue acceptance. An issue that needs hardware closes on
+  those two images.
+- **ESP32-C3 is tested by the implementation side.** Record it under
+  `docs/acceptance/`; it is not delegated and does not need a separate issue.
+- **RP2040 is not a close criterion.** There is no automated BOOTSEL path
+  yet. If a change genuinely needs RP2040 evidence, open a dedicated RP2040
+  issue and it will be scheduled separately; do not put RP2040 into another
+  issue's close condition.
+- **Pico 2 stays its own item** (`OPEN-ITEMS.md` §1b); it is neither the ATK
+  board nor a variant that can be assumed to boot.
+
 ## Hard rules for agents
 
 - Run `git status --short` before editing and keep unrelated user changes.

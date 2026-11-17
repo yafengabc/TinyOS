@@ -59,9 +59,9 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 - **C3 已由本侧测过**（2026-11-17，`736173c`）：`accept 24/24`、`priotest PASS`、
   soak 5 轮 `resets 0 / errors 0`，见 `docs/acceptance/2026-11-17-b3-c3-736173c.md`。
 - **RP2350（ARM 与 RV32 各一次）**：刷当前镜像，heartbeat 6/6 + `hello` + `ls /bin`；
-- **RP2040**：启动 + heartbeat 6/6（镜像格式变了，启动路径要确认）；
 - 可选：用 goc32 产一个 V0 `.tos` 放到板上执行一次，确认旧分支在真机也可用。
 
+RP2040 不作为关闭依据（无自动 BOOTSEL）；确需时另开专项 issue。
 记录镜像、端口、命令；通过后在 `docs/acceptance/` 建卡并把这条移进 HISTORY。
 
 ## 2e. A-7 推迟的口径（2026-11-17）
@@ -71,20 +71,28 @@ Phase A 的收口条件只含 A-0..A-4/A-6/A-8。`ARCHITECTURE-NEXT.md` §7 的�
 的度量表已按这个口径写明，避免再被读成"Phase A 还没完"。此条不需要板子，
 B-4 启动后即可删除。
 
-## 2f. RP park 共享状态重构：三块板未上板（2026-11-17）
+## 2f. RP park 共享状态重构：RP2350 SMP 未上板（2026-11-17）
 
 `board/rp_park.h` 现在持有请求号/ack/flag/parked/owner 五元组，rp2040、rp2350、
 rp2350rv 三块板改为 `static struct rp_park_state park = RP_PARK_STATE_INIT;`；
 entry/exit 序列（IRQ 屏蔽、屏障、sev、超时恢复）**没有动**。UP 目标整段编译掉，
 SMP 目标编译通过，但 QEMU 不跑 RP park，必须上板。
 
-各板跑一次（`rp2040smp`、`rp2350smp`、`rp2350rvsmp`）：
+**RP2350 两个 SMP 镜像各一次**（`rp2350smp`、`rp2350rvsmp`）：
 
 - 1000 轮 `dd of=/x bs=512 count=1` + `rm /x`，确认无 `[flash] park timeout`、无复位；
 - `reboot` 后文件仍在；
 - heartbeat 6/6。
 
+RP2040 不作为关闭依据；它的 park 验收单开专项 issue（#13）另行排期。
 记录镜像/端口/命令；通过后建 `docs/acceptance/` 卡片，并把本条移进 `HISTORY.md`。
+
+## 2g. RP2040 park 专项：等排期（2026-11-17）
+
+RP2040 无自动 BOOTSEL，不能作为其它 issue 的关闭依据。`rp2040smp` 是唯一的
+Cortex-M0+ SMP 目标，park 共享状态改动需要它自己的 1000 轮 `dd`+`rm` 证据
+（HISTORY §35 的竞态就是在这块板上暴露的）。跟踪：[#13](https://github.com/yafengabc/TinyOS/issues/13)，
+由板主排期；关闭时把本条移进 HISTORY。
 
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
