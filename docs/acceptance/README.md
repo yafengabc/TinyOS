@@ -86,8 +86,10 @@
 | 2026-11-17 | T2 soak ?????15s ??+??? | `fd3f079` | QEMU rv32/rv32smp/arm | T2 soak 3/3 PASS??????????????? flake | [soak verify](2026-11-17-soak-verify-fd3f079.md) |
 | 2026-11-17 | B-2b 后半 park 序列共享（#17） | `73b7914` | RP2350 ARM + RV32 (COM14) | T0–T4 PASS：两板 1000x dd/rm bad=0，smpbench ~2x；.data 逐字节相同 | [park merge](2026-11-17-b2b-park-merge-rp2350.md) |
 | 2026-11-17 | RP2040 专项验收（#12） | `2be39bd` | rp2040smp / COM19 / F:(RPI-RP2) | 四判据全过：心跳6/6、1000x dd/rm bad=0、reboot 持久化、goc32 V0 .tos 执行 | [RP2040 accept](2026-11-17-rp2040-accept-2be39bd.md) |
-| 2026-11-17 | Pico 2 A ? SWD ?? | `2be39bd` | Pico 2 + Debugprobe (SWD) | ?? PC=0xeffffffe double fault?boot2/vector ??????????? | [A track scene](2026-11-17-pico2-a-track-swd-scene.md) |
+| 2026-11-17 | Pico 2 A 轨 SWD 现场 | `2be39bd` | Pico 2 + Debugprobe (SWD) | 复现 PC=0xeffffffe double fault；boot2/vector 二进制排除项；根因未定 | [A track scene](2026-11-17-pico2-a-track-swd-scene.md) |
 | 2026-11-18 | 目标/板名改名 + `tinyos-` 前缀 | `e52ad7d` | 13 目标 + fs_ro + QEMU 4 | T0–T2 PASS；chip flag 回归已修；硬件 `NOT RUN` | [rename](2026-11-18-rename-boards-e52ad7d.md) |
-| 2026-11-18 | ATK ?????board ??? + generic ?? | `2d87ded` | ATK-DNRP2350AM (COM14) ARM+RV32?generic ?? | T0/T1 PASS??? heartbeat 6/6?LED/????generic-flash ?? 6/6 | [ATK review](2026-11-18-atk-review-rename-2d87ded.md) |
+| 2026-11-18 | ATK 回归复核：board 重命名 + generic 基线 | `2d87ded` | ATK-DNRP2350AM (COM14) ARM+RV32；generic 基线 | T0/T1 PASS；两板 heartbeat 6/6；LED/键冒烟；generic-flash 真机 6/6 | [ATK review](2026-11-18-atk-review-rename-2d87ded.md) |
 | 2026-11-18 | generic 镜像 + `tos build all` | `a06be75`、`a499be8` | 15 目标 + fs_ro + QEMU 4 | T0–T2 PASS；ATK UF2 逐字节相同；generic 上板 `NOT RUN` | [generic + all](2026-11-18-generic-targets-build-all-a499be8.md) |
 | 2026-11-18 | ESP32-C3 改名 `esp32c3-generic` | `c77319d` | ESP32-C3 / COM4 + 15 目标 + QEMU 4 | T0–T3 PASS：真机 boot + 24/24；T4 `NOT RUN` | [C3 generic](2026-11-18-c3-generic-c77319d.md) |
+| 2026-11-18 | ESP32-C3 改名 `esp32c3-generic` | `c77319d` | 15 目标 + C3 emu + QEMU 4 | T0–T2 PASS；镜像功能性验证通过；C3 真机 `NOT RUN` | [C3 generic](2026-11-18-c3-generic-c77319d.md) |
+| 2026-11-18 | ATK 全 RP2350 目标 + embedded UF2 修复 | `199339d`+fix | ATK-DNRP2350AM (COM14) | `build all` 15/15；7 个 RP2350 目标真机 6/6；修 rp2350-generic/rv-generic UF2 扇区不对齐不启动 | [all RP2350](2026-11-18-atk-rp2350-all-targets.md) |

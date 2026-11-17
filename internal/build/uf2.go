@@ -163,6 +163,20 @@ func elfToFlashRaw(path string) ([]byte, uint32, error) {
 	return raw, uint32(minOff), nil
 }
 
+// rp2350RoundToSector rounds n up to the next 4 KiB flash-sector boundary.
+//
+// A flash-backed image is naturally sector-aligned (the littlefs partition is
+// 512 KiB), so this is a no-op for the shipping boards.  An embedded image
+// (RAM disk linked into .data) ends exactly at its PICOBIN end block,
+// endOff+20, which is not sector-aligned: the RP2350 boot ROM then rejects the
+// UF2, leaves the BOOTSEL drive mounted and never reboots.  Verified on the
+// ATK board: rp2350-generic was stuck in BOOTSEL until the packed image was
+// rounded up (docs/acceptance/2026-11-18-atk-rp2350-all-targets.md).
+func rp2350RoundToSector(n uint32) uint32 {
+	const sector uint32 = 4096
+	return (n + sector - 1) &^ (sector - 1)
+}
+
 // flatToUF2 converts a raw flash image into an RP2040-family UF2 stream.
 func flatToUF2(flat []byte, family uint32) []byte {
 	const blockPayload = 256
@@ -402,8 +416,10 @@ func (b *Builder) emitRP2350UF2(elfPath string) error {
 		copy(flat[fsOff:], ramdisk)
 	} else {
 		// Embedded filesystem: the RAM disk is already linked into the
-		// image, so the UF2 carries the kernel and nothing else.
-		flat = make([]byte, endOff+20)
+		// image, so the UF2 carries the kernel and nothing else.  The image
+		// ends at endOff+20, which is a whole 4 KiB sector only by luck;
+		// rp2350RoundToSector makes it explicit (see its comment).
+		flat = make([]byte, rp2350RoundToSector(endOff+20))
 		copy(flat, kernel)
 	}
 	rp2350CloseBlockLoop(flat, uint32(markerOff), endOff)
@@ -503,8 +519,9 @@ func (b *Builder) emitRP2350RVUF2(elfPath string) error {
 		copy(flat, kernel)
 		copy(flat[fsOff:], ramdisk)
 	} else {
-		// Embedded filesystem: the RAM disk is linked into the image.
-		flat = make([]byte, endOff+20)
+		// Embedded filesystem: the RAM disk is linked into the image.  See
+		// rp2350RoundToSector for why the tail is padded to a whole sector.
+		flat = make([]byte, rp2350RoundToSector(endOff+20))
 		copy(flat, kernel)
 	}
 	binary.LittleEndian.PutUint32(flat[nextWord:nextWord+4], endOff-uint32(markerOff))
