@@ -38,7 +38,7 @@ import time
 import serial
 
 MARK = b"tos> "
-DEFAULT_UF2 = os.path.join("build", "rp2350.uf2")
+DEFAULT_UF2 = os.path.join("build", "tinyos-atk-dnr2350am.uf2")
 TINYOS_USB_VID_PID = "VID_2E8A&PID_000A"   # drivers/usb/rp2350/tusb_shim.c
 
 

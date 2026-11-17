@@ -36,7 +36,7 @@ import serial
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = ROOT / "build" / "tinyos-esp32c3.bin"
 FS = ROOT / "build" / "tinyos-ramdisk-esp32c3.bin"
-FULL = ROOT / "build" / "esp32c3-full.bin"     # kernel padded to FS_OFFSET + fs
+FULL = ROOT / "build" / "tinyos-esp32c3-full.bin"     # kernel padded to FS_OFFSET + fs
 FS_OFFSET = 0x80000
 
 
