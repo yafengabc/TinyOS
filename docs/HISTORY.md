@@ -4821,3 +4821,34 @@ XIP 读 `LBA 0`，而 RAM disk 根本没有被链接进来，所以“generic �
   `tinyos-esp32c3-generic-full.bin`，到 shell（`uptime: 0.112 s`）；
   `scripts/esp-c3/accept.py -p COM4` **24/24 PASS**——PMP 四个隔离项、crash 隔离、
   文件写入/读取/source、^C、reset/reboot 后文件系统保持。T4 soak 未跑。
+
+## 78. 2026-11-18 soak 假 FAIL：先等回显，再等 prompt
+
+**现象**（#23）：复核机的 T2 soak 间歇丢一个 cycle——`deep 2/3`、`journal 2/3`、
+`piperace 1/3`、`free` 解析失败，但同一份 ELF 在别的机器/别的次跑能过；
+`a8d55b7` 把单命令窗口从 15 s 再放宽后仍然出现。
+
+**根因与窗口无关，是同步点选错了**：`tostest` 的 `markSent()` 在写串口**之前**把
+搜索起点设为缓冲区末尾。上一条命令的 `tos> ` 可能还在 pump 里没读出来，于是落在
+mark 之后；`waitFor("tos> ")` 立刻匹配到**上一条的 prompt**，驱动以为命令结束，把
+下一条写进去——下一条的回显就插进了上一条的输出。soak 按输出计数，正好少一个
+cycle。窗口再大也治不好，因为匹配是“成功”的。
+
+**改动**（`5f0eb55`）：
+
+- `socketConn.waitForMark()`：匹配后把 mark 推进到匹配末尾（`waitFor()` 行为不变，
+  两者共用一个内部实现）。
+- `smoke` 每条命令先等它自己的**回显**，再从回显之后等 prompt；找不到回显会打印
+  `smoke: no echo of "<cmd>"`，不再默默拿上一条的 prompt。
+- 回归测试 `TestWaitForMarkConsumesTheCommandEcho`：缓冲区里只有上一条的 prompt
+  时必须**不**匹配，本条输出到达后才匹配。
+
+**验证**（本机 QEMU，go 1.27.3 / qemu 11.1.3）：
+
+- `go test ./cmd/tostest -count=1`、`go test ./... -count=1`、`go vet ./...` PASS；
+- `build all` 15/15；
+- QEMU smoke 4/4（arm/rv32/rv32smp/x86），没有 `no echo` / `no prompt` 行；
+- soak 连续三次 `rv32,rv32smp,arm`（3/4/4 cycles）：**每次 3/3 targets PASS**。
+  改动前大约每次跑都有 1 个目标假 FAIL。
+- 没有加“失败重试一次”来遮住问题：修的是同步点本身，重试会掩盖真正的间歇 bug。
+- 硬件 `NOT RUN`（只动 harness）。
