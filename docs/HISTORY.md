@@ -4145,3 +4145,26 @@ ramdisk 扇区、XIP 基址、驱动目录与默认 feature——同一事实在
 
 **剩余**：镜像清单（同一块板的单核/双核）仍是 `Targets` 字面量；它既不是 chip 事实
 也不是 board 事实，若将来需要自动化，另行引入一份 targets 清单（B-1d）。
+
+## 50. 2026-11-17 A-3 补刀：exec 真正按表分派；A-5/A-7 口径对齐
+
+**背景**：复核指出 A-3 的接缝只是把 `envelope_probe(...)` 换成了
+`lz4tos_exec.probe(...)`——结构体有了，`proc_create_claim()` 仍是单实例调用，
+加一种格式仍要改控制流。同时 `ARCHITECTURE-NEXT` §7/§9 仍把 A-5/A-7 画在 Phase A，
+与"推迟到 B-5/B-4"的共识不一致。
+
+**改动**：
+
+- `kernel/process.c`：`exec_formats[]` / `exec_image_formats[]` 两张以 NULL 结尾的
+  表；容器按 `probe` 顺序尝试，成功者 break，`load` 也走同一个指针；镜像格式同理。
+  代码里不再出现 `lz4tos_exec.` / `elf32_exec.` 的直接调用。
+- `internal/build/execformat_test.go`：静态钉住"表 + 循环、无直接调用"，防止回退。
+- `ARCHITECTURE-NEXT` §7 把 A-5/A-7 移出 Phase A 收口、§9 的对应行改为 B-7/B-4 目标。
+- `OPEN-ITEMS` §2d（运行级 mock 未做）、§2e（推迟口径）。
+
+**验收**：
+
+- 11 目标构建通过（含 `rp2350smp`）；
+- QEMU `rv32`/`rv32smp`/`arm` smoke（`ps`、`piperace`、`deep 3`、`hello`）通过；
+- `go test ./internal/build` 含新的结构测试；
+- **运行级 mock 没有做**：`OPEN-ITEMS` §2d 记录了它需要的开关与测试文件生成器。

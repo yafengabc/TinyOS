@@ -1913,11 +1913,18 @@ static int stream_load(const char *path, uint32_t hdr, uint8_t *dst,
     return rc;
 }
 
-/* C2/A-3: the only format handlers in the current tree.  A new container or
- * image format registers here instead of adding another branch to exec(). */
+/* C2/A-3: the format tables.  A new container or image format registers by
+ * appending an entry here; exec() probes in order and never names a concrete
+ * handler, so adding a format is data, not a new branch.  The NULL sentinel
+ * keeps the loops obvious and makes a forgotten entry a compile error. */
 static const struct exec_format lz4tos_exec = {
     "lz4tos", envelope_probe, stream_load,
     "LZ4TOS envelope with 28-byte hint"
+};
+
+static const struct exec_format *const exec_formats[] = {
+    &lz4tos_exec,
+    NULL
 };
 
 static const struct exec_image_format elf32_exec = {
@@ -1925,13 +1932,27 @@ static const struct exec_image_format elf32_exec = {
     "ET_DYN/ET_EXEC ELF32, segments relocated into the task window"
 };
 
+static const struct exec_image_format *const exec_image_formats[] = {
+    &elf32_exec,
+    NULL
+};
+
 static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
                                  int claim)
 {
     uint32_t raw_size = 0;
     lz4_window_hint_t hint = {0, 0, 0};
-    uint32_t hdr = lz4tos_exec.probe(path, &raw_size, &hint);
-    if (!hdr) {
+    const struct exec_format *cfmt = NULL;
+    uint32_t hdr = 0;
+
+    for (int i = 0; exec_formats[i]; i++) {
+        hdr = exec_formats[i]->probe(path, &raw_size, &hint);
+        if (hdr) {
+            cfmt = exec_formats[i];
+            break;
+        }
+    }
+    if (!cfmt) {
         kprintf("exec: '%s' not found or not a loadable program\n", path);
         return NULL;
     }
@@ -2004,7 +2025,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     }
 
     /* Decode the envelope straight into the reserved window. */
-    if (lz4tos_exec.load(path, hdr, (uint8_t *)base, raw_size) != 0) {
+    if (cfmt->load(path, hdr, (uint8_t *)base, raw_size) != 0) {
         kprintf("exec: '%s' is corrupt (bad LZ4 block)\n", path);
         proc_retire(p);
         return NULL;
@@ -2015,8 +2036,15 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     /* Re-read what the ELF says now that it is here, and refuse a stale or
        tampered hint before the loader can write past an undersized window. */
     uint32_t link_lo = 0, link_hi = 0, link_entry = 0, link_wx = 0;
-    if (elf32_exec.probe(data, size, &link_lo, &link_hi, &link_entry,
-                         &link_wx) != 0) {
+    const struct exec_image_format *ifmt = NULL;
+    for (int i = 0; exec_image_formats[i]; i++) {
+        if (exec_image_formats[i]->probe(data, size, &link_lo, &link_hi,
+                                         &link_entry, &link_wx) == 0) {
+            ifmt = exec_image_formats[i];
+            break;
+        }
+    }
+    if (!ifmt) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         proc_retire(p);
         return NULL;
@@ -2064,7 +2092,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     /* The loader slides the segments into place, clears .bss, applies
        relocations and checks every write against the window it was given. */
     uint32_t entry = 0;
-    if (elf32_exec.load(data, size, win, base, &entry) != 0) {
+    if (ifmt->load(data, size, win, base, &entry) != 0) {
         kprintf("exec: '%s' is not a valid ELF32 program\n", path);
         proc_retire(p);
         return NULL;

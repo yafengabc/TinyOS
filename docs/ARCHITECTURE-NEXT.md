@@ -383,12 +383,16 @@ xip_flash_base/drivers/default_features 来自 `board.conf`，由 `applyBoard()`
 ```
 Phase A（可并行、每项独立提交）
   A-0 SMP exec 并发（BUG-A/B，先做）
-  A-1 配置校验 ─┬─> A-4 flash/cache ─> A-5 内存域接缝
-  A-2 ABI 头     ├─> A-3 exec_format ─> A-8 KASSERT
-  A-6 等待纪律   └─> A-7 LCD lowops
+  A-1 配置校验 ─┬─> A-4 flash/cache
+  A-2 ABI 头     ├─> A-3 exec_format（表 + 循环）
+  A-6 等待纪律   └─> A-8 KASSERT
+
+Phase A 收口条件只含上面六项。以下两项**推迟**，不计入 Phase A：
+  A-5 内存域接缝   -> 与 B-5/B-7 一起（P4 到板后）
+  A-7 LCD lowops   -> 与 B-4 一起（LCD 板适配时）
 
 Phase B（A 稳定后）
-  B-1 生成头
+  B-1 配置生成（B-1a/b/c 已落地，剩镜像清单）
   B-2 park 骨架 + 独占接口
   B-3 LZ4TOS 版本 + 黄金向量
   B-4 LCD upper/lower
@@ -434,16 +438,17 @@ Phase B（A 稳定后）
 
 | 指标 | 现在 | 稳定 v1 目标 |
 |---|---|---|
-| 配置事实 | 4 处 | chip/board/image 三层各一处，`Targets` 全生成 |
+| 配置事实 | 4 处 | chip/board/image 三层各一处 + 生成头（B-1a/b/c 已落地） |
 | conf/target 冲突 | 静默 | 构建期明确报错 |
-| 新板需改内核文件 | 多处 | 0（`Targets` 表一行在 B-1 后消失） |
+| 新板需改内核文件 | 多处 | 0；Go 只剩"镜像清单"（单核/双核） |
 | ABI 偏移 | 内核硬编码 | 单一头 + `offsetof` 静态断言 |
 | 格式版本 | flags 精确匹配 | 高字节版本 + V0 兼容 |
+| exec 注册 | 单实例调用 | 表 + 循环（已落地；mock 运行验证见 `OPEN-ITEMS` §2d） |
 | flash 独占 | 板级私货 | 内核契约 + 共享骨架 |
 | 等待 | 迭代数当时钟，部分在锁内 | tick 后毫秒上限、tick 前按主频折算；不在锁内长等 |
 | 断言 | `assert()` 无条件 no-op | 内部不变量 halt、外部数据返回错误；`TOS_KASSERT` 默认开 |
 | 远端端点 | 无 | C7 形状 + mock lower（参数由 caps 提供） |
-| 单域→多域 | 无接缝 | `mem_domain` 列表，单域行为不变 |
+| 单域→多域 | 无接缝 | B-7（条件，P4 到板后） |
 | 新板验收 | 手工 | 心跳级 6 项（`scripts/<board>/heartbeat.py`） |
 | 平权验收 | 24 项全过或口头子集 | 24/24 或具名 N/24，两种不入项都要 OPEN-ITEMS |
 

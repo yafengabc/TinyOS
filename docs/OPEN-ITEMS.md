@@ -64,6 +64,27 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 
 记录镜像、端口、命令；通过后在 `docs/acceptance/` 建卡并把这条移进 HISTORY。
 
+## 2d. A-3 注册表：运行级 mock 验证未做（2026-11-17）
+
+`exec()` 已改成两张表 + 循环（`exec_formats[]` / `exec_image_formats[]`），
+`lz4tos_exec.probe(` 这类单实例调用已删；`internal/build/execformat_test.go`
+把"表 + 循环、无直接调用"钉成静态测试。
+
+**运行级验证仍缺**：要证明"加一种格式 = 追加一个表项"，需要
+
+- 在 `TOS_EXEC_MOCK` 下注册第二个容器 handler（例如识别 `MOCKTOS` 魔数）；
+- 构建一个含该文件的 QEMU 镜像并执行它。
+
+这需要一个新构建开关和一个测试文件生成器。P4 新格式到来前不是阻塞项；谁做都行，
+做完把这条移进 `HISTORY.md`。
+
+## 2e. A-5 / A-7 推迟的口径（2026-11-17）
+
+A-5（内存域接缝）与 B-5/B-7 一起做、A-7（LCD lowops）与 B-4 一起做；
+Phase A 的收口条件只含 A-0..A-4/A-6/A-8。`ARCHITECTURE-NEXT.md` §7 的顺序图与 §9
+的度量表已按这个口径写明，避免再被读成"Phase A 还没完"。此条不需要板子，
+B-4/B-5 启动后即可删除。
+
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
 `internal/build/build.go::WindowGeometry()` 返回 16 KiB grain / 8 KiB stack /
