@@ -42,6 +42,14 @@ jobs:
       - name: Build x86
         run: go run ./cmd/tos build -target x86 -v
 
+      - name: Show the link the driver would run
+        if: always()
+        run: |
+          clang --target=i386-elf -m32 -fuse-ld=lld -T boot/stage1.ld \
+            -nostdlib -Wl,-static -no-pie -Wl,--gc-sections -Wl,-s \
+            -o /tmp/stage1.elf build/boot/stage1.o -### 2>&1 | tail -20
+          readelf -r build/boot/stage1.o | head -20
+
       - name: Report what came out
         if: success()
         run: |
