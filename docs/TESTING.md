@@ -302,9 +302,10 @@ notes:
 
 - `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
 - 7 个发布镜像构建（esp32c3、rp2040/smp、rp2350/smp、rp2350rv/rvsmp）；
-- `configs/rv32-fsro.conf` 的只读镜像构建（issue #14 的盲区）；
-- rv32/rv32smp/arm/**x86** 的 QEMU smoke（含 `rselftest`）+ `scripts/soak.py` 3 轮
-  （soak 只跑前三个）；
+- `smoke` 是**按目标并行**的一组 job（每个约 50–95 s）：
+  - `configs/rv32-fsro.conf` 的只读镜像构建（只编译，不起机；issue #14 的盲区）；
+  - rv32 / rv32smp / arm / x86 各自构建 + 起机 + `ps`、`ls`、`piperace`、`prot stack`、
+    `deep 3`、`rselftest`；
 - tag 触发的 Release（`release` 依赖 `[checks, build, smoke]`）。
 
 **不覆盖**：
@@ -312,8 +313,9 @@ notes:
 - **x86 的发布资产**：它能在发行版工具链上构建并起机（HISTORY §60），但没有原始磁盘
   镜像的打包路径，所以只在 smoke 里跑，不进 Release（`OPEN-ITEMS.md` 已无此条）；
 - `rv32nc`：整个目标不在 CI 里构建（T1 本地跑）；
-- 任何真机、Pico 2、PIO 目视项；
-- 长时间 SMP/flash soak（CI 只有 3 轮）。
+- **`scripts/soak.py`**：2026-11-17 起从 CI 移出（它只是"冒烟的冒烟"）。soak 属于本地
+  T2/T4，要带日志；
+- 任何真机、Pico 2、PIO 目视项。
 
 所以 **CI 绿 ≠ 回归通过**；按本手册的 T0–T4 执行并在说明里注明哪些是本地/硬件结果。
 

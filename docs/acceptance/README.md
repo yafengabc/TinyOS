@@ -69,3 +69,4 @@
 | 2026-11-17 | B-4a LCD 协议上移 | `968b246` | 11 目标 + QEMU arm/rv32/rv32smp | T0–T2 PASS；T3/T4 `NOT RUN`（§2e，issue #15） | [B-4a](2026-11-17-b4a-lcd-proto-968b246.md) |
 | 2026-11-17 | fs_ro 构建修复（#14） | `a271253` | fs_ro x86/rp2350smp/esp32c3 + 12 目标 + QEMU 3 | T0–T2 PASS；读写路径 `.text` 逐字节相同 | [fs_ro](2026-11-17-fsro-ramdisk-a271253.md) |
 | 2026-11-17 | x86 发行版工具链构建 + 起机 | `b2db294` | QEMU i386（CI `qemu smoke`，run `44015548419`） | T0–T2 PASS；本地换 LD 前后镜像逐字节相同 | [x86](2026-11-17-x86-ci-b2db294.md) |
+| 2026-11-17 | CI smoke 并行化 + soak 移出 | `0207150` | CI `44017659699`：rv32/rv32smp/arm/x86 + fs_ro | T0–T2 PASS；295 s → ≤94 s/leg | [CI smoke](2026-11-17-ci-smoke-matrix-0207150.md) |
