@@ -248,8 +248,14 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 **不做**：全量替换 `sleep` 列表；把早期初始化改成读 tick。
 
 ### A-7｜LCD 接缝（C5）
-- `struct lcd_lowops {init, write_cmd, write_data, fill_rect, sync, delay_ms}`；RP 的 ST7789 作为第一个 lower。
-- 输出/时序不变；mock lower 单测加在 Phase B。
+- **落地形态**（B-4a）：`drivers/display/st7789/lcd_proto.h` 持有 upper——复位/唤醒
+  时序、厂商初始化表、`MADCTL`/`COLMOD`、地址窗口、`RAMWR`；端口只实现 lower 三件事
+  `struct lcd_proto_ops {cmd, data, delay_ms}`（CS/DC、SPI 字节、DMA、毫秒延时）。
+  两个 RP2350 端口（Cortex-M33 / Hazard3）共用同一份协议层。
+- 与最初草案的差异：草案写的是 `{init, write_cmd, write_data, fill_rect, sync, delay_ms}`。
+  `fill_rect`/`sync` 是总线/DMA 的形状，不是面板的形状，放进 upper 会逼每个 lower
+  实现同一套 DMA 策略；先只抽“面板说的话”。
+- 输出/时序不变；`internal/build/lcdproto_test.go` 钉住“协议只有一份”。
 - **不做**：GPIO/SPI/WiFi 全量 upper/lower。
 
 ### A-8｜KASSERT 落地（C2 的配套）
@@ -269,9 +275,9 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 | 项 | 内容 | 依赖/验收 |
 |---|---|---|
 | B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
-| B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态已共享 `board/rp_park.h`，序列待上板后再抽（OPEN-ITEMS §2f）** |
+| B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态已共享 `board/rp_park.h`（HISTORY §57），序列待上板后再抽** |
 | B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
-| B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归 |
+| B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归。**B-4a 协议层已上移（`lcd_proto.h`），真机未验（OPEN-ITEMS §2e）** |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |
 | B-6 | LP/companion 的窄消息接口 + 心跳（C7 形状） | **mock lower 已跑通 `rselftest`（HISTORY §52）**；真 lower 待 P4/C6 |
 | B-7 | 多内存域（仅 PSRAM 窗口确有需求） | C4；QEMU 双段 + P4 硬件 |

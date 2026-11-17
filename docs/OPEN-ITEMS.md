@@ -49,12 +49,20 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
 
-## 2e. A-7 推迟的口径（2026-11-17）
+## 2e. B-4a LCD 协议上移：真机未验（2026-11-17）
 
-A-7（LCD lowops）与 B-4 一起做；A-5（内存域接缝）已于 2026-11-17 落地（`HISTORY` §53）。
-Phase A 的收口条件只含 A-0..A-4/A-6/A-8。`ARCHITECTURE-NEXT.md` §7 的顺序图与 §9
-的度量表已按这个口径写明，避免再被读成"Phase A 还没完"。此条不需要板子，
-B-4 启动后即可删除。
+ST7789 的复位/唤醒时序、厂商初始化表、`MADCTL`/`COLMOD`、地址窗口与 `RAMWR`
+已从两个 RP2350 端口搬进 `drivers/display/st7789/lcd_proto.h`；端口只留 CS/DC、
+SPI 字节、DMA 与毫秒延时（`968b246`，见 `HISTORY` §58）。T0/T1/T2 已过，但**屏幕没亮过**：
+
+- `rp2350smp`（Cortex-M33）与 `rp2350rvsmp`（Hazard3）各刷一次：开机后屏上
+  能看到 banner 与 `tos>` prompt，方向/颜色/反色与改动前一致；
+- `ls /bin` 大段输出无撕裂、无错位（DMA 路径）；
+- 背光开关（`disp` 命令或 `plat_display_backlight_set`）正常。
+
+跟踪：[#15](https://github.com/yafengabc/TinyOS/issues/15)。通过后建
+`docs/acceptance/` 卡片并把本条移进 HISTORY。A-7 的“与 B-4 一起做”至此已满足，
+Phase A 的收口条件只含 A-0..A-6/A-8。
 
 ## 2g. RP2040 专项验收：等排期（2026-11-17）
 

@@ -4329,3 +4329,47 @@ RP2040 的 park 证据拆到专项 #13，等板主排期。
 **一个未关闭的观察**：工作线程的构建机上 `-target x86` 报
 `kernel image 93756 > bootloader 92160`；本机同一提交构建成功（`tinyos.img` 390 KiB）。
 x86 本来就不在 CI/发行工具链（`OPEN-ITEMS.md` §5），这里只记录差异，不在本轮处理。
+
+## 58. 2026-11-17 B-4a：ST7789 协议上移成一份 upper（`lcd_proto.h`）
+
+**问题**：`drivers/display/st7789/rp2350/lcd_st7789.c` 与 `.../rp2350rv/lcd_st7789.c`
+各自带着一份**逐字相同**的复位/唤醒时序、厂商初始化表、`MADCTL`/`COLMOD`、地址窗口。
+两块屏是同一块 ATK 面板，两份代码只是因为一个跑 Cortex-M33、一个跑 Hazard3。改一次
+参数要改两处，漏一处就是"ARM 上颜色不对、RV32 上正常"这种最难查的差异。
+
+**做法**：把"面板说的话"抽成 upper——`drivers/display/st7789/lcd_proto.h`：
+`lcd_proto_panel_init()`（SWRESET/SLPOUT/init 表/INVER/DISPON）、`lcd_proto_window()`
+（CASET/RASET/RAMWR）、`lcd_proto_cmd_data()`。端口只提供 lower 三件事：
+
+```c
+struct lcd_proto_ops { void (*cmd)(uint8_t); void (*data)(const uint8_t *, uint32_t);
+                       void (*delay_ms)(uint32_t); };
+```
+
+CS/DC、SPI 字节、DMA kick/sync、毫秒延时仍是端口的（ARM 轮询 SysTick 下计数器，
+RV32 轮询 TIMER0，两者本来就不能合并）。两个端口都只留 bus bring-up + `proto_ops`。
+
+**与 A-7 草案的差异**：草案写的是
+`struct lcd_lowops {init, write_cmd, write_data, fill_rect, sync, delay_ms}`。
+`fill_rect`/`sync` 描述的是**总线与 DMA**，不是面板；放进 upper 会逼每个 lower（将来
+P4、新板）接受同一套 DMA 策略，而 DMA 恰恰是各板差异最大的地方。所以先只抽协议层，
+渲染（字模、行缓存、扫描、`fill_rect`）留在 lower——那是 B-4b。
+
+**等价性**：搬之前确认两个端口的 init/window 文本相同；搬之后同一棵树前后各构建一次，
+按 ELF 段比较：`.text` `rp2350smp` 70840→70864（+24 B）、`rp2350rvsmp` 79068→79100
+（+32 B），ELF 总长与 `.uf2` 块数不变。差值就是 ops 表的一次间接调用，命令顺序、参数、
+延时数值未变。
+
+**防回退**：`internal/build/lcdproto_test.go` 要求两个端口 include 共享头、调用
+`lcd_proto_panel_init`/`lcd_proto_window`，并且全树只有一份 `pvgam[]` init 表。反向
+验证过（往端口塞一行 `pvgam[]` 立即 FAIL）。
+
+**证据**：`docs/acceptance/2026-11-17-b4a-lcd-proto-968b246.md`（`968b246`），T0/T1/T2
+PASS（11 目标 + QEMU arm/rv32/rv32smp），**T3/T4 NOT RUN**——屏要人看，跟踪 issue #15，
+`OPEN-ITEMS` §2e。
+
+**B-4b 待做**：`font5x7.h` 两份字节相同；`draw_char`/`fill_rect`/行扫描仍是两份。
+等有真机显示回归手段再动，避免一次改"接缝"和"像素"两件事。
+
+**另一处口径修正**：`HISTORY` §57 里写的 RP2040 park 专项 #13 与 #12 重复，已关闭并
+统一指向 #12（`OPEN-ITEMS` §2g）。
