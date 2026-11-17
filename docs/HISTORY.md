@@ -4302,3 +4302,30 @@ XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2
 - 新增负例：缺 `[window] grain` 的错误含 `missing [window] grain` 且不含 `<nil>`；
 - T0、11 目标 + x86 构建、QEMU smoke/soak 通过；**C3 镜像与修复前 b26458d 字节相同**
   （构建侧改动不改内核产物）。
+
+## 57. 2026-11-17 RP2350 真机验收：B-3 V1 与 B-2a park（关闭 #3/#4）
+
+**证据卡**：
+
+- `docs/acceptance/2026-11-17-b2a-b3-rp2350-a16513b.md`
+- `docs/acceptance/2026-11-17-head63f336a-rp2350-63f336a.md`
+
+**B-3 LZ4TOS V1（#3）**：ATK-DNRP2350AM 上 `rp2350smp`（Cortex-M33）与
+`rp2350rvsmp`（Hazard3）都从 V1 镜像启动到 shell，heartbeat 6/6，`hello` 正常，
+`ls /bin` 有内容。C3 之前已由实现侧测过（accept 24/24、soak 0 错误）。格式代码自
+`d0a3cee` 未再改动。RP2040 按新口径不作为关闭依据。
+
+**B-2a park 共享状态（#4）**：
+
+```text
+ARM  1000x dd/rm: rounds=1000 bad=0 timeouts=0 restarts=0
+RV32 1000x dd/rm: rounds=1000 bad=0 timeouts=0 restarts=0
+reboot persistence: 32768 bytes pattern verified on both
+```
+
+两个镜像都没有 `[flash] park timeout`，没有复位；park 状态代码自 `20004a5` 未再改动。
+RP2040 的 park 证据拆到专项 #13，等板主排期。
+
+**一个未关闭的观察**：工作线程的构建机上 `-target x86` 报
+`kernel image 93756 > bootloader 92160`；本机同一提交构建成功（`tinyos.img` 390 KiB）。
+x86 本来就不在 CI/发行工具链（`OPEN-ITEMS.md` §5），这里只记录差异，不在本轮处理。
