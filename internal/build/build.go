@@ -345,6 +345,16 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	// Architecture specific flags.  Everything else is shared so both ports
 	// see the same C dialect, optimiser and warning set.
 	var archFlags []string
+	// Which core this is, is a property of the chip, not of the board name:
+	// the same RP2350 ships as the ATK board and as a Pico 2, and both need
+	// the ARMv8-M flags below.  Keying these on board names silently dropped
+	// them when board/rp2350 became board/atk-dnr2350am, and the image booted
+	// with ARMv7-M MPU registers on an M33 (no MPU -> task switch faults ->
+	// reboot loop).
+	chip := ""
+	if b.BoardConfig != nil {
+		chip = b.BoardConfig.Chip
+	}
 	if b.Target.Arch == "rv32" {
 		// ilp32 = soft float, matching every RV32 MCU we target and keeping
 		// the kernel free of compiler_rt's hard-float helpers.
@@ -365,7 +375,7 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// RP2040 is a Cortex-M0+ (ARMv6-M): no MPU, no BASEPRI, no
 		// ldrex/strex, no CFSR/MMFAR/BFAR.  arch/arm isolates the M0+
 		// specific bits behind this macro so the M3 build is unaffected.
-		if b.Target.Board == "rp2040" {
+		if chip == "rp2040" {
 			archFlags = append(archFlags, "-DTOS_ARM_M0P")
 			// M0+ has no LDREX/STREX.  The SMP build uses one of the
 			// SIO hardware spinlocks as the gate behind the software lock
@@ -379,7 +389,7 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// registers underneath, so arch/arm/platform.c compiles its other
 		// writer.  Fault reporting (CFSR/MMFAR/BFAR) stays on either way -
 		// only TOS_ARM_M0P suppresses that.
-		if b.Target.Board == "rp2350" {
+		if chip == "rp2350" {
 			archFlags = append(archFlags, "-DTOS_ARM_MPU_V8")
 			// Bring-up aid: a 16-entry ring of the last syscall numbers,
 			// dumped by arm_handle_fault().  Only the new M33 port pays for
@@ -449,7 +459,7 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	// kmain can touch a global.  Every other RV32 target is either loaded
 	// whole by QEMU or has a ROM that relocates .data itself, so nothing
 	// else asks for the copy loop.
-	if b.Target.Board == "rp2350rv" {
+	if b.Target.Arch == "rv32" && chip == "rp2350" {
 		archFlags = append(archFlags, "-DTOS_COPY_DATA")
 		// RP2350's Hazard3 PMP supports NAPOT but not TOR, so a task's
 		// window must be one naturally aligned power-of-two region.  The
@@ -954,11 +964,13 @@ func (b *Builder) buildKernel() error {
 	// joins the include path so tusb_config.h is found by name.
 	tusbDir := filepath.Join(b.Root, "third_party", "tinyusb")
 	// TinyUSB is a chip capability, not a board name: every RP2040/RP2350
-	// image has the same USB controller, and a new board on that silicon
-	// (board/pico2) must not have to be added to a list here.
-	useTinyUSB := b.Target.Board == "rp2040" || b.Target.Board == "rp2350" ||
-		b.Target.Board == "rp2350rv" ||
-		(b.BoardConfig != nil && (b.BoardConfig.Chip == "rp2040" || b.BoardConfig.Chip == "rp2350"))
+	// image has the same USB controller, so a new board on that silicon needs
+	// no entry here.
+	chip := ""
+	if b.BoardConfig != nil {
+		chip = b.BoardConfig.Chip
+	}
+	useTinyUSB := chip == "rp2040" || chip == "rp2350"
 	if useTinyUSB {
 		incs = append(incs,
 			filepath.Join(tusbDir, "src"),

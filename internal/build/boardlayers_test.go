@@ -91,3 +91,47 @@ func TestBoardLayering(t *testing.T) {
 		}
 	}
 }
+
+// Flags and include paths must follow the chip or the ISA, never the board
+// name.  When board/rp2350 became board/atk-dnr2350am, three ARMv8-M flags
+// (TOS_ARM_MPU_V8, TOS_SYSCALL_TRACE, TOS_ARM_SIO_SPIN) and TOS_COPY_DATA
+// stopped being defined, and the image booted with ARMv7-M MPU registers on an
+// M33: every task switch faulted and the shell rebooted in a loop.  A build
+// passes either way, which is exactly why this is a source guard.
+func TestNoBoardNameSelectsBuildFlags(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skip("not in the source tree")
+	}
+	dir := filepath.Join(root, "internal", "build")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".go" || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if !strings.Contains(trimmed, "Target.Board ==") &&
+				!strings.Contains(trimmed, "Target.Board !=") {
+				continue
+			}
+			// The empty check is about "is a board set at all", not about
+			// which board it is.
+			if strings.Contains(trimmed, `== ""`) || strings.Contains(trimmed, `!= ""`) {
+				continue
+			}
+			t.Errorf("%s:%d: build behaviour selected by board name: %s",
+				e.Name(), i+1, trimmed)
+		}
+	}
+}
