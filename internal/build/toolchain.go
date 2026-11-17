@@ -191,13 +191,16 @@ func DetectToolchain(target Target) (Toolchain, error) {
 		clang := findTool("clang", "clang-19", "clang-18", "clang-17", "clang-16")
 		lld := findTool("ld.lld", "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16")
 		if clang != "" && lld != "" {
-			// Drive lld through clang rather than calling it directly: the
-			// link helpers pass driver-style flags (-Wl,..., -nostdlib,
-			// -pie) that a bare ld.lld would reject.  lld must be named
-			// explicitly because clang on MSYS2 defaults to GNU ld, which
-			// has no elf_i386 emulation.
+			// Compile with clang (it knows i386-elf), link with ld.lld
+			// directly.  Driving lld through clang used to be necessary for
+			// the driver-style flags, but the link helpers already unwrap
+			// them, and on a distribution toolchain clang does not own an
+			// i386-elf linker: it hands the job to /usr/bin/gcc, which adds
+			// its default -pie.  ld.lld's i386 backend then rejects the boot
+			// sector's 16-bit absolute relocations against local symbols
+			// (OPEN-ITEMS 5).  A bare ld.lld never adds -pie.
 			tc.CC = []string{clang, "--target=i386-elf", "-m32"}
-			tc.LD = []string{clang, "--target=i386-elf", "-m32", "-fuse-ld=lld"}
+			tc.LD = []string{lld, "-m", "elf_i386"}
 			return tc, nil
 		}
 	}
