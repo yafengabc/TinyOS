@@ -180,9 +180,14 @@ func TestBoardHeaderGeneration(t *testing.T) {
 	}
 }
 
-func TestBoardChipPolicy(t *testing.T) {
+// A variant board (base = ...) must be wired for the same silicon as its
+// base.  This replaces the old per-board allow list: with the list gone, the
+// base is the only other statement of what the board is, so it is the check
+// that a typo in chip = runs into.
+func TestBoardVariantMatchesBaseChip(t *testing.T) {
 	root := t.TempDir()
 	write := func(board, conf string) {
+		t.Helper()
 		dir := filepath.Join(root, "board", board)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -191,23 +196,34 @@ func TestBoardChipPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	conf := func(chip string) string {
-		return "[board]\nschema = 1\nchip = " + chip +
-			"\nfs_backing = flash\nramdisk_sectors = 704\n" +
+	conf := func(chip, extra string) string {
+		return "[board]\nschema = 1\nchip = " + chip + "\n" + extra +
+			"fs_backing = flash\nramdisk_sectors = 704\n" +
 			"flash_bytes = 4m\nlfs_offset = 512k\n" +
 			"[window]\ngrain = 4k\nstack = 4k\nguard = 4k\n"
 	}
 
-	write("rp2040", conf("rp2350"))
-	if _, err := LoadBoardConfig(root, "rp2040"); err == nil ||
-		!strings.Contains(err.Error(), "not valid for board") {
-		t.Fatalf("rp2040 with chip=rp2350 was accepted: %v", err)
+	write("base-arm", conf("rp2350", ""))
+	write("variant-same", conf("rp2350", "base = base-arm\n"))
+	if _, err := LoadBoardConfig(root, "variant-same"); err != nil {
+		t.Fatalf("variant on the same silicon rejected: %v", err)
 	}
 
-	/* The same silicon under the other ISA must stay legal. */
-	write("rp2350rv", conf("rp2350"))
-	if _, err := LoadBoardConfig(root, "rp2350rv"); err != nil {
-		t.Fatalf("rp2350rv with chip=rp2350 rejected: %v", err)
+	write("variant-other", conf("rp2040", "base = base-arm\n"))
+	if _, err := LoadBoardConfig(root, "variant-other"); err == nil ||
+		!strings.Contains(err.Error(), "silicon") {
+		t.Fatalf("variant on a different chip was accepted: %v", err)
+	}
+
+	write("self", conf("rp2350", "base = self\n"))
+	if _, err := LoadBoardConfig(root, "self"); err == nil ||
+		!strings.Contains(err.Error(), "this board") {
+		t.Fatalf("base = self was accepted: %v", err)
+	}
+
+	write("orphan", conf("rp2350", "base = nowhere\n"))
+	if _, err := LoadBoardConfig(root, "orphan"); err == nil {
+		t.Fatalf("base = nowhere was accepted")
 	}
 }
 

@@ -17,9 +17,9 @@ func usage() {
 usage:
   tos build [-v] [-target <target>] [-config <file>]
                             build the kernel and filesystem for a target.
-                            Targets: x86, rv32, rv32smp, rv32nc, arm,
-                            rp2040, rp2350, rp2350rv, rp2350rvsmp, esp32c3.  The flash-backed
-                            boards also emit build/<target>.uf2.
+                            Targets are the files in targets/*.conf; -target
+                            takes the file name without the extension.  The
+                            flash-backed boards also emit build/<target>.uf2.
                             -config selects features/drivers from a file; the
                             default is tos.conf when it exists (see configs/).
   tos run   [-headless] [-debug] [-no-build] [-target <target>] [-config <file>]

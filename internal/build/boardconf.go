@@ -14,10 +14,10 @@ import (
 // clocks/XIP/memory domains) stay in the chip/board Go layer; image policy
 // (heap/procs/user trimming) stays in configs/<target>.conf.
 type BoardConfig struct {
-	Path        string
-	Schema      int
-	Chip        string
-	Variant     string
+	Path    string
+	Schema  int
+	Chip    string
+	Variant string
 	// Base names another board directory whose sources this one reuses:
 	// same silicon, different wiring.  Files in this board's directory
 	// shadow same-named files in the base (board_devs.c, board_data.c, ...),
@@ -79,26 +79,12 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if _, ok := Chips[chip]; !ok {
 		return nil, fmt.Errorf("%s: unknown chip %q", relName(root, path), chip)
 	}
-	/* A board directory may only build for the silicon it is wired for.
-	 * rp2350rv is the same physical board as rp2350 with the other ISA, so
-	 * both names are allowed there; everything else is one-to-one.  This is
-	 * the check that catches `board/rp2040/board.conf: chip = rp2350`
-	 * before it produces an image that cannot boot. */
-	allowed, ok := boardChips[board]
-	if !ok {
-		return nil, fmt.Errorf("%s: no chip policy for board %q; add it to boardChips", relName(root, path), board)
-	}
-	validChip := false
-	for _, c := range allowed {
-		if c == chip {
-			validChip = true
-			break
-		}
-	}
-	if !validChip {
-		return nil, fmt.Errorf("%s: chip %q is not valid for board %q (allowed: %s)",
-			relName(root, path), chip, board, strings.Join(allowed, ", "))
-	}
+	/* A board says which chip it is wired for; there is no per-board allow
+	 * list any more.  Two things catch a wrong `chip =`: a variant must name
+	 * the same silicon as its base, and the target's ISA must exist on that
+	 * chip (TestTargetsResolveTheirBoardAndISA / isaFor).  A chip that is
+	 * simply wrong for the board usually fails to compile within seconds,
+	 * because the board's platform code includes the port's headers. */
 	bc := &BoardConfig{
 		Path:        path,
 		Schema:      schema,
@@ -111,10 +97,13 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 		if bc.Base == board {
 			return nil, fmt.Errorf("%s: base = %q is this board", relName(root, path), bc.Base)
 		}
-		baseConf := filepath.Join(root, "board", bc.Base, "board.conf")
-		if _, err := os.Stat(baseConf); err != nil {
-			return nil, fmt.Errorf("%s: base = %q has no board.conf (%s)",
-				relName(root, path), bc.Base, relName(root, baseConf))
+		base, err := LoadBoardConfig(root, bc.Base)
+		if err != nil {
+			return nil, fmt.Errorf("%s: base = %q: %w", relName(root, path), bc.Base, err)
+		}
+		if base.Chip != bc.Chip {
+			return nil, fmt.Errorf("%s: chip = %q but base %q is %q silicon",
+				relName(root, path), bc.Chip, bc.Base, base.Chip)
 		}
 	}
 	for _, p := range splitList(s["peripherals"]) {

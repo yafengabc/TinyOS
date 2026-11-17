@@ -37,22 +37,6 @@ var Chips = map[string]Chip{
 	}},
 }
 
-// boardChips is the construction-time policy: which physical chips a board
-// directory may build for.  rp2350rv is the same board as rp2350 with the
-// other ISA, so both chip names are allowed there; every other board is
-// one-to-one.  A wrong `chip =` in board.conf is caught here instead of
-// producing an image with the wrong triple.
-var boardChips = map[string][]string{
-	"pc":        {"pc"},
-	"qemu-virt": {"qemu-virt"},
-	"qemu-mps2": {"qemu-mps2"},
-	"esp32c3":   {"esp32c3"},
-	"rp2040":    {"rp2040"},
-	"rp2350":    {"rp2350"},
-	"rp2350rv":  {"rp2350"},
-	"pico2":     {"rp2350"},
-}
-
 // isaFor returns the chip/ISA pair a target should compile for.
 func isaFor(chip, arch string) (ChipISA, bool) {
 	c, ok := Chips[chip]

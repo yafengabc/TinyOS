@@ -123,120 +123,8 @@ type Target struct {
 	DefaultFeatures []string
 }
 
-var Targets = map[string]Target{ // The kernel heap has to hold one decompressed program image at a
-	// time: exec() unpacks the program into a kernel buffer before it
-	// copies it into the task window.  The default 32 KiB is enough for
-	// the small tools, but not for the Python interpreter, whose image is
-	// tens of kilobytes.  A board that can spare the room says so here.
-	"x86":  {Name: "x86", Arch: "x86", Board: "pc", HeapBytes: 256 * 1024},
-	"rv32": {Name: "rv32", Arch: "rv32", Board: "qemu-virt", March: "rv32imc", HeapBytes: 256 * 1024},
-	// The shipped littlefs image is small (600 sectors = 300 KiB, same as
-	// every other target): the kernel mounts it with block_count=0 (take
-	// the size from the image superblock) and calls lfs_fs_grow to stretch
-	// it over the real partition, PLAT_LFS_BLOCKS = 896 blocks = 3.5 MiB.
-	// That is what keeps the flashed artifact at 300 KiB while the
-	// filesystem still gets the whole 4 MiB part.
-	// The heap does not hold program images any more: exec() streams the LZ4
-	// block straight into the task window, so the peak is littlefs's working
-	// set - measured on C3 at 768 B after boot and 1 024 B after a `py run`,
-	// where the same numbers used to be 28 424 and 54 752 B.
-	// 8 KiB is 8x the measured peak and still leaves the rest of the kernel
-	// window to the task area: on a 370 KiB part the .bss it frees is worth
-	// more than an arena that never fills.  (It used to be 56 KiB, sized to
-	// hold the largest raw image - the Python interpreter at 31 KiB - while
-	// it was being decompressed in the heap.)  checkLayout() fails the build
-	// if the kernel stops fitting.
-	//
-	// 8 process slots: a proc_t is 792 bytes, and this board only ever runs a
-	// shell plus a foreground child plus a couple of background jobs.  The
-	// 8 slots leave four spare above that - enough for a parent, a child that
-	// exited and is waiting to be reaped, and the odd `&` job - while the
-	// four slots it drops return 3 KiB to .bss.  XipFlashBase is what
-	// selects board/esp32c3/kernel-xip.ld; set it to 0 for the all-RAM
-	// layout.
-	// XipFlashBase must stay 64 KiB aligned: the MMU maps whole 64 KiB
-	// pages and the packer places 0x42000000 at this offset.  0x10000
-	// leaves 448 KiB (0x10000..0x80000) for kernel + WiFi code before the
-	// littlefs partition at 0x80000, instead of the old 256 KiB.
-	"esp32c3": {Name: "esp32c3", Arch: "rv32", Board: "esp32c3", March: "rv32imc", HeapBytes: 80 * 1024, MaxProcs: 8},
-	"arm":     {Name: "arm", Arch: "arm", Board: "qemu-mps2", HeapBytes: 128 * 1024},
-	"rp2040":  {Name: "rp2040", Arch: "arm", Board: "rp2040", HeapBytes: 8 * 1024, MaxProcs: 8, KStack: 8 * 1024},
-	// rp2040smp: both Cortex-M0+ cores.  Core 1 sits in the boot ROM's
-	// wait-for-FIFO loop, not at our reset vector, so the board's
-	// plat_start_cpu() pushes the pico-sdk handshake (VTOR/SP/entry) and
-	// start.S joins the scheduler from arm_core1_entry.  The second 16 KiB
-	// kernel stack comes out of .bss, which shrinks the task area; the
-	// kernel image and the 1.5 MiB littlefs partition are unchanged.
-	"rp2040smp": {Name: "rp2040smp", Arch: "arm", Board: "rp2040", CPUs: 2, HeapBytes: 8 * 1024, MaxProcs: 8, KStack: 8 * 1024},
-	// RP2350: ARMv8-M Mainline (Cortex-M33, Secure state).  Its PMSAv8 MPU is
-	// not the ARMv7-M one, so the port builds with TOS_ARM_MPU_V8 and
-	// arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR.
-	// The M33 user programs are bigger than the RV32 ones: bin/sh is a
-	// 19,884-byte ELF that compresses to 15,632 bytes.  The 60 KiB below was
-	// sized when exec() held the compressed buffer AND the decompression
-	// buffer at once, so the 32 KiB default arena failed at the first shell
-	// and the biggest program (py) wanted ~49 KiB.  Streaming exec made that
-	// reasoning obsolete - the heap now only carries littlefs's working set -
-	// but the value is left alone until an rp2350 board can confirm a smaller
-	// one.  The link places __app_base after whatever .bss turns out to be, so
-	// the panel's DMA row buffer (3.8 KiB in lcd_st7789.c) no longer has to fit
-	// a fixed 128 KiB line.
-	"rp2350": {Name: "rp2350", Arch: "arm", Board: "rp2350", HeapBytes: 60 * 1024},
-
-	// rp2350rv: the same physical board with its Hazard3 RISC-V cores
-	// instead of the Cortex-M33 pair.  RP2350 boots either architecture,
-	// selected by the PICOBIN IMAGE_TYPE in board/rp2350rv/image_def.S, so
-	// this is a separate image rather than a runtime switch.
-	//
-	// The kernel runs in place from XIP flash at 0x10000000; .data/.bss live
-	// in the 520 KiB SRAM at 0x20000000.  The boot ROM does no load at all,
-	// so _start copies .data from its LMA (TOS_COPY_DATA in arch/rv32/
-	// start.S).  The littlefs partition stays in flash at 0x80000, exactly
-	// like the ARM image, and is read through XIP (writes use the ROM's
-	// flash API, see board/rp2350rv/platform.c).
-	//
-	// Hazard3 is RV32IMAC_Zicsr in machine mode only; A is what the SMP
-	// spin lock will need later, and it costs nothing on this core.
-	"rp2350rv": {Name: "rp2350rv", Arch: "rv32", Board: "rp2350rv", March: "rv32imac", HeapBytes: 32 * 1024},
-
-	// rp2350rvsmp: both Hazard3 cores.  Core 1 is parked in the boot ROM's
-	// SIO-FIFO launch loop, not at our reset vector, so the board pushes the
-	// pico-sdk handshake and starts it at _start; start.S then parks it on
-	// cpu_release until the kernel is ready.  mtime is shared but mtimecmp is
-	// core-local (pico-sdk riscv_platform_timer.h), so each hart gets its own
-	// tick.  The second 16 KiB kernel stack comes out of .bss; the heap arena
-	// drops to the same 32 KiB the single-core image uses.
-	"rp2350rvsmp": {Name: "rp2350rvsmp", Arch: "rv32", Board: "rp2350rv", March: "rv32imac", CPUs: 2, HeapBytes: 32 * 1024},
-
-	// rp2350smp: the same board with both Cortex-M33 cores.  Core 1 is not
-	// running at reset (the boot ROM leaves it in a wait-for-FIFO loop), so
-	// the board launches it from cpu_init() - that is what makes this a
-	// separate target rather than a runtime switch.  The per-core kernel
-	// stack drops to 16 KiB (KSTACK_BYTES in kernel/cpu.h is per arch), so
-	// two cores still reserve the 32 KiB the single-core image did and the
-	// 60 KiB exec arena is untouched.
-	"rp2350smp": {Name: "rp2350smp", Arch: "arm", Board: "rp2350", CPUs: 2, HeapBytes: 60 * 1024},
-
-	// rp2350pico2: the same silicon on Raspberry Pi's own board.  The board
-	// directory reuses board/rp2350 through `base =` and replaces only the
-	// device table (LED on GP25, no panel, no card slot) and its board.conf
-	// (4 MiB flash, no lcd peripheral).  Single core first: the point of this
-	// target is a bring-up probe, and an SMP image makes a boot fault harder
-	// to read.  A pico2smp target is one line away once this one boots.
-	"rp2350pico2": {Name: "rp2350pico2", Arch: "arm", Board: "pico2", HeapBytes: 60 * 1024},
-
-	// The SMP build: the same qemu-virt board, two harts, and the only
-	// target that adds the A extension.  Atomic memory operations are what
-	// the spin lock is made of (arch/rv32/platform.c), and the plain rv32
-	// target keeps rv32imc so the ESP32-C3's ISA stays the reference.
-	"rv32smp": {Name: "rv32smp", Arch: "rv32", Board: "qemu-virt", March: "rv32imac", CPUs: 2, HeapBytes: 256 * 1024},
-
-	// rv32nc = rv32im, no C extension: the same machine as rv32 without
-	// compressed instructions.  Exists so the cost/benefit of RVC can be
-	// measured per release (see docs/SIZE-NOTES.md if present); the ELF
-	// links identically, only the encoding differs.
-	"rv32nc": {Name: "rv32nc", Arch: "rv32", Board: "qemu-virt", March: "rv32im", HeapBytes: 256 * 1024},
-}
+// Targets is loaded from targets/*.conf (targets.go).  Each file names a
+// board, an ISA and the image knobs; nothing about a board lives here.
 
 // WindowGeometry is filled by applyBoard() from board.conf; there is no
 // board-name switch here, so a new board only edits its conf and layout.c.
@@ -1296,8 +1184,17 @@ func (b *Builder) buildKernel() error {
 
 		// Flash-backed targets need a board-specific image format.
 		if b.Target.FSBacking == "flash" {
-			switch b.Target.Board {
-			case "esp32c3":
+			/* Which image format a flash-backed board needs is a property of
+			 * the silicon, not of the board: the same chip has one ROM, one
+			 * XIP window and one way of scanning for an image.  Keeping the
+			 * switch on board names meant every new board on the same chip
+			 * added a case here. */
+			chip := ""
+			if b.BoardConfig != nil {
+				chip = b.BoardConfig.Chip
+			}
+			switch {
+			case chip == "esp32c3":
 				img, segs, err := ESPImageFromELF(elfPath, true, b.Target.XipFlashBase)
 				if err != nil {
 					return err
@@ -1338,21 +1235,21 @@ func (b *Builder) buildKernel() error {
 					relName(b.Root, out), relName(b.Root, b.fsImage()))
 				b.logf("      or one shot: esptool write-flash 0x0 %s\n",
 					relName(b.Root, fullPath))
-			case "rp2040":
+			case chip == "rp2040":
 				if err := b.emitRP2040UF2(elfPath); err != nil {
 					return err
 				}
-			case "rp2350", "pico2":
-				// Same silicon, same PICOBIN packaging; the switch is still
-				// by board name, which is the next thing to move to the chip
-				// layer (a pico2smp image would need its own row here).
+			case chip == "rp2350" && b.Target.Arch == "arm":
 				if err := b.emitRP2350UF2(elfPath); err != nil {
 					return err
 				}
-			case "rp2350rv":
+			case chip == "rp2350" && b.Target.Arch == "rv32":
 				if err := b.emitRP2350RVUF2(elfPath); err != nil {
 					return err
 				}
+			default:
+				return fmt.Errorf("target %s: no image format for chip %q, arch %q",
+					b.Target.Name, chip, b.Target.Arch)
 			}
 		}
 		return nil
