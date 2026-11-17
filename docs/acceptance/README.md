@@ -82,3 +82,4 @@
 | 2026-11-17 | B-2b park 1000 ????? | `313270b` | RP2350 ARM + RV32 (COM14) | T0/T1/T3/T4 PASS??? 1000x dd/rm bad=0?smpbench ~2x?T2 soak 1/3 harness flake | [park 1000](2026-11-17-b2b-park-1000round-313270b.md) |
 | 2026-11-17 | T2 soak ?????15s ??+??? | `fd3f079` | QEMU rv32/rv32smp/arm | T2 soak 3/3 PASS??????????????? flake | [soak verify](2026-11-17-soak-verify-fd3f079.md) |
 | 2026-11-17 | B-2b 后半 park 序列共享（#17） | `73b7914` | RP2350 ARM + RV32 (COM14) | T0–T4 PASS：两板 1000x dd/rm bad=0，smpbench ~2x；.data 逐字节相同 | [park merge](2026-11-17-b2b-park-merge-rp2350.md) |
+| 2026-11-17 | RP2040 专项验收（#12） | `2be39bd` | rp2040smp / COM19 / F:(RPI-RP2) | 四判据全过：心跳6/6、1000x dd/rm bad=0、reboot 持久化、goc32 V0 .tos 执行 | [RP2040 accept](2026-11-17-rp2040-accept-2be39bd.md) |

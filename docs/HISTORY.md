@@ -4604,3 +4604,25 @@ T0/T1（12 目标 + fs_ro）/T2（smoke 4 + soak 3/3）通过。T3 归 #17 的�
 按 AGENTS.md 不作关闭依据（其 RAM 段对象级相同）。证据：
 `docs/acceptance/2026-11-17-b2b-park-merge-rp2350.md`（`73b7914`）。§67 里“循环仍分板”
 的悬置到此结清，#17 关闭。
+
+## 71. 2026-11-17 RP2040 专项验收（#12 关闭）
+
+RP2040 无自动 BOOTSEL（CH343 的 DTR/RTS 未接复位），它不是任何其它 issue 的关闭依据，
+证据集中在本条。板子就位后按 OPEN-ITEMS §2g 的四条判据一次跑完（镜像 `2be39bd`，
+`rp2040smp`，UART0 COM19，BOOTSEL 盘 F:）：
+
+1. **启动**：banner + `[smp] 2 of 2 CPU(s) online` + `flash writes enabled` + shell；
+   heartbeat **6/6**（hello、`ls /bin`、wfile/cat/rm、crash 故障隔离）。
+2. **park 1000 轮**：`dd of=/x bs=512 count=1` + `rm /x` × 1000，`bad=0 timeouts=0
+   restarts=0`（497.7 s），无 `[flash] park timeout`、无复位；32 KiB 回读 pattern
+   verified；之后 heartbeat 仍 6/6。这一轮同时给 B-2b 的 park 序列共享补上了 RP2040
+   真机证据（之前只有对象级等价）。
+3. **持久化**：写 `/keep` → `reboot`（TinyOS banner 重现）→ 回读 pattern verified。
+4. **goc32 V0 `.tos`（可选）**：`goc32 -target rp2040` 产出 V0 `LZ4TOS`（hdr[6]=1），
+   经 `tosput-cli` 上传（crc32 verified）后在板上执行，打印 `hello from ring 3!`。
+   顺带确认：默认 `-target rv32` 的产物会被内核正确解开 V0 信封、仅在 ELF machine 处
+   拒绝（rv32 vs arm），即 V0 容器仍被接受。
+
+**结论**：四条判据全部通过，#12 关闭，OPEN-ITEMS §2g 移入本条。RP2040 仍不进自动回归
+矩阵（无自动 BOOTSEL），需要时再由板主人工安排。证据：
+`docs/acceptance/2026-11-17-rp2040-accept-2be39bd.md`。

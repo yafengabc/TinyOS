@@ -49,13 +49,6 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
 
-## 2g. RP2040 专项验收：等排期（2026-11-17）
-
-RP2040 无自动 BOOTSEL，不能作为其它 issue 的关闭依据；确需 RP2040 证据的部分集中在
-[#12](https://github.com/yafengabc/TinyOS/issues/12)（LZ4TOS V1 启动 + park 1000 轮
-`dd`+`rm`），由板主人工安排。`rp2040smp` 是唯一的 Cortex-M0+ SMP 目标，park 证据值得
-单独跑一次（HISTORY §35 的竞态就是在这块板上暴露的）。关闭 #12 时把本条移进 HISTORY。
-
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在
