@@ -3,16 +3,24 @@
  *
  * Responsibilities:
  *   - enable A20
- *   - load the flat kernel image (LBA 1 .. 180) to 0x00010000
+ *   - load the flat kernel image (LBA 1 .. 200) to 0x00010000
  *   - switch to 32-bit protected mode and jump to the kernel entry
  *
  * The disk layout is fixed, so no patching of the boot sector is needed.
  * Everything has to fit into the first 512 bytes.
  *
  * The littlefs filesystem is NOT loaded here: it lives on the disk at LBA
- * 181 and the kernel reads it through its own ATA PIO driver once paging
+ * 201 and the kernel reads it through its own ATA PIO driver once paging
  * is up.  This keeps the boot sector small and removes the real-mode DMA
  * window (0xA0000..0x100000) problem entirely.
+ *
+ * The 100 KiB kernel budget is a hard limit, not a target: the loader reads
+ * that many sectors and nothing else, and build.go fails the build when the
+ * image no longer fits.  90 KiB was enough for a long time, until the distro
+ * clang (18) produced a 94 KB kernel where MSYS clang 23 stayed under 90 KB -
+ * see OPEN-ITEMS 5.  If the budget has to move again, KERNEL_SECTORS here,
+ * KernelSectors in internal/build and PLAT_LFS_LBA in board/pc/layout.c move
+ * together, and the build checks that they did.
  *
  * Note: the kernel image on disk only contains the file-backed part
  * (.text/.rodata/.data).  Its .bss is *not* stored; kernel/entry.S zeroes
@@ -20,7 +28,7 @@
  * reads a fixed number of sectors and the rest of the image is zero padding.
  */
 #define KERNEL_LBA      1
-#define KERNEL_SECTORS  180            /* 90 KiB: 0x10000 .. 0x2E000 */
+#define KERNEL_SECTORS  200            /* 100 KiB: 0x10000 .. 0x29000 */
 #define KERNEL_SEG      0x1000         /* 0x1000 << 4 == 0x10000 */
 
     .section .text.entry, "ax"

@@ -10,12 +10,12 @@
 | CPU | i386 兼容，单核（`PLAT_MAX_CPUS = 1`） |
 | 启动 | BIOS 读 LBA 0 的 512 B 引导扇区（`boot/stage1.S`），自己进保护模式 |
 | 内核 | 链接在 `0x10000`，由引导扇区用 int 13h LBA 扩展读入 |
-| 文件系统 | ATA PIO 上的 littlefs，从 LBA 181 开始，随镜像发布 300 KiB（75 块） |
+| 文件系统 | ATA PIO 上的 littlefs，从 LBA 201 开始，随镜像发布 300 KiB（75 块） |
 | 内存 | QEMU 给 128 MiB（`PLAT_RAM_TOP = 0x08000000`），平坦地址空间 |
 | 控制台 | VGA 文本模式 + COM1；`-headless` 时只用 COM1 |
 | 输入 | PS/2 键盘 |
 
-镜像布局：`LBA 0` 引导扇区 → `LBA 1..180` 内核（90 KiB）→ `LBA 181` 起 littlefs。
+镜像布局：`LBA 0` 引导扇区 → `LBA 1..200` 内核（100 KiB）→ `LBA 201` 起 littlefs。
 
 ## 构建与运行
 

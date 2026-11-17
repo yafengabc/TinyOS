@@ -23,8 +23,8 @@ const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
 
 
 /* The boot sector loads the kernel from LBA 1 and the filesystem follows
- * it (BootSectors + KernelSectors = 181, see internal/build). */
-const uint32_t PLAT_LFS_LBA = 181;
+ * it (BootSectors + KernelSectors = 201, see internal/build). */
+const uint32_t PLAT_LFS_LBA = 201;
 const uint32_t PLAT_LFS_BLOCKS = 75;   /* 300 KiB, unchanged */
 
 /* One CPU: these boards have a single core.  The SMP build sets 2 and
