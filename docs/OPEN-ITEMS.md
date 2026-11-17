@@ -141,3 +141,21 @@ disk 链接在镜像里），但两台都**没有上板**：启动、`mount`、`
 
 关闭条件：两台在 ATK-DNRP2350AM 上各一次启动 + `ls`，结果写进
 `docs/acceptance/`，并记到 issue #7 的后续里。
+
+## 11. C3 的 PWM/SPI/I2C 还差电气验收（2026-11-18）
+
+2026-11-18 在 COM4 上把三条用户态路径跑通了。软件层结果：
+
+- `pwm`：6 通道；`pwm 3 1000 50` → `pwm: GP3 = 1000 Hz, 50%`；`pwm 3 off` → `pwm: GP3 off`；
+- `i2c`：1 条总线；`i2c scan 0`（100 kHz 与 400 kHz）→ `i2c: 0 device(s)`，无器件时不 panic；
+- `spi`：1 条总线；`spi loop 0 -1 1000000` → `recv 00 00 00 00`（没有 MOSI→MISO 跳线，
+  按预期 mismatch）；`spi loopback 0` → `internal loopback failed`（C3 没有内部回环位，
+  文档已写明）。
+
+还没做的是电气/外部器件层：
+
+1. **LEDC**：用示波器或 LED 看 GP3 的 1 kHz/50% 波形——软件只能证明配置被接受。
+2. **SPI2**：把 MOSI 跳到 MISO，`spi loop 0 -1 1000000` 应回读 `55 aa 00 ff`。
+3. **I2C**：接一个从设备（BME280/SSD1306 等），`i2c scan 0` 应列出地址。
+
+关闭条件：三项各一条实机记录（命令 + 输出或波形），写进 `docs/acceptance/`。

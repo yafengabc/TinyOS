@@ -174,7 +174,7 @@ C3 实测（160 MHz）：`threadbench` 三段同样 90 万次迭代——3 线�
 | PMP 分段、U-mode、`ecall` | ✅ | 与 QEMU rv32 同一套 |
 | WiFi（PHY/WPA2/小型 IPv4）+ `ping`/`http` | ✅ 实机 | `drivers/wifi/esp32c3/`，预编译 blob |
 | `py` 解释器、管道、线程、邮箱、内核裁剪 | ✅ 实机 | 百行脚本可跑 |
-| PWM / SPI2 / I2C0 | ◐ 已实现，待实机验收 | LEDC 与 SPI2 是硬件外设，I2C 是软件位翻转；`pwm`/`spi`/`i2c` 命令已进镜像 |
+| PWM / SPI2 / I2C0 | ◐ 命令级实机通过 | 2026-11-18 COM4：`pwm` 6 通道、`pwm 3 1000 50` 与 `pwm 3 off` 成功；`i2c scan 0` 在 100k/400k 扫完 0 设备；`spi` 报 1 条总线，`spi loop` 无跳线时按预期 mismatch，`spi loopback` 按文档在 C3 上不可用。波形与从设备仍待测（OPEN-ITEMS §11） |
 | 软浮点 / Q16.16 | ✅ | 链接期按需保留 |
 | SMP | — | C3 是单核 |
 
