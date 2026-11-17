@@ -96,6 +96,13 @@ type Target struct {
 	// TOS_KSTACK_BYTES define, so this cannot drift between them.
 	KStack int
 
+	// Window geometry, filled from board.conf by applyBoard().  Keeping it
+	// out of the literals is what lets a new board touch only its conf and
+	// layout.c.
+	winGrain int
+	winStack int
+	winGuard int
+
 	// CPUs is how many harts this target is built for.  0 and 1 mean the
 	// same thing - a uniprocessor, with no TOS_MAX_CPUS define at all, so
 	// none of the SMP code (second trap vector, second kernel stack, per-CPU
@@ -223,15 +230,11 @@ var Targets = map[string]Target{ // The kernel heap has to hold one decompressed
 	"rv32nc": {Name: "rv32nc", Arch: "rv32", Board: "qemu-virt", March: "rv32im", HeapBytes: 256 * 1024},
 }
 
-// WindowGeometry mirrors the board's layout.c: the task-window grain, the
-// default per-task stack when the program has no TOS_STACK note, and the
-// guard hole under the stack.
+// WindowGeometry is filled by applyBoard() from board.conf; there is no
+// board-name switch here, so a new board only edits its conf and layout.c.
+// Callers must let ensureBoardConfig() run first (Build does).
 func (t Target) WindowGeometry() (grain, stack, guard int) {
-	switch t.Board {
-	case "esp32c3", "rp2040", "rp2350", "rp2350rv":
-		return 4 << 10, 4 << 10, 4 << 10
-	}
-	return 64 << 10, 32 << 10, 16 << 10
+	return t.winGrain, t.winStack, t.winGuard
 }
 
 // windowNotes is what windowNote() finds in a linked user ELF.

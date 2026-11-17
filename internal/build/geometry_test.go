@@ -17,24 +17,23 @@ func TestWindowGeometryMatchesLayouts(t *testing.T) {
 		t.Skip("not in the source tree")
 	}
 
-	cases := []struct {
-		board string
-		names []string
-	}{
-		{"esp32c3", []string{"PLAT_APP_GRAIN", "PLAT_STACK_BYTES", "PLAT_HEAP_GUARD"}},
-		{"rp2040", []string{"PLAT_APP_GRAIN", "PLAT_STACK_BYTES", "PLAT_HEAP_GUARD"}},
-		{"rp2350", []string{"PLAT_APP_GRAIN", "PLAT_STACK_BYTES", "PLAT_HEAP_GUARD"}},
-		{"rp2350rv", []string{"PLAT_APP_GRAIN", "PLAT_STACK_BYTES", "PLAT_HEAP_GUARD"}},
+	/* Every board with a layout.c, not a hand-picked four: a new board that
+	 * only edits board.conf + layout.c must be covered automatically. */
+	boards, err := filepath.Glob(filepath.Join(root, "board", "*", "layout.c"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	names := []string{"PLAT_APP_GRAIN", "PLAT_STACK_BYTES", "PLAT_HEAP_GUARD"}
 
-	for _, tc := range cases {
-		t.Run(tc.board, func(t *testing.T) {
-			src, err := os.ReadFile(filepath.Join(root, "board", tc.board, "layout.c"))
+	for _, file := range boards {
+		board := filepath.Base(filepath.Dir(file))
+		t.Run(board, func(t *testing.T) {
+			src, err := os.ReadFile(file)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := make([]int, len(tc.names))
-			for i, name := range tc.names {
+			got := make([]int, len(names))
+			for i, name := range names {
 				re := regexp.MustCompile(`(?m)^\s*(?:static\s+)?const\s+uint32_t\s+` +
 					regexp.QuoteMeta(name) + `\s*=\s*([^;]+);`)
 				m := re.FindStringSubmatch(string(src))
@@ -47,12 +46,28 @@ func TestWindowGeometryMatchesLayouts(t *testing.T) {
 				}
 				got[i] = v
 			}
-			grain, stack, guard := Target{Board: tc.board}.WindowGeometry()
+			/* Enrich a target for this board the same way a build does. */
+			var tg Target
+			for _, cand := range Targets {
+				if cand.Board == board {
+					tg = cand
+					break
+				}
+			}
+			if tg.Name == "" {
+				t.Fatalf("no Target for board %q", board)
+			}
+			b := New(root)
+			b.Target = tg
+			if err := b.ensureBoardConfig(); err != nil {
+				t.Fatal(err)
+			}
+			grain, stack, guard := b.Target.WindowGeometry()
 			if grain != got[0] || stack != got[1] || guard != got[2] {
 				t.Fatalf("WindowGeometry() = %d/%d/%d, layout.c = %d/%d/%d",
 					grain, stack, guard, got[0], got[1], got[2])
 			}
-			bc, err := LoadBoardConfig(root, tc.board)
+			bc, err := LoadBoardConfig(root, board)
 			if err != nil {
 				t.Fatal(err)
 			}

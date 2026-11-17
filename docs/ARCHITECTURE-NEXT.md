@@ -197,9 +197,11 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - `ApplyConfig()` 在套用 conf features/drivers 前校验目标能力；不相容直接报错。
 - 能力校验的覆盖范围要说清楚：`featurePeripheral()` 目前只映射 `wifi`/`pio`/`lcd`；
   其余 feature 暂时静默通过，A-1 的注释里写明，或改成按 `peripherals` 反推。
-- `chip=` 的校验**不要按板名硬编码**：用"已知 chip 集合 + chip→arch 映射"，再核对
-  `Target.Arch`；测试遍历 `Targets` 里的棋盘，而不是写死板名列表。否则"加一块已有 chip
-  的新板"仍要改三处 Go（`Targets`、chip 映射、测试），正好是 C1 要消灭的返工面。
+- `chip=` 的校验用 `boardChips` 策略表（board → 允许的物理 chip 集合）：`rp2350rv`
+  与 `rp2350` 共用 rp2350 的两种 ISA，其余一对一；不匹配在 `LoadBoardConfig` 构建期报错，
+  不再有"能构建但起不来"的镜像（`HISTORY` §56）。
+- `WindowGeometry()` 从 `board.conf` 派生（`applyBoard()` 写回 Target），`geometry_test`
+  遍历所有 `board/*/layout.c`，新增板只改 conf + layout.c 即自动纳入三方一致检查。
 - 扩展 `geometry_test.go` 为 board.conf ↔ `layout.c` ↔ `WindowGeometry()` 三方一致。
 - **不做**：生成头、搬 `layout.c`、TOML。
 

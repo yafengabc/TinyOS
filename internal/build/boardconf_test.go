@@ -180,6 +180,59 @@ func TestBoardHeaderGeneration(t *testing.T) {
 	}
 }
 
+func TestBoardChipPolicy(t *testing.T) {
+	root := t.TempDir()
+	write := func(board, conf string) {
+		dir := filepath.Join(root, "board", board)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "board.conf"), []byte(conf), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conf := func(chip string) string {
+		return "[board]\nschema = 1\nchip = " + chip +
+			"\nfs_backing = flash\nramdisk_sectors = 704\n" +
+			"[window]\ngrain = 4k\nstack = 4k\nguard = 4k\n"
+	}
+
+	write("rp2040", conf("rp2350"))
+	if _, err := LoadBoardConfig(root, "rp2040"); err == nil ||
+		!strings.Contains(err.Error(), "not valid for board") {
+		t.Fatalf("rp2040 with chip=rp2350 was accepted: %v", err)
+	}
+
+	/* The same silicon under the other ISA must stay legal. */
+	write("rp2350rv", conf("rp2350"))
+	if _, err := LoadBoardConfig(root, "rp2350rv"); err != nil {
+		t.Fatalf("rp2350rv with chip=rp2350 rejected: %v", err)
+	}
+}
+
+func TestBoardMissingWindowField(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "board", "rp2040")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	text := "[board]\nschema = 1\nchip = rp2040\nfs_backing = flash\n" +
+		"ramdisk_sectors = 1200\n[window]\nstack = 4k\nguard = 4k\n"
+	if err := os.WriteFile(filepath.Join(dir, "board.conf"), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadBoardConfig(root, "rp2040")
+	if err == nil {
+		t.Fatal("missing grain was accepted")
+	}
+	if !strings.Contains(err.Error(), "missing [window] grain") {
+		t.Errorf("error does not name the missing key: %v", err)
+	}
+	if strings.Contains(err.Error(), "<nil>") {
+		t.Errorf("error still prints <nil>: %v", err)
+	}
+}
+
 func TestBoardConfigRejectsBadSchema(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "board", "rp2040"), 0o755); err != nil {

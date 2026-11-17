@@ -4268,3 +4268,37 @@ XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2
 - T0、11 目标 + x86 构建；
 - QEMU `rv32`/`rv32smp`/`arm` smoke 与 `soak.py --cycles 3` 通过；
 - **C3 真机**：`accept.py` 24/24、soak 5 轮 `resets 0, errors 0`。
+
+## 56. 2026-11-17 B-1c 漏迁修复（#8–#11）
+
+**背景**：监督侧在 B-1c 之后实测到四个回归，全部由"把事实搬出 Go"引起，修法都不大：
+
+- **#8 `tos doctor` 全 NOT FOUND**：B-1c 从 `Targets` 删除了 triple/mcpu，但 `doctor`
+  仍读裸 `Targets[name]`，空 triple 让 `DetectToolchain` 落到 x86 路径。
+- **#9 `chip` 不再与物理板校验**：B-1c 删掉了旧的 target↔chip 校验后，只剩"chip 表里
+  有这个键"，把 rp2040 写成 `chip = rp2350` 会安静产出 M33 镜像。
+- **#10 `WindowGeometry()` 仍是硬编码 switch**：`board.conf` 的窗口三项没有写回
+  `Target`，新板只改 conf/layout.c 会在构建期放行、运行时才被 `exec()` 拒绝。
+- **#11 缺字段报 `<nil>`**：`parseSize` 对缺键返回 `(0,nil)`，`LoadBoardConfig` 把它
+  打印成 `[window] grain: <nil>`。
+
+**改动**：
+
+- `doctor` 改用 `build.TargetByName(name)`（含 QEMU 循环）。
+- 新增 `boardChips` 策略表：每块板允许的物理 chip 集合；`rp2350rv` 与 `rp2350` 共用
+  rp2350（两种 ISA），其余一对一。`LoadBoardConfig` 对不匹配的 `chip =` 构建期报错。
+- `Target` 增加 `winGrain/winStack/winGuard`，由 `applyBoard()` 从 `board.conf` 填充；
+  `WindowGeometry()` 只返回它们，不再按板名 switch。
+- `geometry_test.go` 改为遍历 `board/*/layout.c`（不再手写四块板），并用
+  `ensureBoardConfig()` 补齐后的 target 比较 conf/layout/Go 三方。
+- `LoadBoardConfig` 区分缺键与非法值：`missing [window] grain` vs
+  `invalid [window] grain "xyz"`。
+
+**验收**：
+
+- `tos doctor`：x86/rv32/arm/rp2040/rp2350/rp2350rv/rp2350rvsmp/esp32c3 全部显示
+  工具链，`NOT FOUND` 计数 0；
+- 新增负例：`board/rp2040` + `chip = rp2350` 被拒；`rp2350rv` + `chip = rp2350` 通过；
+- 新增负例：缺 `[window] grain` 的错误含 `missing [window] grain` 且不含 `<nil>`；
+- T0、11 目标 + x86 构建、QEMU smoke/soak 通过；**C3 镜像与修复前 b26458d 字节相同**
+  （构建侧改动不改内核产物）。

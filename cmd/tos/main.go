@@ -164,7 +164,7 @@ func main() {
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
 		for _, name := range []string{"x86", "rv32", "arm", "rp2040", "rp2350", "rp2350rv", "rp2350rvsmp", "esp32c3"} {
-			t := build.Targets[name]
+			t, _ := build.TargetByName(name)
 			tc, err := build.DetectToolchain(t)
 			if err != nil {
 				fmt.Printf("%-4s  : NOT FOUND\n", name)
@@ -175,7 +175,7 @@ func main() {
 		}
 		for _, name := range []string{"x86", "rv32", "arm"} {
 			b := build.New(root)
-			b.Target = build.Targets[name]
+			b.Target, _ = build.TargetByName(name)
 			qemu := b.FindQEMU()
 			if qemu == "" {
 				fmt.Printf("qemu %-4s: NOT FOUND (pacman -S mingw-w64-ucrt-x86_64-qemu)\n", name)

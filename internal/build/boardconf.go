@@ -59,6 +59,26 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if _, ok := Chips[chip]; !ok {
 		return nil, fmt.Errorf("%s: unknown chip %q", relName(root, path), chip)
 	}
+	/* A board directory may only build for the silicon it is wired for.
+	 * rp2350rv is the same physical board as rp2350 with the other ISA, so
+	 * both names are allowed there; everything else is one-to-one.  This is
+	 * the check that catches `board/rp2040/board.conf: chip = rp2350`
+	 * before it produces an image that cannot boot. */
+	allowed, ok := boardChips[board]
+	if !ok {
+		return nil, fmt.Errorf("%s: no chip policy for board %q; add it to boardChips", relName(root, path), board)
+	}
+	validChip := false
+	for _, c := range allowed {
+		if c == chip {
+			validChip = true
+			break
+		}
+	}
+	if !validChip {
+		return nil, fmt.Errorf("%s: chip %q is not valid for board %q (allowed: %s)",
+			relName(root, path), chip, board, strings.Join(allowed, ", "))
+	}
 	bc := &BoardConfig{
 		Path:        path,
 		Schema:      schema,
@@ -99,14 +119,27 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if w == nil {
 		return nil, fmt.Errorf("%s: missing [window]", relName(root, path))
 	}
-	if bc.WindowGrain, err = parseSize(w["grain"]); err != nil || bc.WindowGrain <= 0 {
-		return nil, fmt.Errorf("%s: [window] grain: %v", relName(root, path), err)
+	/* Distinguish "key absent" from "value invalid": parseSize returns
+	 * (0, nil) for a missing key, which used to print as "<nil>". */
+	windowSize := func(key string) (int, error) {
+		raw := strings.TrimSpace(w[key])
+		if raw == "" {
+			return 0, fmt.Errorf("%s: missing [window] %s", relName(root, path), key)
+		}
+		v, perr := parseSize(raw)
+		if perr != nil || v <= 0 {
+			return 0, fmt.Errorf("%s: invalid [window] %s %q", relName(root, path), key, raw)
+		}
+		return v, nil
 	}
-	if bc.WindowStack, err = parseSize(w["stack"]); err != nil || bc.WindowStack <= 0 {
-		return nil, fmt.Errorf("%s: [window] stack: %v", relName(root, path), err)
+	if bc.WindowGrain, err = windowSize("grain"); err != nil {
+		return nil, err
 	}
-	if bc.WindowGuard, err = parseSize(w["guard"]); err != nil || bc.WindowGuard <= 0 {
-		return nil, fmt.Errorf("%s: [window] guard: %v", relName(root, path), err)
+	if bc.WindowStack, err = windowSize("stack"); err != nil {
+		return nil, err
+	}
+	if bc.WindowGuard, err = windowSize("guard"); err != nil {
+		return nil, err
 	}
 	return bc, nil
 }
@@ -156,6 +189,9 @@ func (t *Target) applyBoard(bc *BoardConfig) error {
 	t.XipFlashBase = bc.XipFlashBase
 	t.Drivers = bc.Drivers
 	t.DefaultFeatures = bc.DefaultFeatures
+	t.winGrain = bc.WindowGrain
+	t.winStack = bc.WindowStack
+	t.winGuard = bc.WindowGuard
 	return nil
 }
 
