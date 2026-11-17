@@ -165,6 +165,17 @@ build/gen/                  ← 构建期生成物，不入库
 当前状态。两个仓库同时存在时，由测试比对快照与 `abi/syscalls.csv`；只有 goc32 时，
 快照自洽即可构建。这条规则对 `board.conf` 也适用：板级事实入库，生成头不入库。
 
+落地形态（2026-11-17，`a02fe47`）：
+
+- 写这份快照的只有 `scripts/syscalls-snapshot.py`：逐字节复制 `abi/syscalls.csv`，在
+  注释头写下 `tinyos_commit`（生成时的 HEAD，仅作溯源）与 `tinyos_csv_sha256`
+  （CSV 正文的 sha256，**这条才是校验依据**）；
+- 校验分两半，因为两者的失败方式不同：goc32 仓库里的 `abi/snapshot_test.go` 只用
+  goc32 自身的文件证明"文件自洽"（正文哈希、值严格递增、`SYS_EXIT` 仍为 0）；
+  TinyOS 的 `internal/build/syscallsnapshot_test.go` 证明"副本仍等于真表"，不一致时
+  直接把重新生成的命令打出来；
+- CI 的 `checks` job 会取 goc32 子模块，所以这条闸门不是"本地才跑"的。
+
 
 ---
 

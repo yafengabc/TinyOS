@@ -4458,3 +4458,35 @@ clang 23 更小，所以一直没踩到。预算抬到 200 扇区（100 KiB）�
 顺带核对，未动：§2（PIO 目视）与 §2b（A-0 真机）标题上已写"已关闭/已验"，正文还占着
 位置；它们的结论分别在 §43 与 §44–§45，**本轮不搬**，避免一次改两个仓库都在读的文件
 （#20 的边界也这么写）。要收就单独一次提交。
+
+## 63. 2026-11-17 A-2 收尾：goc32 的 syscall 快照（#19）
+
+**问题**：§3.1 要求 goc32 入库一份 TinyOS syscall 快照，作为它**自己的输入**——goc32
+不能读 TinyOS 工作区，否则"发布 goc32"就依赖另一个仓库的当前状态。核对下来，TinyOS 侧
+的 `abi/syscalls.csv` 与 `abi_test.go`（比对 `tos_abi.h` ↔ CSV）都在，goc32 侧没有这份
+快照；`goc32/internal/ir/syscalls.go` 是 Linux ABI 表，跟这个无关。
+
+**做法**（`a02fe47` + goc32 `d3b6cd0`）：
+
+- `scripts/syscalls-snapshot.py` 是唯一写入者：逐字节复制 `abi/syscalls.csv`，头部写
+  `tinyos_commit`（生成时的 HEAD）与 `tinyos_csv_sha256`（正文哈希）。
+- **校验分两半**，因为失败方式不同：
+  - goc32 侧的 `abi/snapshot_test.go` 只读自己的文件：正文哈希必须等于记录值、值必须
+    严格递增（"只追加"这条承诺的机器版）、`SYS_EXIT` 必须还是 0；
+  - TinyOS 侧的 `internal/build/syscallsnapshot_test.go` 比对快照正文与
+    `abi/syscalls.csv` 的字节、比对哈希，并在不一致时把重新生成的命令打出来。
+- CI 的 `checks` job 现在会取 goc32 子模块（`.gitmodules` 是 ssh URL，runner 用不了，
+  所以那一条命令把 `git@github.com:` 重写成 `https://`）。少了这一步，测试在 CI 里会
+  静默 skip——而跳过闸门等于没有闸门。
+
+**一个刻意的让步**：`tinyos_commit` 只做溯源，不参与相等比较。快照是在那次提交**之后**
+才入库的，要求它等于"最后一次改 CSV 的提交"会制造先有鸡还是先有蛋；内容与哈希才是
+真正的判据，测试只额外要求这个 sha 在本仓库里是一个真实 commit。
+
+**反向验证**：往 `abi/syscalls.csv` 塞一行 `SYS_FAKE,54` 之后，TinyOS 侧的测试同时报
+"行数不同"与"哈希不同"；在 goc32 里把 `SYS_WRITE` 改成 2，`snapshot_test.go` 同时报
+哈希不符与"值不再递增"。两边都不是只看前缀。
+
+**证据**：`docs/acceptance/2026-11-17-a2-goc32-snapshot-a02fe47.md`；goc32 的
+`go build/test/vet`、`internal/native32` 测试与 `go run . ../user/hello.c` 单文件编译
+均通过（`goc32-hello.tos` 1242 B）。

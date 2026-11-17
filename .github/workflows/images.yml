@@ -33,6 +33,11 @@ jobs:
         run: |
           git -c url."https://github.com/".insteadOf="git@github.com:" \
             submodule update --init goc32
+      # The snapshot test skips when the file is absent, which is right on a
+      # machine without the submodule but would silently disable the gate in
+      # CI.  Fail here instead, in one line.
+      - name: Confirm the syscall snapshot is present
+        run: test -s goc32/abi/syscalls.snapshot.csv
       - name: Unit tests
         run: go test ./...
       - name: Vet
