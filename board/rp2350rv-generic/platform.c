@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "board_config.h"
 
 /* Park-skeleton hooks (issue #17).  Defined before rp_park.h so the shared
  * RP_PARK_OWNER_TAKE / RP_PARK_PARKED_LOOP macros pick them up.  They name
@@ -755,13 +756,19 @@ void plat_irq_service(uint32_t line)
     (void)line;
 }
 
-/* ---- block device: NOR flash ------------------------------------------- */
+/* ---- block device: NOR flash, or a RAM disk when the board has none ------ */
 
 /* Reads go through the XIP window at 0x10000000; the littlefs partition is
- * at flash offset 0x80000 (PLAT_LFS_LBA * 512), exactly like the ARM image. */
+ * at flash offset 0x80000 (PLAT_LFS_LBA * 512), exactly like the ARM image.
+ * An `fs_backing = embedded` board instead carries the same image in
+ * .data.ramdisk and uses that buffer as the whole device. */
+
+extern uint8_t __ramdisk_start[];
+extern uint8_t __ramdisk_end[];
 
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
+#if TOS_HAS_FLASH
     uint32_t off = lba * 512u;
     uint32_t len = count * 512u;
 
@@ -771,6 +778,15 @@ int plat_block_read(uint32_t lba, uint32_t count, void *buf)
         return -1;
     memcpy(buf, (const void *)(XIP_BASE + off), len);
     return 0;
+#else
+    uint32_t off = lba * 512u;
+    uint32_t len = count * 512u;
+
+    if (off + len < off || off + len > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memcpy(buf, __ramdisk_start + off, len);
+    return 0;
+#endif
 }
 
 /* These two must execute from SRAM: flash_exit_xip puts QSPI into
@@ -976,6 +992,16 @@ void plat_flash_exclusive_end(void)
 
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
+#if !TOS_HAS_FLASH
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+        uint32_t off = (lba + i) * 512u;
+        if (off + 512u > (uint32_t)(__ramdisk_end - __ramdisk_start))
+            return -1;
+        memset(__ramdisk_start + off, 0xFF, 512);
+    }
+    return 0;
+#else
     uint32_t addr, end, was_enabled;
 
     if (!g_rom_ready)
@@ -1031,10 +1057,19 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     if (was_enabled & 8u)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return 0;
+#endif
 }
 
 RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 {
+#if !TOS_HAS_FLASH
+    uint32_t off = lba * 512u;
+    uint32_t len = count * 512u;
+    if (off + len < off || off + len > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memcpy(__ramdisk_start + off, buf, len);
+    return 0;
+#else
     uint32_t addr, was_enabled;
 
     if (!g_rom_ready)
@@ -1081,6 +1116,7 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     if (was_enabled & 8u)
         __asm__ volatile("csrsi mstatus, 8" ::: "memory");
     return 0;
+#endif
 }
 
 uint32_t plat_block_size(void)

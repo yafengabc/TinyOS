@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "board_config.h"
 
 /* Park-skeleton hooks (issue #17).  Defined before rp_park.h so the shared
  * RP_PARK_OWNER_TAKE / RP_PARK_PARKED_LOOP macros pick them up.  They name
@@ -1233,19 +1234,35 @@ int plat_start_cpu(int id)
     }
 }
 
-/* ---- block device: NOR flash via the boot ROM -------------------------- */
+/* ---- block device: NOR flash, or a RAM disk when the board has none ----- */
 
 /* The UF2 packer puts littlefs at flash offset 0x80000, which is
- * PLAT_LFS_LBA * 512.  Erase is 4 KiB aligned (8 littlefs sectors). */
+ * PLAT_LFS_LBA * 512.  Erase is 4 KiB aligned (8 littlefs sectors).
+ *
+ * A board with `fs_backing = embedded` has no partition: the build links the
+ * same littlefs image into .data.ramdisk, and block 0 is block 0 of that
+ * buffer (see writeRamdiskBlob in internal/build). */
 
 #define RP_FLASH_SECTOR      4096u
 #define RP_SECTOR_ERASE_CMD  0x20u
 
+extern uint8_t __ramdisk_start[];
+extern uint8_t __ramdisk_end[];
+
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
+#if TOS_HAS_FLASH
     const void *src = (const void *)(XIP_BASE + lba * 512u);
     memcpy(buf, src, count * 512u);
     return 0;
+#else
+    uint32_t off = lba * 512u;
+    uint32_t len = count * 512u;
+    if (off + len < off || off + len > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memcpy(buf, __ramdisk_start + off, len);
+    return 0;
+#endif
 }
 
 /* Restore XIP the way pico-sdk's flash_range_erase/program does.
@@ -1366,6 +1383,16 @@ void plat_flash_exclusive_end(void)
 
 RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
 {
+#if !TOS_HAS_FLASH
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+        uint32_t off = (lba + i) * 512u;
+        if (off + 512u > (uint32_t)(__ramdisk_end - __ramdisk_start))
+            return -1;
+        memset(__ramdisk_start + off, 0xFF, 512);
+    }
+    return 0;
+#else
     uint32_t addr, end, was_enabled;
 
     if (!g_rom_ready)
@@ -1403,10 +1430,19 @@ RAMFUNC int plat_block_erase(uint32_t lba, uint32_t count)
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return 0;
+#endif
 }
 
 RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
 {
+#if !TOS_HAS_FLASH
+    uint32_t off = lba * 512u;
+    uint32_t len = count * 512u;
+    if (off + len < off || off + len > (uint32_t)(__ramdisk_end - __ramdisk_start))
+        return -1;
+    memcpy(__ramdisk_start + off, buf, len);
+    return 0;
+#else
     uint32_t addr, was_enabled;
 
     if (!g_rom_ready)
@@ -1442,6 +1478,7 @@ RAMFUNC int plat_block_write(uint32_t lba, uint32_t count, const void *buf)
     if (!(was_enabled & 1u))
         __asm__ volatile("cpsie i" ::: "memory");
     return 0;
+#endif
 }
 
 uint32_t plat_block_size(void)
@@ -1451,10 +1488,11 @@ uint32_t plat_block_size(void)
 
 uint32_t plat_block_count(void)
 {
-    /* The whole 3.5 MiB littlefs partition is addressable, even though the
-     * flashed image only occupies its first 300 KiB; ramdisk_init() grows
-     * the filesystem over the rest (see PLAT_LFS_BLOCKS in layout.c). */
-    return PLAT_LFS_BLOCKS * 8u;   /* 7168 sectors = 3.5 MiB */
+    /* Flash-backed: the whole 3.5 MiB partition is addressable even though
+     * the flashed image only occupies its first 300 KiB; ramdisk_init()
+     * grows the filesystem over the rest.  Embedded: the linked RAM disk is
+     * exactly PLAT_LFS_BLOCKS blocks. */
+    return PLAT_LFS_BLOCKS * 8u;
 }
 
 /* ---- boot -------------------------------------------------------------- */

@@ -377,28 +377,34 @@ func (b *Builder) emitRP2350UF2(elfPath string) error {
 		return fmt.Errorf("RP2350 kernel has no PICOBIN IMAGE_DEF marker in the first 4 KiB (check KEEP(*(.picobin_block)) in kernel.ld)")
 	}
 
-	ramdiskPath := b.fsImage()
-	ramdisk, err := os.ReadFile(ramdiskPath)
-	if err != nil {
-		return fmt.Errorf("littlefs image missing (%s); run a full build first", ramdiskPath)
-	}
-
-	const fsOff = rpLfsOffset
-	if len(kernel) > fsOff {
-		return fmt.Errorf("kernel (%d bytes) overruns littlefs partition at flash 0x%x",
-			len(kernel), rp2040FlashBase+fsOff)
-	}
-	flat := make([]byte, fsOff+len(ramdisk))
-	copy(flat, kernel)
-	copy(flat[fsOff:], ramdisk)
-
 	// Close the block loop like pico-sdk's crt0 does: an ignored metadata
 	// block just past the kernel, with the IMAGE_DEF pointing forward to it
 	// and it pointing back.  Everything between the kernel and the 512 KiB
 	// littlefs partition is zero padding, so this costs no flash space.
 	endOff := uint32((len(kernel) + 15) &^ 15)
-	if endOff+20 > fsOff {
-		return fmt.Errorf("RP2350 kernel leaves no room for the PICOBIN end block")
+	var flat []byte
+	if b.Target.FSBacking == "flash" {
+		ramdiskPath := b.fsImage()
+		ramdisk, err := os.ReadFile(ramdiskPath)
+		if err != nil {
+			return fmt.Errorf("littlefs image missing (%s); run a full build first", ramdiskPath)
+		}
+		const fsOff = rpLfsOffset
+		if len(kernel) > fsOff {
+			return fmt.Errorf("kernel (%d bytes) overruns littlefs partition at flash 0x%x",
+				len(kernel), rp2040FlashBase+fsOff)
+		}
+		if endOff+20 > fsOff {
+			return fmt.Errorf("RP2350 kernel leaves no room for the PICOBIN end block")
+		}
+		flat = make([]byte, fsOff+len(ramdisk))
+		copy(flat, kernel)
+		copy(flat[fsOff:], ramdisk)
+	} else {
+		// Embedded filesystem: the RAM disk is already linked into the
+		// image, so the UF2 carries the kernel and nothing else.
+		flat = make([]byte, endOff+20)
+		copy(flat, kernel)
 	}
 	rp2350CloseBlockLoop(flat, uint32(markerOff), endOff)
 	b.logf("      picobin: IMAGE_DEF @0x%x -> ignored end block @0x%x\n", markerOff, endOff)
@@ -410,7 +416,12 @@ func (b *Builder) emitRP2350UF2(elfPath string) error {
 	}
 	b.logf("      %s (%d bytes, %d blocks)\n", relName(b.Root, out), len(uf2), len(uf2)/512)
 	b.logf("      flash: hold BOOTSEL, drop %s onto the RP2350 drive\n", relName(b.Root, out))
-	b.logf("      littlefs partition at flash 0x%x (LBA %d)\n", rp2040FlashBase+fsOff, fsOff/512)
+	if b.Target.FSBacking == "flash" {
+		b.logf("      littlefs partition at flash 0x%x (LBA %d)\n", rp2040FlashBase+rpLfsOffset, rpLfsOffset/512)
+	} else {
+		b.logf("      filesystem: RAM disk inside the image (no partition at 0x%x)\n",
+			rp2040FlashBase+rpLfsOffset)
+	}
 	return nil
 }
 
@@ -473,23 +484,28 @@ func (b *Builder) emitRP2350RVUF2(elfPath string) error {
 	}
 
 	ramdiskPath := b.fsImage()
-	ramdisk, err := os.ReadFile(ramdiskPath)
-	if err != nil {
-		return fmt.Errorf("littlefs image missing (%s); run a full build first", ramdiskPath)
-	}
-
-	const fsOff = rpLfsOffset
-	if len(kernel) > fsOff {
-		return fmt.Errorf("kernel (%d bytes) overruns littlefs partition at flash 0x%x",
-			len(kernel), rp2040FlashBase+fsOff)
-	}
-	flat := make([]byte, fsOff+len(ramdisk))
-	copy(flat, kernel)
-	copy(flat[fsOff:], ramdisk)
-
 	endOff := uint32((len(kernel) + 15) &^ 15)
-	if endOff+20 > fsOff {
-		return fmt.Errorf("RP2350-RV32 kernel leaves no room for the PICOBIN end block")
+	var flat []byte
+	if b.Target.FSBacking == "flash" {
+		ramdisk, err := os.ReadFile(ramdiskPath)
+		if err != nil {
+			return fmt.Errorf("littlefs image missing (%s); run a full build first", ramdiskPath)
+		}
+		const fsOff = rpLfsOffset
+		if len(kernel) > fsOff {
+			return fmt.Errorf("kernel (%d bytes) overruns littlefs partition at flash 0x%x",
+				len(kernel), rp2040FlashBase+fsOff)
+		}
+		if endOff+20 > fsOff {
+			return fmt.Errorf("RP2350-RV32 kernel leaves no room for the PICOBIN end block")
+		}
+		flat = make([]byte, fsOff+len(ramdisk))
+		copy(flat, kernel)
+		copy(flat[fsOff:], ramdisk)
+	} else {
+		// Embedded filesystem: the RAM disk is linked into the image.
+		flat = make([]byte, endOff+20)
+		copy(flat, kernel)
 	}
 	binary.LittleEndian.PutUint32(flat[nextWord:nextWord+4], endOff-uint32(markerOff))
 	rp2350WriteEndBlock(flat, uint32(markerOff), endOff)
@@ -503,6 +519,11 @@ func (b *Builder) emitRP2350RVUF2(elfPath string) error {
 	}
 	b.logf("      %s (%d bytes, %d blocks)\n", relName(b.Root, out), len(uf2), len(uf2)/512)
 	b.logf("      flash: hold BOOTSEL, drop %s onto the RP2350 drive\n", relName(b.Root, out))
-	b.logf("      littlefs partition at flash 0x%x (LBA %d)\n", rp2040FlashBase+fsOff, fsOff/512)
+	if b.Target.FSBacking == "flash" {
+		b.logf("      littlefs partition at flash 0x%x (LBA %d)\n", rp2040FlashBase+rpLfsOffset, rpLfsOffset/512)
+	} else {
+		b.logf("      filesystem: RAM disk inside the image (no partition at 0x%x)\n",
+			rp2040FlashBase+rpLfsOffset)
+	}
 	return nil
 }

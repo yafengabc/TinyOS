@@ -1208,75 +1208,79 @@ func (b *Builder) buildKernel() error {
 			}
 		}
 
-		// Flash-backed targets need a board-specific image format.
-		if b.Target.FSBacking == "flash" {
-			/* Which image format a flash-backed board needs is a property of
-			 * the silicon, not of the board: the same chip has one ROM, one
-			 * XIP window and one way of scanning for an image.  Keeping the
-			 * switch on board names meant every new board on the same chip
-			 * added a case here. */
-			chip := ""
-			if b.BoardConfig != nil {
-				chip = b.BoardConfig.Chip
-			}
-			switch {
-			case chip == "esp32c3":
-				img, segs, err := ESPImageFromELF(elfPath, true, b.Target.XipFlashBase)
-				if err != nil {
-					return err
-				}
-				out := filepath.Join(b.BuildDir, "tinyos-esp32c3.bin")
-				if err := os.WriteFile(out, img, 0o644); err != nil {
-					return err
-				}
-				b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
+		chip := ""
+		if b.BoardConfig != nil {
+			chip = b.BoardConfig.Chip
+		}
 
-				/* One file to flash at 0x0, the way MicroPython ships: the
-				 * kernel image padded to the filesystem offset, then the
-				 * littlefs image.  esptool writes a file linearly, so a
-				 * padded blob is the same two writes in one command - and
-				 * it is what a browser-based flasher or a "drop this onto
-				 * the chip" instruction can use.  The split pair stays the
-				 * default for flashing: it does not rewrite 0x20000..0x80000
-				 * and it keeps --keep-fs possible. */
-				fs, err := os.ReadFile(b.fsImage())
-				if err != nil {
-					return err
-				}
-				const fsOff = 0x80000
-				full := make([]byte, fsOff+len(fs))
-				for i := range full {
-					full[i] = 0xff
-				}
-				copy(full, img)
-				copy(full[fsOff:], fs)
-				fullPath := filepath.Join(b.BuildDir, "tinyos-esp32c3-full.bin")
-				if err := os.WriteFile(fullPath, full, 0o644); err != nil {
-					return err
-				}
-				b.logf("      %s (%d bytes = kernel 0x%x..0x%x + fs 0x%x..0x%x)\n",
-					relName(b.Root, fullPath), len(full), 0, len(img),
-					fsOff, fsOff+len(fs))
-				b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x80000 %s\n",
-					relName(b.Root, out), relName(b.Root, b.fsImage()))
-				b.logf("      or one shot: esptool write-flash 0x0 %s\n",
-					relName(b.Root, fullPath))
-			case chip == "rp2040":
-				if err := b.emitRP2040UF2(elfPath); err != nil {
-					return err
-				}
-			case chip == "rp2350" && b.Target.Arch == "arm":
-				if err := b.emitRP2350UF2(elfPath); err != nil {
-					return err
-				}
-			case chip == "rp2350" && b.Target.Arch == "rv32":
-				if err := b.emitRP2350RVUF2(elfPath); err != nil {
-					return err
-				}
-			default:
-				return fmt.Errorf("target %s: no image format for chip %q, arch %q",
-					b.Target.Name, chip, b.Target.Arch)
+		/* Which image format a board needs is a property of the silicon, not
+		 * of the board: the same chip has one ROM, one XIP window and one way
+		 * of scanning for an image.  Only the ESP32-C3 wants a linear flash
+		 * blob.  The RP2 ROMs take a UF2 whether the filesystem lives in a
+		 * flash partition or in a RAM disk linked into the image, so the
+		 * packer - not this switch - decides whether there is a filesystem
+		 * partition to splice in. */
+		if b.Target.FSBacking == "flash" && chip == "esp32c3" {
+			img, segs, err := ESPImageFromELF(elfPath, true, b.Target.XipFlashBase)
+			if err != nil {
+				return err
 			}
+			out := filepath.Join(b.BuildDir, "tinyos-esp32c3.bin")
+			if err := os.WriteFile(out, img, 0o644); err != nil {
+				return err
+			}
+			b.logf("      %s (%d bytes, %d segment(s))\n", relName(b.Root, out), len(img), len(segs))
+
+			/* One file to flash at 0x0, the way MicroPython ships: the
+			 * kernel image padded to the filesystem offset, then the
+			 * littlefs image.  esptool writes a file linearly, so a
+			 * padded blob is the same two writes in one command - and
+			 * it is what a browser-based flasher or a "drop this onto
+			 * the chip" instruction can use.  The split pair stays the
+			 * default for flashing: it does not rewrite 0x20000..0x80000
+			 * and it keeps --keep-fs possible. */
+			fs, err := os.ReadFile(b.fsImage())
+			if err != nil {
+				return err
+			}
+			const fsOff = 0x80000
+			full := make([]byte, fsOff+len(fs))
+			for i := range full {
+				full[i] = 0xff
+			}
+			copy(full, img)
+			copy(full[fsOff:], fs)
+			fullPath := filepath.Join(b.BuildDir, "tinyos-esp32c3-full.bin")
+			if err := os.WriteFile(fullPath, full, 0o644); err != nil {
+				return err
+			}
+			b.logf("      %s (%d bytes = kernel 0x%x..0x%x + fs 0x%x..0x%x)\n",
+				relName(b.Root, fullPath), len(full), 0, len(img),
+				fsOff, fsOff+len(fs))
+			b.logf("      burn: esptool write-flash 0x0 %s | fs: write-flash 0x80000 %s\n",
+				relName(b.Root, out), relName(b.Root, b.fsImage()))
+			b.logf("      or one shot: esptool write-flash 0x0 %s\n",
+				relName(b.Root, fullPath))
+		}
+
+		switch {
+		case chip == "esp32c3":
+			// The linear flash image was written above; it has no UF2.
+		case chip == "rp2040":
+			if err := b.emitRP2040UF2(elfPath); err != nil {
+				return err
+			}
+		case chip == "rp2350" && b.Target.Arch == "arm":
+			if err := b.emitRP2350UF2(elfPath); err != nil {
+				return err
+			}
+		case chip == "rp2350" && b.Target.Arch == "rv32":
+			if err := b.emitRP2350RVUF2(elfPath); err != nil {
+				return err
+			}
+		case b.Target.FSBacking == "flash":
+			return fmt.Errorf("target %s: no image format for chip %q, arch %q",
+				b.Target.Name, chip, b.Target.Arch)
 		}
 		return nil
 	}
