@@ -185,23 +185,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld libc6-dev \
             qemu-system-misc qemu-system-x86 qemu-system-arm
-      # x86 is deliberately absent: it has never been built on the distro
-      # toolchain and does not link there (i386 PIE rejects the 16-bit
-      # relocations the port produces, "R_386_16 cannot be used against local
-      # symbol").  That is logged as OPEN-ITEMS 37; the three RISC-V/ARM
-      # targets below are the ones this job is here to protect.
+      # x86 is built and booted here too: it links on the distro toolchain now
+      # that the link goes through ld.lld instead of clang-to-gcc (which added
+      # -pie), and the kernel budget went to 100 KiB to fit clang 18's output.
+      # It is still not in the release matrix - no packaging path for a raw
+      # disk image - but a regression here should not go unnoticed.
       - name: Build the read-only image
         run: go run ./cmd/tos build -config configs/rv32-fsro.conf
       - name: Build the QEMU targets
         run: |
           set -euo pipefail
-          for t in rv32 rv32smp arm; do
+          for t in rv32 rv32smp arm x86; do
             go run ./cmd/tos build -target "$t"
           done
       - name: Boot and drive each one
         run: |
           set -euo pipefail
-          for t in rv32 rv32smp arm; do
+          for t in rv32 rv32smp arm x86; do
             go run ./cmd/tostest smoke -target "$t" \
               -commands "ps, ls /bin | wc, piperace, prot stack, deep 3, rselftest" \
               -commandwait-ms 4000
