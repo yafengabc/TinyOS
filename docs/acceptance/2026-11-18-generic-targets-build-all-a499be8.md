@@ -62,14 +62,26 @@ go run ./cmd/tostest smoke -target {arm,rv32,rv32smp,x86} \
 sha256 build/tinyos-atk-dnr2350am-smp.uf2      b30be4589b2c86b3…（前后一致）
 ```
 
+## 后续（同日，实现侧 `20e445f`）
+
+`a06be75` 的 embedded UF2 在 PICOBIN end block 后（`endOff + 20`）就结束，长度不是
+4 KiB 的整数倍；RP2350 ROM 拒收，刷入后 BOOTSEL 盘不弹出、板子不重启。
+`rp2350RoundToSector()` 补齐后，两台 generic 在 ATK 上启动并 heartbeat **6/6**；
+同一轮 7 个 RP2350 目标全部 6/6。见
+[`2026-11-18-atk-rp2350-all-targets.md`](2026-11-18-atk-rp2350-all-targets.md)。
+
+所以本卡下面的“两台都 `NOT RUN`”只描述本卡运行当时；真机结论以那张卡为准。
+
 ## 没做 / 未验证
 
-- **generic 两台都 `NOT RUN`**：没有上板，启动、`mount`、`ps` 均未验证；已记入
-  `docs/OPEN-ITEMS.md` §10。generic 无板级外设，只有 UART0/USB 控制台；文件系统在
-  RAM，重启回到镜像初始状态是预期行为。**注意区分**：ATK 复核卡
+- **本卡运行时 generic 两台都 `NOT RUN`**：启动、`mount`、`ps` 当时未验证（后续
+  `20e445f` 修复并对齐后已在 ATK 上 6/6，见上）。generic 无板级外设，只有
+  UART0/USB 控制台；文件系统在 RAM，重启回到镜像初始状态是预期行为。**注意区分**：
+  ATK 复核卡
   [`2026-11-18-atk-review-rename-2d87ded.md`](2026-11-18-atk-review-rename-2d87ded.md)
   用临时 `generic-flash` 目标验证的是**芯片基线代码**（`board/rp2350-generic` + 4 MiB
-  flash 分区），不是本卡这两个 embedded 目标；RAM-disk 路径仍未上板。
-- **Pico 2 仍停在 #7 A 轨**（`PC=0xeffffffe`）；`rpi-pico2` 的 8 MiB flash 事实未改。
+  flash 分区），不是本卡这两个 embedded 目标。
+- **Pico 2 真机仍停在 #7 A 轨**（`PC=0xeffffffe`）；`rpi-pico2` 的 8 MiB flash 事实
+  未改。同轮把 `rpi-pico2` 镜像刷到 ATK（同硅）是 6/6，说明镜像本身能启动。
 - `build all` 串行执行；并行构建未做（多个目标会写同一个 `build/gen/` 和
   `build/build-config.txt`，并行需要先按目标分目录）。

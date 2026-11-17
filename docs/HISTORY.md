@@ -4852,3 +4852,25 @@ cycle。窗口再大也治不好，因为匹配是“成功”的。
   改动前大约每次跑都有 1 个目标假 FAIL。
 - 没有加“失败重试一次”来遮住问题：修的是同步点本身，重试会掩盖真正的间歇 bug。
 - 硬件 `NOT RUN`（只动 harness）。
+
+## 79. 2026-11-18 embedded UF2 的 4 KiB 对齐（实现侧 `20e445f`）
+
+**背景**：§76 给 `fs_backing = embedded` 的 RP2350 板加了可启动 UF2，但没上板；
+2026-11-18 在 ATK 上逐个刷时发现 `rp2350-generic` / `rp2350rv-generic` 刷完
+**BOOTSEL 盘不弹出、板子不重启**，而同盘的 `atk-dnr2350am-smp` 0.8 s 就 eject。
+
+**根因**：embedded 分支的 `flat` 在 PICOBIN end block 之后（`endOff + 20`）就结束，
+长度不是 4 KiB 的整数倍；flash 分支因为 littlefs 分区是 512 KiB 而“碰巧”对齐。
+RP2350 ROM 拒收不对齐的 UF2，停在 BOOTSEL。
+
+**修复**（实现侧，`20e445f`）：`internal/build/uf2.go` 增加
+`rp2350RoundToSector()`，两个 emit 函数的 embedded 分支把 `flat` 补到 4 KiB；
+flash 分支行为不变；`TestRP2350RoundToSector` 钉住不变式。
+
+**验证**（`docs/acceptance/2026-11-18-atk-rp2350-all-targets.md`）：修复后两台
+generic 在 ATK 上启动并 heartbeat **6/6**；同一轮 7 个 RP2350 目标（ATK ARM/RV32
+单双核、两台 generic、`rpi-pico2` 板定义的镜像）全部 6/6；ATK 镜像未受影响。
+`rpi-pico2` 刷到 ATK 只证明“同硅镜像能启动”，Pico 2 真机仍归 issue #7。
+
+这条修复关闭了 `OPEN-ITEMS.md` 原来的 §10（generic 未上板），也说明 §76 里
+“generic 未上板”的 `NOT RUN` 已由真机证据取代。
