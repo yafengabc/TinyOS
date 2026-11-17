@@ -73,11 +73,14 @@ C4（单域形状冻、第二域参数不冻）与 C7（`send/recv/link_state` �
 | `board.conf` | `schema=1` | 追加键只升 schema |
 | `tos_abi` | `TOS_ABI_VERSION 1`（A-2）＋ `sizeof`/`offsetof` 断言 | 结构只追加；改布局必须升版本 |
 | LZ4TOS flags | 内核接受 V0（`0x0001`）与 V1（`0x0101`）；`mklfs` 写 V1，goc32 仍写 V0（作为旧分支样本） | 新能力位只放可忽略项；改变加载语义必须升版本 |
-| `exec_format` | `{name, probe, load, note}`，无版本 | B-3 追加 `version` 字段；旧 handler 不动（#18） |
+| `exec_format` | `{name, probe, load, note, version}`；`lz4tos` 与 `elf32` 都是 `version = 1`（B-3 第二节） | 新 handler 必须填版本；改加载语义必须升版本 |
 
 "带版本号"在这张表里曾是**目标态**；`board.conf` 的 `schema=1`、LZ4TOS 的 V1
-（`0x0101`，`mklfs` 已开始写）与 `tos_abi` 的 `TOS_ABI_VERSION 1` 现在都是真字段；
-只剩 `exec_format` 的 `version` 待 B-3 的第二节（#18）。
+（`0x0101`，`mklfs` 已开始写）、`tos_abi` 的 `TOS_ABI_VERSION 1` 与 `exec_format` 的
+`version` 现在都是真字段。`version` 只是元数据：`probe()`/`load()` 的签名和语义不变，
+加载路径不分支；要拒绝某个版本就在 `probe()` 里拒绝（header 已经在手上）。
+`/proc/execfmt` 把两张表连同版本打印出来，所以"handler 忘了说自己实现哪一版"是可见的，
+不是靠读代码推的。
 
 LZ4TOS 的格式版本直接等于 flags 高字节，名字不再和编码值错位：
 
