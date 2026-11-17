@@ -306,11 +306,15 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	}
 
 	/* Board defaults first: a target that cannot run WiFi programs must
-	 * not get them just because no config file was passed.  A config's
-	 * [user] exclude only adds to this set. */
+	 * not get them just because no config file was passed.  The hardware
+	 * absence list lives in board.conf ([user] exclude); a config's
+	 * [user] exclude is the separate "this image omits it" list and is
+	 * added below. */
 	b.UserExclude = map[string]bool{}
-	for _, n := range b.Target.UserExclude {
-		b.UserExclude[n] = true
+	if b.BoardConfig != nil {
+		for _, n := range b.BoardConfig.UserExclude {
+			b.UserExclude[n] = true
+		}
 	}
 
 	/* Same idea for driver features: RP2040 PWM/UART1/SPI/I2C are on by

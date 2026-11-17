@@ -19,6 +19,7 @@ type BoardConfig struct {
 	Chip        string
 	Variant     string
 	Peripherals map[string]bool
+	UserExclude []string
 	WindowGrain int
 	WindowStack int
 	WindowGuard int
@@ -84,6 +85,13 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	}
 	for _, p := range splitList(s["peripherals"]) {
 		bc.Peripherals[strings.ToLower(p)] = true
+	}
+	/* [user] exclude is the hardware-absence list: programs this board can
+	 * never run (no WiFi radio, no MPU for the protection demo).  A config's
+	 * own [user] exclude is the separate, reversible "this image omits it"
+	 * list; ApplyConfig adds them together. */
+	if u := sections["user"]; u != nil {
+		bc.UserExclude = splitList(u["exclude"])
 	}
 	w := sections["window"]
 	if w == nil {

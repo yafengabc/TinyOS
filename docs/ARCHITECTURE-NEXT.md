@@ -287,6 +287,12 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
   `board/*/layout.c`；读生成物会让生成器写错时"自洽通过"。生成物只配往返测试
   （生成两次一致 + 与源文件解析值相等）。
 
+**B-1a 已落地（2026-11-17）**：`UserExclude` 的"硬件不存在"列表已从 `Targets`
+移到 `board.conf [user] exclude`（`prot` 只在 RP2040 上排除；WiFi 程序在四块 RP 板上
+排除）；`configs` 的排除仍是可逆的"本镜像不带"。改前/改后用 `configs/rp2040.conf`
+构建的 ramdisk 字节相同（HISTORY §47）。剩余：chip/arch/驱动列表/镜像默认值仍在 Go，
+B-1b 处理。
+
 #### B-5 的三级台阶
 
 | 台阶 | 内容 | 通过标准 |

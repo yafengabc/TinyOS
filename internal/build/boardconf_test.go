@@ -66,6 +66,50 @@ func TestApplyConfigAcceptsBoardFeature(t *testing.T) {
 	}
 }
 
+func TestBoardUserExcludes(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skip("not in the source tree")
+	}
+	wifi := []string{"wifiscan", "wificonn", "ping", "net", "dhcp", "host", "http"}
+	want := map[string][]string{
+		"rp2040":   append(append([]string{}, wifi...), "prot"),
+		"rp2350":   wifi,
+		"rp2350rv": wifi,
+	}
+	for board, list := range want {
+		bc, err := LoadBoardConfig(root, board)
+		if err != nil {
+			t.Errorf("%s: %v", board, err)
+			continue
+		}
+		got := map[string]bool{}
+		for _, n := range bc.UserExclude {
+			got[n] = true
+		}
+		if len(got) != len(list) {
+			t.Errorf("%s: %d excludes, want %d (%v)", board, len(got), len(list), bc.UserExclude)
+			continue
+		}
+		for _, n := range list {
+			if !got[n] {
+				t.Errorf("%s: missing exclude %q", board, n)
+			}
+		}
+	}
+	/* Board-level exclusion is hardware truth: only the RP boards have one. */
+	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3"} {
+		bc, err := LoadBoardConfig(root, board)
+		if err != nil {
+			t.Errorf("%s: %v", board, err)
+			continue
+		}
+		if len(bc.UserExclude) != 0 {
+			t.Errorf("%s: unexpected excludes %v", board, bc.UserExclude)
+		}
+	}
+}
+
 func TestBoardConfigRejectsBadSchema(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "board", "rp2040"), 0o755); err != nil {

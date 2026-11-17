@@ -4061,3 +4061,29 @@ A-0 刷入 `7453bd6` 后另跑：10 轮、每轮两个后台 `piperace 1 8 &` �
 - 临时把 `LZ4_WRAP_VERSION` 改 0 重建 `rv32smp`：头部 `01 00`，smoke 通过（V0 路径），
   随后恢复成 1；
 - 真机 **NOT RUN**，见 `OPEN-ITEMS.md` §2c。
+
+## 47. 2026-11-17 B-1a：板级"硬件不存在"的用户程序移进 board.conf
+
+**背景**：C1/B-1 要求板级事实只有一个来源。`Targets` 里的 `UserExclude` 同时承担了两件
+不同的事：`rp2040Users` 是"这块板没有 MPU，`prot` 不可用"，`rpNoWifiUsers` 是"板子没有
+WiFi 硬件"——都是硬件事实，却和 `configs` 里"本镜像不带某个程序"的可逆裁剪混在 Go 源码里。
+
+**改动**：
+
+- `board/<board>/board.conf` 增加 `[user] exclude`：RP2040 排除
+  `wifiscan,wificonn,ping,net,dhcp,host,http,prot`；RP2350（ARM/RV32）排除前七项；
+  C3/QEMU/PC 为空。
+- `internal/build/boardconf.go` 解析该节；`ApplyConfig()` 的用户排除基线改从
+  `BoardConfig` 取，`configs` 的 `[user] exclude` 仍在其上追加（两种语义不再混）。
+- 删除 `Targets` 的 `UserExclude` 字段以及 `rp2040Users`/`rpNoWifiUsers` 两份 Go 列表。
+
+**验收**：
+
+- `go test ./internal/build` 新增 `TestBoardUserExcludes`：RP2040 含 `prot`、RP2350 不含，
+  C3/QEMU/PC 为空；
+- 用 `configs/rp2040.conf` 在改动前后两棵树各构建一次：
+  `build/ramdisk-rp2040.bin` 的 SHA256 都是 `C4BE5C94...5479B94`，**字节相同**；
+- T0、11 目标构建通过。
+
+**剩余（B-1b）**：`Targets` 的 chip/arch、驱动目录、镜像默认值（heap/kstack/ramdisk 扇区）
+仍在 Go；生成 `build/gen/board_config.h` 与把 `Targets` 完全从 conf 派生留到下一半。
