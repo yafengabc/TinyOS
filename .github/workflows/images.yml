@@ -190,6 +190,8 @@ jobs:
       # relocations the port produces, "R_386_16 cannot be used against local
       # symbol").  That is logged as OPEN-ITEMS 37; the three RISC-V/ARM
       # targets below are the ones this job is here to protect.
+      - name: Build the read-only image
+        run: go run ./cmd/tos build -config configs/rv32-fsro.conf
       - name: Build the QEMU targets
         run: |
           set -euo pipefail
@@ -201,7 +203,7 @@ jobs:
           set -euo pipefail
           for t in rv32 rv32smp arm; do
             go run ./cmd/tostest smoke -target "$t" \
-              -commands "ps, ls /bin | wc, piperace, prot stack, deep 3" \
+              -commands "ps, ls /bin | wc, piperace, prot stack, deep 3, rselftest" \
               -commandwait-ms 4000
           done
       - name: Window and segment soak
