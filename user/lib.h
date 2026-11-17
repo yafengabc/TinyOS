@@ -303,6 +303,9 @@ int  schedstat(struct schedstat *st);
 /* 0 = highest, 2 = lowest; pid 0 means yourself.  A task cannot climb
  * above its own level, so a program cannot starve the shell. */
 int  setprio(int pid, int prio);
+/* C7 remote-endpoint shape check over the kernel loopback lower: 0 ok, -1 the
+ * send/recv/link/pending contract broke.  No hardware is involved yet. */
+int  remote_selftest(void);
 void *sbrk(int bytes);
 void exit(int code) __attribute__((noreturn));
 void reboot(void) __attribute__((noreturn));

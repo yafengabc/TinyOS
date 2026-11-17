@@ -4192,3 +4192,27 @@ XIP 写死；等三块板能在台面上跑 flash soak 再抽（`OPEN-ITEMS` §2
 - 六个 RP 目标（单核 + SMP × 三块板）全部构建通过；11 目标 + x86 通过；
 - `go test ./...` 含新增结构测试；QEMU `rv32/rv32smp/arm` smoke 通过；
 - **真机 NOT RUN**：QEMU 只验证编译与调度路径，park 只在 RP flash 写时触发。
+
+## 52. 2026-11-17 B-6 第一半：C7 接口 + loopback lower + `rselftest`
+
+**背景**：C7 冻结的是形状。真 lower（P4 LP mailbox、C6 SPI 帧）还没有，但接口如果
+等到那时候才写，mock、文档和调用点都来不及验证。
+
+**改动**：
+
+- `kernel/remote_ep.h/.c`：C7 形状落地——`send/recv`（任务上下文）、
+  `poll/link_state`（任务或 tick 上下文，可碰 lower）、`remote_ep_irq()` 只置
+  `pending`；liveness 是 `last_rx_tick` 属性，不是 `heartbeat()` 命令；容量由
+  `remote_ep_get_caps()` 返回，不写成宏。
+- 一个 loopback mock lower（4 帧 × 64 B）：`SYS_REMOTE_TEST` 跑
+  send → recv 顺序、空队列返回、IRQ 只置 pending、`poll` 清 pending 并更新链路。
+- `include/tos.h` 追加 `SYS_REMOTE_TEST = 53`，`abi/syscalls.csv` 同步；用户侧
+  `remote_selftest()` + `user/rselftest.c`。
+- `TESTING.md` §4.1 的 smoke 命令加上 `rselftest`。
+
+**验收**：
+
+- `rselftest: ok (loopback send/recv/link/poll)`：QEMU `rv32`/`rv32smp`/`arm` 三个
+  目标与 **C3 真机**都通过；
+- 11 目标 + x86 构建通过；T0 全绿；
+- 真 lower 未实现，`OPEN-ITEMS` 没有新增阻塞（mock 不需要板子）。

@@ -71,6 +71,9 @@
 /* PIO (RP2040): pio(op, &req).  One request struct carries both the assembled
  * program and the SM configuration; see struct pio_req below. */
 #define SYS_PIO           52
+/* C7 remote-endpoint shape check over the kernel's loopback lower; the real
+ * LP/C6 lower only replaces the lower half.  0 = ok, -1 = the shape broke. */
+#define SYS_REMOTE_TEST   53
 
 #define PIO_LOAD     0   /* req.buf = u16 words, req.len = count          */
 #define PIO_START    1

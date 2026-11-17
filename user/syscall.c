@@ -364,6 +364,11 @@ int setprio(int pid, int prio)
     return tos_sys2(SYS_SETPRIO, pid, prio);
 }
 
+int remote_selftest(void)
+{
+    return tos_sys0(SYS_REMOTE_TEST);
+}
+
 void *sbrk(int bytes)
 {
     int r = tos_sys1(SYS_SBRK, bytes);

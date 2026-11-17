@@ -264,7 +264,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 | B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归 |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |
-| B-6 | LP/companion 的窄消息接口 + 心跳（C7 形状） | mock lower 在 QEMU 跑通；LP 不进入 SMP |
+| B-6 | LP/companion 的窄消息接口 + 心跳（C7 形状） | **mock lower 已跑通 `rselftest`（HISTORY §52）**；真 lower 待 P4/C6 |
 | B-7 | 多内存域（仅 PSRAM 窗口确有需求） | C4；QEMU 双段 + P4 硬件 |
 
 #### B-1 的三层事实（生成边界）

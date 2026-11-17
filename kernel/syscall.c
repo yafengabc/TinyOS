@@ -1,6 +1,7 @@
 #include "tos.h"
 #include "tos_abi.h"
 #include "tos_abi_asserts.h"   /* offset asserts: kernel only, goc32 cannot parse them */
+#include "remote_ep.h"
 #include "console.h"
 #include "ramdisk.h"
 #include "devfs.h"
@@ -265,6 +266,13 @@ static regs_t *dispatch(regs_t *r)
     case SYS_THREAD_JOIN:
         return process_thread_join(r, (int)sc.a0, sc.a1);
 #endif
+
+    case SYS_REMOTE_TEST: {
+        /* C7 shape check over the loopback lower.  The real lower (LP or C6)
+         * replaces only mock_lower; the endpoint logic and this syscall stay. */
+        plat_frame_set_ret(r, (uint32_t)remote_ep_selftest());
+        return r;
+    }
 
     case SYS_PIO: {
         struct pio_req req;
