@@ -105,7 +105,7 @@ foreach ($t in $targets) {
 ```sh
 for t in rv32 rv32smp arm; do
   go run ./cmd/tostest smoke -target "$t" \
-    -commands "ps, ls /bin | wc, piperace, prot stack, deep 3, rselftest" \
+    -commands "ps, ls /bin | wc, cat /proc/execfmt, piperace, prot stack, deep 3, rselftest" \
     -commandwait-ms 4000 || exit 1
 done
 ```

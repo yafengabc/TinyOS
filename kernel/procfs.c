@@ -241,6 +241,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_cdcstat(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/ps"))
         n = process_ps_text(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/execfmt"))
+        n = process_execfmt_text(b, PROC_CAP);
 #if !TOS_PROC_LITE
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
@@ -312,6 +314,7 @@ void procfs_init(void)
     devfs_register("proc/cdcfix", &proc_ops, NULL);
     devfs_register("proc/cdcstat", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
+    devfs_register("proc/execfmt", &proc_ops, NULL);
 #if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);

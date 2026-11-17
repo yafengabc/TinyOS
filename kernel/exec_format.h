@@ -11,7 +11,18 @@
  * through this table instead of naming either implementation directly.
  *
  * probe() returns the container header offset, or 0 when this handler does
- * not recognise the file.  load() must never write outside raw_size. */
+ * not recognise the file.  load() must never write outside raw_size.
+ *
+ * `version` is the newest revision of that format this handler loads, in the
+ * numbering the format itself uses (LZ4TOS V1 is 1; see ARCHITECTURE-NEXT
+ * 0.4 - V0 is the pre-versioning form of the same format).  0 is reserved
+ * for "this handler predates versioning" and must not appear in a registered
+ * table: /proc/execfmt prints the field, so a handler that forgets to say
+ * which revision it implements is visible instead of implied.
+ *
+ * It is metadata only: probe()/load() keep their signatures and semantics,
+ * and nothing in the load path branches on it - a format that needs to reject
+ * a revision does that in probe(), where the header already is. */
 struct exec_format {
     const char *name;
     uint32_t (*probe)(const char *path, uint32_t *raw_size,
@@ -19,6 +30,7 @@ struct exec_format {
     int (*load)(const char *path, uint32_t header, uint8_t *dst,
                 uint32_t raw_size);
     const char *note;
+    uint32_t version;
 };
 
 struct exec_image_format {
@@ -28,6 +40,7 @@ struct exec_image_format {
     int (*load)(uint8_t *win, uint32_t size, uint32_t win_size,
                 uint32_t load_base, uint32_t *entry_out);
     const char *note;
+    uint32_t version;
 };
 
 #endif

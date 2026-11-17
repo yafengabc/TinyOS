@@ -172,6 +172,11 @@ int  process_ioctl(int fd, int cmd, int arg);
  * Returns the number of bytes written; output is truncated, not overrun. */
 uint32_t process_ps_text(char *buf, uint32_t cap);
 
+/* Format the registered exec handlers (container and image tables) with the
+ * format revision each one implements, for /proc/execfmt.  Same truncation
+ * rule as above. */
+uint32_t process_execfmt_text(char *buf, uint32_t cap);
+
 /* Deepest stack any task has ever used, in bytes, and (in `name`, copied and
  * NUL terminated) which task reached it.  The record survives the task, so a
  * program that has already exited still answers "was 16 KiB of stack the

@@ -214,7 +214,7 @@ jobs:
         if: matrix.target != 'read-only'
         run: |
           go run ./cmd/tostest smoke -target "${{ matrix.target }}" \
-            -commands "ps, ls /bin | wc, piperace, prot stack, deep 3, rselftest" \
+            -commands "ps, ls /bin | wc, cat /proc/execfmt, piperace, prot stack, deep 3, rselftest" \
             -commandwait-ms 4000
 
   release:

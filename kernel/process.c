@@ -1997,14 +1997,21 @@ static int mock_load(const char *path, uint32_t header, uint8_t *dst,
 }
 
 static const struct exec_format mock_exec = {
-    "mocktos", mock_probe, mock_load,
-    "test-only MOCKTOS envelope (raw ELF payload)"
+    .name = "mocktos",
+    .probe = mock_probe,
+    .load = mock_load,
+    .note = "test-only MOCKTOS envelope (raw ELF payload)",
+    .version = 1,
 };
 #endif
 
 static const struct exec_format lz4tos_exec = {
-    "lz4tos", envelope_probe, stream_load,
-    "LZ4TOS envelope with 28-byte hint"
+    .name = "lz4tos",
+    .probe = envelope_probe,
+    .load = stream_load,
+    .note = "LZ4TOS envelope with 28-byte hint",
+    /* V0 (flags 0x0001) and V1 (0x0101) both load; 1 is the newest. */
+    .version = 1,
 };
 
 static const struct exec_format *const exec_formats[] = {
@@ -2016,14 +2023,66 @@ static const struct exec_format *const exec_formats[] = {
 };
 
 static const struct exec_image_format elf32_exec = {
-    "elf32", elf_probe, elf_load,
-    "ET_DYN/ET_EXEC ELF32, segments relocated into the task window"
+    .name = "elf32",
+    .probe = elf_probe,
+    .load = elf_load,
+    .note = "ET_DYN/ET_EXEC ELF32, segments relocated into the task window",
+    /* ELF32 has no revision field of its own; 1 is this loader's first
+     * contract, bump it if the segment rules ever change. */
+    .version = 1,
 };
 
 static const struct exec_image_format *const exec_image_formats[] = {
     &elf32_exec,
     NULL
 };
+
+/* /proc/execfmt: what exec() can actually dispatch to, and which revision of
+ * each format the handler implements.  Two tables, one line per registered
+ * handler, in dispatch order.  This is the reader that keeps the `version`
+ * field honest - see exec_format.h. */
+uint32_t process_execfmt_text(char *buf, uint32_t cap)
+{
+    uint32_t off;
+    int n;
+
+    if (!buf || cap < 64)
+        return 0;
+
+    n = ksnprintf(buf, cap, "container ver note\n");
+    if (n < 0)
+        return 0;
+    off = (uint32_t)n;
+
+    for (int i = 0; exec_formats[i]; i++) {
+        n = ksnprintf(buf + off, cap - off, "%s %u %s\n",
+                      exec_formats[i]->name, (unsigned)exec_formats[i]->version,
+                      exec_formats[i]->note);
+        if (n < 0)
+            break;
+        off += (uint32_t)n;
+        if (off >= cap - 1)
+            break;
+    }
+
+    n = ksnprintf(buf + off, cap - off, "image ver note\n");
+    if (n < 0)
+        return off;
+    off += (uint32_t)n;
+
+    for (int i = 0; exec_image_formats[i]; i++) {
+        n = ksnprintf(buf + off, cap - off, "%s %u %s\n",
+                      exec_image_formats[i]->name,
+                      (unsigned)exec_image_formats[i]->version,
+                      exec_image_formats[i]->note);
+        if (n < 0)
+            break;
+        off += (uint32_t)n;
+        if (off >= cap - 1)
+            break;
+    }
+    return off;
+}
 
 static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
                                  int claim)
