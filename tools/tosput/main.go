@@ -31,15 +31,15 @@ func main() {
 	}
 
 	var (
-		mw      *walk.MainWindow
-		portsCb *walk.ComboBox
-		baudCb  *walk.ComboBox
-		localLe *walk.LineEdit
+		mw       *walk.MainWindow
+		portsCb  *walk.ComboBox
+		baudCb   *walk.ComboBox
+		localLe  *walk.LineEdit
 		remoteLe *walk.LineEdit
-		pb      *walk.ProgressBar
-		logTv   *walk.TextEdit
-		sendBtn *walk.PushButton
-		cancelB *walk.PushButton
+		pb       *walk.ProgressBar
+		logTv    *walk.TextEdit
+		sendBtn  *walk.PushButton
+		cancelB  *walk.PushButton
 	)
 	st := &uiState{}
 
