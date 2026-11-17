@@ -56,12 +56,12 @@ Phase A 的收口条件只含 A-0..A-4/A-6/A-8。`ARCHITECTURE-NEXT.md` §7 的�
 的度量表已按这个口径写明，避免再被读成"Phase A 还没完"。此条不需要板子，
 B-4 启动后即可删除。
 
-## 2g. RP2040 park 专项：等排期（2026-11-17）
+## 2g. RP2040 专项验收：等排期（2026-11-17）
 
-RP2040 无自动 BOOTSEL，不能作为其它 issue 的关闭依据。`rp2040smp` 是唯一的
-Cortex-M0+ SMP 目标，park 共享状态改动需要它自己的 1000 轮 `dd`+`rm` 证据
-（HISTORY §35 的竞态就是在这块板上暴露的）。跟踪：[#13](https://github.com/yafengabc/TinyOS/issues/13)，
-由板主排期；关闭时把本条移进 HISTORY。
+RP2040 无自动 BOOTSEL，不能作为其它 issue 的关闭依据；确需 RP2040 证据的部分集中在
+[#12](https://github.com/yafengabc/TinyOS/issues/12)（LZ4TOS V1 启动 + park 1000 轮
+`dd`+`rm`），由板主人工安排。`rp2040smp` 是唯一的 Cortex-M0+ SMP 目标，park 证据值得
+单独跑一次（HISTORY §35 的竞态就是在这块板上暴露的）。关闭 #12 时把本条移进 HISTORY。
 
 ## 4. 构建期的窗口几何还停在 16 KiB 时代（§36）
 
