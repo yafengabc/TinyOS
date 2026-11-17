@@ -25,7 +25,7 @@
 | C2 | **ABI / 格式** | `include/tos_abi.h`、`abi/syscalls.csv`、`exec_format`、LZ4TOS flags 版本位（V0 `0x0001` 特例，见 §0.4） | 结构/编号单一头 + 静态断言；LZ4TOS/ELF 各一个 handler | 新 syscall 追加；新格式注册 handler；flags 高字节版本 |
 | C3 | **flash/跨核独占** | `plat_flash_exclusive_begin/end` + 协作式 park poll + `plat_cache_*`/`plat_dma_*` 钩子 | RP 现有 park 包一层，行为不变；cache/DMA 钩子 no-op | 三块 RP 共享骨架；P4 实现自己的独占；不承诺通用 pause |
 | C4 | **内存域/窗口** | `struct mem_domain` 列表（现在 1 个）+ `win_alloc` 带域参数 | 单域，行为与现在完全一致 | P4 PSRAM 需要时加第二域；不提前做多域 |
-| C5 | **驱动接缝** | `dev_ops` + ST7789 的 `struct lcd_proto_ops {cmd, data, delay_ms}`（`drivers/display/st7789/lcd_proto.h`；§4 A-7 记了为何不是 `lcd_lowops`） | 两个 RP2350 端口共用面板协议层，端口只留总线；输出不变 | P4/新板补 lower；不强制 GPIO/SPI/WiFi 全量迁移 |
+| C5 | **驱动接缝** | `dev_ops` + ST7789 的 `struct lcd_proto_ops {cmd, data, delay_ms}`（`drivers/display/st7789/lcd_proto.h`；§4 A-7 记了为何不是 `lcd_lowops`） | 面板协议层一份、驱动也一份，两个 RP2350 ISA 共用 `lcd_st7789.c`；输出不变 | P4/新板补自己的驱动；不强制 GPIO/SPI/WiFi 全量迁移 |
 | C6 | **等待/超时** | 等待**规则**（不是定时器 API）：tick 就绪后用毫秒上限；tick 前按 `plat_cpu_hz()` 折算迭代上限；不在持锁/关中断状态长等 | 规则 + 一个 helper；`wd_start` 不做 | `wd_start` 只在网络/companion 出现请求级超时时立项（B-8） |
 | C7 | **远端端点** | `remote_ep_send/recv/poll`、`link_state(ep)`、`last_rx_tick`；`send/recv` 仅任务上下文；`poll`/`link_state` 在任务或 tick 上下文（可做 I/O）；`remote_ep_irq()` 是唯一 ISR 入口（只置 pending，无 I/O）；容量参数走 `remote_ep_caps()` | 形状冻结，无真 lower；先 mock + QEMU | LP 与 C6 companion 各实现一个 lower；参数不同不改契约 |
 
@@ -291,7 +291,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 | B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
 | B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态（§57）与握手顺序（§67）已共享，循环仍分板，台面后再抽（#17）** |
 | B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
-| B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归。**B-4a 协议层已上移（`lcd_proto.h`），真机未验（OPEN-ITEMS §2e）** |
+| B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归。**B-4a 协议层共享 + 真机目视（HISTORY §64）；B-4b 两 ISA 合并成一份驱动（§66）** |
 | B-5 | P4 启动/镜像探针（旧 E-0）；cache/DMA 实现 | A-4；见下方 B-5a/b/c |
 | B-6 | LP/companion 的窄消息接口 + 心跳（C7 形状） | **mock lower 已跑通 `rselftest`（HISTORY §52）**；真 lower 待 P4/C6 |
 | B-7 | 多内存域（仅 PSRAM 窗口确有需求） | C4；QEMU 双段 + P4 硬件 |
@@ -431,7 +431,7 @@ Phase B（A 稳定后）
 
 **每项提交的验收**：
 - `go build ./...`、`go vet ./...`、`go test ./... -count=1`；
-- 12 目标构建（x86 按 `OPEN-ITEMS.md` §5 记录）；
+- 12 目标构建（x86 与 `configs/rv32-fsro.conf` 同样算，见 `TESTING.md` §3）；
 - QEMU `rv32/rv32smp/arm` smoke + soak；
 - 有硬件的板按 `docs/TESTING.md` 跑 T3；
 - **复现/压力类测试必须记命令行**（不是只写"跑过了"），并在
@@ -471,7 +471,7 @@ Phase B（A 稳定后）
 | 新板需改内核文件 | 多处 | 0；Go 只剩"镜像清单"（单核/双核） |
 | ABI 偏移 | 内核硬编码 | 单一头 + `offsetof` 静态断言 |
 | 格式版本 | flags 精确匹配 | 高字节版本 + V0 兼容 |
-| exec 注册 | 单实例调用 | 表 + 循环（已落地；mock 运行验证见 `OPEN-ITEMS` §2d） |
+| exec 注册 | 单实例调用 | 表 + 循环（已落地；第二容器 mock 验证已关闭 #5，`2ab6745`）；`/proc/execfmt` 打印版本 |
 | flash 独占 | 板级私货 | 内核契约 + 共享骨架 |
 | 等待 | 迭代数当时钟，部分在锁内 | tick 后毫秒上限、tick 前按主频折算；不在锁内长等 |
 | 断言 | `assert()` 无条件 no-op | 内部不变量 halt、外部数据返回错误；`TOS_KASSERT` 默认开 |
@@ -492,8 +492,8 @@ Phase B（A 稳定后）
 5. **companion**：ESP-Hosted 全栈还是窄帧接口（C7 只冻结消息形状与任务上下文约束）。
 6. **生成文件**：`build/gen/` 不入库；CI 可复现命令固定。
 7. **Pico 2**：`PC=0xeffffffe` 根因；variant 的 LED/LCD/flash 几何；稳定前不进回归基线。
-8. **goc32**：按 §3.1，goc32 提交 `abi/syscalls.snapshot.csv`（入库，带 TinyOS commit
-   与 hash），发布不依赖 TinyOS 工作区；两边都在时由测试比对。
+8. **goc32**：~~按 §3.1 入库 syscall 快照~~ —— 已落地（#19，`f4e1b27` / goc32 `d3b6cd0`）：
+   快照随 goc32 走，两侧各一个测试，CI 会取子模块后比对。
 
 ---
 
