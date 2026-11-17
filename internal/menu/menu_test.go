@@ -11,7 +11,7 @@ import (
 func TestRenderRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "menu.conf")
 	st := Load(nil, path)
-	st.SetTarget("esp32c3")
+	st.SetTarget("esp32c3-generic")
 	st.SetWiFi(true)
 	st.SetNet(true)
 	st.SetFeature("softfloat-min", true)
@@ -40,7 +40,7 @@ func TestRenderRoundTrip(t *testing.T) {
 	}
 	got := Load(cfg, path)
 
-	if got.Target != "esp32c3" {
+	if got.Target != "esp32c3-generic" {
 		t.Fatalf("target = %q", got.Target)
 	}
 	if !got.WiFi() || !got.Net() || !got.SoftMin() {
@@ -83,11 +83,11 @@ func TestTargetGuards(t *testing.T) {
 	if st.WiFi() {
 		t.Fatal("wifi enabled on a target that cannot have it")
 	}
-	st.SetTarget("esp32c3")
+	st.SetTarget("esp32c3-generic")
 	st.SetWiFi(true)
 	st.SetNet(true)
 	if !st.WiFi() || !st.Net() {
-		t.Fatal("wifi/net did not enable on esp32c3")
+		t.Fatal("wifi/net did not enable on esp32c3-generic")
 	}
 	st.SetTarget("rpi-pico")
 	if st.WiFi() || st.Net() {
@@ -98,7 +98,7 @@ func TestTargetGuards(t *testing.T) {
 func TestKeyDrivesState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.conf")
 	st := Load(nil, path)
-	st.SetTarget("esp32c3")
+	st.SetTarget("esp32c3-generic")
 	st.SetWiFi(true)
 	a := &app{st: st}
 	a.stack = []page{a.mainPage()}
@@ -132,7 +132,7 @@ func TestKeyDrivesState(t *testing.T) {
 func TestSubmenus(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.conf")
 	st := Load(nil, path)
-	st.SetTarget("esp32c3")
+	st.SetTarget("esp32c3-generic")
 	a := &app{st: st, progs: []string{"hello"}}
 	a.stack = []page{a.mainPage()}
 

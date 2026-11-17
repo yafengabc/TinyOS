@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-board acceptance test for the esp32c3 target.
+"""Real-board acceptance test for the esp32c3-generic target.
 
 Everything here needs the chip: PMP fault isolation, the flash block device,
 preemption, the console line hand-over and the control-character signals.

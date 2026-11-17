@@ -41,7 +41,7 @@ have to read them from somewhere anyway.
 - **rpi-pico / rpi-pico-smp**: `max_procs = 8`, `kstack = 8k` - a proc_t is ~792 B
   and the shell only ever runs a few tasks; the four slots it drops return
   3 KiB of .bss.
-- **esp32c3**: `max_procs = 8` and an 80 KiB heap; `board/esp32c3/board.conf`
+- **esp32c3-generic**: `max_procs = 8` and an 80 KiB heap; `board/esp32c3-generic/board.conf`
   supplies `xip_flash_base`, which is what selects `kernel-xip.ld`.
 - **rp2350 family**: 60 KiB on ARM (validated size), 32 KiB on the RISC-V
   image.  `atk-dnr2350am-rv32-smp` keeps the same 32 KiB: the second kernel stack comes

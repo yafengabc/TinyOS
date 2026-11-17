@@ -82,7 +82,7 @@ const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
  * kernel keeps the first 512 KiB), served by plat_block_read/write/erase
  * in platform.c (ROM reader + writer, SPI1 hardware erase; see
  * docs/PLATFORM-DESIGN.md ?8.7).  Chip size and offset are board facts in
- * board/esp32c3/board.conf, so a module with a different flash part only
+ * board/esp32c3-generic/board.conf, so a module with a different flash part only
  * changes the conf: 4 MiB with a 512 KiB offset gives 896 blocks = 3.5 MiB.
  * board_config_check() refuses to boot if these disagree with the generated
  * header. */

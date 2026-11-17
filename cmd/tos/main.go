@@ -184,7 +184,7 @@ func main() {
 
 	case "doctor":
 		fmt.Printf("source tree : %s\n", root)
-		for _, name := range []string{"x86", "rv32", "arm", "rpi-pico", "atk-dnr2350am", "atk-dnr2350am-rv32", "atk-dnr2350am-rv32-smp", "esp32c3"} {
+		for _, name := range []string{"x86", "rv32", "arm", "rpi-pico", "atk-dnr2350am", "atk-dnr2350am-rv32", "atk-dnr2350am-rv32-smp", "esp32c3-generic"} {
 			t, _ := build.TargetByName(name)
 			tc, err := build.DetectToolchain(t)
 			if err != nil {

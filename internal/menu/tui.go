@@ -210,7 +210,7 @@ func targetBlurb(name string) string {
 		return "qemu-virt RISC-V, the reference for the MCU ports"
 	case "rv32smp", "atk-dnr2350am-smp", "atk-dnr2350am-rv32-smp":
 		return "both cores"
-	case "esp32c3":
+	case "esp32c3-generic":
 		return "the only WiFi target"
 	case "rpi-pico":
 		return "Cortex-M0+, no FPU, no hardware divide"

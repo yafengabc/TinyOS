@@ -1129,7 +1129,7 @@ func (b *Builder) buildKernel() error {
 	// Targets without a disk carry the filesystem inside the kernel image:
 	// a generated assembly file .incbin's build/tinyos-ramdisk-<target>.bin into a writable
 	// section, which plat_block_* then serves as a RAM disk.  The esp32c3
-	// target reads the partition from flash instead (board/esp32c3).
+	// target reads the partition from flash instead (board/esp32c3-generic).
 	if b.Target.FSBacking == "embedded" {
 		blob, err := b.writeRamdiskBlob()
 		if err != nil {
@@ -1150,7 +1150,7 @@ func (b *Builder) buildKernel() error {
 	/* Espressif's prebuilt WiFi/PHY/coex blobs.  The config's [wifi]
 	 * lib_dir is the primary source; TOS_WIFI_LIB stays as a bring-up
 	 * override for one-off builds. */
-	if b.Target.Name == "esp32c3" && (b.feature("wifi") || wifiEnv) {
+	if b.BoardConfig != nil && b.BoardConfig.Chip == "esp32c3" && (b.feature("wifi") || wifiEnv) {
 		dir := b.WiFiLibDir
 		if dir == "" {
 			if env := os.Getenv("TOS_WIFI_LIB"); env != "" {
@@ -1225,7 +1225,7 @@ func (b *Builder) buildKernel() error {
 			if err != nil {
 				return err
 			}
-			out := filepath.Join(b.BuildDir, "tinyos-esp32c3.bin")
+			out := filepath.Join(b.BuildDir, "tinyos-"+b.Target.Name+".bin")
 			if err := os.WriteFile(out, img, 0o644); err != nil {
 				return err
 			}
@@ -1250,7 +1250,7 @@ func (b *Builder) buildKernel() error {
 			}
 			copy(full, img)
 			copy(full[fsOff:], fs)
-			fullPath := filepath.Join(b.BuildDir, "tinyos-esp32c3-full.bin")
+			fullPath := filepath.Join(b.BuildDir, "tinyos-"+b.Target.Name+"-full.bin")
 			if err := os.WriteFile(fullPath, full, 0o644); err != nil {
 				return err
 			}

@@ -378,9 +378,9 @@ go run ./cmd/tos menuconfig -print -config configs/esp32c3-wifi.conf   # 只输�
 
 ### ESP32-C3 联网（WiFi + 小型 IPv4 栈）
 
-烧写分体两份：`build/tinyos-esp32c3.bin` 到 `0x0`、`build/tinyos-ramdisk-esp32c3.bin` 到 `0x80000`
+烧写分体两份：`build/tinyos-esp32c3-generic.bin` 到 `0x0`、`build/tinyos-ramdisk-esp32c3-generic.bin` 到 `0x80000`
 （`scripts/esp-c3/flash.py`，默认就是这两步）。构建还会输出一份**合体镜像**
-`build/tinyos-esp32c3-full.bin`：内核补齐到 `0x80000` 后接上 littlefs，**一次写到 `0x0`**
+`build/tinyos-esp32c3-generic-full.bin`：内核补齐到 `0x80000` 后接上 littlefs，**一次写到 `0x0`**
 即可，和 MicroPython 那种"刷一个文件"一样：
 
 ```

@@ -163,7 +163,7 @@ x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
 ### 5.1 ESP32-C3
 
 ```sh
-go run ./cmd/tos build -target esp32c3
+go run ./cmd/tos build -target esp32c3-generic
 python scripts/esp-c3/flash.py --full -p COM4
 python scripts/esp-c3/accept.py -p COM4
 ```
@@ -290,7 +290,7 @@ notes:
 当前 `.github/workflows/images.yml` 覆盖：
 
 - `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
-- 7 个发布镜像构建（esp32c3、rpi-pico/smp、atk-dnr2350am/smp、atk-dnr2350am-rv32/smp）；
+- 7 个发布镜像构建（esp32c3-generic、rpi-pico/smp、atk-dnr2350am/smp、atk-dnr2350am-rv32/smp）；
 - `smoke` 是**按目标并行**的一组 job（每个约 50–95 s）：
   - `configs/rv32-fsro.conf` 的只读镜像构建（只编译，不起机；issue #14 的盲区）；
   - rv32 / rv32smp / arm / x86 各自构建 + 起机 + `ps`、`ls`、`piperace`、`prot stack`、

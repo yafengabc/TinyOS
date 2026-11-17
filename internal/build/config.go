@@ -14,7 +14,7 @@ import (
 // format is deliberately flat:
 //
 //	[build]
-//	target = esp32c3
+//	target = esp32c3-generic
 //
 //	[features]
 //	wifi = true

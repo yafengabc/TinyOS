@@ -7,12 +7,12 @@
 
 | 目标 | 文件 | 刷写方式 |
 | --- | --- | --- |
-| `esp32c3` | `tinyos-esp32c3-full.bin`（推荐，一次写完）+ `tinyos-esp32c3.bin` / `tinyos-ramdisk-esp32c3.bin`（分体） | `esptool write-flash 0x0 tinyos-esp32c3-full.bin`；分体见下 |
-| `rpi-pico` | `pico.uf2` | BOOTSEL 后拖到 `RPI-RP2` |
-| `atk-dnr2350am` | `atk-dnr2350am.uf2` | BOOTSEL 后拖到 `RP2350` |
-| `atk-dnr2350am-smp` | `atk-dnr2350am-smp.uf2` | 同上（双核） |
-| `atk-dnr2350am-rv32` | `atk-dnr2350am-rv32.uf2` | 同上（RISC-V 核） |
-| `atk-dnr2350am-rv32-smp` | `atk-dnr2350am-rv32-smp.uf2` | 同上（RISC-V 双核） |
+| `esp32c3-generic` | `tinyos-esp32c3-generic-full.bin`（推荐，一次写完）+ `tinyos-esp32c3-generic.bin` / `tinyos-ramdisk-esp32c3-generic.bin`（分体） | `esptool write-flash 0x0 tinyos-esp32c3-generic-full.bin`；分体见下 |
+| `rpi-pico` | `tinyos-rpi-pico.uf2` | BOOTSEL 后拖到 `RPI-RP2` |
+| `atk-dnr2350am` | `tinyos-atk-dnr2350am.uf2` | BOOTSEL 后拖到 `RP2350` |
+| `atk-dnr2350am-smp` | `tinyos-atk-dnr2350am-smp.uf2` | 同上（双核） |
+| `atk-dnr2350am-rv32` | `tinyos-atk-dnr2350am-rv32.uf2` | 同上（RISC-V 核） |
+| `atk-dnr2350am-rv32-smp` | `tinyos-atk-dnr2350am-rv32-smp.uf2` | 同上（RISC-V 双核） |
 
 每个目标还会带一个 `FLASH-<target>.txt`，里面是简短的刷写说明，以及一份
 **`build-config.txt`**：这次构建用的 `heap` / `max_procs` / `kstack` / `opt` /
@@ -35,7 +35,7 @@ features 与"是否读了 `tos.conf`"。
 的 **Artifacts** 里有：
 
 ```text
-tinyos-esp32c3
+tinyos-esp32c3-generic
 tinyos-rpi-pico
 tinyos-rpi-pico-smp
 tinyos-atk-dnr2350am
@@ -61,22 +61,22 @@ git push origin v0.1.0
 **一次写完**（内核 + 文件系统在同一个文件里，和 MicroPython 的发布形态一样）：
 
 ```bash
-esptool --chip esp32c3 write-flash 0x0 esp32c3-full.bin
+esptool --chip esp32c3 write-flash 0x0 tinyos-esp32c3-generic-full.bin
 ```
 
 **分体**（保留：只换内核时可以不动文件系统）：
 
 ```bash
-esptool.py --chip esp32c3 write-flash 0x0     tinyos-esp32c3.bin
-esptool.py --chip esp32c3 write-flash 0x80000 tinyos-ramdisk-esp32c3.bin
+esptool.py --chip esp32c3 write-flash 0x0     tinyos-esp32c3-generic.bin
+esptool.py --chip esp32c3 write-flash 0x80000 tinyos-ramdisk-esp32c3-generic.bin
 ```
 
 或新语法一次写完：
 
 ```bash
 esptool --chip esp32c3 write-flash \
-  0x0 tinyos-esp32c3.bin \
-  0x80000 tinyos-ramdisk-esp32c3.bin
+  0x0 tinyos-esp32c3-generic.bin \
+  0x80000 tinyos-ramdisk-esp32c3-generic.bin
 ```
 
 刷之前让板子进入下载模式（按住 BOOT，点一下 RESET）。

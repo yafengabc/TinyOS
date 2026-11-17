@@ -343,7 +343,7 @@ volatile int ktask_running;
 volatile uint32_t ktask_entry_sp;
 
 /* Kernel-thread stacks.  Four slots of 6 KiB; see the layout comment in
- * board/esp32c3/layout.c for the 160 KiB kernel-region budget.  The ktask
+ * board/esp32c3-generic/layout.c for the 160 KiB kernel-region budget.  The ktask
  * machinery is RV32-only: it rides the M-mode trap path and start.S. */
 #if defined(__riscv)
 #define KTASK_SLOTS       6

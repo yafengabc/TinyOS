@@ -45,7 +45,7 @@ optional ESP32-C3 WiFi blobs.
 | `rpi-pico`, `rpi-pico-smp` | 2× Cortex-M0+ | Raspberry Pi Pico | 264 KiB | 2 MiB | on hardware |
 | `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | Pico 2 / ATK-DNRP2350AM | 520 KiB | 2–4 MiB | on hardware |
 | `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3 (RISC-V) | same board, other ISA | 520 KiB | 2–4 MiB | on hardware |
-| `esp32c3` | RV32IMC | ESP32-C3 devkit | 400 KiB | 4 MiB | on hardware |
+| `esp32c3-generic` | RV32IMC | ESP32-C3 devkit | 400 KiB | 4 MiB | on hardware |
 | `rv32`, `rv32smp`, `rv32nc` | RV32IMC(+A) | QEMU virt | 256 KiB heap | — | CI smoke + soak |
 | `arm` | Cortex-M3 | QEMU mps2-an385 | — | — | CI smoke |
 | `x86` | i386 | PC / QEMU | — | disk image | local only (see OPEN-ITEMS) |
@@ -90,7 +90,7 @@ the tree.
 ```sh
 # Build any target
 go run ./cmd/tos build -target atk-dnr2350am        # -> build/tinyos-atk-dnr2350am.uf2
-go run ./cmd/tos build -target esp32c3       # -> build/tinyos-esp32c3.bin + -full.bin
+go run ./cmd/tos build -target esp32c3-generic       # -> build/tinyos-esp32c3-generic.bin + -full.bin
 go run ./cmd/tos build all                   # every target in targets/*.conf (15 images)
 
 # RP2040 / RP2350: hold BOOTSEL, plug in USB, copy the .uf2 to the drive

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Long-run stability and memory-leak soak for the esp32c3 target.
+"""Long-run stability and memory-leak soak for the esp32c3-generic target.
 
 The loop drives the shell through every kernel allocation path a normal
 session uses - exec windows, procfs snapshots, pipe buffers, littlefs file
@@ -166,8 +166,8 @@ def main():
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    csv_path = outdir / f"soak-esp32c3-{stamp}.csv"
-    log_path = outdir / f"soak-esp32c3-{stamp}.log"
+    csv_path = outdir / f"soak-esp32c3-generic-{stamp}.csv"
+    log_path = outdir / f"soak-esp32c3-generic-{stamp}.log"
 
     b = Board(args.port)
     t_start = time.time()

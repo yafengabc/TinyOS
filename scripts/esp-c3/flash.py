@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Flash the esp32c3 target and wait for its prompt.
+"""Flash the esp32c3-generic target and wait for its prompt.
 
 Two images go to flash: the kernel at offset 0 and the littlefs image at
 0x80000 (PLAT_LFS_LBA * 512; the first 512 KiB of flash is reserved for the
@@ -13,7 +13,7 @@ erases on first use, so whatever an older 3.5 MiB image left in the tail is
 reclaimed block by block - no erase_region pass is needed.
 
     scripts/esp-c3/flash.py                  # build is assumed done
-    scripts/esp-c3/flash.py --build          # tos build -target esp32c3 first
+    scripts/esp-c3/flash.py --build          # tos build -target esp32c3-generic first
     scripts/esp-c3/flash.py --keep-fs -p COM4
     scripts/esp-c3/flash.py --full -p COM4    # one combined image, like MicroPython
 
@@ -34,9 +34,9 @@ from pathlib import Path
 import serial
 
 ROOT = Path(__file__).resolve().parents[2]
-KERNEL = ROOT / "build" / "tinyos-esp32c3.bin"
-FS = ROOT / "build" / "tinyos-ramdisk-esp32c3.bin"
-FULL = ROOT / "build" / "tinyos-esp32c3-full.bin"     # kernel padded to FS_OFFSET + fs
+KERNEL = ROOT / "build" / "tinyos-esp32c3-generic.bin"
+FS = ROOT / "build" / "tinyos-ramdisk-esp32c3-generic.bin"
+FULL = ROOT / "build" / "tinyos-esp32c3-generic-full.bin"     # kernel padded to FS_OFFSET + fs
 FS_OFFSET = 0x80000
 
 
@@ -50,10 +50,10 @@ def esptool(port, *args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-p", "--port", default="COM4")
-    ap.add_argument("--build", action="store_true", help="run 'tos build -target esp32c3' first")
+    ap.add_argument("--build", action="store_true", help="run 'tos build -target esp32c3-generic' first")
     ap.add_argument("--keep-fs", action="store_true", help="do not rewrite the littlefs image")
     ap.add_argument("--full", action="store_true",
-                    help="flash build/tinyos-esp32c3-full.bin at 0x0 (kernel + fs in one"
+                    help="flash build/tinyos-esp32c3-generic-full.bin at 0x0 (kernel + fs in one"
                          " write, the way MicroPython ships); the split pair stays"
                          " the default")
     ap.add_argument("--wait", type=float, default=20.0, help="seconds to wait for the prompt")
@@ -64,7 +64,7 @@ def main():
         # only as fresh as the last time somebody rebuilt it, and a stale one
         # fails in confusing ways (it once built a kernel that overflowed
         # PLAT_KERNEL_MAX while `go run` built the same tree fine).
-        subprocess.run(["go", "run", "./cmd/tos", "build", "-target", "esp32c3"],
+        subprocess.run(["go", "run", "./cmd/tos", "build", "-target", "esp32c3-generic"],
                        cwd=ROOT, check=True)
 
     if args.full and args.keep_fs:
@@ -73,7 +73,7 @@ def main():
     wanted = (FULL,) if args.full else (KERNEL,) + (() if args.keep_fs else (FS,))
     for p in wanted:
         if not p.exists():
-            sys.exit(f"missing {p}: build the esp32c3 target first")
+            sys.exit(f"missing {p}: build the esp32c3-generic target first")
 
     if args.keep_fs:
         # The kernel and the user programs are flashed separately, so this

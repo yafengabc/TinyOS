@@ -11,7 +11,7 @@
  *  1. It did not disable the watchdogs, so a spin was reset after ~1 s and
  *     the capture looked like a crash at whatever step happened to run.  The
  *     kernel turns off TG0 WDT, the RTC WDT and the RTC super WDT before it
- *     does anything else (board/esp32c3/platform.c); this does the same.
+ *     does anything else (board/esp32c3-generic/platform.c); this does the same.
  *  2. It printed only the result of a call, so a call that died left no
  *     trace.  Every step now prints a marker BEFORE it runs and its result
  *     after, so the last marker in the capture names the failing step.
@@ -60,7 +60,7 @@ _start:
     call putc_nl
 
     /* 0. watchdogs off: TG0, RTC, and the RTC super watchdog.  Same keys and
-     *    registers as the kernel, see board/esp32c3/platform.c. */
+     *    registers as the kernel, see board/esp32c3-generic/platform.c. */
     li   t1, 0x50D83AA1
     li   t0, 0x6001F064            /* TIMG0 WDTWPROTECT */
     sw   t1, 0(t0)

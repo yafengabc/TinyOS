@@ -12,7 +12,7 @@ func TestBoardConfigsExistForEveryBoard(t *testing.T) {
 	if err != nil {
 		t.Skip("not in the source tree")
 	}
-	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3", "rpi-pico",
+	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3-generic", "rpi-pico",
 		"rp2350-generic", "rp2350rv-generic", "atk-dnr2350am", "atk-dnr2350am-rv32", "rpi-pico2"} {
 		bc, err := LoadBoardConfig(root, board)
 		if err != nil {
@@ -32,7 +32,7 @@ func TestApplyConfigRejectsTargetConflict(t *testing.T) {
 	}
 	b := New(root)
 	b.Target = Targets["rpi-pico"]
-	c := &Config{Path: "fake.conf", Explicit: true, Target: "esp32c3"}
+	c := &Config{Path: "fake.conf", Explicit: true, Target: "esp32c3-generic"}
 	if err := b.ApplyConfig(c); err == nil || !strings.Contains(err.Error(), "build target is rpi-pico") {
 		t.Fatalf("target conflict error = %v", err)
 	}
@@ -105,7 +105,7 @@ func TestBoardUserExcludes(t *testing.T) {
 		}
 	}
 	/* Board-level exclusion is hardware truth: only the RP boards have one. */
-	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3"} {
+	for _, board := range []string{"pc", "qemu-virt", "qemu-mps2", "esp32c3-generic"} {
 		bc, err := LoadBoardConfig(root, board)
 		if err != nil {
 			t.Errorf("%s: %v", board, err)

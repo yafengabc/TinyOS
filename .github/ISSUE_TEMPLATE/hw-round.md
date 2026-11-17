@@ -27,7 +27,7 @@ single source of truth; this ticket is the hand-off.
 | `atk-dnr2350am-rv32` | NAPOT | | |
 | `atk-dnr2350am-rv32-smp` | NAPOT | | |
 | `rpi-pico` / `rpi-pico-smp` | none (software guard) | | |
-| `esp32c3` | TOR | | |
+| `esp32c3-generic` | TOR | | |
 
 **What was run** (commands, one per line):
 

@@ -26,7 +26,7 @@ func TestTargetsLoadFromConf(t *testing.T) {
 	}{
 		"x86":                    {"pc", "x86", "", 0, 256 * 1024},
 		"rv32":                   {"qemu-virt", "rv32", "rv32imc", 0, 256 * 1024},
-		"esp32c3":                {"esp32c3", "rv32", "rv32imc", 0, 80 * 1024},
+		"esp32c3-generic":        {"esp32c3-generic", "rv32", "rv32imc", 0, 80 * 1024},
 		"arm":                    {"qemu-mps2", "arm", "", 0, 128 * 1024},
 		"rpi-pico":               {"rpi-pico", "arm", "", 0, 8 * 1024},
 		"rpi-pico-smp":           {"rpi-pico", "arm", "", 2, 8 * 1024},

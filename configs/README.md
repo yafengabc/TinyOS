@@ -15,7 +15,7 @@ paths are resolved against the tree root.
 
 ```ini
 [build]
-target = esp32c3
+target = esp32c3-generic
 
 [features]
 wifi = true

@@ -30,7 +30,7 @@ cross-checks both of those.
     scripts/esp-c3/transtest.py COM4 --no-reset      # board already booted
 
 The board must be flashed with a TinyOS image that contains bin/rx in its
-littlefs ramdisk (rebuild with: go run ./cmd/tos build -target esp32c3).
+littlefs ramdisk (rebuild with: go run ./cmd/tos build -target esp32c3-generic).
 
 Protocol mirror of tools/tosput/sender.go + user/rx.c
     host: "rx <path>\\n"           -> board "READY <chunk>\\n"  (or "ERR ...")
@@ -193,7 +193,7 @@ class Board:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="esp32c3 console file-transfer regression test")
+    ap = argparse.ArgumentParser(description="esp32c3-generic console file-transfer regression test")
     ap.add_argument("port", nargs="?", default="COM4")
     ap.add_argument("--sizes", default="1024,16384,65536",
                     help="comma-separated file sizes in bytes to transfer")
@@ -227,7 +227,7 @@ def main():
     ls = b.read_until_prompt(10.0)
     if "rx" not in ls:
         print("FAIL  bin/rx not found in the ramdisk image")
-        print("       rebuild with: go run ./cmd/tos build -target esp32c3")
+        print("       rebuild with: go run ./cmd/tos build -target esp32c3-generic")
         print("       --- ls bin ---")
         for line in ls.splitlines():
             if line.strip():

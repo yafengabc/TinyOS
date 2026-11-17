@@ -40,7 +40,7 @@ blob。
 | `rpi-pico`, `rpi-pico-smp` | 2× Cortex-M0+ | Raspberry Pi Pico | 264 KiB | 2 MiB | 真机验过 |
 | `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | Pico 2 / ATK-DNRP2350AM | 520 KiB | 2–4 MiB | 真机验过 |
 | `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3（RISC-V） | 同一块板的另一个 ISA | 520 KiB | 2–4 MiB | 真机验过 |
-| `esp32c3` | RV32IMC | ESP32-C3 开发板 | 400 KiB | 4 MiB | 真机验过 |
+| `esp32c3-generic` | RV32IMC | ESP32-C3 开发板 | 400 KiB | 4 MiB | 真机验过 |
 | `rv32`, `rv32smp`, `rv32nc` | RV32IMC(+A) | QEMU virt | 256 KiB 堆 | — | CI 冒烟 + soak |
 | `arm` | Cortex-M3 | QEMU mps2-an385 | — | — | CI 冒烟 |
 | `x86` | i386 | PC / QEMU | — | 磁盘镜像 | 仅本机（见 OPEN-ITEMS） |
@@ -76,7 +76,7 @@ SDK 要装：板子需要的一切都在仓库里。
 ```sh
 # 构建任意目标
 go run ./cmd/tos build -target atk-dnr2350am        # -> build/tinyos-atk-dnr2350am.uf2
-go run ./cmd/tos build -target esp32c3       # -> build/tinyos-esp32c3.bin + -full.bin
+go run ./cmd/tos build -target esp32c3-generic       # -> build/tinyos-esp32c3-generic.bin + -full.bin
 go run ./cmd/tos build all                   # 一次构建 targets/*.conf 里的全部 15 个镜像
 
 # RP2040 / RP2350：按住 BOOTSEL 插 USB，把 .uf2 拷进 U 盘

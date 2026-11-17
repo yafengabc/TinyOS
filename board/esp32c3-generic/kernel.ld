@@ -5,7 +5,7 @@
  * real chip cannot fetch from the data alias, see docs/PLATFORM-DESIGN.md
  * §8.1.  The layout mirrors arch/rv32/kernel.ld; only the base differs.
  *
- * This is the all-SRAM layout.  board/esp32c3/kernel-xip.ld is the variant
+ * This is the all-SRAM layout.  board/esp32c3-generic/kernel-xip.ld is the variant
  * that runs the code half in place out of flash, and is selected when the
  * target sets XipFlashBase (internal/build/build.go).
  */

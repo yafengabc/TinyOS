@@ -1,4 +1,4 @@
-# ESP32-C3（`-target esp32c3`）
+# ESP32-C3（`-target esp32c3-generic`）
 
 第一块真机目标：RV32IMC、单核、400 KiB SRAM、4 MiB SPI flash，代码 XIP 在 flash
 里执行，文件系统也在 flash 上。板子通过 CH343 串口和板载 USB-Serial/JTAG 两条线
@@ -22,10 +22,10 @@
 ## 构建与烧写
 
 ```bash
-go run ./cmd/tos build -target esp32c3
-# -> build/kernel-esp32c3.elf
-# -> build/tinyos-esp32c3.bin          (烧到 flash 0x0)
-# -> build/tinyos-ramdisk-esp32c3.bin  (烧到 flash 0x80000)
+go run ./cmd/tos build -target esp32c3-generic
+# -> build/kernel-esp32c3-generic.elf
+# -> build/tinyos-esp32c3-generic.bin          (烧到 flash 0x0)
+# -> build/tinyos-ramdisk-esp32c3-generic.bin  (烧到 flash 0x80000)
 ```
 
 用脚本一条龙（自动进下载模式、烧完自己复位并抓 banner）：
@@ -39,11 +39,11 @@ python scripts/esp-c3/flash.py --keep-fs -p COM4   # 只更新内核，保留文
 手工用 esptool 时就是 build 输出里提示的两条：
 
 ```bash
-esptool.py write-flash 0x0     build/tinyos-esp32c3.bin
-esptool.py write-flash 0x80000 build/tinyos-ramdisk-esp32c3.bin
+esptool.py write-flash 0x0     build/tinyos-esp32c3-generic.bin
+esptool.py write-flash 0x80000 build/tinyos-ramdisk-esp32c3-generic.bin
 ```
 
-CH343 的 DTR/RTS 接了自动下载电路，不需要手按 BOOT。`-target esp32c3` 没有 QEMU
+CH343 的 DTR/RTS 接了自动下载电路，不需要手按 BOOT。`-target esp32c3-generic` 没有 QEMU
 模型：功能回归走 `rv32emu-c`（`tostest emu` / `tostest emutest`），它模拟同一套
 RV32IMC。
 
@@ -73,7 +73,7 @@ go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软�
 | 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 | 9 |
 | 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） | 2（余 48 KiB） |
 | 进程槽（`max_procs`） | 8 | 8 | **16** |
-| `tinyos-esp32c3.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
+| `tinyos-esp32c3-generic.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
 
 - 前两列的内核堆都是 target 默认的 **80 KiB**（`[build] heap=` 可覆盖）；WiFi 吃掉的是
   它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。
@@ -192,9 +192,9 @@ C3 实测（160 MHz）：`threadbench` 三段同样 90 万次迭代——3 线�
 
 ## 相关文件
 
-- `board/esp32c3/platform.c`：UART0/TIMG0/INTMTX/看门狗、SPI flash、MMU
-- `board/esp32c3/{pwm.c,spi.c,i2c.c}`：LEDC / SPI2 主机 / 软件 I2C，以及 `c3_apb_hz()` 的分频
-- `board/esp32c3/{kernel-xip.ld,kernel.ld,layout.c}`
+- `board/esp32c3-generic/platform.c`：UART0/TIMG0/INTMTX/看门狗、SPI flash、MMU
+- `board/esp32c3-generic/{pwm.c,spi.c,i2c.c}`：LEDC / SPI2 主机 / 软件 I2C，以及 `c3_apb_hz()` 的分频
+- `board/esp32c3-generic/{kernel-xip.ld,kernel.ld,layout.c}`
 - `drivers/serial/esp32c3/`：USB-Serial/JTAG
 - `drivers/wifi/esp32c3/`：WiFi/PHY/WPA2/IPv4 与 blob
 - `scripts/esp-c3/`：真机烧写、验收与寄存器探针

@@ -34,10 +34,10 @@ func cmdEmutest(args []string) int {
 		fmt.Fprintf(os.Stderr, "RV32EMU-C not found: %s (run 'tostest emu build')\n", emu)
 		return 1
 	}
-	elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3.elf")
-	rd := filepath.Join(repoRoot(), "build", "tinyos-ramdisk-esp32c3.bin")
+	elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3-generic.elf")
+	rd := filepath.Join(repoRoot(), "build", "tinyos-ramdisk-esp32c3-generic.bin")
 	if !fileExists(elf) {
-		fmt.Fprintf(os.Stderr, "build artifact missing: %s (run 'tos build -target esp32c3')\n", elf)
+		fmt.Fprintf(os.Stderr, "build artifact missing: %s (run 'tos build -target esp32c3-generic')\n", elf)
 		return 1
 	}
 

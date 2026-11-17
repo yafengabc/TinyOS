@@ -229,7 +229,7 @@ func (s *State) SetTarget(t string) {
 	}
 }
 
-func (s *State) WiFiCapable() bool { return s.Target == "esp32c3" }
+func (s *State) WiFiCapable() bool { return s.Target == "esp32c3-generic" }
 
 func (s *State) SetWiFi(on bool) {
 	if on && !s.WiFiCapable() {

@@ -11,7 +11,7 @@ flash，`layout.c` 给出内存与文件系统分区，`kernel.ld` 决定镜像�
 | [`pc/`](pc/README.md) | `x86` | i386 / 传统 BIOS + MBR | QEMU 或写盘启动 | ✅ 完整 |
 | [`qemu-virt/`](qemu-virt/README.md) | `rv32`、`rv32smp`、`rv32nc` | QEMU virt，RV32IM(C) | `tos run` | ✅ 完整（含 SMP） |
 | [`qemu-mps2/`](qemu-mps2/README.md) | `arm` | QEMU mps2-an385，Cortex-M3 | `tos run` | ✅ 完整 |
-| [`esp32c3/`](esp32c3/README.md) | `esp32c3` | ESP32-C3，XIP flash | esptool / `scripts/esp-c3/flash.py` | ✅ 实机（含 WiFi）；I2C/SPI/PWM 已接、待实机验收 |
+| [`esp32c3-generic/`](esp32c3-generic/README.md) | `esp32c3-generic` | ESP32-C3，XIP flash | esptool / `scripts/esp-c3/flash.py` | ✅ 实机（含 WiFi）；I2C/SPI/PWM 已接、待实机验收 |
 | [`rpi-pico/`](rpi-pico/README.md) | `rpi-pico`、`rpi-pico-smp` | Pico，Cortex-M0+ | BOOTSEL UF2 | ◐ UART 控制台可用，USB CDC 调试中 |
 | `rp2350-generic/` | `rp2350-generic` | RP2350 芯片基线，Cortex-M33，无面板/无卡槽 | BOOTSEL UF2 | 新目标：只有 UART/USB 控制台，文件系统在 RAM |
 | [`atk-dnr2350am/`](atk-dnr2350am/README.md) | `atk-dnr2350am`、`atk-dnr2350am-smp` | ATK-DNRP2350AM，Cortex-M33 | BOOTSEL UF2 | ✅ 实机（USB + 屏 + MPU） |
@@ -22,7 +22,7 @@ flash，`layout.c` 给出内存与文件系统分区，`kernel.ld` 决定镜像�
 ## 选哪个目标
 
 - 只想跑一下 / 改内核：`x86`（默认）或 `rv32`，QEMU 里最快，`make run` 就是 x86。
-- 验证 PMP：`rv32` / `esp32c3`；验证 ARMv7-M MPU：`arm`；验证 PMSAv8 MPU：`atk-dnr2350am`。
+- 验证 PMP：`rv32` / `esp32c3-generic`；验证 ARMv7-M MPU：`arm`；验证 PMSAv8 MPU：`atk-dnr2350am`。
 - 验证"没有 MPU 的 MCU"：`rpi-pico`（任务之间没有硬件隔离）。
 - 验证 SMP：`rv32smp`、`atk-dnr2350am-smp`、`atk-dnr2350am-rv32-smp`。
 - 真机：C3 走串口烧写；三块 RP 系列都是 BOOTSEL 拖 UF2。

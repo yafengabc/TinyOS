@@ -47,7 +47,7 @@
 
 两个必须说清的事实：
 
-- **C3 的内核不是 XIP**。`board/esp32c3/kernel.ld` 把 `.text` 放在 `0x40380000`
+- **C3 的内核不是 XIP**。`board/esp32c3-generic/kernel.ld` 把 `.text` 放在 `0x40380000`
   （SRAM 的指令别名），ROM 从 flash 把镜像搬进 SRAM 执行。所以“预编译进内核区，
   不占 RAM”这条在 C3 上不成立——内核每多 1 字节代码就少 1 字节 RAM。
   （余量曾经只有 252 字节；2026-11-03 把内核堆从 64 KiB 收回 32 KiB 后变成 33 KiB。）

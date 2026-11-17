@@ -18,7 +18,7 @@
  * exactly what makes the same calls safe from two cores later.
  *
  * Register map from the ESP32-C3 TRM (chapter "GPIO Matrix and IO_MUX");
- * see the note in board/esp32c3/platform.c about which parts of this port
+ * see the note in board/esp32c3-generic/platform.c about which parts of this port
  * have been exercised on silicon.  The GPIO matrix select value (128,
  * "IGPIO") is the one part that differs between ESP32 generations - it is
  * 256 on the original ESP32 and 128 on the C3/S3 family. */

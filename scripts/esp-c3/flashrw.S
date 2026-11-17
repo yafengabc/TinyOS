@@ -6,7 +6,7 @@
  * Tests esp_rom_spiflash_erase_sector's argument convention - sector
  * NUMBER (0x3FC000 >> 12 = 0x3FF) is tried first; if the sector does not
  * read back as erased after the call, the alternative (byte address) is
- * what the ROM wants and the caller in board/esp32c3/platform.c must be
+ * what the ROM wants and the caller in board/esp32c3-generic/platform.c must be
  * fixed.  Then writes a pattern and reads it back, then erases again.
  */
     .section .text

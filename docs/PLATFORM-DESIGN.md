@@ -33,7 +33,7 @@ arch/arm/        ARMv6-M/ARMv7-M：异常入口、SysTick、UART、块设备
 board/pc/        板级：内存布局、启动
 board/qemu-virt/ QEMU rv32 virt：0x80000000 启动、16550、CLINT
 board/qemu-mps2/ QEMU Cortex-M 参考板
-board/esp32c3/   ESP32-C3：ESP 镜像、SPI flash、UART0
+board/esp32c3-generic/   ESP32-C3：ESP 镜像、SPI flash、UART0
 board/rpi-pico/    RP2040：boot2、UF2、XIP、UART0
 ```
 
@@ -947,7 +947,7 @@ M-mode、U-mode、PMP、mtvec、ecall 五条通路全部打通，C3 移植的可
 
 TIMG0 → INTMTX 线 2 → vectored 槽 2，全链在实板上跑通，内核
 `tick self-check` 通过、三个看门狗全关后 12 s 内零复位。板级序列在
-`board/esp32c3/platform.c`，探针全过程在 `scripts/esp-c3/tick.S` 头注释。
+`board/esp32c3-generic/platform.c`，探针全过程在 `scripts/esp-c3/tick.S` 头注释。
 
 - INTMTX：`MAP[32]=2`（源 32 = TG0_T0）、`PRI_2=1`（0x11C，不是 0x118）、
   `THRESH=1`、`ENABLE |= 1<<2`。**mcause = 0x80000000 | 线号**（tick 到达为
@@ -1023,7 +1023,7 @@ nibble 是真的**。于是 entries < 0x10000000 时永远打出 `00000000`，�
 #### 8.7 SPI flash 块设备（已验证，2026-11-01）
 
 littlefs 分区烧在 flash 偏移 0x80000（`PLAT_LFS_LBA=1024`，前 512 KiB 留给内核；3.5 MiB = 896 块），
-`esptool write-flash 0x80000 build/tinyos-ramdisk-esp32c3.bin`（脚本：`scripts/esp-c3/flash.py`）。
+`esptool write-flash 0x80000 build/tinyos-ramdisk-esp32c3-generic.bin`（脚本：`scripts/esp-c3/flash.py`）。
 块设备三层组合，全部真机验证：
 
 - **读 = ROM `esp_rom_spiflash_read`（0x40000130）**。ROM bootloader 已探测好芯片，
@@ -1148,7 +1148,7 @@ tasks        196608  (192 KiB)
 unused        34128  ( 33 KiB)   ← 原 2,048
 ```
 
-同时给 `board/esp32c3/kernel.ld` 补了 `ASSERT(__kernel_end <= 0x403AC000)`（rp2040
+同时给 `board/esp32c3-generic/kernel.ld` 补了 `ASSERT(__kernel_end <= 0x403AC000)`（rp2040
 早就有）。在此之前，内核 `.bss` 再长 240 字节可以链接成功，运行期表现为 pid 1 的
 映像被内核全局变量覆盖——症状是"用户程序随机崩"，没人会往链接脚本上想。
 
@@ -1382,7 +1382,7 @@ C3 这条是这一轮唯一在真机上验过的：写之前先等 FIFO 排空�
 
 ### 8.10 控制台：两条线、四个中断、一个必须非阻塞的输出（真机实测，2026-11-03）
 
-C3 上有两条控制台通道，都在 `board/esp32c3/`：UART0（GPIO20/21，板上 CH343
+C3 上有两条控制台通道，都在 `board/esp32c3-generic/`：UART0（GPIO20/21，板上 CH343
 USB-UART 桥，主机侧是 COM13 这类口）和原生 USB-Serial/JTAG（固定功能 CDC，
 主机侧是另一个口）。
 
@@ -1466,7 +1466,7 @@ C3 的内核原本整份装在 SRAM 里（`0x40380000`，175.6 KiB），`PLAT_KE
 0x42000000  .text / .rodata                                     (flash 0x40000 起)
 ```
 
-`internal/build` 用 `XipFlashBase` 开关选 `board/esp32c3/kernel-xip.ld`（板级目录里
+`internal/build` 用 `XipFlashBase` 开关选 `board/esp32c3-generic/kernel-xip.ld`（板级目录里
 同时留着 `kernel.ld` 的全 RAM 布局，关掉 XIP 只是把这个字段清 0）。打包器看到
 `0x42000000` 的段就不把它们放进 ROM 可加载段，而是按 `vaddr - 0x42000000` 摆成
 `XipBlob` 追加到镜像的 `XipOffset`（64 KiB 对齐）——**ROM 不能把段加载到
