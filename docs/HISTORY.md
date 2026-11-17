@@ -4663,3 +4663,44 @@ base = rp2350          # 复用该板目录的 platform.c / layout.c / ld / PICO
   （197540/143972 与改前相同），需要一次真机 heartbeat + LED/按键冒烟；
 - `rp2350rv` 仍保留自己那份 `board_devs.c`（它的 `platform.c` 是 RISC-V，走不了
   `base =`），所以两份板文件在结构上暂时不对等——记在这里，不假装已经统一。
+
+## 74. 2026-11-17 B-1d：镜像清单变成数据（`targets/*.conf`）
+
+**问题**：13 个目标原本是 `internal/build/build.go` 里的一个 Go 字面量。加
+`rp2350pico2` 就必须改 Go——这正是 C1 说的“新板要改代码”。板的事实已经在
+`board.conf`，芯片的事实已经在 chip 表，只剩下“有哪些镜像、每个镜像什么堆/进程数”
+这一层还是代码。
+
+**做法**（`45fc869`）：
+
+```ini
+# targets/rp2350smp.conf
+[target]
+name = rp2350smp
+board = rp2350
+arch = arm
+cpus = 2
+heap = 60k
+```
+
+- `Targets` 仍是 map（build/doctor/menu/测试都当查找表用），内容改为 init 时从
+  `targets/*.conf` 读；**全有或全无**——半张表会让菜单和 CI 悄悄少几个镜像；
+- 字面量里那些“为什么是 60 KiB / 为什么 8 个进程”的注释没有丢，搬进
+  `targets/README.md` 与各文件头；
+- **`boardChips` 删除**：board.conf 自己声明 chip；variant 必须与 base 同 chip，
+  目标的 ISA 必须在该 chip 的 ISAs 里（两条都有测试）。原来那个“板目录只允许某颗芯片”
+  的白名单，抓的是新板 conf 写错芯片——这类错误现在会在几秒内编译失败，因为板级
+  platform 代码用的是该移植端的头文件；
+- **UF2/镜像格式 switch 改为按 `(chip, arch)` 分派**，不再按板名；没有格式的组合直接报错，
+  而不是静默不产出。
+
+**验证**：13 个目标全部构建，且各自的 `build-config.txt` 与字面量时代**逐字节相同**
+（对照文件保存在本地 `build/goc32probe/b1d/`）。新增 `targets_test.go` 钉住 13 组
+`name/board/arch/march/cpus/heap`、每个 board 可解析、每个 ISA 在芯片上存在。
+
+**下一步（未做）**：把 `board/rp2350` 拆成 `board/rp2350-generic` + `board/atk-dnr2350am`，
+`board/rp2350rv` 拆成 `board/rp2350rv-generic` + `board/atk-dnr2350am-rv32`，pico2 的
+`base` 改指 generic。两个已知约束：`layout.c` 的 `PLAT_LFS_*` 无条件被 ramdisk 引用，
+所以 generic 的 embedded 形态需要 `#if TOS_HAS_FLASH` 分支；RV32 的 generic 要自带
+`platform.c`/`kernel.ld`/`image_def.S`，只能从 ARM generic 继承 `board_devs.c` 这类
+与 ISA 无关的文件。

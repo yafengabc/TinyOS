@@ -75,6 +75,7 @@
 | 2026-11-17 | T2 soak 1/3 根因：harness 等待窗口 | `3dae711` | QEMU rv32/rv32smp/arm/x86 | T0/T2 PASS；soak 3/3；T1/T3/T4 `NOT RUN` | [soak window](2026-11-17-soak-window-3dae711.md) |
 | 2026-11-17 | B-4b 一份 ST7789 驱动供两 ISA | `fe1dc85` | rp2350smp/rp2350rvsmp + 12 目标 + QEMU 4（CI `44039230725`） | T0–T2 PASS；两 ELF 与合并前逐字节相同 | [B-4b](2026-11-17-b4b-one-driver-fe1dc85.md) |
 | 2026-11-17 | smoke 超时诊断 + soak 窗口 15 s | `a8d55b7` | QEMU rv32/rv32smp/arm | T0/T2 PASS；诊断行按预期出现 | [smoke timeout](2026-11-17-smoke-timeout-a8d55b7.md) |
+| 2026-11-17 | B-1d 镜像清单变成数据 | `45fc869` | 13 目标 + fs_ro + QEMU 4 | T0–T2 PASS；13/13 build-config 逐字节相同 | [B-1d](2026-11-17-b1d-targets-conf-45fc869.md) |
 | 2026-11-17 | 板组合 `base =` + `board/pico2`（#7 B1/B2） | `b6be508` | 13 目标 + fs_ro + QEMU 4 | T0–T2 PASS；Pico 2 未上板（T3 `NOT RUN`） | [pico2 variant](2026-11-17-pico2-variant-b6be508.md) |
 | 2026-11-17 | flash 容量/偏移变成板级事实（#7 前置） | `cf60065` | 12 目标 + fs_ro + QEMU 4 | T0–T2 PASS；值未变；2m/1m 旋钮可用 | [flash facts](2026-11-17-flash-facts-cf60065.md) |
 | 2026-11-17 | B-2b 前半：park 握手顺序共享 + host 模型 | `1120aac` | 6 个 RP 目标 + 12 目标 + QEMU 4 | T0–T2 PASS；T3 `NOT RUN`（#17） | [park ordering](2026-11-17-b2b-park-ordering-1120aac.md) |
