@@ -106,6 +106,13 @@ static void wdt_feed(void);        /* defined with the RAM helpers below */
 static void wdt_enable(void);
 static void early_puts(const char *s);
 static void early_put_hex(uint32_t v);
+static uint32_t measure_clk_src_khz(uint32_t src);
+
+/* measure_clk_khz() is the common case: clk_sys itself. */
+static uint32_t measure_clk_khz(void)
+{
+    return measure_clk_src_khz(FC0_SRC_CLK_SYS);
+}
 
 /* Board: Raspberry Pi RP2350, Hazard3 RISC-V cores.
  *
@@ -436,6 +443,17 @@ static void clocks_init(void)
         if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
             break;
     }
+    /* STABLE asserts on amplitude, not on a settled frequency.  pico-sdk
+     * spends PICO_XOSC_STARTUP_DELAY_MULTIPLIER ms here for the same reason.
+     * Moving clk_ref (and with it clk_sys) onto a crystal that is still
+     * drifting changes the flash clock mid-transaction; the QMI's sampling
+     * delay is counted in clk_sys cycles, so the first flash data read after
+     * the switch can fault - measured on the Pico 2 as a load access fault
+     * inside the [A] line and, in other boots, no output at all. */
+    if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
+        for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+            ;
+    }
 
     if ((mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) &&
         !(mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))) {
@@ -531,6 +549,16 @@ static void pll_sys_init(void)
 {
     uint32_t i;
 
+    /* The dividers below are the 12 MHz crystal's.  If a cold start left
+     * clk_ref on the ROSC (~6.5 MHz, drifting), the same dividers produce
+     * ~81 MHz instead of 150 MHz and the flash timing the ROM set up no
+     * longer matches; the boot then dies at the switch (measured on the
+     * Pico 2: first boot after power-on, retry with a warm crystal was
+     * fine).  Require the crystal as clk_ref before raising anything; the
+     * boot continues at clk_ref with measured divisors instead. */
+    if (!(mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2)))
+        return;
+
     /* Defensive repeat: if this is ever called on its own, moving clk_sys
      * to the glitchless source is what makes the reset below safe. */
     mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);
@@ -562,14 +590,22 @@ static void pll_sys_init(void)
 
     PLL_SYS_PWR_REG &= ~PLL_SYS_PWR_POSTDIVPD;
 
-    /* Switch clk_sys onto the PLL and re-time XIP in the same RAM-resident
-     * step; see clk_sys_to_pll_sys(). */
+    /* 150 MHz, but only if the PLL is really there - same reason as the ARM
+     * port: on a cold start the crystal is still drifting when LOCK asserts,
+     * and switching clk_sys onto a drifting PLL hangs the first boot.  Keep
+     * clk_sys on clk_ref when the measured output is not 150 MHz; the board
+     * then boots at 12 MHz and the next reset gets the full rate. */
+    if (measure_clk_src_khz(FC0_SRC_PLL_SYS) < 149000u ||
+        measure_clk_src_khz(FC0_SRC_PLL_SYS) > 151000u)
+        return;
+
+    /* Switch clk_sys onto the PLL from SRAM; see clk_sys_to_pll_sys(). */
     clk_sys_to_pll_sys();
 }
 
 /* Measure clk_sys in kHz against the 12 MHz crystal.  Returns 0 when the
  * counter does not settle; the caller then keeps its conservative default. */
-static uint32_t measure_clk_khz(void)
+static uint32_t measure_clk_src_khz(uint32_t src)
 {
     uint32_t spins;
     const uint32_t bound = plat_pre_tick_spins(1000000u);
@@ -589,7 +625,7 @@ static uint32_t measure_clk_khz(void)
     mmio_write32(FC0_MIN_KHZ, 0u);
     mmio_write32(FC0_MAX_KHZ, 0xffffffffu);
     mmio_write32(FC0_INTERVAL, 10u);
-    mmio_write32(FC0_SRC, FC0_SRC_CLK_SYS);
+    mmio_write32(FC0_SRC, src);
 
     for (spins = 0; spins < bound; spins++) {
         if (mmio_read32(FC0_STATUS) & FC0_STATUS_DONE)

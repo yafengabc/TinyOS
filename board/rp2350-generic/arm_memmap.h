@@ -139,6 +139,7 @@
 #define FC0_STATUS       (CLOCKS_BASE + 0xa4u)
 #define FC0_RESULT       (CLOCKS_BASE + 0xa8u)
 #define FC0_SRC_CLK_SYS  0x09u
+#define FC0_SRC_PLL_SYS  0x01u   /* pll_sys primary: measurable before the mux */
 #define FC0_STATUS_RUNNING (1u << 8)
 #define FC0_STATUS_DONE    (1u << 4)
 #define FC0_RESULT_KHZ_S  5

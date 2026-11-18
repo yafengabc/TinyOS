@@ -191,6 +191,11 @@ static void rom_reboot(uint32_t flags)
 static void rom_stop_other_core(void);   /* defined with the flash helpers */
 static RAMFUNC void wdt_feed(void);       /* defined with the flash helpers */
 
+/* Used by pll_sys_init() long before their definitions. */
+static void early_puts(const char *s);
+static void early_put_hex(uint32_t v);
+static uint32_t measure_clk_src_khz(uint32_t src);
+
 static void rom_enter_bootsel(void)
 {
     rom_stop_other_core();
@@ -282,6 +287,17 @@ static void clocks_init(void)
         if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
             break;
     }
+    /* STABLE asserts when the amplitude crosses its threshold, not when the
+       frequency has settled: a crystal that has just started still drifts for
+       a few more milliseconds.  pico-sdk spends PICO_XOSC_STARTUP_DELAY_MULTIPLIER
+       ms here for the same reason.  Switching clk_ref mid-transient gives the
+       PLL a wandering reference, and its output moves far enough to break the
+       flash sampling - measured on the Pico 2 as "half of the cold boots died
+       right after the clock raise, no output at all". */
+    if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
+        for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+            ;
+    }
 
     if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
         mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);
@@ -371,6 +387,21 @@ static void pll_sys_init(void)
     const uint32_t post1   = 5u;
     const uint32_t post2   = 2u;
     uint32_t i;
+    uint32_t khz;
+
+    /* The dividers below are the 12 MHz crystal's (125 x 12 MHz / 5 / 2).
+     * If the oscillator did not come up - a cold start can leave clk_ref on
+     * the ROSC, which is ~6.5 MHz and drifts with temperature - the same
+     * dividers produce ~81 MHz, and raising clk_sys onto that breaks the
+     * flash timing the ROM set up.  So the crystal has to be the selected
+     * reference before the clock is raised at all; otherwise the boot
+     * continues at the ROSC with divisors that were measured, not assumed. */
+    if (!(mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))) {
+#if TOS_BOOT_TRACE
+        early_puts("[B] crystal not selected, staying on clk_ref\r\n");
+#endif
+        return;
+    }
 
     /* The live clock source is whatever the boot path left behind: ROSC on a
      * cold boot, but possibly a PLL after a UF2-triggered reboot.  Park
@@ -405,6 +436,24 @@ static void pll_sys_init(void)
         return;                     /* no PLL: stay on the ROM's clk_sys   */
 
     PLL_SYS_PWR_REG &= ~PLL_SYS_PWR_POSTDIVPD;
+
+    /* 150 MHz, but only if the PLL is really there.  On a cold start the
+     * crystal is still drifting when the PLL reports LOCK, and moving
+     * clk_sys onto it hangs the first boot: measured on the Pico 2, the
+     * first boot after power-on died right here and the retry 1.2 s later
+     * came up with the crystal warm (the ROM never ran - no UF2 volume
+     * appeared).  So measure the PLL output and keep clk_sys on clk_ref
+     * when it is not 150 MHz; the board then boots at 12 MHz instead of
+     * not booting, and the next reset (crystal warm) gets the full rate. */
+    khz = measure_clk_src_khz(FC0_SRC_PLL_SYS);
+    if (khz < 149000u || khz > 151000u) {
+#if TOS_BOOT_TRACE
+        early_puts("[B] pll not used, measured 0x");
+        early_put_hex(khz * 1000u);
+        early_puts(" Hz\r\n");
+#endif
+        return;
+    }
 
     /* Switch clk_sys onto the PLL output.  The divider is forced to 1.0
      * first, then SRC moves to the AUX mux (which now selects pll_sys).
