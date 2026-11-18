@@ -105,3 +105,4 @@
 | 2026-11-18 | 复测上游 HEAD：共享 XOSC 启动实现 | `e9588ee` | Pico 2 rv32-smp（COM19）+ 18 目标 + QEMU 3 | T0–T3 PASS（拔插电源 10/10）；ATK / RP2040 真机 `NOT RUN` | [shared xosc](2026-11-18-rp-xosc-shared-e9588ee.md) |
 | 2026-11-18 | Pico 2 冷启动清零：SDK 顺序 + 20 ms 起振 | `0193e00` | Pico 2 两个 SMP 镜像（COM19）+ 18 目标 + QEMU 3 | T0–T3 PASS（rv32-smp 20/20、arm-smp 20+/20）；ATK/RP2040 真机 `NOT RUN` | [cold boot zero](2026-11-18-pico2-coldboot-zero-0193e00.md) |
 | 2026-11-19 | 发布镜像精简启动日志 + `configs/release.conf` | `5a030cd` | Pico 2（COM19/COM17）+ 18 目标 + 5 个 release 构建 + QEMU 4 | T0–T3 PASS（release 镜像 heartbeat 6/6）；ATK/RP2040 真机 `NOT RUN` | [release log](2026-11-19-release-log-pico2-5a030cd.md) |
+| 2026-11-19 | 启动不再等 USB 枚举 + RP2040 RESETS 地址修正 | `4f032cf` | ATK-DNRP2350AM M33 SMP（COM24）+ RP2040 时间戳 + 18 目标 + QEMU 4 | T0–T3 PASS（ATK 冷启动 20/20）；RP2040 计数/RV32/accept33 `NOT RUN` | [usb no-wait](2026-11-19-usb-no-host-wait-atk-4f032cf.md) |
