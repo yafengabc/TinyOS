@@ -1648,7 +1648,7 @@ void plat_board_early(void)
                                                 : ARM_SYSTICK_CLK;
     uart_init();
 #if TOS_BOOT_TRACE
-    early_puts("[B] clk_sys=");
+    early_puts("[B] clk=0x");
     early_put_hex(g_clk_hz);
     early_puts("\r\n");
 #endif
