@@ -100,3 +100,4 @@
 | 2026-11-18 | Pico 2 标准流程：flash smoke + 心跳 | `fdb515a` | Pico 2 ARM（COM19）+ 18 目标 + QEMU 3 | T0–T3 PASS（flash 7/7、heartbeat 6/6）；T4/ATK 真机 `NOT RUN` | [Pico 2 heartbeat](2026-11-18-pico2-heartbeat-fdb515a.md) |
 | 2026-11-18 | Pico 2 四镜像心跳 + dd/rm + smpbench | `2349bbe` | Pico 2（COM19）×4 镜像 + 18 目标 + QEMU 3 | T0–T3 PASS（4/4 心跳 6/6、flash 7/7）；dd ARM 200/200 + RV32 340/340；smpbench 1.96–2.04x 无回归；ATK 真机 `NOT RUN` | [matrix](2026-11-18-pico2-matrix-ddrw-smpbench-2349bbe.md) |
 | 2026-11-18 | ATK T3：两个 SMP 镜像（issue #7 硬件门槛） | `987d59c` | ATK-DNRP2350AM（COM14）×2 镜像 + 18 目标 + QEMU 3 | T0–T3 PASS（M33 SMP 15/15、RV32 SMP 17/17，含 dd 100 轮）；T4 `NOT RUN` | [ATK T3](2026-11-18-atk-smp-t3-987d59c.md) |
+| 2026-11-18 | 复测远端 HEAD，修 boot_trace 默认值回归 | `00daf21` | ATK-DNRP2350AM（COM14）×2 镜像 + 18 目标 + QEMU 3 | T0–T3 PASS（M33 SMP 16/16、RV32 SMP 17/17）；T4/ATK 单核/Pico 2 `NOT RUN` | [retest](2026-11-18-atk-retest-00daf21.md) |
