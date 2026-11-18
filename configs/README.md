@@ -39,6 +39,11 @@ exclude = ping,net,dhcp
   `max_procs = 8` (process table slots), `kstack = 16384` (per-CPU kernel
   stack, 8192/16384/32768; the linker pool and `kernel/cpu.h` read the same
   define) and `opt = -Oz` (compiler optimisation; `TOS_OPT` still wins).
+  `boot_trace = 0` compiles the boot-progress traces and the `TOS_DIAG`
+  diagnostics out in one step (the menuconfig item is "Boot traces +
+  diagnostics"); the default is on because `scripts/rp2350/accept33.py` reads
+  the `[A]`..`[E]` markers.  `configs/release.conf` is the quiet file to pass
+  for a shipping image.
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
   A target can also declare default features: `rpi-pico` starts with
@@ -92,3 +97,4 @@ Examples:
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
 | `configs/atk-dnr2350am-smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
 | `configs/atk-dnr2350am-rv32-smp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |
+| `configs/release.conf` | target-agnostic release build: boot traces and diagnostics compiled out (`boot_trace = 0`), everything else at the target's defaults |

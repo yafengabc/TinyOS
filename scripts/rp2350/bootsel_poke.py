@@ -3,6 +3,11 @@
 The running firmware watches UART0 for Ctrl-D from its 1 ms tick during the
 first 30 s after boot, so all this has to do is keep sending 0x04 while the
 user presses RESET.  It stops as soon as the UF2 volume shows up.
+
+Since the CDC console accepts Ctrl-D as well, `--dtr` works on the board's own
+USB port (2e8a:000a) and needs no button at all:
+
+    python scripts/rp2350/bootsel_poke.py COM17 20 --dtr
 """
 
 import os
@@ -14,6 +19,7 @@ import serial
 PORT = sys.argv[1] if len(sys.argv) > 1 else "COM14"
 SECONDS = float(sys.argv[2]) if len(sys.argv) > 2 else 45.0
 FLASH = len(sys.argv) > 3 and sys.argv[3] == "--flash"
+DTR = "--dtr" in sys.argv[1:]        # CDC console needs DTR asserted
 
 
 def bootsel_present():
@@ -26,7 +32,7 @@ def bootsel_present():
 
 def main():
     s = serial.Serial(PORT, 115200, timeout=0.2)
-    s.setDTR(False)
+    s.setDTR(bool(DTR))
     s.setRTS(False)
     deadline = time.time() + SECONDS
     while time.time() < deadline:

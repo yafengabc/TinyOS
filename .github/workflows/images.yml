@@ -116,7 +116,12 @@ jobs:
           go version
 
       - name: Build ${{ matrix.target }}
-        run: go run ./cmd/tos build -target ${{ matrix.target }}
+        # Release artifacts are built quiet: configs/release.conf turns
+        # boot_trace off, so the [A]..[E] bring-up markers, the P1/P2 USB
+        # progress lines and the [cpu1]/[mpu] diagnostics are compiled out.
+        # The smoke job below deliberately keeps the default (traces on) and
+        # so does any acceptance run, because accept33.py reads those markers.
+        run: go run ./cmd/tos build -target ${{ matrix.target }} -config configs/release.conf
 
       - name: Report image sizes
         run: |

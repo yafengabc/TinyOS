@@ -131,7 +131,9 @@ void cpu_init(void)
                 break;
             }
         }
+#if TOS_BOOT_TRACE
         kprintf("[smp] %d of %d CPU(s) online\n", cpu_count, n);
+#endif
     }
 }
 

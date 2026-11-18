@@ -1061,7 +1061,11 @@ void plat_task_protect(const plat_seg_t *segs, int n)
     uint32_t r;
     int cid = plat_cpu_id();
     int i = 0;
+#if TOS_DIAG
+    /* Only the one-shot summary below uses this; keep it out of the image
+     * when the diagnostics are compiled out. */
     static int reported;
+#endif
 
     if (cid < 0 || cid >= (int)MAX_CPUS)
         cid = 0;
@@ -1170,6 +1174,7 @@ void plat_task_protect(const plat_seg_t *segs, int n)
                      ARM_MPU_CTRL_ENABLE | ARM_MPU_CTRL_PRIVDEFENA);
     }
 
+#if TOS_DIAG
     if (!reported) {
         reported = 1;
         kprintf("[mpu] type=%x win=%x..%x wx=%x brk=%x stk=%x..%x regions=%u\n",
@@ -1179,6 +1184,7 @@ void plat_task_protect(const plat_seg_t *segs, int n)
                 (unsigned)(stack_low - PLAT_HEAP_GUARD), (unsigned)stack_low,
                 (unsigned)used);
     }
+#endif
 
     __asm__ volatile("dsb" ::: "memory");
     __asm__ volatile("isb" ::: "memory");

@@ -101,6 +101,7 @@ void kmain(void)
        turn it on here and leave it on - the runtime state after this point
        is exactly this, and the process tables are live already. */
     plat_irq_enable();
+#if TOS_BOOT_TRACE
     {
         uint32_t spins = plat_pre_tick_spins(20000000u);
         while (plat_ticks() == 0 && --spins)
@@ -108,6 +109,7 @@ void kmain(void)
         kprintf("tick self-check: %u tick(s) after boot\n",
                 (unsigned)plat_ticks());
     }
+#endif
 
 #ifdef TOS_WIFI
     /* TEMP WiFi probe: shell first, then the driver task. */
@@ -117,7 +119,9 @@ void kmain(void)
     }
 #endif
 
+#if TOS_BOOT_TRACE
     kprintf("\nstarting /bin/msh ...\n\n");
+#endif
     process_start_shell("bin/msh");
     panic("shell returned");
 }

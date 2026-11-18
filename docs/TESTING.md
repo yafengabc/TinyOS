@@ -88,6 +88,9 @@ go run ./cmd/tos build all          # 15 个目标逐个构建；失败会汇总
   `#ifdef` 块里外”的边界，就额外跑 `go run ./cmd/tos build -config configs/rv32-fsro.conf`
   （x86 能建就再跑一次 x86 的 RO 构建）。默认 configs 都不开 `fs_ro`，否则这条只在别人
   分支上炸（issue #14）。这个 config 随仓库走，CI 每次 push 也会构建它。
+- **发布/静默镜像也算一个目标**：碰了 `TOS_BOOT_TRACE`/`TOS_DIAG` 或启动打印时，至少用
+  `go run ./cmd/tos build -target <board> -config configs/release.conf` 构建一次，确认
+  静默镜像仍然链接通过（`[build] boot_trace` 是唯一开关，CI 发布矩阵就用它）。
 
 ## 4. T2：QEMU
 
@@ -320,7 +323,9 @@ notes:
 当前 `.github/workflows/images.yml` 覆盖：
 
 - `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
-- 7 个发布镜像构建（esp32c3-generic、rpi-pico/smp、atk-dnr2350am/smp、atk-dnr2350am-rv32/smp）；
+- 7 个发布镜像构建（esp32c3-generic、rpi-pico/smp、atk-dnr2350am/smp、atk-dnr2350am-rv32/smp），
+  统一加 `-config configs/release.conf`（`boot_trace = 0`）：发布件不打印 `[A]..[E]`、
+  `[P1]/[P2]`、`[smp]`、`[mpu]` 等启动轨迹；
 - `smoke` 是**按目标并行**的一组 job（每个约 50–95 s）：
   - `configs/rv32-fsro.conf` 的只读镜像构建（只编译，不起机；issue #14 的盲区）；
   - rv32 / rv32smp / arm / x86 各自构建 + 起机 + `ps`、`ls`、`piperace`、`prot stack`、
