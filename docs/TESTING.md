@@ -230,7 +230,10 @@ python scripts/rp2350/heartbeat.py -p COM19 --target rpi-pico2
 
 - UART0 在 GP0/GP1（115200 8N1，需要一个 USB-TTL 适配器）；板上 USB（2e8a:000a）
   是另一个 console，`-p COM17 --dtr` 走它。
-- 启动日志应看到 `[A] clocks+reset ok clk_sys=00b71ee8` → `[B] clk_sys=08f0d180`
+- **刷完按一次 RUN**：这块克隆板的 ROM 在 UF2 写完不保证自动重启应用。刷入后
+  3–5 s 内没有 `[A]`/`tos>` 就按一次 RUN；`flash.py --smoke` 遇到这种情况会一直等，
+  可以 Ctrl-C 后按 RUN 再 `--no-flash --smoke` 重看启动日志。
+- 启动日志应看到 `[A] clocks+reset ok  clk_sys=00b71ee8` → `[B] clk=0x08f0d180`
   → `[C]` → `[D]` → `[E] ... clk_usb_khz=0000bb80` → `tos>`。
 - **2026-11-18 前的失败已修**（`cff442f`）：不是 XIP 时序，而是三处叠加 ——
   clk_sys 切换在 flash 里执行、`boot2-w25q080` 在 ROM 已配好四线之后又改 QMI/SR2、
