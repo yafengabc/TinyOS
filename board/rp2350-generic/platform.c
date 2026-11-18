@@ -281,19 +281,25 @@ static void clocks_init(void)
        has not: XOSC_CTRL_ENABLE resets to DISABLE and the chip comes up on
        ROSC.  The UART and FC0 still look like 12 MHz, which masked it, but
        PLL_USB has no reference and can never reach LOCK. */
-    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE))
+    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)) {
+        /* Program the startup delay before enabling, exactly as pico-sdk's
+         * xosc_init() does.  With the reset value (0) the block asserts
+         * STABLE as soon as the amplitude crosses its threshold, while the
+         * frequency is still drifting; moving clk_ref onto such a crystal
+         * changes clk_sys mid-transient and the next flash read samples in
+         * the wrong place. */
+        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
         mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
+    }
     for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
             break;
     }
-    /* STABLE asserts when the amplitude crosses its threshold, not when the
-       frequency has settled: a crystal that has just started still drifts for
-       a few more milliseconds.  pico-sdk spends PICO_XOSC_STARTUP_DELAY_MULTIPLIER
-       ms here for the same reason.  Switching clk_ref mid-transient gives the
-       PLL a wandering reference, and its output moves far enough to break the
-       flash sampling - measured on the Pico 2 as "half of the cold boots died
-       right after the clock raise, no output at all". */
+    /* STABLE asserts on amplitude, not on a settled frequency.  When this
+       code enabled the crystal it also programmed STARTUP.DELAY (6 ms, as
+       pico-sdk does), so STABLE itself already implies that wait; when the
+       ROM enabled it earlier, the delay was 0 and there is no way to redo it,
+       so the settle wait below covers that case. */
     if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
         for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
             ;

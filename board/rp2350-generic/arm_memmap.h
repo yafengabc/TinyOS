@@ -81,6 +81,13 @@
  * ENABLE = 0xfab << 12, FREQ_RANGE = 0xaa0 (1-15 MHz) << 0. */
 #define XOSC_CTRL               (XOSC_BASE + 0x00u)
 #define XOSC_STATUS             (XOSC_BASE + 0x04u)
+/* STARTUP.DELAY counts 256 XOSC cycles and its reset value is 0, i.e. STABLE
+ * asserts as soon as the amplitude crosses the threshold.  pico-sdk programs
+ * it before enabling: (((XOSC_HZ/KHZ) + 128) / 256) * 6 ("from 1 ms")
+ * = 47 * 6 = 282 for a 12 MHz crystal, about 6 ms.  Leaving it at 0 is what
+ * made cold boots flaky here (issue #7 follow-up). */
+#define XOSC_STARTUP            (XOSC_BASE + 0x0cu)
+#define XOSC_STARTUP_DELAY_12M  282u
 #define XOSC_CTRL_ENABLE_12M    ((0xfabu << 12) | 0xaa0u)
 #define XOSC_STATUS_STABLE      (1u << 31)
 

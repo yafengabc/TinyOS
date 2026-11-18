@@ -437,19 +437,22 @@ static void clocks_init(void)
     g_boot_ref_sel = mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET);
     g_boot_xosc    = mmio_read32(XOSC_STATUS);
 
-    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE))
+    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)) {
+        /* Program the startup delay before enabling, as pico-sdk's
+         * xosc_init() does: with the reset value (0) STABLE asserts on
+         * amplitude alone and the frequency is still drifting when this code
+         * moves clk_ref onto it. */
+        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
         mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
+    }
     for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
         if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
             break;
     }
-    /* STABLE asserts on amplitude, not on a settled frequency.  pico-sdk
-     * spends PICO_XOSC_STARTUP_DELAY_MULTIPLIER ms here for the same reason.
-     * Moving clk_ref (and with it clk_sys) onto a crystal that is still
-     * drifting changes the flash clock mid-transaction; the QMI's sampling
-     * delay is counted in clk_sys cycles, so the first flash data read after
-     * the switch can fault - measured on the Pico 2 as a load access fault
-     * inside the [A] line and, in other boots, no output at all. */
+    /* STABLE asserts on amplitude, not on a settled frequency.  When this
+     * code enabled the crystal it also programmed STARTUP.DELAY (6 ms, like
+     * pico-sdk), so STABLE already implies that wait; when the ROM enabled it
+     * earlier the delay was 0 and cannot be redone, which this covers. */
     if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
         for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
             ;

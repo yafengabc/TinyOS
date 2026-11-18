@@ -72,6 +72,11 @@
  * 0xfab << 12 and FREQ_RANGE 0xaa0 selects the 1-15 MHz crystal range. */
 #define XOSC_CTRL               (XOSC_BASE + 0x00u)
 #define XOSC_STATUS             (XOSC_BASE + 0x04u)
+/* STARTUP.DELAY counts 256 XOSC cycles and resets to 0, i.e. STABLE asserts
+ * on amplitude alone.  pico-sdk programs (((XOSC_HZ/KHZ)+128)/256) * 6 before
+ * enabling = 282 for a 12 MHz crystal, about 6 ms; see arm_memmap.h. */
+#define XOSC_STARTUP            (XOSC_BASE + 0x0cu)
+#define XOSC_STARTUP_DELAY_12M  282u
 #define XOSC_CTRL_ENABLE_12M    ((0xfabu << 12) | 0xaa0u)
 #define XOSC_STATUS_STABLE      (1u << 31)
 
