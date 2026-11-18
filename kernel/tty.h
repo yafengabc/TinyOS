@@ -24,6 +24,7 @@
 
 void tty_poll(void);                       /* drain the device, cook it   */
 int  tty_line_ready(void);
+int  tty_line_taken(void);                 /* a reader has had a line      */
 int  tty_take_line(char *dst, int max);    /* copy one line, clear it     */
 
 /* ---- raw mode --------------------------------------------------------

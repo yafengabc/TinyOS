@@ -306,6 +306,21 @@ func (a *app) kernelPage() page {
 				help: "Line-discipline history pool (TOS_HIST_BYTES).  Off removes the arrow-key recall and the `history` builtin's data, saving up to 1 KiB of .bss and a little text; the rest of line editing stays.",
 			},
 			{
+				label: "Boot traces + diagnostics", kind: kBool,
+				text: func() string {
+					if a.st.BootTrace {
+						return "on ([A]..[D], USB stage, wedge report)"
+					}
+					return "quiet"
+				},
+				act: func(int) {
+					a.st.BootTrace = !a.st.BootTrace
+					a.dirty = true
+				},
+				live: func() bool { return true },
+				help: "One switch for 'the image explains itself' (boot_trace).  On: the platform prints [A]..[D], the USB bring-up stages and CDC notices, and TOS_DIAG compiles in the wedge reporting (which core stopped, inside what, what the other one was doing).  Off: nothing but the banner - a production image.  On by default; the RP2350 acceptance script reads those markers, so only turn it off for a board that has already passed with them on.",
+			},
+			{
 				label: "Diagnostic /proc", kind: kBool,
 				text: func() string {
 					if a.st.ProcLite {

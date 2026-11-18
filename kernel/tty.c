@@ -33,6 +33,7 @@ static int  q_cnt;                     /* lines queued                       */
 static char pending[TTY_LINE_MAX];     /* the line being typed             */
 static int  pending_len;
 static int  pending_cur;                /* insertion point, 0..pending_len */
+static int  g_line_taken;               /* a reader has had a line already */
 
 /* ESC sequence state for the arrow keys.  The cooked path used to drop
  * everything below 32, so ESC [ A arrived as nothing at all; now the
@@ -552,6 +553,13 @@ int tty_line_ready(void)
     return q_cnt > 0;
 }
 
+/* Has any line been handed to a reader yet?  Bring-up traces use this to
+ * stop themselves once the shell owns the console. */
+int tty_line_taken(void)
+{
+    return g_line_taken;
+}
+
 #if TOS_HIST_BYTES > 0
 int tty_hist_count(void)
 {
@@ -577,6 +585,10 @@ int tty_take_line(char *dst, int max)
 {
     if (q_cnt == 0)
         return 0;
+
+    /* Something is reading the console: from here on the shell owns the
+     * prompt, and asynchronous bring-up traces must stop interrupting it. */
+    g_line_taken = 1;
 
     int n = (unsigned char)q_pool[q_base] |
             ((unsigned char)q_pool[q_base + 1] << 8);

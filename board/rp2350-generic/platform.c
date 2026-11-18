@@ -80,6 +80,7 @@
 #include "board_internal.h"
 #include "arm_memmap.h"
 #include "console.h"
+#include "tty.h"
 #include "usb_cdc.h"
 #include "string.h"
 #include "cpu.h"
@@ -885,9 +886,13 @@ void plat_console_init(void)
      * only moment the evidence exists. */
     diag_prev_report();
 #endif
+#if TOS_BOOT_TRACE
     early_puts("[P1] uart ready, usb init ...\r\n");
+#endif
     usb_cdc_console_init(g_clk_hz);
+#if TOS_BOOT_TRACE
     early_puts("[P2] usb init returned\r\n");
+#endif
 
     /* SysTick priority is set by plat_arm_systick_priority() below, from
      * inside arm_exceptions_init().  Writing SHPR3 here would be undone a
@@ -911,6 +916,7 @@ void plat_console_init(void)
      * off the wire, and a PLL that reports LOCK at the wrong divider still
      * detects SE0 but silently drops every packet - printing what FC0
      * actually measured separates those cases in one glance. */
+#if TOS_BOOT_TRACE
     early_puts("[E] usb hw=");
     early_puts(usb_cdc_hw_ready() ? "1" : "0");
     early_puts(" cfg=");
@@ -922,11 +928,14 @@ void plat_console_init(void)
     early_puts(" clk_usb_khz=");
     early_put_hex(measure_clk_src_khz(0x0bu));    /* FC0_SRC = CLK_USB */
     early_puts("\r\n");
+#endif
 
     if (usb_cdc_configured()) {
+#if TOS_BOOT_TRACE
         early_puts("\r\nTinyOS/RP2350  usb-cdc=up  clk=0x");
         early_put_hex(g_clk_hz);
         early_puts(" Hz\r\n");
+#endif
         led_set(0);                 /* enumerated: normal boot          */
     }
     /* USB did not come up: leave the LED lit as a visible "look at UART0"
@@ -1126,16 +1135,22 @@ void plat_timer_tick(void)
      * rather than dumping the SIE state every 100 ms.  cfg=1 means
      * SET_CONFIGURATION has been processed and the CDC port exists on the
      * host side; anything else is still in flight. */
-    if (g_usb_ready && g_ticks <= 120000u && (g_ticks % 500u) == 0u) {
+#if TOS_BOOT_TRACE
+    if (!tty_line_taken() && g_usb_ready && g_ticks <= 120000u &&
+        (g_ticks % 500u) == 0u) {
         static int last_cfg = -1;
         int cfg = usb_cdc_configured();
         if (cfg != last_cfg) {
             last_cfg = cfg;
-            early_puts("[U] cfg=");
+            /* Start on a fresh line and stop as soon as the shell has taken
+             * a command: glued to "tos> " this trace reads as garbled
+             * output, and it has no value once someone is typing. */
+            early_puts("\r\n[U] cfg=");
             plat_console_putc(cfg ? '1' : '0');
             early_puts("\r\n");
         }
     }
+#endif
 
     /* A 1 Hz heartbeat (tick is 1000 Hz, so one toggle per second gives a
      * 0.5 Hz square wave).  This is the ONLY boot signal that needs no
@@ -1584,6 +1599,7 @@ void plat_board_early(void)
     g_clk_hz = (khz >= 1000u && khz <= 250000u) ? khz * 1000u
                                                 : ARM_SYSTICK_CLK;
     uart_init();
+#if TOS_BOOT_TRACE
     early_puts("\r\n[A] clocks+reset ok  clk_sys=");
     early_put_hex(g_clk_hz);
     early_puts("\r\n");
@@ -1591,6 +1607,7 @@ void plat_board_early(void)
      * this line would otherwise be clocked out at the new rate with the old
      * divisor and arrive as garbage. */
     plat_console_flush();
+#endif
 
     /* From here on a fault is recoverable: the panic loop polls UART0 for
      * Ctrl-D, so a broken build never needs a physical BOOTSEL press. */
@@ -1604,9 +1621,11 @@ void plat_board_early(void)
     g_clk_hz = (khz >= 1000u && khz <= 250000u) ? khz * 1000u
                                                 : ARM_SYSTICK_CLK;
     uart_init();
+#if TOS_BOOT_TRACE
     early_puts("[B] clk_sys=");
     early_put_hex(g_clk_hz);
     early_puts("\r\n");
+#endif
 
     /* Arm the watchdog now that the clock is final: a kernel that wedges
      * later resets itself instead of waiting for a human with a button. */
@@ -1614,7 +1633,9 @@ void plat_board_early(void)
 
     led_init();
     led_set(1);
+#if TOS_BOOT_TRACE
     early_puts("[C] vtor+sau+led ok\r\n");
+#endif
 
     /* Defensive core-1 park: the ROM normally holds core 1 in its own
      * wait-for-FIFO loop, but a stray multicore launch must not execute
@@ -1623,11 +1644,13 @@ void plat_board_early(void)
         for (;;)
             __asm__ volatile("wfe");
     }
+#if TOS_BOOT_TRACE
     early_puts("[D] cpu0\r\n");
 
     early_puts("TinyOS/RP2350  clk=0x");
     early_put_hex(g_clk_hz);
     early_puts(" Hz  uart0=115200\r\n");
+#endif
     /* Bring up the full console (UART re-divide + native USB CDC) the same
      * way every other ARM board does from plat_board_early().  Without this
      * call the CDC controller is never taken out of reset, no 2E8A COM port

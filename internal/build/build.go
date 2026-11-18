@@ -281,6 +281,7 @@ type Builder struct {
 	DevNodes   bool
 	Panel      bool
 	FSReadOnly bool
+	BootTrace  bool
 	Mailbox    bool
 
 	mu sync.Mutex
@@ -344,6 +345,16 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	}
 	if opt == "" {
 		opt = "-O2"
+	}
+
+	// Boot-progress traces on the console: on by default, off with
+	// TOS_BOOT_TRACE=0 at build time.  Kept out of the config file because it
+	// describes what the image should say while it boots, not what the image
+	// contains - the same board wants the loud build during bring-up and the
+	// quiet one afterwards.
+	bootTrace := ""
+	if v := strings.TrimSpace(os.Getenv("TOS_BOOT_TRACE")); v == "0" || v == "1" {
+		bootTrace = "-DTOS_BOOT_TRACE=" + v
 	}
 
 	// Architecture specific flags.  Everything else is shared so both ports
@@ -490,6 +501,9 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	}
 
 	flags := append([]string{}, archFlags...)
+	if bootTrace != "" {
+		flags = append(flags, bootTrace)
+	}
 	flags = append(flags,
 		"-ffreestanding",
 		"-fno-builtin",
@@ -1069,6 +1083,12 @@ func (b *Builder) buildKernel() error {
 		fmt.Sprintf("-DTOS_DEVNODES=%d", boolInt(b.DevNodes)),
 		fmt.Sprintf("-DTOS_PERIPH=%d", boolInt(b.DevNodes)),
 		fmt.Sprintf("-DTOS_PANEL=%d", boolInt(b.Panel)),
+		fmt.Sprintf("-DTOS_BOOT_TRACE=%d", boolInt(b.BootTrace)),
+		// One switch for "make this image explain itself": the boot-progress
+		// lines above and the TOS_DIAG wedge reporting are the same decision
+		// (bring-up/debug build vs quiet production build), so they share
+		// boot_trace instead of needing two knobs that can drift apart.
+		fmt.Sprintf("-DTOS_DIAG=%d", boolInt(b.BootTrace)),
 	)
 	if b.FSReadOnly {
 		featDefs = append(featDefs, "-DTOS_LFS_RO")

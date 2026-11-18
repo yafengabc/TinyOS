@@ -45,6 +45,7 @@ type State struct {
 	DevNodes      bool
 	Panel         bool
 	FSReadOnly    bool
+	BootTrace     bool
 	Mailbox       bool
 	WiFiLibDir    string
 	WiFiLDScript  string
@@ -67,6 +68,7 @@ func Load(c *build.Config, path string) *State {
 		HistBytes:     512,
 		DevNodes:      true,
 		Panel:         true,
+		BootTrace:     true,
 	}
 	if c == nil {
 		return s
@@ -91,6 +93,7 @@ func Load(c *build.Config, path string) *State {
 	s.DevNodes = c.DevNodes
 	s.Panel = c.Panel
 	s.FSReadOnly = c.FSReadOnly
+	s.BootTrace = c.BootTrace
 	s.Mailbox = c.Mailbox
 	s.WiFiLibDir = c.WiFiLibDir
 	s.WiFiLDScript = c.WiFiLDScript
@@ -328,6 +331,9 @@ func (s *State) Render() string {
 	}
 	if s.FSReadOnly {
 		b.WriteString("fs_ro = 1\n")
+	}
+	if !s.BootTrace {
+		b.WriteString("boot_trace = 0\n")
 	}
 	if s.Mailbox {
 		b.WriteString("mailbox = 1\n")

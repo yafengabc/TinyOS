@@ -61,6 +61,10 @@ type Config struct {
 	DevNodes   bool // /dev device classes and the GPIO/ADC syscalls
 	Panel      bool // text mirror on a pixel panel (needs DevNodes to start)
 	FSReadOnly bool // mount littlefs read-only; create/write/unlink fail
+	// BootTrace keeps the boot-progress lines on the console ([A]..[D], the
+	// USB stage lines, the CDC configuration notices).  On by default: it is
+	// how a board that dies before the shell is diagnosed from a capture.
+	BootTrace bool // boot-progress traces on the console
 	// Mailbox is the global 4 x 256 B message pool (SYS_MSG_SEND/RECV).
 	// Off by default: the code and the 1 KiB pool are only in the image when
 	// a config asks for them.
@@ -90,6 +94,7 @@ func LoadConfig(path string) (*Config, error) {
 		HistBytes:     512,
 		DevNodes:      true,
 		Panel:         true,
+		BootTrace:     true,
 	}
 	if s := sections["build"]; s != nil {
 		bad := func(key string, err error) error {
@@ -122,6 +127,11 @@ func LoadConfig(path string) (*Config, error) {
 		if raw, ok := s["devnodes"]; ok {
 			if c.DevNodes, err = parseOnOff(raw); err != nil {
 				return nil, bad("devnodes", err)
+			}
+		}
+		if raw, ok := s["boot_trace"]; ok {
+			if c.BootTrace, err = parseOnOff(raw); err != nil {
+				return nil, bad("boot_trace", err)
 			}
 		}
 		if raw, ok := s["panel"]; ok {
@@ -340,6 +350,7 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	b.DevNodes = c.DevNodes
 	b.Panel = c.Panel
 	b.FSReadOnly = c.FSReadOnly
+	b.BootTrace = c.BootTrace
 	b.Mailbox = c.Mailbox
 	b.ensureDriverDirs()
 	for _, d := range c.Drivers {
