@@ -8,7 +8,9 @@
 - **必须人看/上板的明确标注**：PIO 的 LED/灯带、LCD 花屏、USB 枚举、真实 flash 擦写、SMP 死锁。
 - **"构建通过" ≠ "功能通过"**：只说 build-only 时，不准写"验证通过"。
 - **硬件不在本机就是 NOT RUN**，不是 PASS；阻塞项写入 `docs/OPEN-ITEMS.md`。
-- **Pico 2 目前不是 TinyOS 支持目标**（`OPEN-ITEMS.md` §1b）。不要把 ATK-DNRP2350AM 的镜像刷到 Pico 2 上；官方 MicroPython 只用于确认 clone 的硬件/ROM/USB 正常。
+- **Pico 2 从 2026-11-18 起是可启动的板级目标**（`rpi-pico2`，见 `OPEN-ITEMS.md` §1b 与
+  `TESTING.md` §5.4）。仍然不要把 ATK-DNRP2350AM 的镜像刷到 Pico 2 上；官方 MicroPython
+  只用于确认 clone 的硬件/ROM/USB 正常。
 
 ## 1. 测试级别
 
@@ -158,7 +160,9 @@ x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
   issue。
 - **RP2040 不作为关闭依据**：目前没有自动 BOOTSEL 路径。确实需要 RP2040 证据的改动，
   单独开一个 RP2040 专项 issue，由板主另行排期；不要写进别的 issue 的关闭条件。
-- **Pico 2 是独立项**（`OPEN-ITEMS.md` §1b），既不是 ATK，也不能假设同镜像能启动。
+- **Pico 2 是独立板级目标** `rpi-pico2`（`OPEN-ITEMS.md` §1b，2026-11-18 起可启动）：
+  有自己的 board target、LED/无 LCD/8 MiB flash 事实和 T3 流程（`TESTING.md` §5.4），
+  但不要假设 ATK 的镜像或它的 24 项表适用于它。
 
 ### 5.1 ESP32-C3
 
@@ -210,11 +214,33 @@ python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-
 - `scripts/rp2040/heartbeat.py --port COM19` 已在最终单核镜像上 **6/6**（启动、时间、fs 读、用户程序、fs 写回、crash 隔离）。
 - PIO 的 LED/灯带是目视项，必须写"看了/没看"，不能只写"PIO 通过"。
 
-### 5.4 Pico 2（暂不支持）
+### 5.4 Pico 2（`rpi-pico2`，2026-11-18 起可启动）
 
-- TinyOS 的 `board/atk-dnr2350am` 是 ATK-DNRP2350AM 板级目标（LED GPIO3、LCD/TF、4 MiB 文件系统假设），**不是 Pico 2 target**。
-- 现状：官方 MicroPython 在 clone 上正常；TinyOS `atk-dnr2350am-smp.uf2` 早期 HardFault。已记在 `OPEN-ITEMS.md` §1b。
-- 规则：不要把 ATK 镜像刷到 Pico 2；Pico 2 适配要单独立项（独立 board target、正确的 LED/无 LCD/实际 flash 大小），并为它建立 T3 验收后再纳入回归矩阵。
+板级目标是 `board/rpi-pico2`（`base = rp2350-generic`）：LED 在 GP25（高电平点亮）、
+无 LCD/TF、8 MiB W25Q64。四个镜像：`rpi-pico2`、`rpi-pico2-smp`、
+`rpi-pico2-rv32`、`rpi-pico2-rv32-smp`。
+
+```sh
+# 刷写 + 启动日志校验（会等 RP2350 BOOTSEL 盘）
+python scripts/rp2350/flash.py --uf2 build/tinyos-rpi-pico2.uf2 --smoke -p COM19
+
+# 心跳级 6 项（启动、时间、fs 读、用户程序、fs 写回、fault 隔离）
+python scripts/rp2350/heartbeat.py -p COM19 --target rpi-pico2
+```
+
+- UART0 在 GP0/GP1（115200 8N1，需要一个 USB-TTL 适配器）；板上 USB（2e8a:000a）
+  是另一个 console，`-p COM17 --dtr` 走它。
+- 启动日志应看到 `[A] clocks+reset ok clk_sys=00b71ee8` → `[B] clk_sys=08f0d180`
+  → `[C]` → `[D]` → `[E] ... clk_usb_khz=0000bb80` → `tos>`。
+- **2026-11-18 前的失败已修**（`cff442f`）：不是 XIP 时序，而是三处叠加 ——
+  clk_sys 切换在 flash 里执行、`boot2-w25q080` 在 ROM 已配好四线之后又改 QMI/SR2、
+  以及首行串口用猜测的 12 MHz 算分频（把前面两处伪装成“死机”）。
+  详见 `docs/PICO2-VS-ATK-BOOT.md` 与 `docs/acceptance/2026-11-18-pico2-boot-rp2350-cff442f.md`。
+- 仍不要把 ATK 镜像刷到 Pico 2（LED/屏幕/flash 大小都不同），也不要反过来。
+- 未纳入的项：屏幕、TF 卡、PIO 灯带（板子没有这些外设）；`accept33.py` 的 24 项表
+  只适用于 ATK 四个镜像。
+- GP25 上的 1 Hz 心跳目前**不会亮**（`led_set()` 仍硬编码 GP3，issue #27）；
+  判断“内核活着”请看串口或 `uptime`。
 
 ## 6. T4：压力
 

@@ -7,15 +7,30 @@
 > 原 §1（RP2040 4 KiB 窗口 + 软件栈守卫）已于 2026-11-17 验收关闭，结论和原始
 > 回显在 `HISTORY.md` §43。
 
-## 1b. Pico 2 上的 TinyOS 启动失败（2026-11-16）
+## 1b. Pico 2 上的 TinyOS 启动失败（已关闭 2026-11-18）
 
 同一块 RP2350 上换成 **Pico 2** 后，GitHub v0.3.0 发布版和本轮 `atk-dnr2350am-smp` 都在
 启动早期 HardFault（`PC=0xeffffffe`），USB CDC 不枚举；官方 MicroPython Pico 2 UF2
 则能正常枚举。ATK-DNRP2350AM 上同一轮镜像通过 USB、1000 轮 `dd/rm` 和屏幕命令，
 所以这不是 USB 线材/供电问题，也不能用这次 review 的 SMP/锁补丁解释。
 
-`board/atk-dnr2350am/README.md` 目前写"同一套代码也能跑在 Pico 2 上"，需要按 Pico 2 的
-实际 flash/时钟/板级外设重新验证；在修好之前不要把这句话当验收结论。
+**结论（2026-11-18）**：根因是三处叠加，都已修（`cff442f`）：
+
+1. `pll_sys_init()` 在 **flash 里**切 `clk_sys`，切换瞬间的取指要重新对齐 flash 时序；
+   W25Q32 有余量、W25Q64 没有。现在切换在 `.data.ramfunc` 里完成。
+2. 板级开关 `xip_setup = boot2-w25q080` 在 ROM 已经把这颗 flash 配成 EBh 四线之后
+   又写一遍 SRAM 状态寄存器并重设 `M0_TIMING`，把 XIP 弄坏。实测 ROM 的时序在
+   150 MHz 下**本来就能用**（切换前后 4 KiB flash 校验和一致），所以内核现在完全不碰 QMI，
+   这条开关也不再启用。
+3. 首行串口输出用固定 12 MHz 猜分频（而 `clk_peri` 此时可能已是 150 MHz），
+   于是上面两处故障都表现为“零字节”，把排障方向带偏。现在先测 `clk_sys` 再算分频。
+
+现状：`rpi-pico2` 能启动到 shell，心跳级 6/6（`scripts/rp2350/heartbeat.py -p COM19
+--target rpi-pico2`），`flash.py --smoke` 7/7。细节见 `docs/PICO2-VS-ATK-BOOT.md`、
+`docs/acceptance/2026-11-18-pico2-boot-rp2350-cff442f.md`、`TESTING.md` §5.4。
+
+仍未做：Pico 2 的 SMP / RV32 镜像真机验证；GP25 上的 1 Hz 心跳不亮（`led_set()` 仍
+硬编码 GP3，见 issue #27）；`accept33.py` 的 24 项表只覆盖 ATK 四个镜像。
 
 ## 2. PIO 的"眼睛两项"（已关闭 2026-11-17）
 
