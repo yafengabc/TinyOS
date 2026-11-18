@@ -4906,6 +4906,18 @@ clk_sys 周期计、150 MHz 下短 12.5 倍——但只在 flash 写完恢复 XI
 SWD 在切时钟前后读 QMI `M0_TIMING`/SCK。卡片：
 `docs/acceptance/2026-11-18-pico2-xip-setup-d16f949.md`。
 
+**更正（同日，`cff442f`）**：boot2 **不是修复，反而破坏 XIP**。真机 A/B（带 boot2
+只闪 2 下，不带 boot2 三组探针全过）与 QMI 实测（ROM 交接时 flash 已经是 EBh 四线，
+`M0_TIMING = 0x60007203`；切换后对 4 KiB flash 求校验和不变）证明 ROM 的时序在
+150 MHz 下够用，不需要第二次配置；这段 blob 对 SRAM/QE/QMI 的改写才是新的故障源。
+真正的死因是**切 clk_sys 的那一次 flash 取指**（Pico 2 的 W25Q64 克隆在切换窗口
+余量不足），加上**早期串口按猜测的 12 MHz 算分频**把故障点伪装成“零输出”。
+现修复：`clk_sys_to_pll_sys()` 在 `.data.ramfunc` 里只切 mux、不动 QMI；VTOR/SAU
+在 `plat_board_early()` 最前接管；串口先测频率再算分频。`rpi-pico2` 已不再启用
+`xip_setup`，这条路径保留给真正需要四线的板子。详见
+[`PICO2-VS-ATK-BOOT.md`](PICO2-VS-ATK-BOOT.md) 与
+`docs/acceptance/2026-11-18-pico2-boot-rp2350-cff442f.md`。
+
 ## 81. 2026-11-18 Pico 2 补 RISC-V 与 SMP 对照镜像
 
 **结果**：`d16f949` 的 XIP 设置在真机 Pico 2 上**没有效果**——仍然无反应、USB 不
