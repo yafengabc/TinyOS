@@ -225,7 +225,8 @@ python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-
 python scripts/rp2350/flash.py --uf2 build/tinyos-rpi-pico2.uf2 --smoke -p COM19
 
 # 心跳级 6 项（启动、时间、fs 读、用户程序、fs 写回、fault 隔离）
-python scripts/rp2350/heartbeat.py -p COM19 --target rpi-pico2
+python scripts/rp2350/pico2_heartbeat.py                 # 默认端口：板上 CDC(2e8a:000a) 优先，其次 CH343
+python scripts/rp2350/heartbeat.py -p COM19 --target rpi-pico2   # 指定 UART0
 ```
 
 - UART0 在 GP0/GP1（115200 8N1，需要一个 USB-TTL 适配器）；板上 USB（2e8a:000a）

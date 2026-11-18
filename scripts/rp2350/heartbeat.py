@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""Six-item heartbeat for the RP2350 targets (ATK, Pico 2 and friends).
+"""Six-item heartbeat for the RP2350 port (ATK, Pico 2 and friends).
 
 This is the board-level minimum from docs/TESTING.md section 5.0: it does not
 claim the full acceptance table, only that the image boots, keeps time, reads
 and writes the filesystem, can exec a user program, and survives a user fault.
 
+    python scripts/rp2350/heartbeat.py                      # auto port
     python scripts/rp2350/heartbeat.py -p COM19 --target rpi-pico2
-    python scripts/rp2350/heartbeat.py -p COM17 --dtr --target atk-dnr2350am-smp
+    python scripts/rp2350/heartbeat.py -p COM17 --dtr        # USB CDC console
 
 The board must already be running the image; flashing is a separate step
 (scripts/rp2350/flash.py).  The six checks are the same as the RP2040 port's
 scripts/rp2040/heartbeat.py on purpose: the point of a heartbeat is that every
 board answers the same questions the same way.
 
+`--port auto` (the default) picks the board's own USB CDC (2e8a:000a) when it
+is present, otherwise the only CH343 UART adapter; with two boards on the
+bench, name the port explicitly.
+
 Output is one line per item and a final `HEARTBEAT OK n/n` (exit 0) or
-`HEARTBEAT FAIL n/n` (exit 1).
+`HEARTBEAT FAIL n/n` (exit 1).  When the shell never appears the report says
+so instead of pretending six checks ran: "no shell" and "booted but item 3
+failed" are different diagnosis paths.
 """
 
 import argparse
@@ -23,6 +30,24 @@ import sys
 import time
 
 import serial
+import serial.tools.list_ports
+
+RP_CDC_VID = 0x2E8A
+RP_CDC_PID = 0x000A          # TinyOS's own CDC-ACM
+CH343_VID = 0x1A86
+CH343_PID = 0x55D3           # the USB-TTL adapter used for UART0
+
+
+def find_port():
+    """Return (port, is_cdc) for the board on the bench, or (None, False)."""
+    ports = list(serial.tools.list_ports.comports())
+    for p in ports:
+        if p.vid == RP_CDC_VID and p.pid == RP_CDC_PID:
+            return p.device, True
+    uarts = [p.device for p in ports if p.vid == CH343_VID and p.pid == CH343_PID]
+    if len(uarts) == 1:
+        return uarts[0], False
+    return None, False
 
 
 class Console:
@@ -58,18 +83,33 @@ def uptime_seconds(text):
     return float(m.group(1)) if m else None
 
 
-def main():
+def main(default_target="rpi-pico2"):
     ap = argparse.ArgumentParser()
-    ap.add_argument("-p", "--port", required=True)
-    ap.add_argument("--target", default="rpi-pico2",
+    ap.add_argument("-p", "--port", default="auto",
+                    help="serial port, or 'auto' to find the board's CDC/UART")
+    ap.add_argument("--target", default=default_target,
                     help="recorded in the report; the script itself is board-agnostic")
     ap.add_argument("--dtr", action="store_true", help="assert DTR (USB CDC console)")
+    ap.add_argument("--not-shell-timeout", type=float, default=10.0,
+                    help="seconds to wait for the first prompt")
     args = ap.parse_args()
 
+    dtr = args.dtr
+    port = args.port
+    if port == "auto":
+        port, is_cdc = find_port()
+        if not port:
+            print("cannot pick a port: two or more adapters are attached; pass -p COMx")
+            print("\nHEARTBEAT FAIL 0/6  (no port)")
+            return 2
+        dtr = dtr or is_cdc
+        print("port %s (%s)" % (port, "USB CDC" if is_cdc else "UART0 adapter"))
+
     try:
-        con = Console(args.port, dtr=args.dtr)
+        con = Console(port, dtr=dtr)
     except serial.SerialException as e:
-        print("cannot open %s: %s" % (args.port, e))
+        print("cannot open %s: %s" % (port, e))
+        print("\nHEARTBEAT FAIL 0/6  (port busy)")
         return 2
 
     results = []
@@ -80,8 +120,20 @@ def main():
         return bool(ok)
 
     try:
-        boot = con.cmd("")
-        check("1 boot to a shell", "tos>" in boot, "prompt seen")
+        boot = con.cmd("", args.not_shell_timeout)
+        if "tos>" not in boot:
+            # One misdiagnosis this whole port burned time on: "no bytes at
+            # all" and "shell is up but a command failed" looked the same.
+            print("no shell prompt on %s after %.0f s"
+                  % (port, args.not_shell_timeout))
+            if not boot.strip():
+                print("  nothing came back at all: wrong port, board not running, "
+                      "or (Pico 2 clone) a flash that needs one RUN press")
+            else:
+                print("  got %r" % boot.strip()[:200])
+            print("\nHEARTBEAT FAIL 0/6  (no shell)")
+            return 1
+        check("1 boot to a shell", True, "prompt seen")
 
         u1t = con.cmd("uptime")
         t1 = time.monotonic()
@@ -122,7 +174,7 @@ def main():
     total = len(results)
     print("\n%s %d/%d" % ("HEARTBEAT OK" if passed == total else "HEARTBEAT FAIL",
                           passed, total))
-    print("target: %s  port: %s" % (args.target, args.port))
+    print("target: %s  port: %s" % (args.target, port))
     return 0 if passed == total else 1
 
 
