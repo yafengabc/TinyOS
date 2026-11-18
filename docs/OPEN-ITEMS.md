@@ -66,6 +66,13 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
 
 ## 5b. USB：还有三件事
 
+0. **RV32 端口不能删 `usb_cdc_wait()`**（2026-11-19 已回退）。Hazard3 端口没有 USB
+   中断，`usb_cdc_poll()` 就是控制器唯一的事件泵；删掉等待后 ATK Hazard3 首次启动
+   在 `tos>` 之后立刻 trap（`mcause=0x3` breakpoint、`mepc=0x10013d0a`，该地址处是
+   `li a0,0; ebreak`，即 panic 路径）。恢复后启动很快、CDC 立刻枚举。ARM 两个端口
+   没有这个问题。**待查**：那个 `ebreak` 具体是哪个断言（当前发布 ELF 已 strip，
+   需要一次带符号的构建）。
+
 1. **RP2040 的 `UNRESET_BLOCK_WAIT` 仍会跑满上限**（143 ms / 次启动）。RP2040 的
    USBCTRL 复位位是 bit 24（TinyUSB shim 头文件里写的是 RP2350 的 bit 28），
    `reset_block()` / `unreset_block_wait()` 拿到的仍是那个共享常量，所以 RP2040 上

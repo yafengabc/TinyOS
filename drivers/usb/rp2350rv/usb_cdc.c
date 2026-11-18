@@ -471,15 +471,32 @@ void usb_cdc_irq_enable(void)
 #endif
 }
 
-/* The console does not wait for the host.  The old bounded spin (nominally
- * 1.5 s, 8-10 s in practice because every iteration also ran tud_task()) kept
- * the whole boot on the host's enumeration.  See drivers/usb/rp2040/usb_cdc.c
- * for the RP2040 timestamps. */
+/* Wait (bounded) for the host to finish SET_CONFIGURATION.
+ *
+ * The ARM ports dropped this: it kept the whole boot on the host's
+ * enumeration (8-10 s on the RP2040).  Kept here because the RV32 port has no
+ * USB interrupt - usb_cdc_poll() *is* the controller's event pump - and a
+ * first boot with it removed trapped right after the shell prompt on
+ * ATK-DNRP2350AM Hazard3 (mcause=0x3 at 0x10013d0a, 2026-11-19).  Until that
+ * is understood, this port keeps the old sequence. */
+static void usb_cdc_wait(uint32_t clk_hz)
+{
+    uint64_t spins;
+
+    if (!g_hw_ready)
+        return;
+    spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
+    for (uint64_t i = 0; i < spins && !tud_mounted(); i++) {
+        usb_cdc_poll();
+        for (volatile int j = 0; j < 40; j++)
+            ;
+    }
+}
 
 void usb_cdc_console_init(uint32_t clk_hz)
 {
-    (void)clk_hz;
     usb_cdc_init();
+    usb_cdc_wait(clk_hz);
 }
 
 /* ---- event pump --------------------------------------------------------- */
