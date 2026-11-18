@@ -90,6 +90,7 @@
 #define XOSC_STARTUP_DELAY_12M  282u
 #define XOSC_CTRL_ENABLE_12M    ((0xfabu << 12) | 0xaa0u)
 #define XOSC_STATUS_STABLE      (1u << 31)
+#define XOSC_STATUS_ENABLED     (1u << 12)
 
 #define CLK_REF_CTRL_OFFSET     0x30u
 #define CLK_REF_SELECTED_OFFSET 0x38u

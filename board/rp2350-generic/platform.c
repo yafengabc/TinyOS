@@ -271,41 +271,55 @@ static void unreset(uint32_t bits)
     }
 }
 
+/* Wait for the crystal, bounded by the pre-tick spin budget. */
+static int xosc_wait_stable(void)
+{
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
+        if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
+            return 1;
+    }
+    return 0;
+}
+
+/* Bring the crystal up the way pico-sdk's xosc_init() does, and return 1
+ * when clk_ref may be moved onto it.
+ *
+ * The two cases are not symmetric:
+ *
+ *   - this code enables it (ENABLE was off, the cold-boot case): program
+ *     STARTUP.DELAY first, 282 = ((12 MHz/1 kHz + 128)/256)*6, so STABLE
+ *     itself is held off for ~6 ms.  The hardware counter is what makes
+ *     that delay exact; a software loop would depend on the current clock.
+ *
+ *   - the ROM enabled it earlier with DELAY = 0 (warm/UF2 boot): that
+ *     cannot be rewritten for the current start, so give the crystal a
+ *     full startup period after STABLE instead.
+ *
+ * Either way, do not move clk_ref (and with it clk_sys) onto a crystal
+ * whose frequency is still drifting: the next flash read samples at the
+ * wrong point and the board dies before its first byte. */
+static int xosc_start(void)
+{
+    uint32_t st = mmio_read32(XOSC_STATUS);
+
+    if (!(st & XOSC_STATUS_ENABLED)) {
+        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
+        mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
+        return xosc_wait_stable();
+    }
+    if (!(st & XOSC_STATUS_STABLE) && !xosc_wait_stable())
+        return 0;
+    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+        ;
+    return 1;
+}
+
 /* clk_ref = XOSC (12 MHz) so FC0 has an honest reference.  clk_sys itself is
  * re-hosted on PLL_SYS by pll_sys_init() below; only clk_peri is pinned to
  * clk_sys here so the UART and the CPU share one rate. */
 static void clocks_init(void)
 {
-    /* ENABLE the crystal first.  The old code only *checked* STABLE, on the
-       assumption that the ROM had left XOSC running after a flash boot - it
-       has not: XOSC_CTRL_ENABLE resets to DISABLE and the chip comes up on
-       ROSC.  The UART and FC0 still look like 12 MHz, which masked it, but
-       PLL_USB has no reference and can never reach LOCK. */
-    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)) {
-        /* Program the startup delay before enabling, exactly as pico-sdk's
-         * xosc_init() does.  With the reset value (0) the block asserts
-         * STABLE as soon as the amplitude crosses its threshold, while the
-         * frequency is still drifting; moving clk_ref onto such a crystal
-         * changes clk_sys mid-transient and the next flash read samples in
-         * the wrong place. */
-        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
-        mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
-    }
-    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
-        if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
-            break;
-    }
-    /* STABLE asserts on amplitude, not on a settled frequency.  When this
-       code enabled the crystal it also programmed STARTUP.DELAY (6 ms, as
-       pico-sdk does), so STABLE itself already implies that wait; when the
-       ROM enabled it earlier, the delay was 0 and there is no way to redo it,
-       so the settle wait below covers that case. */
-    if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
-        for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
-            ;
-    }
-
-    if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
+    if (xosc_start()) {
         mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);
         for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
             if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))

@@ -431,34 +431,42 @@ static uint32_t g_boot_xosc;
  * then clk_sys onto clk_ref.  If the crystal never starts, clk_ref is left
  * exactly as the ROM left it - a source the CPU is demonstrably running from
  * - and the board boots slowly instead of not at all. */
+/* See the ARM port (board/rp2350-generic/platform.c): wait for the crystal,
+ * bounded, then bring it up the pico-sdk way - STARTUP.DELAY before ENABLE
+ * when we are the one enabling it, a full startup period after STABLE when
+ * the ROM already did. */
+static int xosc_wait_stable(void)
+{
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
+        if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
+            return 1;
+    }
+    return 0;
+}
+
+static int xosc_start(void)
+{
+    uint32_t st = mmio_read32(XOSC_STATUS);
+
+    if (!(st & XOSC_STATUS_ENABLED)) {
+        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
+        mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
+        return xosc_wait_stable();
+    }
+    if (!(st & XOSC_STATUS_STABLE) && !xosc_wait_stable())
+        return 0;
+    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+        ;
+    return 1;
+}
+
 static void clocks_init(void)
 {
     g_boot_sys_sel = mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET);
     g_boot_ref_sel = mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET);
     g_boot_xosc    = mmio_read32(XOSC_STATUS);
 
-    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)) {
-        /* Program the startup delay before enabling, as pico-sdk's
-         * xosc_init() does: with the reset value (0) STABLE asserts on
-         * amplitude alone and the frequency is still drifting when this code
-         * moves clk_ref onto it. */
-        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
-        mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
-    }
-    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
-        if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
-            break;
-    }
-    /* STABLE asserts on amplitude, not on a settled frequency.  When this
-     * code enabled the crystal it also programmed STARTUP.DELAY (6 ms, like
-     * pico-sdk), so STABLE already implies that wait; when the ROM enabled it
-     * earlier the delay was 0 and cannot be redone, which this covers. */
-    if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) {
-        for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
-            ;
-    }
-
-    if ((mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE) &&
+    if (xosc_start() &&
         !(mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))) {
         mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);
         for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
