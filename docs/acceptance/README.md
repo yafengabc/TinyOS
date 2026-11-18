@@ -96,3 +96,4 @@
 | 2026-11-18 | Pico 2：标准 XIP 设置（boot2） | `d16f949` | 15 目标构建；ATK 镜像逐字节不变 | T0–T1 PASS；Pico 2 真机 `NOT RUN`（待刷） | [XIP setup](2026-11-18-pico2-xip-setup-d16f949.md) |
 | 2026-11-18 | Pico 2：ARM/RV32 × 单核/SMP 四个镜像 | `4fd6857` | 18 目标构建 | T0–T1 PASS；四镜像真机 `NOT RUN`（待刷） | [ISA matrix](2026-11-18-pico2-isa-matrix-4fd6857.md) |
 | 2026-11-18 | Pico 2 启动到 shell（SAU + 实测波特率 + 不改写 QMI） | `cff442f` | Pico 2 ARM（COM19）+ 18 目标 + QEMU 3 | T0/T1/T2 PASS；T3 Pico 2 ARM PASS（boot + heartbeat）；ATK / SMP / RV32 真机 `NOT RUN` | [Pico 2 boot](2026-11-18-pico2-boot-rp2350-cff442f.md) |
+| 2026-11-18 | 启动轨迹开关 `boot_trace` + 提示符不再被打断 | `6ca4f18` | Pico 2（COM19）+ 18 目标 + QEMU 3 | T0/T1/T2 PASS；T3 Pico 2 PASS；ATK 真机 `NOT RUN` | [boot trace](2026-11-18-boot-trace-switch-6ca4f18.md) |
