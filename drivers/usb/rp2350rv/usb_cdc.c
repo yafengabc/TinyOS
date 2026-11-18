@@ -471,29 +471,15 @@ void usb_cdc_irq_enable(void)
 #endif
 }
 
-/* Wait (bounded) for the host to finish SET_CONFIGURATION so the boot banner
- * is not written into a FIFO nobody reads yet.  The ROM may hand over clk_sys
- * anywhere between 12 and 150 MHz, so the bound is derived from the measured
- * clock: one spin is about 130 cycles and 1.5 s is plenty for a host that is
- * awake, without stalling a board that has no USB cable attached. */
-static void usb_cdc_wait(uint32_t clk_hz)
-{
-    uint64_t spins;
-
-    if (!g_hw_ready)
-        return;
-    spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
-    for (uint64_t i = 0; i < spins && !tud_mounted(); i++) {
-        usb_cdc_poll();
-        for (volatile int j = 0; j < 40; j++)
-            ;
-    }
-}
+/* The console does not wait for the host.  The old bounded spin (nominally
+ * 1.5 s, 8-10 s in practice because every iteration also ran tud_task()) kept
+ * the whole boot on the host's enumeration.  See drivers/usb/rp2040/usb_cdc.c
+ * for the RP2040 timestamps. */
 
 void usb_cdc_console_init(uint32_t clk_hz)
 {
+    (void)clk_hz;
     usb_cdc_init();
-    usb_cdc_wait(clk_hz);
 }
 
 /* ---- event pump --------------------------------------------------------- */

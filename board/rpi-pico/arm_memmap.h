@@ -19,6 +19,11 @@
 #define XOSC_BASE       0x40024000u
 #define CLOCKS_BASE     0x40008000u
 #define RESETS_BASE     0x4000c000u
+/* USBCTRL's reset bit.  RP2040 puts it at 24; the RP2350 moved it to 28,
+ * which is where the shared TinyUSB shim used to point for both chips (the
+ * cost: dcd_init() reset a block that does not exist and then waited for its
+ * RESET_DONE forever). */
+#define RESETS_USBCTRL  0x01000000u
 #define IO_BANK0_BASE   0x40014000u
 #define PADS_BANK0_BASE 0x4001c000u
 #define UART0_BASE      0x40034000u

@@ -64,6 +64,25 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
 
+## 5b. USB：还有三件事
+
+1. **RP2040 的 `UNRESET_BLOCK_WAIT` 仍会跑满上限**（143 ms / 次启动）。RP2040 的
+   USBCTRL 复位位是 bit 24（TinyUSB shim 头文件里写的是 RP2350 的 bit 28），
+   `reset_block()` / `unreset_block_wait()` 拿到的仍是那个共享常量，所以 RP2040 上
+   `dcd_init()` 复位不到控制器，`RESET_DONE` 也就不会置起。功能不受影响（
+   `usb_clock_init()` 已经用正确的位复位过），但这 143 ms 是白等。修法是让 shim
+   头文件按芯片给出掩码（例如把 `drivers/usb/rp2040/include/hardware/resets.h`
+   放到 include 路径前面覆盖）。2026-11-19 已把 `RESETS_BASE` 修对（那是 6.09 s 的
+   真凶），只剩这个位。
+2. **两块板的 USB 身份完全一样**：RP2040 与 RP2350 的 CDC 都是 `2e8a:000a` +
+   `iSerialNumber "0001"`（`drivers/usb/*/usb_cdc.c`）。同时插在电脑上时 Windows
+   分不清它们，COM 号会漂移（COM24 → COM25 → COM17），并触发一次"新设备"的慢枚举。
+   正解是用芯片唯一 ID（RP2040 走 flash 的 0x4B 命令，RP2350 读 OTP）生成序列号。
+3. **主机侧枚举延迟**：固件侧 `usb init done` 已降到 158 ms（RP2040 实测），但
+   Windows 把 CDC 配置起来仍要几秒——`usb_cdc_init()` 里 200 ms 的 D+ 掉电重连是
+   给"刷完 UF2 后 ROM 的 MSC 节点"准备的，冷启动时并不需要。可改成只在
+   `SIE_STATUS.CONNECTED` 为真时做；未验证。
+
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在

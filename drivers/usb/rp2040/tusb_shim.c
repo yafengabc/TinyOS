@@ -23,6 +23,7 @@
 #include "platform.h"
 #include "board.h"
 #include "scs.h"
+#include "arm_memmap.h"          /* RESETS_BASE is per chip (see hardware/resets.h) */
 #include "console.h"
 #include "usb_cdc.h"
 
@@ -154,8 +155,9 @@ void unreset_block_wait(uint32_t bits)
      * running never reports RESET_DONE, and an unbounded spin there turns a
      * USB problem into an unbootable board. */
     for (uint32_t spins = 0; spins < plat_pre_tick_spins(1000000u); spins++) {
-        if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bits) == bits)
+        if ((mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & bits) == bits) {
             return;
+        }
     }
 }
 

@@ -102,7 +102,6 @@ usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count)
 
 /* ---- reset / clock registers ------------------------------------------- */
 
-#define RESETS_USBCTRL    0x10000000u   /* RP2040 had this at bit 24        */
 #define RESETS_PLL_USB    0x00008000u
 
 #define PLL_USB_BASE      0x40058000u   /* RP2040: 0x4002c000               */
@@ -327,31 +326,16 @@ void usb_cdc_irq_enable(void)
     dcd_int_enable(0);
 }
 
-/* Wait (bounded) for the host to finish SET_CONFIGURATION so the boot banner
- * is not written into a FIFO nobody reads yet.  The ROM may hand over clk_sys
- * anywhere between 12 and 150 MHz, so the bound is derived from the measured
- * clock: one spin is about 130 cycles and 1.5 s is plenty for a host that is
- * awake, without stalling a board that has no USB cable attached. */
-static void usb_cdc_wait(uint32_t clk_hz)
-{
-    uint64_t spins;
-
-    if (!g_hw_ready)
-        return;
-    spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
-    for (uint64_t i = 0; i < spins && !tud_mounted(); i++) {
-        usb_cdc_poll();
-        for (volatile int j = 0; j < 40; j++)
-            ;
-    }
-    if (!tud_mounted())
-        BM("[uN]");                     /* host never finished SET_CONFIGURATION */
-}
+/* The console does not wait for the host.  The old bounded spin (nominally
+ * 1.5 s, 8-10 s in practice because every iteration also ran tud_task()) kept
+ * the whole boot on the host's enumeration: measured on the RP2040 as ten
+ * seconds of solid LED after every reset.  See drivers/usb/rp2040/usb_cdc.c
+ * for the timestamps. */
 
 void usb_cdc_console_init(uint32_t clk_hz)
 {
+    (void)clk_hz;
     usb_cdc_init();
-    usb_cdc_wait(clk_hz);
 }
 
 /* ---- cross-core USB exclusion ------------------------------------------- */
@@ -571,23 +555,14 @@ void usb_cdc_putc(char c)
 {
     uint32_t primask;
 
+    /* Nothing is written before the host has configured the port: a
+     * "buffer it anyway" variant made the RP2040 stop mid-boot on the UART
+     * too, because every console byte then took the cross-core USB lock and
+     * pushed into a FIFO that could not drain until enumeration.  Dropping
+     * is the contract here - putc is called from the tick and the echo path
+     * and must never block.  usb_cdc_tx_room() lets callers pace. */
     if (!g_hw_ready || !tud_mounted())
         return;
-
-    /* Drop rather than block: putc is called from the tick and from the
-     * console echo path, and a full FIFO there must not stall the kernel.
-     * usb_cdc_tx_room() lets callers pace themselves instead.
-     *
-     * The old guard ("skip in exception context" via IPSR) was wrong: the
-     * shell writes through the SVC syscall handler, which IS an exception,
-     * so every byte the shell ever printed was silently dropped and the
-     * CDC port never said a word after the boot banner.
-     *
-     * The PRIMASK window that replaced it only ever stopped re-entrancy on
-     * the SAME core.  Core 1 writing this fifo raced core 0's tud_task()
-     * and write_flush across cores, which is what corrupted the state the
-     * idle core then spun on forever (see usb_cdc_lock above).  The window
-     * is now the SIO-spinlock critical section: same shape, cross core. */
     US(10);
     primask = usb_cdc_lock();
     /* A full 128-byte ring used to drop every byte until the next 1 ms

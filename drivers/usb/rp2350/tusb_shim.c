@@ -23,6 +23,7 @@
 #include "platform.h"
 #include "board.h"
 #include "scs.h"
+#include "arm_memmap.h"          /* RESETS_BASE is per chip (see hardware/resets.h) */
 #include "console.h"
 #include "usb_cdc.h"
 
