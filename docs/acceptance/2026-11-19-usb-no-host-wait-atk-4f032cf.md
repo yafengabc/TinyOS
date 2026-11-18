@@ -115,3 +115,25 @@ UART0 → CH343 COM19）上拔插电源 20 次：**20/20 都起来了**，但主
 （`board/rpi-pico/platform.c`），而 CDC 就绪要等 Windows 枚举。下一步两个实验：
 把熄灯从 `usb_cdc_configured()` 上解耦，以及冷启动不做 200 ms 的 D+ 掉电重连
 （见 `docs/OPEN-ITEMS.md` §5b 第 3 条）。
+
+
+## 补记三（同夜，`998efe5`）：RP2040 的 10 s 真正原因 = USBCTRL 复位位
+
+前面用临时 `[t]` 计时点得出的 "usb init done = 158 ms" 是**读错了单位**：这块板上
+`TIMERAWL` 实际约 23 kHz，不是 1 MHz，所以那些数是 tick 而不是 µs。用 COM19 上的
+到达时间重新测，同一台机器：
+
+```text
+修正前（4f032cf）：uart0 primary 0.933 s → [usb] init done 7.747 s → tos> 7.832 s
+修正后（998efe5）：uart0 primary 0.952 s → [usb] init done 1.668 s → tos> 1.751 s
+```
+
+真因：共享的 TinyUSB shim 用 RP2350 的 bit 28 命名 USBCTRL，而 RP2040 是 **bit 24**，
+于是 `dcd_init()` 的 `reset_block()`/`unreset_block_wait()` 复位了个不存在的东西，
+`RESET_DONE` 永远不置起——100 万次 APB 读，实测 **6.0 s**，正好横在
+`[console] uart0 primary` 和 `[usb] init done` 之间。现在掩码按 `TOS_ARM_M0P` 选择。
+修正后用户实测 **CDC 瞬间枚举**。
+
+`usb init` 里剩下的约 0.7 s 是那个 200 ms 的 D+ 掉电重连（`usb_delay_ms()` 按每次
+迭代 3 周期标定，实测约 9 周期，所以 200 ms 花掉约 614 ms），下一步处理，见
+`docs/OPEN-ITEMS.md` §5b。

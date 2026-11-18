@@ -73,21 +73,15 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    没有这个问题。**待查**：那个 `ebreak` 具体是哪个断言（当前发布 ELF 已 strip，
    需要一次带符号的构建）。
 
-0b. **RP2040 从 reset 到 `tos>` 仍要约 10 s（UART 观察，用户实测）**，而固件的临
-   时 `[t]` 计时点显示 `usb init done` 在 **158 ms**。也就是说等待在 158 ms 之后：
-   `usb_dump()` → `plat_board_init()` → banner → shell 之间，且与“Windows 枚举完成”
-   同步。ARM 端已确认删掉 `usb_cdc_wait()` 不是问题所在（该循环已不在了）。下一步：
-   在这四段各插一个 TIMERAWL 计时点，一次定位；需要 RP2040 单独接在 USB 上（与 ATK
-   同时插会因序列号相同互相干扰）。
+0b. **RP2040 reset → `tos>` 的 10 s 已解决**（`998efe5`）：共享 shim 用 RP2350 的
+   bit 28 命名 USBCTRL，RP2040 是 bit 24，`unreset_block_wait()` 白跑 100 万次
+   （实测 6.0 s）。改成按 `TOS_ARM_M0P` 选位后实测 **1.75 s**，且 CDC 瞬间枚举。
+   注意这块板的 `TIMERAWL` 约 23 kHz，临时计时点不要当 µs 读。
 
-1. **RP2040 的 `UNRESET_BLOCK_WAIT` 仍会跑满上限**（143 ms / 次启动）。RP2040 的
-   USBCTRL 复位位是 bit 24（TinyUSB shim 头文件里写的是 RP2350 的 bit 28），
-   `reset_block()` / `unreset_block_wait()` 拿到的仍是那个共享常量，所以 RP2040 上
-   `dcd_init()` 复位不到控制器，`RESET_DONE` 也就不会置起。功能不受影响（
-   `usb_clock_init()` 已经用正确的位复位过），但这 143 ms 是白等。修法是让 shim
-   头文件按芯片给出掩码（例如把 `drivers/usb/rp2040/include/hardware/resets.h`
-   放到 include 路径前面覆盖）。2026-11-19 已把 `RESETS_BASE` 修对（那是 6.09 s 的
-   真凶），只剩这个位。
+1. **`usb_delay_ms()` 标定偏慢**：注释按每次迭代约 3 周期算，实测约 9 周期，
+   所以“200 ms”实际约 614 ms（RP2040，`998efe5` 之后 `usb init` 里剩的那 0.7 s
+   基本就是它）。要么按实测重算，要么只在 `SIE_STATUS.CONNECTED` 为真时才做
+   D+ 掉电重连（冷启动不需要），见本条第 3 点。
 2. **两块板的 USB 身份完全一样**：RP2040 与 RP2350 的 CDC 都是 `2e8a:000a` +
    `iSerialNumber "0001"`（`drivers/usb/*/usb_cdc.c`）。同时插在电脑上时 Windows
    分不清它们，COM 号会漂移（COM24 → COM25 → COM17），并触发一次"新设备"的慢枚举。
