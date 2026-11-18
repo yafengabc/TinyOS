@@ -329,6 +329,27 @@ static RAMFUNC void clk_sys_to_pll_sys(void)
     }
 }
 
+/* Park clk_sys on clk_ref (12 MHz XOSC/ROSC) before touching PLL_SYS.
+ *
+ * A UF2 download reboots into the new image without a power cycle, and the
+ * bootrom can leave clk_sys running from a PLL.  Pulsing PLL_SYS's reset
+ * while it is the live source stops the clock, so the chip never reaches
+ * USB - the Pico 2 then only starts after the RUN button (issue #7: ATK
+ * survived because its boot path happens to leave clk_sys on ROSC).  The
+ * same step is a no-op on a cold boot, where clk_ref is already the source.
+ * Runs from SRAM for the same reason as the PLL switch below. */
+static RAMFUNC void clk_sys_to_clkref(void)
+{
+    uint32_t i;
+
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, CLK_SYS_CTRL_SRC_CLKREF);
+    for (i = 0; i < 100000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
+            break;
+    }
+}
+
 /* Bring PLL_SYS up at 150 MHz and switch clk_sys onto it.
  *
  * The ROM leaves clk_sys on the ~12 MHz ROSC/XOSC path; at that rate the
@@ -350,6 +371,11 @@ static void pll_sys_init(void)
     const uint32_t post1   = 5u;
     const uint32_t post2   = 2u;
     uint32_t i;
+
+    /* The live clock source is whatever the boot path left behind: ROSC on a
+     * cold boot, but possibly a PLL after a UF2-triggered reboot.  Park
+     * clk_sys on clk_ref first so the reset below cannot stop the clock. */
+    clk_sys_to_clkref();
 
     /* Force a clean reset/unreset cycle: the ROM may have used this PLL for
      * its own XIP setup and left the dividers anywhere.  Same lesson as
