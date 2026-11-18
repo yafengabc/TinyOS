@@ -73,6 +73,13 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    没有这个问题。**待查**：那个 `ebreak` 具体是哪个断言（当前发布 ELF 已 strip，
    需要一次带符号的构建）。
 
+0b. **RP2040 从 reset 到 `tos>` 仍要约 10 s（UART 观察，用户实测）**，而固件的临
+   时 `[t]` 计时点显示 `usb init done` 在 **158 ms**。也就是说等待在 158 ms 之后：
+   `usb_dump()` → `plat_board_init()` → banner → shell 之间，且与“Windows 枚举完成”
+   同步。ARM 端已确认删掉 `usb_cdc_wait()` 不是问题所在（该循环已不在了）。下一步：
+   在这四段各插一个 TIMERAWL 计时点，一次定位；需要 RP2040 单独接在 USB 上（与 ATK
+   同时插会因序列号相同互相干扰）。
+
 1. **RP2040 的 `UNRESET_BLOCK_WAIT` 仍会跑满上限**（143 ms / 次启动）。RP2040 的
    USBCTRL 复位位是 bit 24（TinyUSB shim 头文件里写的是 RP2350 的 bit 28），
    `reset_block()` / `unreset_block_wait()` 拿到的仍是那个共享常量，所以 RP2040 上
