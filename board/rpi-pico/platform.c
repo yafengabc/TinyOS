@@ -181,7 +181,7 @@ static int xosc_start(void)
     }
     if (!(st & XOSC_STATUS_STABLE) && !xosc_wait_stable())
         return 0;
-    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(660000u); d++)
         ;
     return 1;
 }

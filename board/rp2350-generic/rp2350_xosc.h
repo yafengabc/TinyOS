@@ -40,7 +40,12 @@
 #define XOSC_CTRL_ENABLE_12M    ((0xfabu << 12) | 0xaa0u)
 #define XOSC_STATUS_STABLE      (1u << 31)
 #define XOSC_STATUS_ENABLED     (1u << 12)
-#define XOSC_STARTUP_DELAY_12M  282u
+/* 282 is pico-sdk's default (multiplier 6).  This board's crystal is slow
+ * to settle - 6 ms still left roughly one cold boot in ten dead - so the
+ * multiplier is raised to 20: 47 * 20 = 940 counts of 256 periods each,
+ * about 20 ms at 12 MHz.  The SDK documents the multiplier as the knob
+ * for exactly this ("to accommodate slow-starting oscillators"). */
+#define XOSC_STARTUP_DELAY_12M  940u
 
 /* Bounded: callers continue on the ROM's clock if the crystal never starts. */
 static inline int rp2350_xosc_wait_stable(void)
@@ -64,8 +69,9 @@ static inline int rp2350_xosc_start(void)
     }
     if (!(st & XOSC_STATUS_STABLE) && !rp2350_xosc_wait_stable())
         return 0;
-    /* ROM started it with DELAY = 0; give it the period it never waited. */
-    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+    /* ROM started it with DELAY = 0; give it the period it never waited
+     * (same order as the hardware delay above). */
+    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(660000u); d++)
         ;
     return 1;
 }

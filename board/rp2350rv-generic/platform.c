@@ -515,7 +515,13 @@ static RAMFUNC void clk_sys_to_pll_sys(void)
 {
     uint32_t i;
 
+    /* pico-sdk's clock_configure_internal() order: the glitchless mux is on
+     * clk_ref (pll_sys_init() put it there), then AUXSRC is programmed, then
+     * the glitchless source moves last.  Setting both in one write passes a
+     * glitch when the aux mux changes. */
     mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
+                 CLK_SYS_CTRL_AUX_PLL_SYS << 5);
     mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
                  CLK_SYS_CTRL_SRC_AUX |
                  (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
@@ -1545,6 +1551,7 @@ void plat_board_early(void)
      * before that reset, so a hang in the PLL step is visible on the wire
      * instead of looking like a dead board. */
     g_clk_hz = 12000000u;
+
     clocks_init();
 
     /* The [A] line is divided for the clock the core is actually on now: if

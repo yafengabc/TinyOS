@@ -92,7 +92,9 @@
  * in 256 crystal periods (~6 ms).  See board/rp2350-generic/rp2350_xosc.h
  * for the full story; the two chips have different XOSC bases, so this map
  * carries its own copy of the constants. */
-#define XOSC_STARTUP_DELAY_12M  282u
+/* 282 is pico-sdk default (multiplier 6); this board family needs ~20 ms
+ * (47 * 20 = 940), see board/rp2350-generic/rp2350_xosc.h. */
+#define XOSC_STARTUP_DELAY_12M  940u
 
 #define CLK_REF_CTRL_OFFSET      0x30u
 #define CLK_REF_SELECTED_OFFSET  0x38u

@@ -234,6 +234,7 @@ static void panic_poll_uart(void)
 /* plat_board_early() prints its boot line before the USB stack exists, so
  * the console shunts the CDC calls until plat_console_init() has run. */
 static int g_usb_ready;
+static int g_last_cfg = -1;     /* last CDC config state reported to the log */
 
 static int g_led_on;
 
@@ -309,7 +310,20 @@ static RAMFUNC void clk_sys_to_pll_sys(void)
 {
     uint32_t i;
 
+    /* Same order as pico-sdk's clock_configure_internal(): before touching
+     * AUXSRC, put the glitchless mux back on clk_ref (source 0) and wait for
+     * it, otherwise changing the aux mux passes a glitch to the core.  The
+     * ARM port never did this step; the RV32 port did it in pll_sys_init().
+     * Then AUXSRC first, the glitchless source last, and wait for SELECTED. */
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET, 0u);
+    for (i = 0; i < 100000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & 1u)
+            break;
+    }
+
     mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
+                 CLK_SYS_CTRL_AUX_PLL_SYS << 5);
     mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
                  CLK_SYS_CTRL_SRC_AUX |
                  (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
@@ -981,6 +995,10 @@ void plat_console_init(void)
     early_puts(" clk_usb_khz=");
     early_put_hex(measure_clk_src_khz(0x0bu));    /* FC0_SRC = CLK_USB */
     early_puts("\r\n");
+    /* The state is on the wire now; the tick's change tracer must not repeat
+     * it one line later.  It only speaks when the host later re-configures
+     * (cable pulled, replugged). */
+    g_last_cfg = usb_cdc_configured();
 #endif
 
     if (usb_cdc_configured()) {
@@ -1198,10 +1216,9 @@ void plat_timer_tick(void)
 #if TOS_BOOT_TRACE
     if (!tty_line_taken() && g_usb_ready && g_ticks <= 120000u &&
         (g_ticks % 500u) == 0u) {
-        static int last_cfg = -1;
         int cfg = usb_cdc_configured();
-        if (cfg != last_cfg) {
-            last_cfg = cfg;
+        if (cfg != g_last_cfg) {
+            g_last_cfg = cfg;
             /* Start on a fresh line and stop as soon as the shell has taken
              * a command: glued to "tos> " this trace reads as garbled
              * output, and it has no value once someone is typing. */
