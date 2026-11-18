@@ -103,3 +103,15 @@ ra=0x100131c8 sp=0x20016830 ...
 
 固件侧那个断言的**具体位置仍未知**：发布 ELF 已 strip，`addr2line` 解析不了，
 需要一次带符号构建（`docs/OPEN-ITEMS.md` §5b）。
+
+
+## 补记二（同夜）：RP2040 冷启动 20/20
+
+用户在本卡片所述构建的 RP2040（`rpi-pico-smp`，Pico 2 克隆板之外的 RP2040 板，
+UART0 → CH343 COM19）上拔插电源 20 次：**20/20 都起来了**，但主观上“启动慢”。
+
+结合 `[t]` 时间戳（固件 `usb init done` = 158 ms），慢的部分不在固件启动，而在
+主机把 CDC 配置起来之前：LED 只在 `usb_cdc_configured()` 为真时熄灭
+（`board/rpi-pico/platform.c`），而 CDC 就绪要等 Windows 枚举。下一步两个实验：
+把熄灯从 `usb_cdc_configured()` 上解耦，以及冷启动不做 200 ms 的 D+ 掉电重连
+（见 `docs/OPEN-ITEMS.md` §5b 第 3 条）。
