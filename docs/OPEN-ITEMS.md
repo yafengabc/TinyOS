@@ -91,6 +91,16 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    给"刷完 UF2 后 ROM 的 MSC 节点"准备的，冷启动时并不需要。可改成只在
    `SIE_STATUS.CONNECTED` 为真时做；未验证。
 
+4. **Hazard3 不能照搬 ARM 的有界 pump**（2026-11-19 实测）：把 RV32 的
+   `usb_cdc_wait()` 换成 ARM 的 `USB_BOOT_PUMP`（40 000 次 `usb_cdc_poll()`）后，
+   刷入即**启动挂死**——CDC 不枚举、UART 也是 0 字节，只能按 BOOTSEL 刷回。RV32 的
+   `usb_cdc_poll()` 比 ARM 重得多（自己搬 tx ring + `usb_tx_drain()` + `plat_spin_*`），
+   ARM 上“~250 ms”的数字不适用于它。要继续得先量出单次 poll 的耗时（与 §5b-2 的
+   时间窗是同一条路）。
+5. **刷机/BOOTSEL 之后那次重启，UART0 会哑掉**（CDC 与 shell 正常，重新上电才恢复）。
+   2026-11-19 两次观察到，ATK-DNRP2350AM。原因未查；抓启动日志时如果只有 CDC 有输出，
+   先怀疑这个，不要当成 USB/固件问题。
+
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在
