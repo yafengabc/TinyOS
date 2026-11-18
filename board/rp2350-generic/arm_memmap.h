@@ -16,6 +16,15 @@
 #define SRAM_BASE       0x20000000u
 #define SRAM_END        0x20082000u   /* 520 KiB, striped SRAM0..7 + 2x4K */
 
+/* XIP/QMI memory window 0.  TinyOS deliberately writes nothing here: the
+ * boot ROM already leaves the part in its fastest mode with a timing that
+ * survives the move to 150 MHz (measured on the Pico 2, 2026-11-18), and
+ * changing M0_TIMING across the clk_sys switch breaks XIP.  Kept for
+ * diagnostics only. */
+#define XIP_QMI_BASE    0x400d0000u
+#define QMI_M0_TIMING   (XIP_QMI_BASE + 0x0cu)
+#define QMI_M0_RFMT     (XIP_QMI_BASE + 0x10u)
+#define QMI_M0_RCMD     (XIP_QMI_BASE + 0x14u)
 /* Boot ROM well-known pointers.  On RP2350 the ARM lookup routine is a
  * 16-bit pointer stored at 0x16, and it takes (code, flags) rather than
  * the RP2040 (table, code) pair.  RT_FLAG_FUNC_ARM_SEC = 0x0004. */

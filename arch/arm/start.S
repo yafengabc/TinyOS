@@ -131,16 +131,19 @@ _start:
     isb
 
 #ifdef TOS_RP2350_BOOT2
-    /* RP2350: move QMI to continuous quad read before the kernel starts
-       using flash at 150 MHz.  The ROM's conservative 03h/CLKDIV=12 mode is
-       safe at the boot clock but its sampling delay is counted in clk_sys
-       cycles, so it becomes too short once pll_sys_init() switches to
-       150 MHz - on some flash parts the first fetch after the switch reads
-       garbage (issue #7: PC=0xeffffffe, no USB).  MicroPython's RP2350
-       build does the same (PICO_EMBED_XIP_SETUP=1).  boot2 must run from
-       SRAM, so copy it to __boot2_ram first; this happens before the .data
-       copy because that copy is itself a bulk flash read at the new
-       timing. */
+    /* Optional second-stage flash setup (board.conf: xip_setup =
+       boot2-w25q080) that moves the part to continuous quad read before the
+       kernel runs.  Not enabled by any board right now: a second QMI setup
+       on top of the one the ROM installs is unnecessary and, on the 8 MiB
+       W25Q64, the SR2/QE programming this blob starts with left XIP
+       unusable (issue #7).  The clock switch itself no longer needs it -
+       measured on the Pico 2, the ROM's own EBh quad timing still reads
+       flash correctly at 150 MHz, so pll_sys_init() only moves the mux
+       (see clk_sys_to_pll_sys in board/rp2350-generic/platform.c).  Keep
+       this path for a board that genuinely needs quad, and verify it on
+       hardware before enabling it.
+
+       boot2 must run from SRAM, so it is copied to __boot2_ram first. */
     ldr     r0, =__boot2_ram
     ldr     r1, =__boot2_start
     ldr     r2, =__boot2_end

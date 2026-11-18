@@ -96,6 +96,12 @@
  * this file's char[] declaration. */
 #define TOS_NOINIT __attribute__((section(".noinit")))
 
+/* Code that must execute from SRAM: flash_exit_xip puts QSPI into
+ * serial-command mode and an instruction fetch from flash then hangs; the
+ * same is true between the clk_sys mux write and the QMI retime.  The linker
+ * script copies .data.ramfunc to SRAM before kmain. */
+#define RAMFUNC __attribute__((section(".data.ramfunc"), noinline))
+
 static void wdt_feed(void);        /* defined with the RAM helpers below */
 static void wdt_enable(void);
 static void early_puts(const char *s);
@@ -488,6 +494,31 @@ static void ticks_init(void)
     mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 1u);
 }
 
+/* Move clk_sys onto PLL_SYS from SRAM.  Same reasoning as the ARM port:
+ * measured on the Pico 2 with a standalone harness, the ROM's own QMI timing
+ * (EBh quad, CLKDIV 3 / RXDELAY 50) still reads flash correctly at 150 MHz,
+ * and writing a different M0_TIMING in this step is what breaks XIP.  So the
+ * mux is the only thing that moves; no QMI register is touched.
+ *
+ * Must run from SRAM so that no flash fetch happens between the mux write
+ * and the point where the new clock is acknowledged. */
+static RAMFUNC void clk_sys_to_pll_sys(void)
+{
+    uint32_t i;
+
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
+                 CLK_SYS_CTRL_SRC_AUX |
+                 (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
+
+    /* A fixed spin count keeps this off plat_pre_tick_spins(), which is
+     * flash. */
+    for (i = 0; i < 100000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
+            break;
+    }
+}
+
 /* PLL_SYS at 150 MHz.  Failure is benign: the boot continues on clk_ref
  * (12 MHz) and every divisor is re-derived from the measured value.
  *
@@ -531,14 +562,9 @@ static void pll_sys_init(void)
 
     PLL_SYS_PWR_REG &= ~PLL_SYS_PWR_POSTDIVPD;
 
-    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
-    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
-                 CLK_SYS_CTRL_SRC_AUX |
-                 (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
-    for (i = 0; i < plat_pre_tick_spins(1000000u); i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
-            break;
-    }
+    /* Switch clk_sys onto the PLL and re-time XIP in the same RAM-resident
+     * step; see clk_sys_to_pll_sys(). */
+    clk_sys_to_pll_sys();
 }
 
 /* Measure clk_sys in kHz against the 12 MHz crystal.  Returns 0 when the
@@ -552,7 +578,14 @@ static uint32_t measure_clk_khz(void)
         if (!(mmio_read32(FC0_STATUS) & FC0_STATUS_RUNNING))
             break;
     }
-    mmio_write32(FC0_REF_KHZ, 12000u);
+    /* FC0 measures against clk_ref, which is the 12 MHz crystal only when
+     * the mux actually selected it.  clocks_init() falls back to the ROSC
+     * (~6.5 MHz) when the crystal does not start, and assuming 12 MHz then
+     * scales every measurement - and the UART divisor derived from it - by
+     * the ratio between the two.  Read the mux instead of assuming. */
+    mmio_write32(FC0_REF_KHZ,
+                 (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) &
+                  (1u << 2)) ? 12000u : 6500u);
     mmio_write32(FC0_MIN_KHZ, 0u);
     mmio_write32(FC0_MAX_KHZ, 0xffffffffu);
     mmio_write32(FC0_INTERVAL, 10u);

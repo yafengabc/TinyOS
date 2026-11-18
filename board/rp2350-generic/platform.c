@@ -115,7 +115,11 @@
  * simply continues at the ROM's clock - every divisor still comes out
  * right because it was measured, not assumed.
  *
- * Flash: reads go straight through XIP.  Writes and erases use the RP2350
+ * Flash: reads go straight through XIP in the mode the boot ROM left.  The
+ * kernel never writes QMI: measured on the Pico 2, the ROM's own EBh quad
+ * timing still reads flash correctly after clk_sys moves to 150 MHz, and
+ * re-timing it in the same step is what used to break XIP (issue #7).
+ * Writes and erases use the RP2350
  * boot ROM's low-level flash API.  Its lookup ABI differs from RP2040: a
  * (code, flags) call through a 16-bit pointer at 0x16 with
  * RT_FLAG_FUNC_ARM_SEC.  Those wrappers live in .data.ramfunc (copied to
@@ -292,6 +296,38 @@ static void clocks_init(void)
                  (CLK_PERI_CTRL_AUXSRC_CLK_SYS << 5));
 }
 
+/* Move clk_sys onto PLL_SYS from SRAM.
+ *
+ * No QMI re-timing here, on purpose.  Measured on the Pico 2 (standalone
+ * harness, 2026-11-18): the ROM leaves the part in EBh quad mode with
+ * CLKDIV 3 / RXDELAY 50, and that timing still reads flash correctly at
+ * 150 MHz - a 4 KiB checksum taken after the mux move is identical to the
+ * one taken before it.  Writing our own M0_TIMING in the same step
+ * (CLKDIV 4 / RXDELAY 1) is what breaks XIP: the sample point moves to
+ * 3 ns after the clock edge instead of 167 ns, and the first fetch after
+ * the switch reads garbage.  So the mux is the only thing that moves.
+ *
+ * This still runs from SRAM.  It keeps the mux write and the callers'
+ * assumption that no flash fetch happens in between honest, and costs
+ * nothing: .data.ramfunc is copied by _start before kmain. */
+static RAMFUNC void clk_sys_to_pll_sys(void)
+{
+    uint32_t i;
+
+    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
+    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
+                 CLK_SYS_CTRL_SRC_AUX |
+                 (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
+
+    /* CLK_SYS_SELECTED must follow before anyone downstream assumes the
+     * new rate; until it does the bus is still on the old source.  A fixed
+     * spin count keeps this off plat_pre_tick_spins(), which is flash. */
+    for (i = 0; i < 100000u; i++) {
+        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
+            break;
+    }
+}
+
 /* Bring PLL_SYS up at 150 MHz and switch clk_sys onto it.
  *
  * The ROM leaves clk_sys on the ~12 MHz ROSC/XOSC path; at that rate the
@@ -345,16 +381,9 @@ static void pll_sys_init(void)
 
     /* Switch clk_sys onto the PLL output.  The divider is forced to 1.0
      * first, then SRC moves to the AUX mux (which now selects pll_sys).
-     * CLK_SYS_SELECTED must follow before anyone downstream assumes the
-     * new rate; until it does the bus is still on the old source. */
-    mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
-    mmio_write32(CLOCKS_BASE + CLK_SYS_CTRL_OFFSET,
-                 CLK_SYS_CTRL_SRC_AUX |
-                 (CLK_SYS_CTRL_AUX_PLL_SYS << 5));
-    for (i = 0; i < plat_pre_tick_spins(1000000u); i++) {
-        if (mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET) & (1u << 1))
-            break;
-    }
+     * Done from SRAM, where no flash fetch can happen between the mux write
+     * and the switch being acknowledged - see clk_sys_to_pll_sys(). */
+    clk_sys_to_pll_sys();
 }
 
 /* Measure clk_sys in kHz against clk_ref.  Returns 0 when the counter does
@@ -368,12 +397,21 @@ static uint32_t measure_clk_src_khz(uint32_t src)
 {
     uint32_t spins;
     const uint32_t bound = plat_pre_tick_spins(1000000u);
+    /* FC0 counts against clk_ref, and clk_ref is not always the crystal:
+     * clocks_init() leaves it on the ROSC when the 12 MHz crystal fails to
+     * start.  Getting this reference wrong is invisible at the call site but
+     * scales every measurement - and therefore the UART divisor and the
+     * tick reload - by the ratio between the two, so read it from the mux
+     * instead of assuming. */
+    uint32_t ref_khz =
+        (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
+            ? 12000u : 6500u;
 
     for (spins = 0; spins < bound; spins++) {
         if (!(mmio_read32(FC0_STATUS) & FC0_STATUS_RUNNING))
             break;
     }
-    mmio_write32(FC0_REF_KHZ, 12000u);
+    mmio_write32(FC0_REF_KHZ, ref_khz);
     mmio_write32(FC0_MIN_KHZ, 0u);
     mmio_write32(FC0_MAX_KHZ, 0xffffffffu);
     mmio_write32(FC0_INTERVAL, 10u);
@@ -1501,6 +1539,26 @@ void plat_board_early(void)
 {
     uint32_t khz;
 
+    /* The ROM leaves the SAU enabled with eight regions (SAU_CTRL=1,
+     * SAU_TYPE=8).  This is a Secure-only image: there is no Non-secure
+     * world, no NSC veneer and no secure gateway, so any region that marks
+     * a slice of SRAM/flash Non-secure only makes Secure instruction
+     * fetches and branches land in an invalid-transition SecureFault.
+     * Disabling the SAU with ALLNS=0 makes the whole address space Secure -
+     * the same flat model the RP2040/M0+ port has.
+     *
+     * This has to happen before anything executes from SRAM, not after the
+     * clock setup: pll_sys_init() switches clk_sys from a .data.ramfunc
+     * stub, and with the SAU still enabled that fetch faulted on the Pico 2
+     * - a silent death exactly at the clock switch, with every handler in
+     * flash so nothing was ever printed (issue #7).  Measured on hardware:
+     * the same mux move from the same SRAM address works once the SAU is
+     * off. */
+    mmio_write32(ARM_VTOR, XIP_BASE);
+    mmio_write32(ARM_SAU_CTRL, 0u);
+    __asm__ volatile("dsb" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
+
     /* clk_peri is OFF after reset (CLOCKS_CLK_PERI_CTRL_RESET == 0).  UART0,
      * IO_BANK0 and PADS_BANK0 ALL sit behind it.  Touching any of those
      * registers with the clock gated stalls the AHB fabric FOREVER - it
@@ -1509,56 +1567,54 @@ void plat_board_early(void)
      * clk_peri, so the clock must be enabled before anything else here. */
     g_clk_hz = 12000000u;       /* conservative guess until FC0 measures */
     clocks_init();
-    pll_sys_init();             /* 150 MHz, or a no-op if the PLL refuses */
 
-    /* Arm the watchdog now that the clock is final: a kernel that wedges
-     * later resets itself instead of waiting for a human with a button. */
-    wdt_enable();
-
-    /* RP2350 also leaves most peripherals held in reset.  Same stall rule:
-     * release before any GPIO, pad or UART access.  The RP2040 port could
-     * get away with touching the pads first because stage-2 had already
-     * done both of these steps. */
+    /* Release the peripherals the early output needs before using them:
+     * IO_BANK0, PADS_BANK0 and UART0 are all held in reset on RP2350, and
+     * touching them while they are costs an AHB stall, not a fault. */
     unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0);
 
-    led_init();
-    led_set(1);
-
-    /* Now UART0 is safe.  Emit a progress marker at every boot stage so a
-     * single COM14 capture locates a hang without a debugger.  The divider
-     * is re-programmed below once clk_sys has actually been measured. */
+    /* Measure clk_sys before the first byte goes out and derive the UART
+     * divider from the measurement, never from a guess.  The PL011 divider
+     * comes from g_clk_hz, so any mismatch with the clock clk_peri is
+     * actually running at turns every early line into garbage - which is
+     * exactly how the Pico 2 bring-up looked: readable fragments, dropped
+     * bytes, and a boot that appeared to die at the clock switch when it
+     * had only lost its baud rate (issue #7). */
+    khz = measure_clk_khz();
+    g_clk_hz = (khz >= 1000u && khz <= 250000u) ? khz * 1000u
+                                                : ARM_SYSTICK_CLK;
     uart_init();
-    early_puts("\r\n[A] clocks+reset ok\r\n");
+    early_puts("\r\n[A] clocks+reset ok  clk_sys=");
+    early_put_hex(g_clk_hz);
+    early_puts("\r\n");
+    /* Let the shift register drain before clk_peri changes: the tail of
+     * this line would otherwise be clocked out at the new rate with the old
+     * divisor and arrive as garbage. */
+    plat_console_flush();
 
     /* From here on a fault is recoverable: the panic loop polls UART0 for
      * Ctrl-D, so a broken build never needs a physical BOOTSEL press. */
     g_panic_poll = panic_poll_uart;
 
+    /* 150 MHz, or a no-op if the PLL refuses.  The switch itself runs from
+     * SRAM (see clk_sys_to_pll_sys) and re-measures afterwards, because
+     * clk_peri follows clk_sys and the UART divider has to follow it. */
+    pll_sys_init();
     khz = measure_clk_khz();
-    if (khz >= 1000u && khz <= 250000u)
-        g_clk_hz = khz * 1000u;
-    else
-        g_clk_hz = ARM_SYSTICK_CLK;
-    uart_init();                    /* re-divide for the real clk_sys */
-    early_puts("[B] clk=0x");
+    g_clk_hz = (khz >= 1000u && khz <= 250000u) ? khz * 1000u
+                                                : ARM_SYSTICK_CLK;
+    uart_init();
+    early_puts("[B] clk_sys=");
     early_put_hex(g_clk_hz);
     early_puts("\r\n");
 
-    /* Repoint exceptions at our vector table in flash.  The ROM already
-     * installed it to jump here, but VTOR is ours to own from now on. */
-    mmio_write32(ARM_VTOR, XIP_BASE);
+    /* Arm the watchdog now that the clock is final: a kernel that wedges
+     * later resets itself instead of waiting for a human with a button. */
+    wdt_enable();
 
-    /* The ROM leaves the SAU enabled with eight regions (SAU_CTRL=1,
-     * SAU_TYPE=8).  This is a Secure-only image: there is no Non-secure
-     * world, no NSC veneer and no secure gateway, so any region that marks
-     * a slice of SRAM/flash Non-secure only makes Secure instruction fetches
-     * and branches land in an invalid-transition SecureFault.  Disabling the
-     * SAU with ALLNS=0 makes the whole address space Secure - the same flat
-     * model the RP2040/M0+ port has. */
-    mmio_write32(ARM_SAU_CTRL, 0u);
-    __asm__ volatile("dsb" ::: "memory");
-    __asm__ volatile("isb" ::: "memory");
-    early_puts("[C] vtor+sau ok\r\n");
+    led_init();
+    led_set(1);
+    early_puts("[C] vtor+sau+led ok\r\n");
 
     /* Defensive core-1 park: the ROM normally holds core 1 in its own
      * wait-for-FIFO loop, but a stray multicore launch must not execute
@@ -1572,7 +1628,6 @@ void plat_board_early(void)
     early_puts("TinyOS/RP2350  clk=0x");
     early_put_hex(g_clk_hz);
     early_puts(" Hz  uart0=115200\r\n");
-
     /* Bring up the full console (UART re-divide + native USB CDC) the same
      * way every other ARM board does from plat_board_early().  Without this
      * call the CDC controller is never taken out of reset, no 2E8A COM port

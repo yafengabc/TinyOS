@@ -395,12 +395,11 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// only TOS_ARM_M0P suppresses that.
 		if chip == "rp2350" {
 			archFlags = append(archFlags, "-DTOS_ARM_MPU_V8")
-			// Run the standard RP2350 XIP setup (boot2) from SRAM before
-			// the kernel touches flash at 150 MHz — only on boards whose
-			// flash part needs it.  MicroPython's RP2350 build enables the
-			// same thing (PICO_EMBED_XIP_SETUP=1); without it the ROM's
-			// conservative read timing is 12.5x too short after
-			// pll_sys_init().  See board/rp2350-generic/boot2_w25q080.S.
+			// Optional second-stage XIP setup (boot2), for a board whose
+			// flash part needs quad mode before the kernel runs.  No board
+			// enables it: the RP2350 boot ROM already configures the part,
+			// and the clk_sys switch only needs the mux moved from SRAM
+			// (see clk_sys_to_pll_sys in board/rp2350-generic/platform.c).
 			if b.BoardConfig != nil && b.BoardConfig.XIPSetup == "boot2-w25q080" {
 				archFlags = append(archFlags, "-DTOS_RP2350_BOOT2")
 			}

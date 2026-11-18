@@ -15,6 +15,13 @@
 #define SRAM_BASE       0x20000000u
 #define SRAM_END        0x20082000u   /* 520 KiB, striped SRAM0..7 + 2x4K */
 
+/* XIP/QMI memory window 0, shared with the ARM port.  Nothing in this port
+ * writes it: the boot ROM's own timing survives the move to 150 MHz, and
+ * changing it across the switch breaks XIP (measured on the Pico 2). */
+#define XIP_QMI_BASE    0x400d0000u
+#define QMI_M0_TIMING   (XIP_QMI_BASE + 0x0cu)
+#define QMI_M0_RFMT     (XIP_QMI_BASE + 0x10u)
+#define QMI_M0_RCMD     (XIP_QMI_BASE + 0x14u)
 /* SIO: CPU id, GPIO, FIFO and the RISC-V machine timer.  SIO is at the
  * same address for both CPU architectures. */
 #define SIO_BASE        0xd0000000u
