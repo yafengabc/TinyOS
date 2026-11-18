@@ -469,12 +469,28 @@ void usb_cdc_irq_enable(void)
  * shows up.  usb_cdc_putc() keeps its "drop until mounted" guard - buffering
  * there instead made the RP2040's boot stall on the UART as well. */
 
+/* Pump the controller for a short, bounded time right after init, so the
+ * host's first control transfers are answered during boot instead of timing
+ * out and backing off (Windows retries after ~5.5 s).  Same shape as the
+ * RP2350 port; see drivers/usb/rp2350/usb_cdc.c for the measurement.
+ *
+ * 40 000 iterations is roughly 250 ms at 125 MHz; it returns as soon as the
+ * host has configured the port. */
+#define USB_BOOT_PUMP 40000u
+
+static void usb_cdc_boot_pump(void)
+{
+    for (uint32_t i = 0; i < USB_BOOT_PUMP && !tud_mounted(); i++)
+        usb_cdc_poll();
+}
+
 void usb_cdc_console_init(uint32_t clk_hz)
 {
     /* The E15 workaround holds LS_J for ~1 ms with a volatile loop; it
      * needs the runtime clk_sys (which the Ctrl-Y / Ctrl-U A/B changes). */
     g_usb_clk_hz = clk_hz;
     usb_cdc_init();
+    usb_cdc_boot_pump();
 }
 
 /* ---- cross-core USB exclusion ------------------------------------------- */

@@ -69,8 +69,18 @@ static inline int rp2350_xosc_start(void)
     }
     if (!(st & XOSC_STATUS_STABLE) && !rp2350_xosc_wait_stable())
         return 0;
-    /* ROM started it with DELAY = 0; give it the period it never waited
-     * (same order as the hardware delay above). */
+    /* ROM started it with DELAY = 0; give it the period it never waited.
+     *
+     * This is a deliberately generous cycle bound, not a calibrated delay:
+     * at this point clk_sys is still the ROSC/12 MHz handover value, so
+     * plat_pre_tick_spins() cannot turn microseconds into a real count.  660
+     * nominal units at 12 MHz come out around 40-50 ms with the loop's
+     * measured ~9 cycles per iteration (the same shape as the RP2040 port's
+     * usb_delay_ms()), i.e. comfortably more than the 20 ms the hardware
+     * delay above waits.  Erring long is the safe direction here: this branch
+     * only runs when the ROM already started the crystal with DELAY = 0, and
+     * switching clk_ref to a still-drifting crystal is what used to break the
+     * next flash read. */
     for (volatile uint32_t d = 0; d < plat_pre_tick_spins(660000u); d++)
         ;
     return 1;

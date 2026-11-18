@@ -31,6 +31,13 @@
 #include "hardware/resets.h"
 #include "pico/platform.h"
 
+/* The USBCTRL reset bit lives in two places that must agree: this port's
+ * tos_usb_resets.h (what vendored TinyUSB sees) and the board's memmap
+ * RESETS_USBCTRL (what our own code uses).  A re-import of third_party cannot
+ * silently bring back the other chip's bit - it stops the build here. */
+_Static_assert(TOS_RESETS_USBCTRL == RESETS_USBCTRL,
+               "USBCTRL reset bit disagrees with the board memmap");
+
 /* ---- interrupt plumbing -------------------------------------------------- */
 
 /* dcd_init() hands us TinyUSB's controller handler through this call; the

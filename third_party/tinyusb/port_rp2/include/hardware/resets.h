@@ -19,17 +19,14 @@
 #define RESETS_RESET_DONE_OFFSET 0x00000008u /* 1 = reset finished          */
 
 /* USBCTRL's reset bit differs per chip: 24 on the RP2040, 28 on the RP2350.
- * This used to be the RP2350 value for both, so on the RP2040 dcd_init()
- * reset a block that does not exist and then polled a RESET_DONE bit that
- * never sets: 1 000 000 iterations, measured at 6.0 s of real time on the
- * board (the uart timestamp capture in docs/acceptance).  TOS_ARM_M0P is the
- * RP2040 arch define, and it reaches every translation unit including this
- * one; the board memmaps carry the same value as RESETS_USBCTRL. */
-#ifdef TOS_ARM_M0P
-#define RESETS_RESET_USBCTRL_BITS 0x01000000u   /* bit 24 (RP2040)            */
-#else
-#define RESETS_RESET_USBCTRL_BITS 0x10000000u   /* bit 28 (RP2350)            */
-#endif
+ * The value is NOT written here - it comes from the port shim
+ * (drivers/usb/<port>/tos_usb_resets.h), so this file can be re-imported from
+ * upstream TinyUSB without silently restoring the wrong chip's bit.  Getting
+ * that wrong cost the RP2040 6 s per boot: reset_block() held a block that
+ * does not exist and unreset_block_wait() polled a RESET_DONE that never set. */
+#include "tos_usb_resets.h"
+
+#define RESETS_RESET_USBCTRL_BITS TOS_RESETS_USBCTRL
 
 void reset_block(uint32_t bits);
 void unreset_block(uint32_t bits);

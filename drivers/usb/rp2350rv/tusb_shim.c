@@ -22,6 +22,10 @@
 #include "hardware/resets.h"
 #include "pico/platform.h"
 
+/* See the RP2040 copy: pins the TinyUSB-visible bit to the board memmap. */
+_Static_assert(TOS_RESETS_USBCTRL == RESETS_USBCTRL,
+               "USBCTRL reset bit disagrees with the board memmap");
+
 /* ---- interrupt plumbing -------------------------------------------------- */
 
 static void (*s_usb_isr)(void);

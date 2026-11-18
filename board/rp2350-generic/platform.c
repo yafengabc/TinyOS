@@ -234,7 +234,10 @@ static void panic_poll_uart(void)
 /* plat_board_early() prints its boot line before the USB stack exists, so
  * the console shunts the CDC calls until plat_console_init() has run. */
 static int g_usb_ready;
-static int g_last_cfg = -1;     /* last CDC config state reported to the log */
+/* Written once during console init (core 0, before the tick starts) and then
+ * from the tick; read there too.  volatile keeps the compiler from folding
+ * the two reads across the wait loop it sits in. */
+static volatile int g_last_cfg = -1;
 
 static int g_led_on;
 
