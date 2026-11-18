@@ -1068,8 +1068,15 @@ int plat_console_getchar(void)
      * tty_poll() with interrupts masked. */
     if (plat_cpu_id() == 0 && g_usb_ready) {
         c = usb_cdc_getchar();
-        if (c >= 0)
+        if (c >= 0) {
+            /* Same escape hatch over CDC as over UART0: the ROM reboot does
+             * not care which console delivered the byte.  Both consoles are
+             * checked because a host with only the USB cable attached has no
+             * other way back into BOOTSEL. */
+            if (c == BOOTSEL_MAGIC_CHAR)
+                rom_enter_bootsel();
             return c;
+        }
     }
     if (mmio_read32(RP_UART_FR) & RP_UART_FR_RXFE)
         return -1;

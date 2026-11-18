@@ -356,8 +356,12 @@ int plat_console_getchar(void)
      * usb_idle_poll() above).  Only the byte queue is touched here. */
     if (plat_cpu_id() == 0 && g_usb_ready) {
         c = usb_cdc_getchar();
-        if (c >= 0)
+        if (c >= 0) {
+            /* Ctrl-D over CDC: same ROM reboot as the UART path below. */
+            if (c == BOOTSEL_MAGIC_CHAR)
+                rom_enter_bootsel();
             return c;
+        }
     }
 
     if (mmio_read32(RP_UART_FR) & RP_UART_FR_RXFE)
