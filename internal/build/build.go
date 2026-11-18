@@ -314,6 +314,12 @@ func New(root string) *Builder {
 		HistBytes:     512,
 		DevNodes:      true,
 		Panel:         true,
+		// Same default as build.Config: an image explains itself unless a
+		// config says otherwise.  This has to be here as well as in
+		// LoadConfig(), because a build with no config file never runs
+		// ApplyConfig() - the markers were silently compiled out of every
+		// default build until the ATK acceptance table noticed.
+		BootTrace: true,
 	}
 }
 
