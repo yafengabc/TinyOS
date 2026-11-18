@@ -155,18 +155,43 @@ static int pll_sys_start_125(void)
     return 0;
 }
 
+/* Same two-case startup as the RP2350 ports (see board/rp2350-generic/
+ * rp2350_xosc.h): program STARTUP.DELAY before enabling when we are the one
+ * starting the crystal, otherwise (ROM already enabled it with DELAY = 0)
+ * wait a full startup period after STABLE.  Leaving DELAY at 0 lets STABLE
+ * assert while the frequency is still drifting; switching clk_ref onto it
+ * then changes clk_sys mid-transient and can break the next flash read. */
+static int xosc_wait_stable(void)
+{
+    for (uint32_t i = 0; i < plat_pre_tick_spins(1000000u); i++) {
+        if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
+            return 1;
+    }
+    return 0;
+}
+
+static int xosc_start(void)
+{
+    uint32_t st = mmio_read32(XOSC_STATUS);
+
+    if (!(st & XOSC_STATUS_ENABLED)) {
+        mmio_write32(XOSC_STARTUP, XOSC_STARTUP_DELAY_12M);
+        mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
+        return xosc_wait_stable();
+    }
+    if (!(st & XOSC_STATUS_STABLE) && !xosc_wait_stable())
+        return 0;
+    for (volatile uint32_t d = 0; d < plat_pre_tick_spins(200000u); d++)
+        ;
+    return 1;
+}
+
 static void clocks_init(void)
 {
     uint32_t spins;
     int locked = 0;
 
-    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)) {
-        mmio_write32(XOSC_CTRL, XOSC_CTRL_ENABLE_12M);
-        for (spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
-            if (mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE)
-                break;
-    }
-    if (!(mmio_read32(XOSC_STATUS) & XOSC_STATUS_STABLE))
+    if (!xosc_start())
         goto keep_ref;                   /* no crystal: stay on ROSC      */
 
     mmio_write32(CLOCKS_BASE + CLK_REF_CTRL_OFFSET, CLK_REF_CTRL_SRC_XOSC);

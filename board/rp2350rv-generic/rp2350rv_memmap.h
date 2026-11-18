@@ -47,7 +47,6 @@
 #define BOOTROM_RV_LOOKUP_PTR 0x7dfau
 #define RT_FLAG_FUNC_RISCV    0x0001u
 
-#define XOSC_BASE       0x40048000u
 #define CLOCKS_BASE     0x40010000u
 #define RESETS_BASE     0x40020000u
 #define IO_BANK0_BASE   0x40028000u
@@ -68,18 +67,8 @@
 #define RESET_IO_BANK0  (1u << 6)
 #define RESET_PLL_SYS   (1u << 14)
 
-/* XOSC enable, exactly as board/rp2350-generic/platform.c measures it: ENABLE is
- * 0xfab << 12 and FREQ_RANGE 0xaa0 selects the 1-15 MHz crystal range. */
-#define XOSC_CTRL               (XOSC_BASE + 0x00u)
-#define XOSC_STATUS             (XOSC_BASE + 0x04u)
-/* STARTUP.DELAY counts 256 XOSC cycles and resets to 0, i.e. STABLE asserts
- * on amplitude alone.  pico-sdk programs (((XOSC_HZ/KHZ)+128)/256) * 6 before
- * enabling = 282 for a 12 MHz crystal, about 6 ms; see arm_memmap.h. */
-#define XOSC_STARTUP            (XOSC_BASE + 0x0cu)
-#define XOSC_STARTUP_DELAY_12M  282u
-#define XOSC_CTRL_ENABLE_12M    ((0xfabu << 12) | 0xaa0u)
-#define XOSC_STATUS_STABLE      (1u << 31)
-#define XOSC_STATUS_ENABLED     (1u << 12)
+/* XOSC lives in board/rp2350-generic/rp2350_xosc.h: the startup sequence is
+ * a chip fact shared with the ARM port, not part of this map. */
 
 #define CLK_REF_CTRL_OFFSET     0x30u
 #define CLK_REF_SELECTED_OFFSET 0x38u

@@ -84,8 +84,15 @@
  * the host, which reset the port right after the first device descriptor. */
 #define XOSC_CTRL               (XOSC_BASE + 0x00u)
 #define XOSC_STATUS             (XOSC_BASE + 0x04u)
+#define XOSC_STARTUP            (XOSC_BASE + 0x0cu)
 #define XOSC_CTRL_ENABLE_12M    ((0xfabu << 12) | 0xaa0u)
 #define XOSC_STATUS_STABLE      (1u << 31)
+#define XOSC_STATUS_ENABLED     (1u << 12)
+/* Same SDK formula as the RP2350 header: ((12000+128)/256)*6 = 282, counted
+ * in 256 crystal periods (~6 ms).  See board/rp2350-generic/rp2350_xosc.h
+ * for the full story; the two chips have different XOSC bases, so this map
+ * carries its own copy of the constants. */
+#define XOSC_STARTUP_DELAY_12M  282u
 
 #define CLK_REF_CTRL_OFFSET      0x30u
 #define CLK_REF_SELECTED_OFFSET  0x38u
