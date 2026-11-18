@@ -84,3 +84,22 @@ UART 终端出现"卡在 `[usb] init done`、等 Windows 枚举完才到 `tos>`"
 - **T4 长跑**。
 - 两块板 USB 身份相同（`2e8a:000a` + 序列号 `0001`）导致同时插上时 Windows 互相
   干扰、COM 号漂移；改芯片唯一序列号还没做，记在 `docs/OPEN-ITEMS.md`。
+
+
+## 补记（同夜，`eb8798b`）：RV32 端口必须保留这个等待
+
+`atk-dnr2350am-rv32-smp` 刷入本卡片所述的镜像后，到 `tos>` 立刻 trap：
+
+```text
+*** RV32 TRAP ***
+breakpoint: mcause=0x3 mepc=0x10013d0a mtval=0x0
+ra=0x100131c8 sp=0x20016830 ...
+```
+
+`0x10013d0a` 反汇编为 `li a0,0; ebreak`（panic 路径）。Hazard3 端口没有 USB 中断，
+`usb_cdc_poll()` 是控制器唯一的事件泵，删掉 `usb_cdc_wait()` 等于抽掉了启动早期的
+轮询点。`eb8798b` 只回退 RV32 端口，M33 保持本卡片的改动；回退后用户实测
+**启动很快、CDC 瞬间枚举**。
+
+固件侧那个断言的**具体位置仍未知**：发布 ELF 已 strip，`addr2line` 解析不了，
+需要一次带符号构建（`docs/OPEN-ITEMS.md` §5b）。
