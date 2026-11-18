@@ -19,11 +19,17 @@
 #define RESETS_RESET_DONE_OFFSET 0x00000008u /* 1 = reset finished          */
 
 /* USBCTRL's reset bit differs per chip: 24 on the RP2040, 28 on the RP2350.
- * This macro is the RP2350 value; the RP2040 port is only reached through
- * reset_block()/unreset_block_wait() in drivers/usb/rp2040/tusb_shim.c, which
- * keep their own mask.  See docs/OPEN-ITEMS.md for the remaining 143 ms
- * timeout this leaves on the RP2040. */
+ * This used to be the RP2350 value for both, so on the RP2040 dcd_init()
+ * reset a block that does not exist and then polled a RESET_DONE bit that
+ * never sets: 1 000 000 iterations, measured at 6.0 s of real time on the
+ * board (the uart timestamp capture in docs/acceptance).  TOS_ARM_M0P is the
+ * RP2040 arch define, and it reaches every translation unit including this
+ * one; the board memmaps carry the same value as RESETS_USBCTRL. */
+#ifdef TOS_ARM_M0P
+#define RESETS_RESET_USBCTRL_BITS 0x01000000u   /* bit 24 (RP2040)            */
+#else
 #define RESETS_RESET_USBCTRL_BITS 0x10000000u   /* bit 28 (RP2350)            */
+#endif
 
 void reset_block(uint32_t bits);
 void unreset_block(uint32_t bits);
