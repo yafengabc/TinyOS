@@ -12,7 +12,7 @@ T0:                PASS（go test ./... -count=1；go vet ./...）
 T1:                PASS（go run ./cmd/tos build all：18/18）
 T2:                PASS（tostest smoke rv32/rv32smp/arm：3× SMOKE TEST OK）
 T3:                PASS 4/4 镜像心跳 6/6；ARM 单核另跑 flash.py --smoke 7/7
-T4:                部分（dd/rm 340 轮后按要求停止，见下）
+T4:                部分（dd/rm：ARM 双核 200 轮全通过，RV32 双核 340 轮后按要求停止）
 logs:              build/dd-rv32smp-1000.log（原始日志不入库）
 ```
 
@@ -32,11 +32,13 @@ logs:              build/dd-rv32smp-1000.log（原始日志不入库）
 `scripts/rp2350/dd_stress.py`：每轮写 32 KiB、读回校验、删除。
 
 ```text
-rpi-pico2-rv32-smp：340 轮 340/340 通过（≈1.0 轮/s），随后按要求停止
+rpi-pico2-smp      ：200 轮 200/200 通过（≈1.0 轮/s）  ← ARM 双核，完整跑完
+rpi-pico2-rv32-smp ：340 轮 340/340 通过（≈1.0 轮/s），随后按要求停止
 ```
 
-**未跑满 1000 轮**：用户要求中止（时间成本）。已完成的 340 轮无一次校验失败、
-无写错误、无掉线，覆盖了写+读+删的完整路径；剩余 660 轮 `NOT RUN`。
+两个镜像合计 540 轮无一次校验失败、无写错误、无掉线，覆盖了写+读+删的完整路径。
+最初计划的 1000 轮没有跑满：`rpi-pico2-rv32-smp` 在 340 轮后中止（时间成本），
+`rpi-pico2-smp` 按后续要求跑了 200 轮；剩余轮次 `NOT RUN`，不当作 1000 轮。
 
 ## 3. smpbench（双核扩展性回归）
 
@@ -82,7 +84,8 @@ python scripts/rp2350/dd_stress.py       -p COM19 --target rpi-pico2-rv32-smp --
 
 ## 5. 没做（NOT RUN）
 
-- **dd/rm 剩余 660 轮**（中止于 340/340）。
+- **dd/rm 的 1000 轮长跑**：改为两次短跑（ARM SMP 200/200、RV32 SMP 340/340），
+  剩余轮次未跑。
 - **ATK-DNRP2350AM 真机**：issue 关闭的硬件门槛仍是 ATK 上的 Cortex-M33 与 Hazard3 RV32 SMP，
   本卡片只覆盖 Pico 2。
 - 屏幕 / TF 卡 / PIO 灯带：Pico 2 无这些外设。

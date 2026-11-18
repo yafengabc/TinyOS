@@ -98,4 +98,4 @@
 | 2026-11-18 | Pico 2 启动到 shell（SAU + 实测波特率 + 不改写 QMI） | `cff442f` | Pico 2 ARM（COM19）+ 18 目标 + QEMU 3 | T0/T1/T2 PASS；T3 Pico 2 ARM PASS（boot + heartbeat）；ATK / SMP / RV32 真机 `NOT RUN` | [Pico 2 boot](2026-11-18-pico2-boot-rp2350-cff442f.md) |
 | 2026-11-18 | 启动轨迹开关 `boot_trace` + 提示符不再被打断 | `6ca4f18` | Pico 2（COM19）+ 18 目标 + QEMU 3 | T0/T1/T2 PASS；T3 Pico 2 PASS；ATK 真机 `NOT RUN` | [boot trace](2026-11-18-boot-trace-switch-6ca4f18.md) |
 | 2026-11-18 | Pico 2 标准流程：flash smoke + 心跳 | `fdb515a` | Pico 2 ARM（COM19）+ 18 目标 + QEMU 3 | T0–T3 PASS（flash 7/7、heartbeat 6/6）；T4/ATK 真机 `NOT RUN` | [Pico 2 heartbeat](2026-11-18-pico2-heartbeat-fdb515a.md) |
-| 2026-11-18 | Pico 2 四镜像心跳 + dd/rm + smpbench | `2349bbe` | Pico 2（COM19）×4 镜像 + 18 目标 + QEMU 3 | T0–T3 PASS（4/4 心跳 6/6、flash 7/7）；dd 340/1000 后中止；smpbench 1.96–2.04x 无回归；ATK 真机 `NOT RUN` | [matrix](2026-11-18-pico2-matrix-ddrw-smpbench-2349bbe.md) |
+| 2026-11-18 | Pico 2 四镜像心跳 + dd/rm + smpbench | `2349bbe` | Pico 2（COM19）×4 镜像 + 18 目标 + QEMU 3 | T0–T3 PASS（4/4 心跳 6/6、flash 7/7）；dd ARM 200/200 + RV32 340/340；smpbench 1.96–2.04x 无回归；ATK 真机 `NOT RUN` | [matrix](2026-11-18-pico2-matrix-ddrw-smpbench-2349bbe.md) |
