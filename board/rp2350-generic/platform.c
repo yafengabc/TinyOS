@@ -142,6 +142,20 @@ typedef void (*rp_rom_program_t)(uint32_t addr, const uint8_t *data, size_t coun
 #define ROM_FUNC_FLASH_RANGE_ERASE    0x4552u   /* 'R','E' */
 #define ROM_FUNC_FLASH_RANGE_PROGRAM   0x5052u   /* 'R','P' */
 
+/* QMI direct-mode registers: the only way to send an arbitrary flash
+ * command (JEDEC RDID) - the ROM's FLASH_OP entry covers erase/program/
+ * read only.  Layout per the RP2350 datasheet / pico-sdk structs/qmi.h,
+ * base = XIP_QMI_BASE (0x400d0000).  In direct mode each byte written to
+ * DIRECT_TX clocks one byte in on DIRECT_RX, so an N-byte command must be
+ * read back N bytes; CSn is asserted by setting ASSERT_CS0N. */
+#define QMI_DIRECT_CSR          (XIP_QMI_BASE + 0x00u)
+#define QMI_DIRECT_TX           (XIP_QMI_BASE + 0x04u)
+#define QMI_DIRECT_RX           (XIP_QMI_BASE + 0x08u)
+#define QMI_DIRECT_CSR_EN           (1u << 0)
+#define QMI_DIRECT_CSR_ASSERT_CS0N  (1u << 2)
+#define QMI_DIRECT_CSR_TXFULL       (1u << 10)
+#define QMI_DIRECT_CSR_RXEMPTY      (1u << 16)
+
 /* Data-table lookup ('F','D' = 0x4446, the bootram FLASH_DEVINFO16 copy).
  * The ROM's data table is addressed with the same (code, flags) lookup
  * entry as the function table, only the flag differs: RT_FLAG_DATA (0x40)
@@ -162,6 +176,19 @@ typedef void (*rp_rom_program_t)(uint32_t addr, const uint8_t *data, size_t coun
 #define FLASH_DEVINFO_CS0_SIZE_MASK  0x0f00u
 #define FLASH_DEVINFO_CS0_SIZE_LSB   8
 
+static rp_rom_void_t    g_rom_connect;
+static rp_rom_void_t    g_rom_exit_xip;
+static rp_rom_void_t    g_rom_enter_xip;
+static rp_rom_void_t    g_rom_flush;
+static rp_rom_erase_t   g_rom_erase;
+static rp_rom_program_t g_rom_program;
+static int              g_rom_ready;
+
+/* The JEDEC RDID probe sits above the definitions of the copyout/XIP
+ * helpers (they are RAMFUNC, section-placed below), so declare them here. */
+static RAMFUNC void flash_init_boot2_copyout(void);
+static RAMFUNC void flash_enable_xip_via_boot2(void);
+
 static void *rp_rom_func(uint32_t code)
 {
     rp_rom_lookup_t lookup =
@@ -173,51 +200,139 @@ static void *rp_rom_func(uint32_t code)
     return (void *)((uintptr_t)lookup(code, RT_FLAG_FUNC_ARM_SEC) | 1u);
 }
 
-/* Read the CS0 flash capacity the boot ROM recorded.  The value sits in
- * bootram as a 16-bit FLASH_DEVINFO word, reachable through the ROM data
- * table ('F','D').  Read it early: the ROM only writes it at boot, but the
- * copy could in principle be rewritten later, and a stale read is worse
- * than none.  Mirrors the ESP32-C3 port's flash_detect_from_rom(). */
+/* Issue JEDEC RDID (0x9F) through QMI direct mode and return the 3-byte
+ * manufacturer/dev-id/capacity code as one 24-bit value, or 0 on failure.
+ * The ROM cannot do this: FLASH_OP covers erase/program/read only, so the
+ * chip select and the FIFO are driven by hand, exactly as pico-sdk's
+ * flash_do_cmd_cs() does.
+ *
+ * This runs before the console has anything else to do but with XIP live,
+ * so it uses the same ROM sequence the write path uses: copy the ROM's
+ * XIP-setup routine out of bootram, connect the QSPI pins, drop XIP, talk
+ * to the part in direct mode, restore XIP.  All RAM-resident; callers on
+ * SMP take plat_flash_exclusive_begin() first so the other core is parked
+ * out of flash.  The RDID itself must be clocked as 1 + 4 bytes (dummy
+ * cycles clock the ID out): send the opcode followed by four zero bytes
+ * and read back five, keeping the FIFO in lockstep.
+ *
+ * A JEDEC part answering 0xff/0x00 reads as a missing or floating bus and
+ * returns 0 (mirrors the ESP32-C3 port's flash_detect_from_rom()). */
+static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
+{
+    uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
+    volatile uint8_t rx[5];
+    uint32_t id;
+
+    flash_init_boot2_copyout();
+    g_rom_connect();
+    g_rom_exit_xip();
+
+    /* Assert CS0n and enable direct mode. */
+    mmio_write32(QMI_DIRECT_CSR,
+                 QMI_DIRECT_CSR_EN | QMI_DIRECT_CSR_ASSERT_CS0N);
+
+    /* Byte-by-byte FIFO exchange: each DIRECT_TX write clocks a byte in,
+     * each DIRECT_RX read consumes the byte clocked by the previous write.
+     * Poll for FIFO space and data; a missing part leaves RXEMPTY set, but
+     * the exchange still drains because DIRECT_RX reads of an empty FIFO
+     * return the last byte shifted (0xff on a floating bus). */
+    for (uint32_t i = 0; i < 5u; i++) {
+        while (mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_TXFULL)
+            ;
+        mmio_write32(QMI_DIRECT_TX, tx[i]);
+        while (mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY)
+            ;
+        rx[i] = (uint8_t)mmio_read32(QMI_DIRECT_RX);
+    }
+
+    /* Deassert CS0n and leave direct mode. */
+    mmio_write32(QMI_DIRECT_CSR, 0u);
+
+    /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID. */
+    id = ((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3];
+    if (id == 0u || id == 0xffffffu)
+        id = 0u;
+
+    flash_enable_xip_via_boot2();
+    return id;
+}
+
+/* Decode a JEDEC capacity byte to bytes.  The third JEDEC byte encodes
+ * log2(capacity in bytes) for the standard density table: 0x20=1 MiB,
+ * 0x21=2 MiB, 0x22=4 MiB, 0x23=8 MiB, 0x24=16 MiB.  Only 1..16 MiB are
+ * usable CS0 sizes here (the same bounds the ROM's CS0_SIZE decode and the
+ * ESP32-C3 port's capacity-code check use); anything else - a non-JEDEC
+ * part, a sub-MiB device, or a floating read - returns 0. */
+static uint32_t rp2350_jedec_capacity(uint32_t jedec_id)
+{
+    uint32_t code = jedec_id & 0xffu;
+
+    /* 20..24 decimal (0x14..0x18): 1<<20 = 1 MiB .. 1<<24 = 16 MiB.  The
+     * bounds must be decimal - writing 0x20 here makes 1u << code a shift
+     * of 32, which is undefined behaviour and lets the optimiser fold the
+     * whole capacity decode to poison. */
+    if (code < 20u || code > 24u)
+        return 0;
+    return 1u << code;
+}
+
+/* Read the CS0 flash capacity.  Two sources, in order of trust:
+ *
+ * 1. JEDEC RDID issued live through QMI direct mode (rp2350_flash_detect_
+ *    jedec): this is what is actually on the board, whatever the board.conf
+ *    says or the OTP was programmed with.
+ * 2. The boot ROM's FLASH_DEVINFO word in bootram (data table 'F','D'),
+ *    which only reflects the OTP FLASH_DEVINFO configuration - and with
+ *    BOOT_FLAGS0_FLASH_DEVINFO_ENABLE unset it is the conservative default
+ *    CS0_SIZE = 12 (16 MiB), an upper bound rather than a measurement.
+ *
+ * RDID is authoritative when it works; the ROM value is the fallback for a
+ * part that does not answer (no flash, a bare-metal probe, a locked CS).
+ * Mirrors the ESP32-C3 port's flash_detect_from_rom(), which reads the
+ * JEDEC ID the ROM bootloader already fetched. */
 static uint32_t rp2350_flash_detect(void)
 {
-    rp_rom_lookup_t lookup =
-        (rp_rom_lookup_t)(uintptr_t)(*(volatile uint16_t *)BOOTROM_LOOKUP_PTR);
-    uint32_t *ptr_literal;
-    uint16_t devinfo;
-    uint32_t size;
+    uint32_t jedec = rp2350_flash_detect_jedec();
+    uint32_t bytes = rp2350_jedec_capacity(jedec);
 
-    if (!lookup)
-        return 0;
-    ptr_literal = (uint32_t *)lookup(ROM_DATA_FLASH_DEVINFO16_PTR,
-                                     ROM_DATA_FLAG_DATA);
-    if (!ptr_literal)
-        return 0;
-    /* The data table row holds a pointer to the bootram copy; dereference
-     * twice: once for the 32-bit pointer literal, once for the 16-bit
-     * FLASH_DEVINFO word. */
-    devinfo = *(volatile uint16_t *)(uintptr_t)(*ptr_literal);
-    size = (devinfo & FLASH_DEVINFO_CS0_SIZE_MASK) >> FLASH_DEVINFO_CS0_SIZE_LSB;
+    if (bytes)
+        return bytes;
 
-    /* Only 1/2/4/8/16 MiB are usable CS0 sizes (4096u << size, size 0x8..
-     * 0xc).  _NONE (0x0), the sub-MiB parts, and a missing/floating table
-     * (0x0, 0xffff) all fail these bounds; ramdisk.c clamps the detected
-     * value against the configured size, so a bogus 4 KiB would otherwise
-     * shrink the filesystem to nothing.  Mirrors the ESP32-C3 port's
-     * JEDEC capacity-code check. */
-    if (size < 0x8u || size > 0xcu)
-        return 0;
-    return 4096u << size;
+    /* Fallback: the ROM's recorded FLASH_DEVINFO.  Read it early: the ROM
+     * only writes it at boot, but the copy could in principle be rewritten
+     * later, and a stale read is worse than none. */
+    {
+        rp_rom_lookup_t lookup =
+            (rp_rom_lookup_t)(uintptr_t)(*(volatile uint16_t *)BOOTROM_LOOKUP_PTR);
+        uint32_t *ptr_literal;
+        uint16_t devinfo;
+        uint32_t size;
+
+        if (!lookup)
+            return 0;
+        ptr_literal = (uint32_t *)lookup(ROM_DATA_FLASH_DEVINFO16_PTR,
+                                         ROM_DATA_FLAG_DATA);
+        if (!ptr_literal)
+            return 0;
+        /* The data table row holds a pointer to the bootram copy; dereference
+         * twice: once for the 32-bit pointer literal, once for the 16-bit
+         * FLASH_DEVINFO word. */
+        devinfo = *(volatile uint16_t *)(uintptr_t)(*ptr_literal);
+        size = (devinfo & FLASH_DEVINFO_CS0_SIZE_MASK)
+               >> FLASH_DEVINFO_CS0_SIZE_LSB;
+
+        /* Only 1/2/4/8/16 MiB are usable CS0 sizes (4096u << size, size
+         * 0x8..0xc).  _NONE (0x0), the sub-MiB parts, and a missing/floating
+         * table (0x0, 0xffff) all fail these bounds; ramdisk.c clamps the
+         * detected value against the configured size, so a bogus 4 KiB would
+         * otherwise shrink the filesystem to nothing. */
+        if (size < 0x8u || size > 0xcu)
+            return 0;
+        return 4096u << size;
+    }
 }
 
 static uint32_t g_flash_detected;
-
-static rp_rom_void_t    g_rom_connect;
-static rp_rom_void_t    g_rom_exit_xip;
-static rp_rom_void_t    g_rom_enter_xip;
-static rp_rom_void_t    g_rom_flush;
-static rp_rom_erase_t   g_rom_erase;
-static rp_rom_program_t g_rom_program;
-static int              g_rom_ready;
 
 /* Bring-up convenience: a script on COM14 can send one Ctrl-D and have the
    ROM mount BOOTSEL again, instead of a human pressing BOOT + RST before
@@ -1807,13 +1922,8 @@ void plat_board_early(void)
 
 void plat_board_init(void)
 {
-    /* Snapshot the ROM's CS0 flash capacity before anything else: this is
-     * the first board code after the console, and nothing rewrites the
-     * bootram FLASH_DEVINFO copy afterwards.  Kept in g_flash_detected so
-     * /proc/flash can show the true capacity instead of the configured
-     * 4 MiB (ATK) / 8 MiB (Pico 2) upper bound. */
-    g_flash_detected = rp2350_flash_detect();
-
+    /* Resolve the ROM flash entries first: the capacity probe below (JEDEC
+     * RDID through QMI direct mode) needs g_rom_connect/g_rom_exit_xip. */
     g_rom_connect   = (rp_rom_void_t)rp_rom_func(ROM_FUNC_CONNECT_INTERNAL_FLASH);
     g_rom_exit_xip  = (rp_rom_void_t)rp_rom_func(ROM_FUNC_FLASH_EXIT_XIP);
     g_rom_enter_xip = (rp_rom_void_t)rp_rom_func(ROM_FUNC_FLASH_ENTER_CMD_XIP);
@@ -1822,6 +1932,13 @@ void plat_board_init(void)
     g_rom_program   = (rp_rom_program_t)rp_rom_func(ROM_FUNC_FLASH_RANGE_PROGRAM);
     g_rom_ready = (g_rom_connect && g_rom_exit_xip && g_rom_enter_xip &&
                    g_rom_flush && g_rom_erase && g_rom_program) ? 1 : 0;
+
+    /* Snapshot the CS0 flash capacity before anything else: this is the
+     * first board code after the console, and the JEDEC RDID probe turns
+     * XIP off for a moment (the other core is parked out of flash on SMP).
+     * Kept in g_flash_detected so /proc/flash can show the true capacity
+     * instead of the configured 4 MiB (ATK) / 8 MiB (Pico 2) upper bound. */
+    g_flash_detected = rp2350_flash_detect();
 
     /* The ARM USB controller receives IRQ 14, but TinyUSB's task loop still
      * belongs in thread context.  Install it here, before the scheduler
