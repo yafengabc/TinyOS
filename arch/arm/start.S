@@ -130,39 +130,6 @@ _start:
     msr     control, r0
     isb
 
-#ifdef TOS_RP2350_BOOT2
-    /* Optional second-stage flash setup (board.conf: xip_setup =
-       boot2-w25q080) that moves the part to continuous quad read before the
-       kernel runs.  Not enabled by any board right now: a second QMI setup
-       on top of the one the ROM installs is unnecessary and, on the 8 MiB
-       W25Q64, the SR2/QE programming this blob starts with left XIP
-       unusable (issue #7).  The clock switch itself no longer needs it -
-       measured on the Pico 2, the ROM's own EBh quad timing still reads
-       flash correctly at 150 MHz, so pll_sys_init() only moves the mux
-       (see clk_sys_to_pll_sys in board/rp2350-generic/platform.c).  Keep
-       this path for a board that genuinely needs quad, and verify it on
-       hardware before enabling it.
-
-       boot2 must run from SRAM, so it is copied to __boot2_ram first. */
-    ldr     r0, =__boot2_ram
-    ldr     r1, =__boot2_start
-    ldr     r2, =__boot2_end
-1:  cmp     r1, r2
-    bhs     2f
-    ldr     r3, [r1]
-    str     r3, [r0]
-    adds    r1, #4
-    adds    r0, #4
-    b       1b
-2:  dsb
-    isb
-    ldr     r0, =__boot2_ram
-    adds    r0, #1                      /* Thumb bit                        */
-    blx     r0
-    dsb
-    isb
-#endif
-
     ldr     r0, =__data_start
     ldr     r1, =__data_end
     ldr     r2, =__data_load
@@ -588,16 +555,6 @@ arm_core1_entry:
     .ltorg
 
 /* -------------------------------------------------------------------- */
-
-#ifdef TOS_RP2350_BOOT2
-/* Scratch for the SRAM-resident XIP setup copied out of .text.boot2.  It
- * lives in .data so the linker gives it a RAM address; the .data copy that
- * follows boot2 overwrites it with zeros, which is harmless. */
-    .section .data.boot2, "aw"
-    .align 2
-__boot2_ram:
-    .space 256
-#endif
 
     .section .bss
     .align 3

@@ -39,13 +39,8 @@ type BoardConfig struct {
 	// Flash geometry, for boards whose filesystem lives on the QSPI chip.
 	// Both are board facts: the same silicon with a different flash part is a
 	// different board (or a different variant of one), not a different image.
-	FlashBytes int
-	LFSOffset  int
-	// XIPSetup names a standard flash setup routine to run at boot.  The
-	// part, not the silicon, decides: a W25Q64JV needs the w25q080 continuous
-	// quad-read setup before clk_sys is raised, while a part the ROM already
-	// drives correctly does not.  Empty means "the ROM's default is fine".
-	XIPSetup        string
+	FlashBytes      int
+	LFSOffset       int
 	Drivers         []string
 	DefaultFeatures []string
 	WindowGrain     int
@@ -225,15 +220,6 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	 * to the page base explicitly. */
 	if !xipMapSet && bc.XipFlashBase != 0 {
 		bc.XipMapBase = bc.XipFlashBase
-	}
-	if v := strings.TrimSpace(s["xip_setup"]); v != "" {
-		switch v {
-		case "boot2-w25q080":
-			bc.XIPSetup = v
-		default:
-			return nil, fmt.Errorf("%s: xip_setup must be boot2-w25q080 (got %q)",
-				relName(root, path), v)
-		}
 	}
 	bc.Drivers = splitList(s["drivers"])
 	bc.DefaultFeatures = splitList(s["features"])

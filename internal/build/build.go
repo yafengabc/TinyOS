@@ -416,14 +416,6 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// only TOS_ARM_M0P suppresses that.
 		if chip == "rp2350" {
 			archFlags = append(archFlags, "-DTOS_ARM_MPU_V8")
-			// Optional second-stage XIP setup (boot2), for a board whose
-			// flash part needs quad mode before the kernel runs.  No board
-			// enables it: the RP2350 boot ROM already configures the part,
-			// and the clk_sys switch only needs the mux moved from SRAM
-			// (see clk_sys_to_pll_sys in board/rp2350-generic/platform.c).
-			if b.BoardConfig != nil && b.BoardConfig.XIPSetup == "boot2-w25q080" {
-				archFlags = append(archFlags, "-DTOS_RP2350_BOOT2")
-			}
 			// Bring-up aid: a 16-entry ring of the last syscall numbers,
 			// dumped by arm_handle_fault().  Only the new M33 port pays for
 			// it; remove once the shell is stable on real hardware.
