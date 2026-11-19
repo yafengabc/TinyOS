@@ -1975,7 +1975,16 @@ void plat_reboot(void)
      * not the plan: it leaves the USB controller and the clock tree as they
      * were, and measured on this board the shell came back with a CDC port
      * the host could enumerate but not open, and no UART0 output at all -
-     * i.e. it hung. */
+     * i.e. it hung.
+     *
+     * The other core has to be parked first, exactly as rom_enter_bootsel()
+     * does: the ROM reboot takes core 0 away, and a core 1 still running the
+     * old kernel on the same physical addresses is a coin flip.  Measured on
+     * rpi-pico2-smp: the first "reboot" came back, the second left a CDC port
+     * that enumerated, opened and never answered - the same shape as the
+     * AIRCR hang above.  g_core1_stopped keeps it in the park loop for good,
+     * so there is nothing to unpark afterwards. */
+    rom_stop_other_core();
     rom_reboot(0x100u);           /* BOOT_TYPE_NORMAL | NO_RETURN_ON_SUCCESS */
     mmio_write32(ARM_AIRCR, ARM_AIRCR_VECTKEY | ARM_AIRCR_SYSRESETREQ);
     plat_panic_halt();

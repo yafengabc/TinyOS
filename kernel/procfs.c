@@ -227,6 +227,18 @@ static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
 /* What the port could detect about the primary flash, what the board
  * configured as its build-time figure (the fallback when the port cannot
  * measure), and the filesystem size the two produce. */
+/* One USB poll's cost, for sizing a bounded pump (issue #29).  Zero on ports
+ * whose controller is interrupt-driven. */
+static uint32_t fmt_usbpoll(char *b, uint32_t cap)
+{
+    uint32_t ns = plat_usb_poll_ns();
+
+    if (!ns)
+        return put(b, cap, 0, "usbpoll: not measured\n");
+    return put(b, cap, 0, "usbpoll: %u ns/poll (%u polls per 250 ms)\n",
+               ns, (uint32_t)(250000000u / ns));
+}
+
 static uint32_t fmt_flash(char *b, uint32_t cap)
 {
 #if TOS_HAS_FLASH
@@ -290,6 +302,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = process_execfmt_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/flash"))
         n = fmt_flash(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/usbpoll"))
+        n = fmt_usbpoll(b, PROC_CAP);
 #if !TOS_PROC_LITE
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
@@ -363,6 +377,7 @@ void procfs_init(void)
     devfs_register("proc/ps",     &proc_ops, NULL);
     devfs_register("proc/execfmt", &proc_ops, NULL);
     devfs_register("proc/flash",  &proc_ops, NULL);
+    devfs_register("proc/usbpoll", &proc_ops, NULL);
 #if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);

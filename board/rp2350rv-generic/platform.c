@@ -8,6 +8,11 @@
 #define RP_PARK_WDT_TICK(spins)                                              \
     do { if (((spins) & 0xfffffu) == 0xfffffu) wdt_feed(); } while (0)
 #define RP_PARK_OWNER_TICK(spins) RP_PARK_WDT_TICK(spins)
+/* Set before a ROM reboot: the parked hart must stay in the loop instead of
+ * returning to a kernel that is about to be replaced under it.  Same hook the
+ * ARM port uses for g_core1_stopped. */
+#define RP_PARK_STOP_FOREVER()                                               \
+    do { if (g_hart1_stopped) for (;;) wdt_feed(); } while (0)
 #if TOS_DIAG
 #define RP_PARK_PARKED_DIAG(entering)                                        \
     do {                                                                     \
@@ -394,6 +399,10 @@ static uint32_t g_clk_hz = 12000000u;
  * simply stay zero. */
 static struct rp_park_state park = RP_PARK_STATE_INIT;
 
+/* Set by plat_reboot() before the ROM takes core 0 away; see
+ * RP_PARK_STOP_FOREVER above. */
+static volatile int g_hart1_stopped;
+
 #if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
 /* Set by core 0 before it takes XIP away for a ROM flash call; the parking
  * block next to plat_block_erase is what acts on it. */
@@ -501,6 +510,40 @@ void plat_console_flush(void)
     }
     if (g_usb_ready)
         usb_cdc_flush();
+}
+
+/* How long one usb_cdc_poll() takes, in nanoseconds (issue #29).
+ *
+ * The ARM ports bound their boot pump by iteration count (40 000 polls ~
+ * 250 ms there).  The Hazard3 port cannot copy that number: the same bound
+ * was a hung boot here, because its poll does more work per call (it moves the
+ * tx ring itself, drains with usb_tx_drain() and takes spin locks).  Any
+ * bounded pump has to start from a measured cost, and mtime is already the
+ * tick's clock, so measure against it directly.
+ *
+ * Cost is measured over a fixed slice rather than a fixed count: a fixed count
+ * would spend a whole slice of the boot on a fast part and almost nothing on a
+ * slow one. */
+static uint64_t mtime_read(void);        /* clock source for the measurement */
+
+uint32_t plat_usb_poll_ns(void)
+{
+    uint64_t t0, t1;
+    uint32_t n = 0;
+
+    if (!g_usb_ready || !g_clk_hz)
+        return 0;
+
+    t0 = mtime_read();
+    do {
+        usb_cdc_poll();
+        n++;
+        t1 = mtime_read();
+    } while (t1 - t0 < (uint64_t)g_clk_hz / 50u && n < 20000u);  /* ~20 ms */
+
+    if (!n || t1 == t0)
+        return 0;
+    return (uint32_t)(((t1 - t0) / n) * 1000000000ull / (uint64_t)g_clk_hz);
 }
 
 int plat_console_tx_room(void)
@@ -1860,9 +1903,43 @@ void plat_shutdown(void)
     }
 }
 
+/* Park the other hart for good before the ROM reboots core 0.
+ *
+ * Without this the reboot only takes core 0: hart 1 keeps executing the old
+ * kernel on the same physical addresses while core 0 re-enters the bootrom,
+ * and the board ends up with a CDC port that enumerates and never answers.
+ * Measured on rpi-pico2-rv32-smp: the first "reboot" came back, the second
+ * left nothing at all (0/15 of a 15-cycle run, against 15/15 for the ARM
+ * image with the equivalent fix in plat_reboot).
+ *
+ * The handshake is the flash-park one, with g_hart1_stopped making the park
+ * permanent: rp_flash_park_loop() ends in RP_PARK_STOP_FOREVER(), so the hart
+ * stays in RAM feeding the watchdog instead of returning to the kernel. */
+static void rv_stop_other_hart(void)
+{
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+    uint32_t myreq;
+
+    if (cpu_count <= 1)
+        return;
+
+    g_hart1_stopped = 1;
+    myreq = rp_park_begin(&park, plat_cpu_id());
+    RP_PARK_WAKE();
+    for (uint32_t i = 0; i < plat_pre_tick_spins(20000000u); i++) {
+        if (rp_park_acked(&park, myreq))
+            break;
+        wdt_feed();
+    }
+#else
+    (void)0;
+#endif
+}
+
 void plat_reboot(void)
 {
     console_shutdown();
+    rv_stop_other_hart();
     rom_reboot_normal();
     plat_panic_halt();
 }

@@ -397,6 +397,13 @@ __attribute__((weak)) void plat_flash_probe_debug(uint32_t *out)
         out[i] = 0u;
 }
 
+/* Optional port diagnostic (issue #29): cost of one USB poll in nanoseconds.
+ * Zero means the port does not have a polled controller to measure. */
+__attribute__((weak)) uint32_t plat_usb_poll_ns(void)
+{
+    return 0u;
+}
+
 uint32_t plat_lfs_blocks(void)
 {
 #if TOS_HAS_FLASH
