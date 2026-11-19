@@ -54,16 +54,16 @@ go run ./cmd/tos build -config configs/esp32c3.conf            # 内核 + shell�
 go run ./cmd/tos build -config configs/esp32c3-wifi.conf       # WiFi + DHCP/ICMP + 全部命令
 go run ./cmd/tos build -config configs/esp32c3-wifi-nonet.conf # 只关联 AP
 go run ./cmd/tos build -config configs/esp32c3-wifi-softmin.conf # 饱和式软浮点，再小 ~580 B
-go run ./cmd/tos build -config configs/esp32c3-xip2k.conf       # 无 WiFi，XIP 代码从 0x2000 开始
-go run ./cmd/tos build -config configs/esp32c3-wifi-xip2k.conf  # WiFi/net + 0x2000，为 BLE 留空间
+go run ./cmd/tos build -config configs/esp32c3-wifi-ble.conf    # WiFi/net + -Oz，为 BLE 留空间
 ```
 
 `[user] exclude` 里的程序需要 `/dev/wifi` 或 `/dev/net`，非 WiFi 配置会把它们排除。
 
-默认 XIP 代码放在 flash `0x10000`（MMU 页首）。`-xip2k` 版本把代码放到 `0x2000`，
-仍然映射在同一个 64 KiB 页（启动日志 `[xip] mmu[0]=0 want 0` 是正常值）：
-无 WiFi 内核结束约 `0x11A78`，WiFi + `-Oz` 约 `0x56248`，文件系统仍在 `0x80000`，
-分别给 BLE 留出约 452 KiB / 167 KiB。默认配置保持 `0x10000`，不受影响。
+默认 XIP 代码放在 flash `0x4000`（仍在映射到 `0x42000000` 的 64 KiB 页内）。
+ROM 可加载的 boot 段目前约占 `0x1A00`，所以这里留了约 9.5 KiB 余量；内核结束
+比旧的 `0x10000` 布局提前 48 KiB：无 WiFi 约 `0x18350`，WiFi + `-Oz` 约 `0x58248`，
+文件系统仍在 `0x80000`。`esp32c3-wifi-ble.conf` 再加 `-Oz`，把 BLE 的余量扩大到
+约 160 KiB。启动日志里 `[xip] mmu[0]=0 want 0` 是这一版的正常值。
 
 ## WiFi 开/关的资源对比
 

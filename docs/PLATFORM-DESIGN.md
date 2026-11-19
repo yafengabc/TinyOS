@@ -1472,8 +1472,9 @@ C3 的内核原本整份装在 SRAM 里（`0x40380000`，175.6 KiB），`PLAT_KE
 `XipBlob` 追加到镜像的 `XipOffset`——**ROM 不能把段加载到
 `0x42000000`，那是 flash 的只读别名**。`XipMapBase` 必须 64 KiB 对齐；`XipOffset`
 可以落在该页内，此时 `XipVaddrBase = 0x42000000 + (XipOffset - XipMapBase)`。
-默认两者都是 `0x10000`；`configs/esp32c3-*-xip2k.conf` 设 `XipMapBase=0`、
-`XipOffset=0x2000`，代码从 `0x42002000` 取指，内核结束提前约 56 KiB。
+C3 默认 `XipMapBase=0`、`XipOffset=0x4000`：代码从 `0x42004000` 取指，给 ROM
+可加载的 boot 段留约 9.5 KiB，内核结束比旧的 `0x10000` 布局提前 48 KiB。
+`configs/esp32c3-wifi-ble.conf` 再叠 `-Oz`，给 BLE 留出约 160 KiB。
 
 启动桩（`arch/rv32/start.S`，只在 `TOS_XIP_CODE_OFFSET` 定义时汇编）做四件事，全部在
 RAM 里、不用字面量池、不碰数据：
