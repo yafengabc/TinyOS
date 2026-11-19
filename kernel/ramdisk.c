@@ -390,8 +390,13 @@ uint32_t plat_lfs_blocks(void)
 #if TOS_HAS_FLASH
     uint32_t configured = TOS_FLASH_BYTES;
     uint32_t detected = plat_flash_detected_bytes();
-    uint32_t bytes = (detected && detected < configured) ? detected
-                                                         : configured;
+    /* The measurement wins in both directions.  A part smaller than the
+     * board file claims must not be overrun, and a part larger than it
+     * claims is space that exists - "assume 1 MiB at build time, measure at
+     * boot, then grow" only works if the larger measurement is used.
+     * configured is what a port that cannot measure falls back to, and what
+     * the build checked the partition layout against. */
+    uint32_t bytes = detected ? detected : configured;
 
     if (bytes <= TOS_LFS_OFFSET)
         return 0;
@@ -619,10 +624,11 @@ static int unlink_locked(const char *path)
 #endif
 
 /* Report littlefs partition usage.  `total` is the effective volume size
-   (detected capacity clamped to the board's configured one); `used` is what
-   littlefs has actually consumed.  Note lfs_fs_size() returns a *block
-   count*, so multiply by the block size for bytes.
-   Either pointer may be NULL.  Returns 0 when the filesystem is mounted. */
+   (the measured part when the port can measure it, otherwise the board's
+   configured size); `used` is what littlefs has actually consumed.  Note
+   lfs_fs_size() returns a *block count*, so multiply by the block size for
+   bytes.  Either pointer may be NULL.  Returns 0 when the filesystem is
+   mounted. */
 static int df_locked(uint32_t *total, uint32_t *used)
 {
     if (total)

@@ -225,7 +225,8 @@ static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
 #endif
 
 /* What the port could detect about the primary flash, what the board
- * configured as its upper bound, and the filesystem size after clamping. */
+ * configured as its build-time figure (the fallback when the port cannot
+ * measure), and the filesystem size the two produce. */
 static uint32_t fmt_flash(char *b, uint32_t cap)
 {
 #if TOS_HAS_FLASH
