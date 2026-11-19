@@ -60,6 +60,9 @@ static void usb_lk_select(void);
 #include "console.h"
 #include "diag.h"
 
+/* Fills g_serial from the chip id; defined with the descriptors below. */
+static void serial_from_chip_id(void);
+
 #if TOS_DIAG
 /* Bring-up markers straight to the PL011 (board/rp2350/platform.c).  They
  * must not go through the console: this file can be called from inside a USB
@@ -261,6 +264,7 @@ void usb_cdc_init(void)
 {
     g_hw_ready = 0;
     g_init_stage = 0;
+    serial_from_chip_id();
 
     /* A warm boot (panic path, soft reboot) can land with a cross-core USB
      * spinlock still held by the previous run - the SIO block survives a core
@@ -764,12 +768,46 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
  * uint16_t and the length/type pair is packed into element 0. */
 static uint16_t desc_str[32];
 
+/* The chip's own 64-bit id, not a shared constant.
+ *
+ * Every board used to send "0001", so two boards on one host were the same
+ * USB device as far as Windows was concerned: it moved them onto different
+ * COM numbers and could hand a port to the wrong board.  The boot ROM reports
+ * the id through SYS_INFO_CHIP_INFO ('G','S'), which is also where pico-sdk's
+ * pico_unique_id gets it; the last 8 bytes of the 32-byte answer are the id,
+ * little-endian. */
+static char g_serial[17];
+
+static void serial_from_chip_id(void)
+{
+    static const char hex[] = "0123456789abcdef";
+    uint32_t info[9] = {0};
+    void *(*lookup)(uint32_t, uint32_t) =
+        (void *(*)(uint32_t, uint32_t))(uintptr_t)
+            (*(volatile uint16_t *)BOOTROM_LOOKUP_PTR);
+    int (*sysinfo)(uint32_t *, uint32_t, uint32_t) = 0;
+
+    if (lookup)
+        sysinfo = (int (*)(uint32_t *, uint32_t, uint32_t))(uintptr_t)
+            ((uintptr_t)lookup(0x5347u, RT_FLAG_FUNC_ARM_SEC) | 1u);
+    if (!sysinfo || sysinfo(info, 9, 0x0001u) != 4) {
+        memcpy(g_serial, "0000000000000000", sizeof(g_serial));
+        return;
+    }
+    for (int i = 0; i < 8; i++) {
+        uint8_t v = ((const uint8_t *)info)[15 - i];
+
+        g_serial[2 * i] = hex[v >> 4];
+        g_serial[2 * i + 1] = hex[v & 0x0fu];
+    }
+}
+
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
     static char const *const str_table[] = {
         "TinyOS",                   /* iManufacturer */
         "TinyOS CDC-ACM",           /* iProduct      */
-        "0001",                     /* iSerialNumber */
+        g_serial,                   /* iSerialNumber: the chip's own id */
     };
     uint8_t chr_count;
 

@@ -52,6 +52,9 @@
 #include "console.h"
 #include "cpu.h"
 
+/* Fills g_serial from the chip id; defined with the descriptors below. */
+static void serial_from_chip_id(void);
+
 /* SIO hardware spinlock 30 (0xD0000000 + 0x100 + 4*30).  31 is reserved for
  * the kernel's ARM spin gate; on the RV port the kernel uses LR/SC, so 30 is
  * free either way.  The SIO block is shared between the two harts whatever
@@ -403,6 +406,7 @@ void usb_cdc_init(void)
 {
     g_hw_ready = 0;
     g_init_stage = 0;
+    serial_from_chip_id();
     u_mark("[u0]\r\n");
 
     /* A warm boot can land with the cross-core USB spinlock still held by
@@ -852,12 +856,42 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
  * uint16_t and the length/type pair is packed into element 0. */
 static uint16_t desc_str[32];
 
+/* The chip's own 64-bit id, not a shared constant - see the ARM port's copy
+ * of this helper for why ("0001" made every board the same USB device).  The
+ * RISC-V lookup entry at 0x7dfa takes RT_FLAG_FUNC_RISCV and returns the
+ * routine directly; there is no Thumb bit to set. */
+static char g_serial[17];
+
+static void serial_from_chip_id(void)
+{
+    static const char hex[] = "0123456789abcdef";
+    uint32_t info[9] = {0};
+    void *(*lookup)(uint32_t, uint32_t) =
+        (void *(*)(uint32_t, uint32_t))(uintptr_t)
+            (*(volatile uint16_t *)BOOTROM_RV_LOOKUP_PTR);
+    int (*sysinfo)(uint32_t *, uint32_t, uint32_t) = 0;
+
+    if (lookup)
+        sysinfo = (int (*)(uint32_t *, uint32_t, uint32_t))(uintptr_t)
+            lookup(0x5347u, RT_FLAG_FUNC_RISCV);
+    if (!sysinfo || sysinfo(info, 9, 0x0001u) != 4) {
+        memcpy(g_serial, "0000000000000000", sizeof(g_serial));
+        return;
+    }
+    for (int i = 0; i < 8; i++) {
+        uint8_t v = ((const uint8_t *)info)[15 - i];
+
+        g_serial[2 * i] = hex[v >> 4];
+        g_serial[2 * i + 1] = hex[v & 0x0fu];
+    }
+}
+
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
     static char const *const str_table[] = {
         "TinyOS",                   /* iManufacturer */
         "TinyOS CDC-ACM",           /* iProduct      */
-        "0001",                     /* iSerialNumber */
+        g_serial,                   /* iSerialNumber: the chip's own id */
     };
     uint8_t chr_count;
 
