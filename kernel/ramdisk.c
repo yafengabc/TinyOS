@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "heap.h"
 #include "platform.h"
+#include "board_config.h"   /* TOS_HAS_FLASH / TOS_FLASH_BYTES / TOS_LFS_OFFSET */
 #include "tty.h"
 #include "lfs_config.h"   /* must come before lfs.h: defines LFS_NO_* + LFS_MALLOC */
 #include "lfs.h"
@@ -377,6 +378,29 @@ static void dent_drop(void)
     dent_overflow = 0;
 }
 
+/* Ports that can read the flash capacity override this; the default keeps the
+ * board's configured size. */
+__attribute__((weak)) uint32_t plat_flash_detected_bytes(void)
+{
+    return 0;
+}
+
+uint32_t plat_lfs_blocks(void)
+{
+#if TOS_HAS_FLASH
+    uint32_t configured = TOS_FLASH_BYTES;
+    uint32_t detected = plat_flash_detected_bytes();
+    uint32_t bytes = (detected && detected < configured) ? detected
+                                                         : configured;
+
+    if (bytes <= TOS_LFS_OFFSET)
+        return 0;
+    return (bytes - TOS_LFS_OFFSET) / 4096u;
+#else
+    return PLAT_LFS_BLOCKS;
+#endif
+}
+
 void ramdisk_init(void)
 {
     heap_init();
@@ -391,14 +415,9 @@ void ramdisk_init(void)
     cfg.read_size      = 512;             /* one disk sector */
     cfg.prog_size      = 512;
     cfg.block_size     = FS_BLOCK_SIZE;
-    /* block_count=0 tells littlefs to take the size from the image's
-     * superblock instead of checking it against the device (lfs.c: "this
-     * is where we get the block_count from disk if block_count=0").  The
-     * shipped image is built small (RamdiskSectors in build.go) and
-     * lfs_fs_grow below re-commits the superblock for whatever the real
-     * partition says, so a 300 KiB flash image grows into the rest of a
-     * 4 MiB chip on first boot.  When image and device already agree the
-     * grow is a no-op, so every board runs the same code. */
+    /* block_count=0 lets littlefs take the size from the image's superblock,
+     * which is how a small shipped image mounts; ramdisk_init then checks the
+     * superblock against the detected partition before growing (see below). */
     cfg.block_count    = 0;
     cfg.cache_size     = FS_CACHE_SIZE;
     cfg.lookahead_size = FS_CACHE_SIZE;
@@ -424,6 +443,18 @@ void ramdisk_init(void)
         return;
     }
 
+    /* A superblock written by a board configured for more flash than the part
+     * really has must not be trusted: mounting it would let lfs_fs_grow (and
+     * later allocation) reach past the detected end of the chip.  Refuse it
+     * before the first write.  An image smaller than the device is fine -
+     * lfs_fs_grow below expands it. */
+    if (lfs.block_count > plat_lfs_blocks()) {
+        kprintf("[ramdisk] image claims %u blocks, device has %u; refusing\n",
+                (unsigned)lfs.block_count, plat_lfs_blocks());
+        lfs_unmount(&lfs);
+        return;
+    }
+
 #ifndef TOS_LFS_RO
     /* Grow to the real partition size.  littlefs 2.9 decides free blocks by
      * tree reachability (lfs_alloc_scan walks every referenced block), not
@@ -431,9 +462,9 @@ void ramdisk_init(void)
      * so a tail that still holds an old image is simply reclaimed block by
      * block, no erase pass needed.  Failure keeps the (smaller) mounted
      * filesystem working; only the extra space is lost. */
-    if (lfs_fs_grow(&lfs, PLAT_LFS_BLOCKS) < 0)
+    if (lfs_fs_grow(&lfs, plat_lfs_blocks()) < 0)
         kprintf("[ramdisk] warning: fs grow to %u blocks failed\n",
-                PLAT_LFS_BLOCKS);
+                plat_lfs_blocks());
 #endif
 
     /* Readdir walks the tree on demand, so there is nothing to snapshot. */
@@ -587,14 +618,15 @@ static int unlink_locked(const char *path)
 }
 #endif
 
-/* Report littlefs partition usage.  `total` is the configured volume size;
-   `used` is what littlefs has actually consumed.  Note lfs_fs_size()
-   returns a *block count*, so multiply by the block size for bytes.
+/* Report littlefs partition usage.  `total` is the effective volume size
+   (detected capacity clamped to the board's configured one); `used` is what
+   littlefs has actually consumed.  Note lfs_fs_size() returns a *block
+   count*, so multiply by the block size for bytes.
    Either pointer may be NULL.  Returns 0 when the filesystem is mounted. */
 static int df_locked(uint32_t *total, uint32_t *used)
 {
     if (total)
-        *total = (uint32_t)FS_BLOCK_SIZE * PLAT_LFS_BLOCKS;
+        *total = (uint32_t)FS_BLOCK_SIZE * plat_lfs_blocks();
     if (used) {
         if (!ok) {
             *used = 0;

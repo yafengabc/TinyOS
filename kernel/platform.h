@@ -272,6 +272,16 @@ int      plat_block_erase(uint32_t lba, uint32_t count);
 uint32_t plat_block_size(void);            /* bytes per sector */
 uint32_t plat_block_count(void);
 
+/* Capacity of the primary flash in bytes, as the port can detect it at
+ * runtime; 0 when the port cannot tell (the board's configured size is then
+ * the only answer).  Implemented per chip; a weak default returns 0. */
+uint32_t plat_flash_detected_bytes(void);
+
+/* Effective filesystem size in blocks: the detected capacity clamped to the
+ * board's configured flash_bytes, minus the partition offset.  Generic: it
+ * only needs plat_flash_detected_bytes(). */
+uint32_t plat_lfs_blocks(void);
+
 /* ---- physical memory ------------------------------------------------- */
 
 /* The flat model needs no frame allocator or page tables: every byte of RAM

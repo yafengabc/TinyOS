@@ -11,7 +11,7 @@ RAM 起始地址 `0x80000000`，不经过 OpenSBI。
 | 核数 | 1（`rv32`、`rv32nc`）；2（`rv32smp`，加 A 扩展与自旋锁） |
 | 启动 | QEMU 把 ELF 放到链接地址，`_start` 在 M 模式建立 trap 向量后进 U-mode |
 | RAM | 内核只用前 128 MiB（`PLAT_RAM_TOP = 0x88000000`） |
-| 文件系统 | **内嵌**在 `.data.ramdisk` 里的 littlefs（随镜像发布 300 KiB） |
+| 文件系统 | **内嵌**在 `.data.ramdisk` 里的 littlefs（随镜像发布 512 KiB） |
 | 控制台 | 16550 UART0，`-serial stdio` 或写入 `build/serial.log` |
 | 定时器 | CLINT `mtime`/`mtimecmp`，每 hart 一个 1 kHz tick |
 

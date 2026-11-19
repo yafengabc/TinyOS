@@ -7,6 +7,7 @@
 #include "heap.h"
 #include "console.h"
 #include "platform.h"
+#include "board_config.h"
 #include "process.h"
 #include "ramdisk.h"
 #include "cpu.h"
@@ -223,6 +224,28 @@ static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
 }
 #endif
 
+/* What the port could detect about the primary flash, what the board
+ * configured as its upper bound, and the filesystem size after clamping. */
+static uint32_t fmt_flash(char *b, uint32_t cap)
+{
+#if TOS_HAS_FLASH
+    uint32_t configured = TOS_FLASH_BYTES;
+    uint32_t offset = TOS_LFS_OFFSET;
+#else
+    uint32_t configured = 0;
+    uint32_t offset = 0;
+#endif
+    uint32_t off = 0;
+
+    off = put(b, cap, off, "flash\n");
+    off = put(b, cap, off, "  detected    %8u bytes\n",
+              plat_flash_detected_bytes());
+    off = put(b, cap, off, "  configured  %8u bytes\n", configured);
+    off = put(b, cap, off, "  lfs_offset  %8u bytes\n", offset);
+    off = put(b, cap, off, "  lfs_blocks  %8u\n", plat_lfs_blocks());
+    return off;
+}
+
 static int proc_open(const dev_t *d, void **priv)
 {
     char *b;
@@ -243,6 +266,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = process_ps_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/execfmt"))
         n = process_execfmt_text(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/flash"))
+        n = fmt_flash(b, PROC_CAP);
 #if !TOS_PROC_LITE
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
@@ -315,6 +340,7 @@ void procfs_init(void)
     devfs_register("proc/cdcstat", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
     devfs_register("proc/execfmt", &proc_ops, NULL);
+    devfs_register("proc/flash",  &proc_ops, NULL);
 #if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);

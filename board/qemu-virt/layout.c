@@ -24,7 +24,7 @@ const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
 /* The filesystem image is linked into the kernel (.data.ramdisk), so the
  * partition starts at block 0 of the device. */
 const uint32_t PLAT_LFS_LBA = 0;
-const uint32_t PLAT_LFS_BLOCKS = 75;   /* 300 KiB, unchanged */
+const uint32_t PLAT_LFS_BLOCKS = 128;  /* 512 KiB: the whole FS on a 1 MiB part */
 
 /* How many harts this kernel was built for.  QEMU virt is the one board
  * that can be *given* more than one (-smp N), so its answer comes from the

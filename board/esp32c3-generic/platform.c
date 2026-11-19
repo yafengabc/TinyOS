@@ -548,19 +548,24 @@ typedef int (*rom_spiflash_erase_t)(uint32_t sector);
 
 #define LFS_LBA_START  PLAT_LFS_LBA           /* 1024 = flash 0x80000 */
 #define NOR_SECTOR     4096u
-#define LFS_SECTORS    (PLAT_LFS_BLOCKS * 8u) /* 7168 = 3.5 MiB partition */
 
 static rom_spiflash_read_t   rom_flash_read   = (rom_spiflash_read_t)ROM_SPIFLASH_READ;
 static rom_spiflash_write_t  rom_flash_write  = (rom_spiflash_write_t)ROM_SPIFLASH_WRITE;
 static rom_config_param_t    rom_config_param = (rom_config_param_t)ROM_SPIFLASH_CONFIG_PARAM;
 
+/* JEDEC capacity read from the ROM's boot-loader record, 0 if unknown. */
+static uint32_t g_flash_detected;
+
 /* The ROM's chip record says 2 MiB after boot, and every ROM flash call
  * range-checks against it (reads past 0x200000 fail: flashsz.S).  Tell
- * the truth: this board has 4 MiB.  Must happen before any ROM flash
- * call; verified by flashcfg.S (config returns 0, 0x3FC000 readable). */
+ * the truth: the boot loader's JEDEC ID when it is readable, otherwise this
+ * board's 4 MiB.  Must happen before any ROM flash call; verified by
+ * flashcfg.S (config returns 0, 0x3FC000 readable). */
 static void rom_flash_set_chip_size(void)
 {
-    rom_config_param(0, FLASH_CHIP_SIZE, FLASH_BLOCK_SIZE,
+    uint32_t bytes = g_flash_detected ? g_flash_detected : FLASH_CHIP_SIZE;
+
+    rom_config_param(0, bytes, FLASH_BLOCK_SIZE,
                      FLASH_SECTOR_SIZE, FLASH_PAGE_SIZE, 0xFFFFu);
 }
 
@@ -690,9 +695,39 @@ uint32_t plat_block_size(void)
     return 512;
 }
 
+/* The ROM keeps a legacy flash-chip record at ROM_SPIFLASH_LEGACY_DATA.  Its
+ * device_id is the JEDEC ID read by the boot loader; the low byte is the
+ * capacity code (bytes = 1 << code).  chip_size is the ROM's conservative
+ * 2 MiB default, so it cannot be used for detection - the ID can. */
+#define ROM_SPIFLASH_LEGACY_DATA 0x3fcdfff0u
+
+/* Read the JEDEC ID before esp_rom_spiflash_config_param() rewrites the
+ * record: that call stores deviceId (we pass 0), so afterwards the field no
+ * longer identifies the part. */
+static uint32_t flash_detect_from_rom(void)
+{
+    uint32_t raw = *(volatile uint32_t *)ROM_SPIFLASH_LEGACY_DATA;
+    uint32_t base = (raw >= 0x3fc00000u && raw < 0x3fcf0000u)
+                        ? raw
+                        : ROM_SPIFLASH_LEGACY_DATA;
+    uint32_t id = *(volatile uint32_t *)base;
+    uint32_t code = id & 0xffu;
+
+    /* Only 1/2/4/8/16 MiB are valid JEDEC capacity codes, and a missing or
+     * floating bus reads 0 or all ones. */
+    if (id == 0u || id == 0xffffffffu || code < 20u || code > 24u)
+        return 0;
+    return 1u << code;
+}
+
+uint32_t plat_flash_detected_bytes(void)
+{
+    return g_flash_detected;
+}
+
 uint32_t plat_block_count(void)
 {
-    return LFS_SECTORS;
+    return plat_lfs_blocks() * 8u;
 }
 
 /* ---- CPU clock: XTAL/2 (20 MHz) -> PLL (160 MHz CPU, 80 MHz APB) -----
@@ -985,6 +1020,9 @@ void plat_board_init(void)
     /* And the super watchdog on top of them (own key, own config). */
     mmio_write32(RTC_WDT_BASE + RTC_SWD_WPROTECT_REG, RTC_SWD_WKEY);
     mmio_write32(RTC_WDT_BASE + RTC_SWD_CONF_REG, RTC_SWD_DISABLE);
+
+    /* Read the JEDEC ID before config_param() rewrites the ROM's record. */
+    g_flash_detected = flash_detect_from_rom();
 
     /* Fix the ROM's 2 MiB chip-size record before any ROM flash call
      * (the littlefs partition at 0x100000 fits in 2 MiB, but the record
