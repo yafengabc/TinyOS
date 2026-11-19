@@ -332,26 +332,30 @@ void usb_cdc_irq_enable(void)
  * seconds of solid LED after every reset.  See drivers/usb/rp2040/usb_cdc.c
  * for the timestamps. */
 
-/* Pump the controller for a short, bounded time right after init.
+/* Pump the controller for a short, bounded time right after init, so the
+ * host's first control transfers are answered during boot instead of timing
+ * out and backing off (Windows retries after ~5.5 s).
  *
- * Without this the host's first control transfers arrive while nothing is
- * running the USB task (early boot still has interrupts masked), so Windows
- * times out, backs off and retries: measured on ATK-DNRP2350AM M33, power
- * cycles alternate between 5.5 s and 11.3 s "device gone -> CDC back" even
- * though the firmware itself is up in well under a second.  The Hazard3 port
- * never had this problem because its enumeration wait does exactly this
- * pumping; the difference is that this one stops after a bounded number of
- * iterations instead of waiting for tud_mounted() (that wait cost 8-10 s on
- * the RP2040 when the host was slow).
+ * Without this the host's first SETUP arrives while nothing is running the
+ * USB task (early boot still has interrupts masked), so Windows times out and
+ * retries: measured on ATK-DNRP2350AM M33, power cycles alternated between
+ * 5.5 s and 11.3 s "device gone -> CDC back" even though the firmware itself
+ * was up in well under a second.
  *
- * 40 000 iterations is ~250 ms at the 150 MHz this board runs at; it returns
- * immediately once the host has configured the port, i.e. in the normal case
- * after the first successful SET_CONFIGURATION. */
-#define USB_BOOT_PUMP 40000u
-
+ * The budget is a cycle window, not a fixed iteration count: at 150 MHz,
+ * 40 000 polls measure ~250 ms, so the count is derived from the running
+ * clock (this also covers the 12 MHz crystal-failure path, where a fixed
+ * count would take 12x as long in wall time).  It stops as soon as the port
+ * is configured. */
 static void usb_cdc_boot_pump(void)
 {
-    for (uint32_t i = 0; i < USB_BOOT_PUMP && !tud_mounted(); i++)
+    uint32_t n = plat_cpu_hz() / 3750u;      /* 150 MHz -> 40 000, ~250 ms */
+
+    if (n > 200000u)
+        n = 200000u;                         /* never more than ~1.3 s */
+    if (n < 4000u)
+        n = 4000u;                           /* and always a few ms' worth */
+    for (uint32_t i = 0; i < n && !tud_mounted(); i++)
         usb_cdc_poll();
 }
 

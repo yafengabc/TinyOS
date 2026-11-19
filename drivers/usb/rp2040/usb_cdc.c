@@ -471,16 +471,19 @@ void usb_cdc_irq_enable(void)
 
 /* Pump the controller for a short, bounded time right after init, so the
  * host's first control transfers are answered during boot instead of timing
- * out and backing off (Windows retries after ~5.5 s).  Same shape as the
- * RP2350 port; see drivers/usb/rp2350/usb_cdc.c for the measurement.
- *
- * 40 000 iterations is roughly 250 ms at 125 MHz; it returns as soon as the
- * host has configured the port. */
-#define USB_BOOT_PUMP 40000u
-
+ * out and backing off.  Same shape and the same cycle window as the RP2350
+ * port (see drivers/usb/rp2350/usb_cdc.c): 40 000 polls at 125 MHz is ~250 ms,
+ * derived from the running clock so the 12 MHz crystal-failure path does not
+ * stretch it.  Stops as soon as the port is configured. */
 static void usb_cdc_boot_pump(void)
 {
-    for (uint32_t i = 0; i < USB_BOOT_PUMP && !tud_mounted(); i++)
+    uint32_t n = plat_cpu_hz() / 3125u;      /* 125 MHz -> 40 000, ~250 ms */
+
+    if (n > 200000u)
+        n = 200000u;
+    if (n < 4000u)
+        n = 4000u;
+    for (uint32_t i = 0; i < n && !tud_mounted(); i++)
         usb_cdc_poll();
 }
 
