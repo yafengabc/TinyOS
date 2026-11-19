@@ -281,6 +281,7 @@ uint32_t plat_flash_detected_bytes(void);
  * board's configured flash_bytes, minus the partition offset.  Generic: it
  * only needs plat_flash_detected_bytes(). */
 uint32_t plat_lfs_blocks(void);
+void plat_flash_probe_debug(uint32_t *out);
 
 /* ---- physical memory ------------------------------------------------- */
 

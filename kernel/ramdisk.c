@@ -385,6 +385,18 @@ __attribute__((weak)) uint32_t plat_flash_detected_bytes(void)
     return 0;
 }
 
+/* Optional port debug for a failed capacity probe: twelve words the port can
+ * fill in (for RP2040: SSI registers, the bytes read, and the last step the
+ * probe reached) so /proc/flash can show why the part did not answer.  All
+ * zero means "nothing to say". */
+__attribute__((weak)) void plat_flash_probe_debug(uint32_t *out)
+{
+    int i;
+
+    for (i = 0; i < 12; i++)
+        out[i] = 0u;
+}
+
 uint32_t plat_lfs_blocks(void)
 {
 #if TOS_HAS_FLASH

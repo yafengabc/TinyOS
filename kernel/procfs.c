@@ -244,6 +244,27 @@ static uint32_t fmt_flash(char *b, uint32_t cap)
     off = put(b, cap, off, "  configured  %8u bytes\n", configured);
     off = put(b, cap, off, "  lfs_offset  %8u bytes\n", offset);
     off = put(b, cap, off, "  lfs_blocks  %8u\n", plat_lfs_blocks());
+
+    /* A port whose probe failed can explain itself here (RP2040: SSIENR,
+     * CTRLR0, SR, RXFLR, drain, exchange, SR after, stage reached).  All
+     * zero means no port debug. */
+    if (plat_flash_detected_bytes() == 0u) {
+        uint32_t dbg[12];
+        int i;
+        uint32_t any = 0;
+
+        plat_flash_probe_debug(dbg);
+        for (i = 0; i < 12; i++)
+            any |= dbg[i];
+        if (any)
+            off = put(b, cap, off,
+                      "  probe_dbg   %08x %08x %08x %08x\n"
+                      "              %08x %08x %08x %08x\n"
+                      "              %08x %08x %08x %08x (last = stage)\n",
+                      dbg[0], dbg[1], dbg[2], dbg[3],
+                      dbg[4], dbg[5], dbg[6], dbg[7],
+                      dbg[8], dbg[9], dbg[10], dbg[11]);
+    }
     return off;
 }
 

@@ -1004,18 +1004,67 @@ rp_flash_op(uint32_t addr, const uint8_t *data, uint32_t count, int erase)
 
 /* ---- flash capacity: JEDEC RDID through the SSI ------------------------ */
 
-/* SSI (PL022) registers.  In serial command mode the SSI is a plain 8-bit
- * SPI master: write a byte to DR0 to clock it out, read DR0 for the byte
- * that came back.  SR carries the FIFO flags (TFNF = room in TX, RFNE =
- * data in RX); the SDK's flash_do_cmd() uses the same pair. */
-#define SSI_CTRLR0   (XIP_SSI_BASE + 0x00u)
-#define SSI_CTRLR1   (XIP_SSI_BASE + 0x04u)
-#define SSI_SSIENR   (XIP_SSI_BASE + 0x08u)
-#define SSI_SER      (XIP_SSI_BASE + 0x10u)
-#define SSI_SR       (XIP_SSI_BASE + 0x28u)
-#define SSI_DR0      (XIP_SSI_BASE + 0x60u)
-#define SSI_SR_TFNF  (1u << 1)
-#define SSI_SR_RFNE  (1u << 3)
+/* After flash_exit_xip() the ROM has already put the SSI into 8-bit serial
+ * command mode and left the SS pad forced high through the QSPI pad override.
+ * sdk's flash_do_cmd_cs() therefore does NOT touch SSI_CTRLR0/SSIENR/SER: it
+ * bit-bangs the chip select with the pad override (which wins over SSI_SER)
+ * and only reads SR / writes DR0.  Doing it any other way leaves CS high, the
+ * part never answers and the receive FIFO stays empty - the first attempt
+ * at this hung the board that way. */
+#define SSI_CTRLR0    (XIP_SSI_BASE + 0x00u)
+#define SSI_SSIENR    (XIP_SSI_BASE + 0x08u)
+#define SSI_RXFLR     (XIP_SSI_BASE + 0x24u)   /* receive FIFO level, in bytes */
+#define SSI_SR        (XIP_SSI_BASE + 0x28u)
+#define SSI_DR0       (XIP_SSI_BASE + 0x60u)
+#define SSI_SR_TFNF   (1u << 1)                /* transmit FIFO not full */
+
+/* "Has the part answered?" is asked of RXFLR, never of an SR flag bit: SR is
+ * a PL022 status word whose bits shift meaning between documents (0x6 reads
+ * as "TNF|RNE, a byte is waiting" or as "TNF|RFE, the FIFO is empty",
+ * depending on whether bit 2 or bit 3 is the not-empty flag).  Guessing wrong
+ * here cost two flash cycles - one probe that always timed out, and one
+ * unbounded drain loop that wedged the boot in ramdisk_init().  RXFLR is a
+ * count: zero means nothing to read, no interpretation required. */
+
+/* Where the probe got to, in case it ever misbehaves again.  Every loop below
+ * is bounded, so a silent part ends in "no measurement", never in a hung
+ * boot; this counter tells us which step reached that point. */
+#define PROBE_STAGE(n)   do { g_probe_dbg[7] = (n); } while (0)
+
+/* Filled in as the probe runs and dumped by /proc/flash when the
+ * measurement fails. */
+/* [0] SSIENR  [1] CTRLR0  [2] SR on entry  [3] RXFLR on entry
+ * [4] drain: pops<<16 | RXFLR after     [5] exchange: i<<16 | ok<<8 | RXFLR
+ * [6] SR after the command              [7] last stage reached
+ * [8] the four bytes read               [9] SS ctrl before  [10] after
+ * [11] spare */
+static volatile uint32_t g_probe_dbg[12];
+
+#define IO_QSPI_SS_CTRL      (IO_QSPI_BASE + 0x0cu)   /* io[1] = QSPI_SS */
+#define IO_QSPI_SS_OUTOVER   (3u << 8)
+
+/* OUTOVER is the GPIO override field: 0 = drive the peripheral's value,
+ * 1 = drive its inverse, 2 = force low, 3 = force high.  Only "force" values
+ * actually pin the pad, and getting them wrong is invisible from the SSI
+ * side: the FIFOs still shift five frames, but the part is not selected, so
+ * MISO floats and the bytes are junk.  That cost a flash cycle here - with
+ * 0/1 the probe reported ok=1, five bytes read, and an ID that failed the
+ * 0x9f echo check. */
+#define IO_QSPI_SS_LOW       (2u << 8)
+#define IO_QSPI_SS_HIGH      (3u << 8)
+
+/* Inlined into the RAM-resident probe: this runs with XIP off.  Only the
+ * 2-bit OUTOVER field is touched so FUNCSEL and the pulls survive. */
+static inline void rp_flash_cs_force(int high)
+{
+    uint32_t ctrl = mmio_read32(IO_QSPI_SS_CTRL);
+
+    g_probe_dbg[9] = ctrl;
+    ctrl = (ctrl & ~IO_QSPI_SS_OUTOVER) | (high ? IO_QSPI_SS_HIGH
+                                               : IO_QSPI_SS_LOW);
+    mmio_write32(IO_QSPI_SS_CTRL, ctrl);
+    g_probe_dbg[10] = mmio_read32(IO_QSPI_SS_CTRL);
+}
 
 /* RDID (0x9F) is not in the ROM's flash API - flash_range_erase/program only
  * cover erase and program - so the SSI is driven by hand between
@@ -1026,9 +1075,17 @@ rp_flash_op(uint32_t addr, const uint8_t *data, uint32_t count, int erase)
  *
  * The command is clocked as 1 + 4 bytes: the opcode, then four dummy bytes
  * that shift the 24-bit ID out.  All five are read back so the FIFO stays in
- * lockstep; rx[0] is the opcode echo, rx[1..3] the manufacturer/device/
- * capacity bytes.  A floating bus reads back 0x00 or 0xff and is rejected by
- * the capacity check in plat_flash_detected_bytes(). */
+ * lockstep, and the ID lands in rx[1..3] (see below for why rx[0] is not an
+ * echo).  Both polls are bounded: a quiet bus must end in "no measurement"
+ * (capacity falls back to board.conf), never in a hung boot. */
+void plat_flash_probe_debug(uint32_t *out)
+{
+    int i;
+
+    for (i = 0; i < 12; i++)
+        out[i] = g_probe_dbg[i];
+}
+
 static int __attribute__((noinline, section(".data.flash_ram")))
 rp_flash_rdid(uint32_t *out, int park)
 {
@@ -1036,7 +1093,11 @@ rp_flash_rdid(uint32_t *out, int park)
     volatile uint32_t *dst = g_boot2_copy;
     uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
+    uint32_t b1, b2, b3;
     uint32_t i;
+    int ok = 1;
+
+    PROBE_STAGE(1);
 
     if (park && plat_flash_exclusive_begin() != 0)
         return -1;
@@ -1047,37 +1108,79 @@ rp_flash_rdid(uint32_t *out, int park)
 
     g_rom_connect();
     g_rom_exit_xip();
+    PROBE_STAGE(2);
 
-    /* DSS = 7 (8-bit), Motorola SPI frame, SCPOL = SCPH = 0, TMOD = 0
-     * (transmit and receive).  CTRLR1 only matters in receive-only mode;
-     * 4 = five frames is what the SDK writes for the same exchange. */
-    mmio_write32(SSI_SSIENR, 0u);
-    mmio_write32(SSI_CTRLR0, 7u);
-    mmio_write32(SSI_CTRLR1, 4u);
-    mmio_write32(SSI_SER, 1u);
-    mmio_write32(SSI_SSIENR, 1u);
+    /* What the ROM left behind, for /proc/flash.  CTRLR0 should read 7<<16
+     * (DFS_32 = 8-bit frame, TMOD = 00 transmit+receive, Motorola mode 0);
+     * SSIENR should read 1. */
+    g_probe_dbg[0] = mmio_read32(SSI_SSIENR);
+    g_probe_dbg[1] = mmio_read32(SSI_CTRLR0);
+    if (!(g_probe_dbg[0] & 1u))
+        mmio_write32(SSI_SSIENR, 1u);
+    g_probe_dbg[2] = mmio_read32(SSI_SR);
+    g_probe_dbg[3] = mmio_read32(SSI_RXFLR) & 0xffffu;
+
+    /* Drop whatever the ROM left in the receive FIFO, otherwise a stale byte
+     * would shift the whole ID by one position.  Bounded: if the level never
+     * drops we carry on and let the capacity check reject the result. */
+    for (i = 0; i < 16u; i++) {
+        if (mmio_read32(SSI_RXFLR) == 0u)
+            break;
+        (void)mmio_read32(SSI_DR0);
+    }
+    g_probe_dbg[4] = (i << 16u) | (mmio_read32(SSI_RXFLR) & 0xffffu);
+    PROBE_STAGE(3);
+
+    rp_flash_cs_force(0);
+    PROBE_STAGE(4);
 
     for (i = 0; i < 5u; i++) {
-        while (!(mmio_read32(SSI_SR) & SSI_SR_TFNF))
+        uint32_t spins = 200000u;
+
+        while (!(mmio_read32(SSI_SR) & SSI_SR_TFNF) && --spins)
             ;
+        if (!spins) { ok = 0; break; }
         mmio_write32(SSI_DR0, tx[i]);
-        while (!(mmio_read32(SSI_SR) & SSI_SR_RFNE))
+
+        spins = 200000u;
+        while (mmio_read32(SSI_RXFLR) == 0u && --spins)
             ;
+        if (!spins) { ok = 0; break; }
         rx[i] = (uint8_t)mmio_read32(SSI_DR0);
     }
+    g_probe_dbg[5] = (i << 16u) | (ok ? 0x100u : 0u) |
+                     (mmio_read32(SSI_RXFLR) & 0xffu);
 
-    mmio_write32(SSI_SSIENR, 0u);
-    mmio_write32(SSI_SER, 0u);
+    rp_flash_cs_force(1);
+    g_probe_dbg[6] = mmio_read32(SSI_SR);
+    PROBE_STAGE(5);
 
-    *out = ((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3];
+    g_probe_dbg[8] = ((uint32_t)rx[0] << 24u) | ((uint32_t)rx[1] << 16u) |
+                     ((uint32_t)rx[2] << 8u) | (uint32_t)rx[3];
+
+    /* rx[0] is NOT the opcode echo.  This part only starts driving MISO once
+     * the opcode has been clocked in, so the first byte read back is whatever
+     * the bus idles at (measured: 0xff), and the ID lands in rx[1..3]:
+     * a W25Q16 answers ff ef 40 15.  Checking rx[0] against 0x9f here once
+     * rejected a perfectly good measurement - the plausibility of the ID is
+     * checked by the caller instead (capacity code in 20..24, not 0 or all
+     * ones), which is the check that actually means something. */
+
+    b1 = rx[1];
+    b2 = rx[2];
+    b3 = rx[3];
+    *out = ok ? ((b1 << 16u) | (b2 << 8u) | b3) : 0u;
+    PROBE_STAGE(6);
 
     g_rom_flush();
+    PROBE_STAGE(7);
     ((void (*)(void))((uintptr_t)g_boot2_copy + 1u))();
     __asm__ volatile("dsb\n isb" ::: "memory");
+    PROBE_STAGE(8);
 
     if (park)
         plat_flash_exclusive_end();
-    return 0;
+    return ok ? 0 : -1;
 }
 
 /* What the part actually is, measured once.  The capacity byte is
@@ -1099,9 +1202,9 @@ uint32_t plat_flash_detected_bytes(void)
     done = 1;
     if (!g_rom_ready)
         return 0;
-    /* The first caller is ramdisk_init(), which kmain() runs before cpu_init()
-     * and before interrupts come on, so the machine is still single-core and
-     * there is nothing to park. */
+    /* The first caller is plat_block_count(), from ramdisk_init(), which
+     * kmain() runs before cpu_init() and before interrupts come on, so the
+     * machine is still single-core and there is nothing to park. */
     if (rp_flash_rdid(&id, 0) != 0 || id == 0u || id == 0xffffffu)
         return 0;
     code = id & 0xffu;

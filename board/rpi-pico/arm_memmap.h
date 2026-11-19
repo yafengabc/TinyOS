@@ -10,8 +10,10 @@
 #define XIP_BASE        0x10000000u
 #define SRAM_BASE       0x20000000u
 /* The SSI (PL022) behind XIP: in serial command mode it drives QSPI directly,
- * which is how the JEDEC RDID probe talks to the flash. */
+ * which is how the JEDEC RDID probe talks to the flash.  IO_QSPI carries the
+ * pad overrides; io[1] is the QSPI_SS chip select. */
 #define XIP_SSI_BASE    0x18000000u
+#define IO_QSPI_BASE    0x40018000u
 
 /* Boot ROM: the flash API function table and its lookup live at these
  * fixed offsets inside the (always-mapped) boot ROM at 0x00000000. */
