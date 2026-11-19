@@ -18,13 +18,10 @@
   没有厂商构建系统：boot2 桩、ROM 函数表、pad 寄存器、TinyUSB 要的那层 pico-sdk
   形状的门面，都 vendored 在 `third_party/` 和 `board/` 里。**加一块板子是加一个
   目录，不是装一套 SDK。**
-- **编译器就在仓库里**。`goc32`（树内）一条命令把 C 编成 `tos build` 会放进
-  littlefs 的那个 **LZ4TOS** 封装——窗口提示、栈/堆申请、LZ4 数据全在里面——覆盖
-  RV32IMC、Thumb-1/ARMv6-M、ARMv7-M、ARMv8-M。不用 libLLVM、不用 cgo，**也不需
-  要外部工具链**：汇编器和链接器就在 `internal/as` 和 `internal/ld`。产出的
-  `.tos` 丢进 `build/fs-stage/bin/`，重建 ramdisk 就装进去了。（goc32 的目标码
-  比 clang 大；这没关系——发布镜像和预编译的 `msh` 继续用 clang，goc32 负责
-  快速单文件开发。）
+- **甚至编译器都准备了**。`goc32`一条命令把 C 语言编译成可以直接运行的二进制程序，
+- 通过tosput命令+串口传到内置的littlsfs文件系统，然后直接通过shell运行。**不需
+  要外部工具链**：（goc32 编译的代码比 clang 大一些，大约1.3倍的体积；这没关系
+  ——发布镜像和预编译的程序继续用 clang，goc32 负责快速单文件开发。）
 - **一套内核、一套用户态、12 个目标**——包括同一颗 RP2350 硅片上的两种指令集，
   以及一台 PC。
 - **小到能读完**——内核约 70 KiB flash、约 45 KiB RAM，整个系统是一个下午能从头
