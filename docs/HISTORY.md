@@ -30,6 +30,7 @@
 | 11 | 传文件窗口化（不等 ACK 连发 N 块） | 未评估：当前 7.0 KiB/s 已是 115200+base64 的 81%，窗口化只能再挤 ~19% | 协议 + 板端乱序/重排逻辑 | 待评估（优先级低） |
 | 12 | Python 解释器改字节码 VM | **做**：AST 整体退役，单遍编译 + 栈式 VM | flash +3 KiB，RAM −27%，速度持平 | **已合并**（§13） |
 | 13 | 移植 MicroPython，只留 runtime | **不换**：core 76.8 / 54.0 KiB，是我们的 2.17× / 1.53× | 10 个 libc shim + 软浮点 + GC 改造 | 只评估（§13） |
+| 14 | boot 阶段实测 flash 容量（JEDEC RDID） | **做**：RP2350 走 QMI direct、RP2040 走 PL022 SSI；`board.conf` 从「硬上界」降级为「兜底假定」 | 双端各 ~120 行，无 RAM 代价 | **已完成**，四板六镜像实测（§82） |
 
 ---
 
@@ -4943,3 +4944,74 @@ SWD 在切时钟前后读 QMI `M0_TIMING`/SCK。卡片：
 
 **验证**：`go test ./...`、`build all` **18/18**。硬件 **`NOT RUN`**；卡片：
 `docs/acceptance/2026-11-18-pico2-isa-matrix-4fd6857.md`。
+
+## 82. 2026-11-19 boot 阶段实测 flash 容量（JEDEC RDID）
+
+**动机**：同一版型的板子贴的 flash 容量五花八门，`board.conf` 写死一个数就是赌。
+赌大了挂载时按虚报容量算，超级块能把地址走出芯片；赌小了一直浪费。所以把
+`board.conf` 的 `flash_bytes` 降级成「测不到时的兜底假定」，能用就按 1 MiB 编，
+启动读芯片自述、再给分区扩容。
+
+**结果**：`plat_flash_detected_bytes()` 以前在 RP2350 上只是回显 ROM 的
+FLASH_DEVINFO，也就是 OTP 配置；未编程时那是**保守默认 16 MiB，是上界不是实测**。
+现在四个镜像都真发 JEDEC RDID（0x9F），四板六镜像全部对上任一配置：
+
+| 板 / 镜像 | 芯片 | RDID | code | detected | lfs_blocks | df total |
+| --- | --- | --- | --- | --- | --- | --- |
+| Pico 2 ARM / RV32 | W25Q64 | `EF 40 17` | 23 | 8388608 | 1920 | 7864320 |
+| ATK ARM / RV32 | W25Q32 | `EF 40 16` | 22 | 4194304 | 896 | 3670016 |
+| Pico 1 / SMP | W25Q16 | `EF 40 15` | 21 | 2097152 | 384 | 1572864 |
+
+修复前 RP2350 报 `detected 16777216`（ROM 默认值），RP2040 根本没有探测、直接用配置值。
+
+**改动**：
+
+- `board/rp2350-generic/`、`board/rp2350rv-generic/`：`rp2350_flash_detect_jedec()`
+  （`RAMFUNC`）在 `rom_exit_xip()` 与 boot2 恢复 XIP 之间手动驱 QMI direct 模式
+  （`DIRECT_CSR`/`TX`/`RX` 逐字节 FIFO 交换），失败回退 ROM FLASH_DEVINFO。
+- `board/rpi-pico/`：`rp_flash_rdid()`（`.data.flash_ram`）走 PL022 SSI，片选用
+  QSPI pad override，读写只碰 `RXFLR`/`SR`/`DR0`。
+- `kernel/ramdisk.c`：`plat_lfs_blocks()` 从 `min(detected, configured)` 改成
+  **detected 优先、configured 兜底**。挂载时的超级块校验不变，配置虚报仍会被拒。
+- `kernel/procfs.c` + `plat_flash_probe_debug()` 弱钩子：`detected == 0` 时
+  `/proc/flash` 打印 12 个字（SSI/寄存器现场、读到的 4 字节、最后到达的 stage）。
+- `kernel/main.c` 顺序未动：探测发生在 `ramdisk_init()`，早于 `cpu_init()`，
+  单核、中断未开，所以 SMP 镜像也不需要 parking。
+
+**扩容实测**（ATK，`flash_bytes = 1m` 故意编小）：
+
+| 规则 | detected | configured | lfs_blocks | df total |
+| --- | --- | --- | --- | --- |
+| 旧 `min()` | 4194304 | 1048576 | 128 | 524288 |
+| 新「实测优先」 | 4194304 | 1048576 | **896** | **3670016** |
+
+**两个坑，都值得单独记**：
+
+1. **先查 UB，再怀疑编译器**。容量解码写成 `code < 0x20u || code > 0x24u` +
+   `1u << code`，即移位 32~36 位。clang `-O2` 把 UB 折成 poison，于是整个
+   `id` 组合/比较/返回被判成死代码：三次 `volatile` 读保留却都读进同一寄存器，
+   IR 里甚至能看到 `define internal fastcc void @rp2350_flash_detect_jedec`
+   （返回类型被 IPSCCP 改成 void），调用方静默走 ROM 回退。现象极像「clang
+   miscompile（尾调用覆盖返回值）」，实际根因是自己的 UB。边界必须是**十进制
+   20..24**（0x14..0x18，`1<<20`=1 MiB .. `1<<24`=16 MiB），与 C3 端一致。
+2. **RP2040 的 SSI 有四个「在 SSI 侧看不出来」的陷阱**，每个都表现为
+   `detected 0` 或卡启动：`SER` 选不中片（`exit_xip()` 后 ROM 已用 pad override
+   钉住 SS，override 优先级更高）；`OUTOVER` 是 `0 正常 / 1 反相 / 2 强制低 /
+   3 强制高`，写成 0/1 时 FIFO 照常收发 5 帧、`ok=1`，但芯片没被选中；`SR` 的
+   not-empty 位在 bit2/bit3 之间随文献漂移，信错的那个会写出无上限轮询、把启动
+   卡死在 `ramdisk_init()`（串口停在 `[p] timer init`）——现在一律只看 `RXFLR`
+   计数且所有循环有界，探测失败只能是「测不到」；`rx[0]` **不是** opcode 回显
+   （芯片收完 opcode 才驱动 MISO，首字节是 `0xff`），ID 在 `rx[1..3]`。
+
+**验证**：`go build` / `go vet` / `go test ./...` 全绿，`build all` **18/18**；
+四板六镜像真机通过（含 Pico 1 的 SMP 镜像 `cpus=2`、shell 在双核间迁移、20 轮
+写删不掉速）。提交 `a9345c9`（RP2350 双端）、`0dedccc`（容量语义）、`ac0796e`
+（RP2040，片选不对）、`58a45e8`（RP2040 修好）、`d08b1fa` / `0e158bc`（验收卡）。
+卡片：`docs/acceptance/2026-11-19-rp2350-jedec-rdid-a9345c9.md`、
+`docs/acceptance/2026-11-19-rp2040-jedec-rdid-ac0796e.md`。
+
+**架构备注**：为什么探测不能做成用户态程序（当初讨论过）。不是「RAM 执行」决定的
+——用户 ELF 本来就整体 memcpy 到 SRAM 窗口跑。三条硬约束：① 消费点是
+`ramdisk_init()`，用户进程在其后，而用户程序本身就在被定尺寸的那个 littlefs 里；
+② QMI / SSI 都是特权外设（M33 MPU、RV32 PMP）；③ 关 XIP 是全局的（中断须关、
+SMP 须 park 另一核）。用户态只保留 `flashinfo` 读 `/proc/flash`。
