@@ -1002,6 +1002,115 @@ rp_flash_op(uint32_t addr, const uint8_t *data, uint32_t count, int erase)
     return 0;
 }
 
+/* ---- flash capacity: JEDEC RDID through the SSI ------------------------ */
+
+/* SSI (PL022) registers.  In serial command mode the SSI is a plain 8-bit
+ * SPI master: write a byte to DR0 to clock it out, read DR0 for the byte
+ * that came back.  SR carries the FIFO flags (TFNF = room in TX, RFNE =
+ * data in RX); the SDK's flash_do_cmd() uses the same pair. */
+#define SSI_CTRLR0   (XIP_SSI_BASE + 0x00u)
+#define SSI_CTRLR1   (XIP_SSI_BASE + 0x04u)
+#define SSI_SSIENR   (XIP_SSI_BASE + 0x08u)
+#define SSI_SER      (XIP_SSI_BASE + 0x10u)
+#define SSI_SR       (XIP_SSI_BASE + 0x28u)
+#define SSI_DR0      (XIP_SSI_BASE + 0x60u)
+#define SSI_SR_TFNF  (1u << 1)
+#define SSI_SR_RFNE  (1u << 3)
+
+/* RDID (0x9F) is not in the ROM's flash API - flash_range_erase/program only
+ * cover erase and program - so the SSI is driven by hand between
+ * flash_exit_xip() and the boot2 copy, exactly the window rp_flash_op()
+ * works in.  Same rules apply: this function lives in .data.flash_ram (copied
+ * to SRAM by _start), and nothing it touches may be in flash while XIP is
+ * off.  The result is written through `out`, which points into SRAM.
+ *
+ * The command is clocked as 1 + 4 bytes: the opcode, then four dummy bytes
+ * that shift the 24-bit ID out.  All five are read back so the FIFO stays in
+ * lockstep; rx[0] is the opcode echo, rx[1..3] the manufacturer/device/
+ * capacity bytes.  A floating bus reads back 0x00 or 0xff and is rejected by
+ * the capacity check in plat_flash_detected_bytes(). */
+static int __attribute__((noinline, section(".data.flash_ram")))
+rp_flash_rdid(uint32_t *out, int park)
+{
+    const volatile uint32_t *src = (const volatile uint32_t *)XIP_BASE;
+    volatile uint32_t *dst = g_boot2_copy;
+    uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
+    volatile uint8_t rx[5];
+    uint32_t i;
+
+    if (park && plat_flash_exclusive_begin() != 0)
+        return -1;
+
+    for (i = 0; i < 64u; i++)
+        dst[i] = src[i];
+    __asm__ volatile("dsb\n isb" ::: "memory");
+
+    g_rom_connect();
+    g_rom_exit_xip();
+
+    /* DSS = 7 (8-bit), Motorola SPI frame, SCPOL = SCPH = 0, TMOD = 0
+     * (transmit and receive).  CTRLR1 only matters in receive-only mode;
+     * 4 = five frames is what the SDK writes for the same exchange. */
+    mmio_write32(SSI_SSIENR, 0u);
+    mmio_write32(SSI_CTRLR0, 7u);
+    mmio_write32(SSI_CTRLR1, 4u);
+    mmio_write32(SSI_SER, 1u);
+    mmio_write32(SSI_SSIENR, 1u);
+
+    for (i = 0; i < 5u; i++) {
+        while (!(mmio_read32(SSI_SR) & SSI_SR_TFNF))
+            ;
+        mmio_write32(SSI_DR0, tx[i]);
+        while (!(mmio_read32(SSI_SR) & SSI_SR_RFNE))
+            ;
+        rx[i] = (uint8_t)mmio_read32(SSI_DR0);
+    }
+
+    mmio_write32(SSI_SSIENR, 0u);
+    mmio_write32(SSI_SER, 0u);
+
+    *out = ((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3];
+
+    g_rom_flush();
+    ((void (*)(void))((uintptr_t)g_boot2_copy + 1u))();
+    __asm__ volatile("dsb\n isb" ::: "memory");
+
+    if (park)
+        plat_flash_exclusive_end();
+    return 0;
+}
+
+/* What the part actually is, measured once.  The capacity byte is
+ * log2(bytes): 20 (0x14) = 1 MiB .. 24 (0x18) = 16 MiB.  The bounds must be
+ * decimal - writing 0x20 here makes 1u << code a shift of 32, undefined
+ * behaviour that lets the optimiser fold the whole decode to poison (that
+ * exact mistake cost a day on the RP2350 port).  Anything else is a
+ * non-JEDEC part or a floating bus, and 0 means "no measurement", which
+ * makes plat_lfs_blocks() fall back to the configured size. */
+uint32_t plat_flash_detected_bytes(void)
+{
+    static uint32_t cached;
+    static int done;
+    uint32_t id = 0;
+    uint32_t code;
+
+    if (done)
+        return cached;
+    done = 1;
+    if (!g_rom_ready)
+        return 0;
+    /* The first caller is ramdisk_init(), which kmain() runs before cpu_init()
+     * and before interrupts come on, so the machine is still single-core and
+     * there is nothing to park. */
+    if (rp_flash_rdid(&id, 0) != 0 || id == 0u || id == 0xffffffu)
+        return 0;
+    code = id & 0xffu;
+    if (code < 20u || code > 24u)
+        return 0;
+    cached = 1u << code;
+    return cached;
+}
+
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
     BOOT_PROBE("[p] bd read");
@@ -1064,10 +1173,12 @@ uint32_t plat_block_size(void)
 
 uint32_t plat_block_count(void)
 {
-    /* The whole 1.5 MiB littlefs partition is addressable, even though the
-     * flashed image only occupies its first 300 KiB; ramdisk_init() grows
-     * the filesystem over the rest (see PLAT_LFS_BLOCKS in layout.c). */
-    return PLAT_LFS_BLOCKS * 8u;   /* 3072 sectors = 1.5 MiB */
+    /* The whole littlefs partition is addressable, even though the flashed
+     * image only occupies its first 300 KiB; ramdisk_init() grows the
+     * filesystem over the rest (see PLAT_LFS_BLOCKS in layout.c).  The size
+     * is plat_lfs_blocks(), i.e. the JEDEC capacity clamped to the board's
+     * configured upper bound - not a compile-time constant. */
+    return plat_lfs_blocks() * 8u;
 }
 
 /* ---- boot -------------------------------------------------------------- */
