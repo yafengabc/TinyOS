@@ -89,8 +89,23 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    需要在 USB init 时走 SSI/ROM flash 序列，尚未实现；两块 RP2040 同时插仍会撞。
 3. **主机侧枚举延迟**：固件侧 `usb init done` 已降到 158 ms（RP2040 实测），但
    Windows 把 CDC 配置起来仍要几秒——`usb_cdc_init()` 里 200 ms 的 D+ 掉电重连是
-   给"刷完 UF2 后 ROM 的 MSC 节点"准备的，冷启动时并不需要。可改成只在
-   `SIE_STATUS.CONNECTED` 为真时做；未验证。
+   给"刷完 UF2 后 ROM 的 MSC 节点"准备的，冷启动时并不需要。目标是只在需要时做，
+   省掉每次冷启动的 205 ms（`usb_delay_ms(200)` + 5）。
+
+   2026-11-20 读代码后的现状（**还没改**，因为判据要冷/暖对比，冷启动要人工拔电）：
+   - `usb_clock_init()` 是**清** `RESETS` 的 bit（RP2040 bit24 / RP2350 bit28），
+     不是打脉冲；真正把控制器状态清掉的是 `tud_init()` → `dcd_init()`。
+   - 所以"进 BOOTSEL 没进过"这件事，唯一可能读到的证据是**进 `usb_clock_init()`
+     之前**的 `RESETS.RESET` 这一位（USBCTRL 是否已被 ROM 放开）以及放开之后、
+     `tud_init()` 之前的 `SIE_STATUS` 快照。两者都还是假设，得靠 A/B 数据说话。
+   - 测法：在 `usb_cdc_init()` 开头与 `tud_init()` 之前各存一份
+     `RESETS.RESET`/`RESET_DONE`/`SIE_STATUS`/`SIE_CTRL`，先从 CDC 控制台打出来；
+     然后对比 ① 断电冷启动、② ROM `reboot`（暖重启）、③ BOOTSEL 刷机后首启
+     三种情况。只有三组数据分得开，才谈得上"仅在被需要时掉电重连"。
+   - 风险：改错的后果是 CDC 不枚举，而本机 UART0 的 TX 现在又是坏的（第 5 条），
+     等于板子要人工按 BOOTSEL 才能救。**动手前先修好 UART0**，或者确认
+     `bootsel_poke` 那条 CDC Ctrl-D 通路在"枚举成功但 shell 不答"时仍然有效
+     （2026-11-20 实测有效）。
 
 4. **Hazard3 不能照搬 ARM 的有界 pump**（2026-11-19 实测）：把 RV32 的
    `usb_cdc_wait()` 换成 ARM 的 `USB_BOOT_PUMP`（40 000 次 `usb_cdc_poll()`）后，
