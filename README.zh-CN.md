@@ -18,7 +18,7 @@
   没有厂商构建系统：boot2 桩、ROM 函数表、pad 寄存器、TinyUSB 要的那层 pico-sdk
   形状的门面，都 vendored 在 `third_party/` 和 `board/` 里。**加一块板子是加一个
   目录，不是装一套 SDK。**
-- **编译器就在仓库里**。`goc32`（子模块）一条命令把 C 编成 `tos build` 会放进
+- **编译器就在仓库里**。`goc32`（树内）一条命令把 C 编成 `tos build` 会放进
   littlefs 的那个 **LZ4TOS** 封装——窗口提示、栈/堆申请、LZ4 数据全在里面——覆盖
   RV32IMC、Thumb-1/ARMv6-M、ARMv7-M、ARMv8-M。不用 libLLVM、不用 cgo，**也不需
   要外部工具链**：汇编器和链接器就在 `internal/as` 和 `internal/ld`。产出的

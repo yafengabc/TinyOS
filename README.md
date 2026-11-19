@@ -21,7 +21,7 @@ build/test toolchain written in Go — small enough to read end to end.
   the pad registers and the pico-sdk-shaped facade TinyUSB asks for are all
   vendored under `third_party/` and `board/`. A new board is a directory, not
   an SDK.
-- **A C compiler in the tree.** `goc32` (a submodule) turns one C file into
+- **A C compiler in the tree.** `goc32` (in-tree) turns one C file into
   the exact **LZ4TOS** blob `tos build` would put in littlefs — window hint,
   stack/heap asks and the LZ4 block included — for RV32IMC, Thumb-1/ARMv6-M,
   ARMv7-M and ARMv8-M. No libLLVM, no cgo, and no external toolchain: its
