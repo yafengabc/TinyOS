@@ -245,7 +245,17 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o "dist/tools/tostest${{ matrix.ext }}" ./cmd/tostest
           (cd goc32 && go build -trimpath -ldflags "-s -w" -o "../dist/tools/goc32${{ matrix.ext }}" .)
           (cd tools/tosput && go build -trimpath -ldflags "-s -w" -o "../../dist/tools/tosput-cli${{ matrix.ext }}" .)
-          (cd rv32emu-c && go run ./cmd/rv32emu-build emu)
+          # The emulator's own builder passes src/*.c to gcc without a shell,
+          # which works on Windows (MinGW expands it) but not on Linux.  Let
+          # the shell expand the list here.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cc="C:/msys64/ucrt64/bin/gcc.exe"
+          else
+            cc="gcc"
+          fi
+          mkdir -p rv32emu-c/build
+          (cd rv32emu-c && "$cc" -std=c11 -O3 -DNDEBUG -flto -Wall -Wextra \
+            -o "build/rv32emu-c${{ matrix.ext }}" src/*.c -lm)
           cp "rv32emu-c/build/rv32emu-c${{ matrix.ext }}" dist/tools/
           cat > dist/tools/README.txt <<'EOF'
           TinyOS host tools
