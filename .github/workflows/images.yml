@@ -249,13 +249,23 @@ jobs:
           # which works on Windows (MinGW expands it) but not on Linux.  Let
           # the shell expand the list here.
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cc="C:/msys64/ucrt64/bin/gcc.exe"
+            if command -v gcc >/dev/null 2>&1; then
+              cc=gcc
+            elif command -v clang >/dev/null 2>&1; then
+              cc=clang
+            else
+              cc="C:/msys64/ucrt64/bin/gcc.exe"
+            fi
+            extra=""
           else
-            cc="gcc"
+            cc=gcc
+            # src/embed.h uses __declspec(dllimport) without a _WIN32 guard;
+            # the emulator itself does not need the DLL decoration on ELF.
+            extra="-D__declspec(x)="
           fi
           mkdir -p rv32emu-c/build
           (cd rv32emu-c && "$cc" -std=c11 -O3 -DNDEBUG -flto -Wall -Wextra \
-            -o "build/rv32emu-c${{ matrix.ext }}" src/*.c -lm)
+            $extra -o "build/rv32emu-c${{ matrix.ext }}" src/*.c -lm)
           cp "rv32emu-c/build/rv32emu-c${{ matrix.ext }}" dist/tools/
           cat > dist/tools/README.txt <<'EOF'
           TinyOS host tools
