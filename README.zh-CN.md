@@ -38,8 +38,10 @@ blob。
 | 目标 | CPU | 板子 | RAM | Flash | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | `rpi-pico`, `rpi-pico-smp` | 2× Cortex-M0+ | Raspberry Pi Pico | 264 KiB | 2 MiB | 真机验过 |
-| `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | Pico 2 / ATK-DNRP2350AM | 520 KiB | 2–4 MiB | 真机验过 |
-| `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3（RISC-V） | 同一块板的另一个 ISA | 520 KiB | 2–4 MiB | 真机验过 |
+| `rpi-pico2`, `rpi-pico2-smp` | 2× Cortex-M33 | Raspberry Pi Pico 2 | 520 KiB | 8 MiB | 真机验过，**RP2350 门槛** |
+| `rpi-pico2-rv32`, `rpi-pico2-rv32-smp` | 2× Hazard3（RISC-V） | Pico 2，另一个 ISA | 520 KiB | 8 MiB | 真机验过，**RP2350 门槛** |
+| `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | ATK-DNRP2350AM | 520 KiB | 4 MiB | 参考板 |
+| `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3（RISC-V） | ATK，另一个 ISA | 520 KiB | 4 MiB | 参考板 |
 | `esp32c3-generic` | RV32IMC | ESP32-C3 开发板 | 400 KiB | 4 MiB | 真机验过 |
 | `rv32`, `rv32smp`, `rv32nc` | RV32IMC(+A) | QEMU virt | 256 KiB 堆 | — | CI 冒烟 + soak |
 | `arm` | Cortex-M3 | QEMU mps2-an385 | — | — | CI 冒烟 |

@@ -19,7 +19,7 @@
  *            UART0 is the fallback and the bring-up probe.
  *   USB      native USB 1.1 device port (BOOTSEL + CDC console).
  *   ADC0..3  GP26..29, 12 bit, 3.3 V reference.
- *   QSPI     4 MiB boot flash on the dedicated pads.
+ *   QSPI     8 MiB boot flash on the dedicated pads.
  *
  * Absent on purpose: no panel, no card slot, no user key.  BOOTSEL is a
  * button wired to the flash chip select, not a GPIO, so it cannot appear
@@ -38,7 +38,7 @@ static const board_dev_t pico2_devs[] = {
     { "adc1", "GPIO27 / ADC1", TOS_DEV_ADC, 0, 27, 1, "12 bit, 3.3 V" },
     { "adc2", "GPIO28 / ADC2", TOS_DEV_ADC, 0, 28, 2, "12 bit, 3.3 V" },
     { "adc3", "GPIO29 / ADC3", TOS_DEV_ADC, 0, 29, 3, "12 bit, 3.3 V" },
-    { "flash0", "QSPI 4 MiB", TOS_DEV_FLASH, 0, -1, -1,
+    { "flash0", "QSPI 8 MiB", TOS_DEV_FLASH, 0, -1, -1,
       "qspi, boot + littlefs" },
 };
 

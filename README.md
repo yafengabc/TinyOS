@@ -43,8 +43,10 @@ optional ESP32-C3 WiFi blobs.
 | Target | CPU | Board | RAM | Flash | State |
 | --- | --- | --- | --- | --- | --- |
 | `rpi-pico`, `rpi-pico-smp` | 2× Cortex-M0+ | Raspberry Pi Pico | 264 KiB | 2 MiB | on hardware |
-| `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | Pico 2 / ATK-DNRP2350AM | 520 KiB | 2–4 MiB | on hardware |
-| `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3 (RISC-V) | same board, other ISA | 520 KiB | 2–4 MiB | on hardware |
+| `rpi-pico2`, `rpi-pico2-smp` | 2× Cortex-M33 | Raspberry Pi Pico 2 | 520 KiB | 8 MiB | on hardware, **RP2350 gate** |
+| `rpi-pico2-rv32`, `rpi-pico2-rv32-smp` | 2× Hazard3 (RISC-V) | Pico 2, other ISA | 520 KiB | 8 MiB | on hardware, **RP2350 gate** |
+| `atk-dnr2350am`, `atk-dnr2350am-smp` | 2× Cortex-M33 | ATK-DNRP2350AM | 520 KiB | 4 MiB | reference board |
+| `atk-dnr2350am-rv32`, `atk-dnr2350am-rv32-smp` | 2× Hazard3 (RISC-V) | ATK, other ISA | 520 KiB | 4 MiB | reference board |
 | `esp32c3-generic` | RV32IMC | ESP32-C3 devkit | 400 KiB | 4 MiB | on hardware |
 | `rv32`, `rv32smp`, `rv32nc` | RV32IMC(+A) | QEMU virt | 256 KiB heap | — | CI smoke + soak |
 | `arm` | Cortex-M3 | QEMU mps2-an385 | — | — | CI smoke |

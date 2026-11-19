@@ -200,7 +200,12 @@ topology 和 `smpbench` 的 `speedup: x.xx` 原样回报即可。若两个 worke
 
 ---
 
-## 2. RP2350 / Pico 2 / ATK-DNRP2350AM
+## 2. RP2350 / Pico 2（关闭门槛）/ ATK-DNRP2350AM（参考）
+
+> **2026-11-19 起，RP2350 的关闭门槛是 Pico 2 的两个 SMP 镜像**
+> （`rpi-pico2-smp` / `rpi-pico2-rv32-smp`：心跳 6/6、dd/rm ≥100 轮、
+> `smpbench` ≥1.8x）。ATK 继续支持、用于 24 项表和对照，但不再是门槛。
+> 选 Pico 2 的原因：8 MiB flash 适合高强度测试，板子更便宜。
 
 RP2350 的大部分功能已经是 ✅ 实机（USB CDC + UART0 双控制台、littlefs、MPU
 `prot`、ST7789 屏、SMP）。**这里不要重复做全量回归**，只测下面这些新增/未验项。
@@ -208,9 +213,11 @@ RP2350 的大部分功能已经是 ✅ 实机（USB CDC + UART0 双控制台、l
 ### 2.1 构建与烧写
 
 ```sh
-go run ./cmd/tos build -target atk-dnr2350am
-python scripts/rp2350/flash.py --smoke
+go run ./cmd/tos build -target rpi-pico2-smp
+python scripts/rp2350/flash.py --uf2 build/tinyos-rpi-pico2-smp.uf2 --smoke
 ```
+
+ATK 对照：`-target atk-dnr2350am-smp` / `build/tinyos-atk-dnr2350am-smp.uf2`。
 
 `--smoke` 会在看到 `tos> ` 后依次跑 `echo / ls / free / uptime / cat /proc/uptime /
 gpio / reboot`；`--port auto` 靠 VID/PID 找 CDC 口。按住 BOOTSEL 插 USB（或

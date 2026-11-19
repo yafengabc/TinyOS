@@ -155,17 +155,18 @@ x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
   2. **构建了但运行失败/降级**（例：P4 PMP 粒度不足）→ 具名降级，写清硬件原因。
 - 只有第 2 种叫"降级"；两种都不许写成 24/24。
 
-### 5.0.1 硬件验收分工（2026-11-17）
+### 5.0.1 硬件验收分工（2026-11-19）
 
-- **关闭 issue 的硬件门槛是 RP2350（ATK-DNRP2350AM）的 Cortex-M33 与 Hazard3 RV32
-  两个 SMP 镜像**；两者都过才算过。
+- **关闭 issue 的 RP2350 硬件门槛是 Pico 2 的两个 SMP 镜像**
+  （`rpi-pico2-smp` Cortex-M33、`rpi-pico2-rv32-smp` Hazard3）：心跳 6/6、
+  `dd_stress.py` ≥100 轮、`smpbench` ≥1.8x，三者都过才算过。
+- **为什么换成 Pico 2**：8 MiB flash 让高强度 dd/soak 跑得开，板子也更便宜；
+  ATK-DNRP2350AM 继续支持、镜像继续构建，但不再是关闭门槛。
 - **ESP32-C3 由实现侧自测**（命令见 §5.1），结果写 `docs/acceptance/`，不外包、不另开
   issue。
 - **RP2040 不作为关闭依据**：目前没有自动 BOOTSEL 路径。确实需要 RP2040 证据的改动，
   单独开一个 RP2040 专项 issue，由板主另行排期；不要写进别的 issue 的关闭条件。
-- **Pico 2 是独立板级目标** `rpi-pico2`（`OPEN-ITEMS.md` §1b，2026-11-18 起可启动）：
-  有自己的 board target、LED/无 LCD/8 MiB flash 事实和 T3 流程（`TESTING.md` §5.4），
-  但不要假设 ATK 的镜像或它的 24 项表适用于它。
+- 镜像是板级的：ATK 的 24 项验收表不等于 Pico 2 的证据，反之亦然。
 
 ### 5.1 ESP32-C3
 
@@ -178,7 +179,10 @@ python scripts/esp-c3/accept.py -p COM4
 - 验收是 24 项；本机 `tos.conf` 的 `[user] exclude` 若裁掉了 `hello` 等程序，会得到 23/24。**必须说明缺的是哪一个、因为配置排除**，不能把 23/24 当 24/24。
 - 想跑满 24 项：用默认配置或临时配置（不要把 `tos.conf` 提交）。
 
-### 5.2 ATK-DNRP2350AM（Cortex-M33 / Hazard3）
+### 5.2 ATK-DNRP2350AM（参考板，Cortex-M33 / Hazard3）
+
+> 自 2026-11-19 起 ATK **不是关闭门槛**（门槛见 §5.0.1 与 §5.4）。下面的命令保留
+> 用于回归、对照和 24 项表。
 
 ```sh
 # 刷机 + 看启动日志（--port 用 CDC 或 UART）
@@ -217,20 +221,30 @@ python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-
 - `scripts/rp2040/heartbeat.py --port COM19` 已在最终单核镜像上 **6/6**（启动、时间、fs 读、用户程序、fs 写回、crash 隔离）。
 - PIO 的 LED/灯带是目视项，必须写"看了/没看"，不能只写"PIO 通过"。
 
-### 5.4 Pico 2（`rpi-pico2`，2026-11-18 起可启动）
+### 5.4 Pico 2（RP2350 验收门槛）
 
 板级目标是 `board/rpi-pico2`（`base = rp2350-generic`）：LED 在 GP25（高电平点亮）、
 无 LCD/TF、8 MiB W25Q64。四个镜像：`rpi-pico2`、`rpi-pico2-smp`、
 `rpi-pico2-rv32`、`rpi-pico2-rv32-smp`。
 
-```sh
-# 刷写 + 启动日志校验（会等 RP2350 BOOTSEL 盘）
-python scripts/rp2350/flash.py --uf2 build/tinyos-rpi-pico2.uf2 --smoke -p COM19
+**关闭门槛用两个 SMP 镜像**：
 
-# 心跳级 6 项（启动、时间、fs 读、用户程序、fs 写回、fault 隔离）
-python scripts/rp2350/pico2_heartbeat.py                 # 默认端口：板上 CDC(2e8a:000a) 优先，其次 CH343
-python scripts/rp2350/heartbeat.py -p COM19 --target rpi-pico2   # 指定 UART0
+```sh
+# 心跳 6/6（启动、时间、fs 读、用户程序、fs 写回、fault 隔离）
+python scripts/rp2350/flash_heartbeat.py --uf2 build/tinyos-rpi-pico2-smp.uf2 \
+    -p COM19 --target rpi-pico2-smp
+python scripts/rp2350/flash_heartbeat.py --uf2 build/tinyos-rpi-pico2-rv32-smp.uf2 \
+    -p COM19 --target rpi-pico2-rv32-smp
+
+# dd/rm 至少 100 轮（8 MiB flash 的意义就在这里）
+python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-smp --rounds 100
+python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-rv32-smp --rounds 100
+
+# 双核扩展性：在 shell 里 smpbench 1250000，期望 >= 1.8x
 ```
+
+单核镜像和 `accept33.py` 的 24 项表仍可用于排查，但**不是关闭依据**（那张表是 ATK
+的 LCD/TF/按键假设）。
 
 - UART0 在 GP0/GP1（115200 8N1，需要一个 USB-TTL 适配器）；板上 USB（2e8a:000a）
   是另一个 console，`-p COM17 --dtr` 走它。
