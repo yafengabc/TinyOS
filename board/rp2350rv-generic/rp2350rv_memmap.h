@@ -43,9 +43,15 @@
  * jump instruction stored at 0x7dfa (pico-sdk bootrom_constants.h:
  * BOOTROM_ENTRY_OFFSET - BOOTROM_WELL_KNOWN_PTR_SIZE), and it takes
  * (code, RT_FLAG_FUNC_RISCV = 1).  The ARM port instead uses the (code,
- * flags) pointer at 0x16 with RT_FLAG_FUNC_ARM_SEC. */
-#define BOOTROM_RV_LOOKUP_PTR 0x7dfau
-#define RT_FLAG_FUNC_RISCV    0x0001u
+ * flags) pointer at 0x16 with RT_FLAG_FUNC_ARM_SEC.
+ *
+ * Data-table lookups (RT_FLAG_DATA) must use the entry one slot earlier,
+ * BOOTROM_TABLE_LOOKUP_OFFSET = 0x7df8 (BOOTROM_ENTRY_OFFSET -
+ * 2*BOOTROM_WELL_KNOWN_PTR_SIZE); the 0x7dfa entry is the func-table
+ * lookup only. */
+#define BOOTROM_RV_LOOKUP_PTR      0x7dfau
+#define BOOTROM_RV_DATA_LOOKUP_PTR 0x7df8u
+#define RT_FLAG_FUNC_RISCV         0x0001u
 
 #define CLOCKS_BASE     0x40010000u
 #define RESETS_BASE     0x40020000u

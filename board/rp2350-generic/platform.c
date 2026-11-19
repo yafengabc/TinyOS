@@ -142,6 +142,26 @@ typedef void (*rp_rom_program_t)(uint32_t addr, const uint8_t *data, size_t coun
 #define ROM_FUNC_FLASH_RANGE_ERASE    0x4552u   /* 'R','E' */
 #define ROM_FUNC_FLASH_RANGE_PROGRAM   0x5052u   /* 'R','P' */
 
+/* Data-table lookup ('F','D' = 0x4446, the bootram FLASH_DEVINFO16 copy).
+ * The ROM's data table is addressed with the same (code, flags) lookup
+ * entry as the function table, only the flag differs: RT_FLAG_DATA (0x40)
+ * selects the data table, RT_FLAG_FUNC_ARM_SEC (0x4) the secure function
+ * table.  On RP2350 the returned value for a data row is a pointer to a
+ * 32-bit pointer literal in ROM, which itself points at the live copy in
+ * bootram - so a data lookup needs one more dereference than a function
+ * lookup.  (pico-sdk bootrom_constants.h + flash.c: flash_devinfo_ptr().) */
+#define ROM_DATA_FLASH_DEVINFO16_PTR 0x4446u   /* 'F','D' */
+#define ROM_DATA_FLAG_DATA           0x0040u
+
+/* bootram FLASH_DEVINFO bit fields (OTP_DATA_FLASH_DEVINFO, RP2350 OTP):
+ * bits 12:15 = CS1_SIZE, bits 8:11 = CS0_SIZE, bit 7 = D8H_ERASE_SUPPORTED.
+ * The capacity of the primary CS0 flash is 4096u << CS0_SIZE - the exact
+ * decode pico-sdk's flash_devinfo_size_to_bytes() applies.  With the OTP
+ * BOOT_FLAGS0_FLASH_DEVINFO_ENABLE bit not set the ROM reports the
+ * conservative default CS0_SIZE = 12 (16 MiB). */
+#define FLASH_DEVINFO_CS0_SIZE_MASK  0x0f00u
+#define FLASH_DEVINFO_CS0_SIZE_LSB   8
+
 static void *rp_rom_func(uint32_t code)
 {
     rp_rom_lookup_t lookup =
@@ -152,6 +172,44 @@ static void *rp_rom_func(uint32_t code)
      * stored it aligned. */
     return (void *)((uintptr_t)lookup(code, RT_FLAG_FUNC_ARM_SEC) | 1u);
 }
+
+/* Read the CS0 flash capacity the boot ROM recorded.  The value sits in
+ * bootram as a 16-bit FLASH_DEVINFO word, reachable through the ROM data
+ * table ('F','D').  Read it early: the ROM only writes it at boot, but the
+ * copy could in principle be rewritten later, and a stale read is worse
+ * than none.  Mirrors the ESP32-C3 port's flash_detect_from_rom(). */
+static uint32_t rp2350_flash_detect(void)
+{
+    rp_rom_lookup_t lookup =
+        (rp_rom_lookup_t)(uintptr_t)(*(volatile uint16_t *)BOOTROM_LOOKUP_PTR);
+    uint32_t *ptr_literal;
+    uint16_t devinfo;
+    uint32_t size;
+
+    if (!lookup)
+        return 0;
+    ptr_literal = (uint32_t *)lookup(ROM_DATA_FLASH_DEVINFO16_PTR,
+                                     ROM_DATA_FLAG_DATA);
+    if (!ptr_literal)
+        return 0;
+    /* The data table row holds a pointer to the bootram copy; dereference
+     * twice: once for the 32-bit pointer literal, once for the 16-bit
+     * FLASH_DEVINFO word. */
+    devinfo = *(volatile uint16_t *)(uintptr_t)(*ptr_literal);
+    size = (devinfo & FLASH_DEVINFO_CS0_SIZE_MASK) >> FLASH_DEVINFO_CS0_SIZE_LSB;
+
+    /* Only 1/2/4/8/16 MiB are usable CS0 sizes (4096u << size, size 0x8..
+     * 0xc).  _NONE (0x0), the sub-MiB parts, and a missing/floating table
+     * (0x0, 0xffff) all fail these bounds; ramdisk.c clamps the detected
+     * value against the configured size, so a bogus 4 KiB would otherwise
+     * shrink the filesystem to nothing.  Mirrors the ESP32-C3 port's
+     * JEDEC capacity-code check. */
+    if (size < 0x8u || size > 0xcu)
+        return 0;
+    return 4096u << size;
+}
+
+static uint32_t g_flash_detected;
 
 static rp_rom_void_t    g_rom_connect;
 static rp_rom_void_t    g_rom_exit_xip;
@@ -1619,13 +1677,18 @@ uint32_t plat_block_size(void)
     return 512;
 }
 
+uint32_t plat_flash_detected_bytes(void)
+{
+    return g_flash_detected;
+}
+
 uint32_t plat_block_count(void)
 {
-    /* Flash-backed: the whole 3.5 MiB partition is addressable even though
-     * the flashed image only occupies its first 300 KiB; ramdisk_init()
-     * grows the filesystem over the rest.  Embedded: the linked RAM disk is
-     * exactly PLAT_LFS_BLOCKS blocks. */
-    return PLAT_LFS_BLOCKS * 8u;
+    /* The RAM disk is the filesystem here (fs_backing = embedded), and
+     * ramdisk_init() grows it over the flash partition only on a
+     * flash-backed board.  The count must follow the runtime-detected
+     * capacity, exactly like the ESP32-C3 port. */
+    return plat_lfs_blocks() * 8u;
 }
 
 /* ---- boot -------------------------------------------------------------- */
@@ -1744,6 +1807,13 @@ void plat_board_early(void)
 
 void plat_board_init(void)
 {
+    /* Snapshot the ROM's CS0 flash capacity before anything else: this is
+     * the first board code after the console, and nothing rewrites the
+     * bootram FLASH_DEVINFO copy afterwards.  Kept in g_flash_detected so
+     * /proc/flash can show the true capacity instead of the configured
+     * 4 MiB (ATK) / 8 MiB (Pico 2) upper bound. */
+    g_flash_detected = rp2350_flash_detect();
+
     g_rom_connect   = (rp_rom_void_t)rp_rom_func(ROM_FUNC_CONNECT_INTERNAL_FLASH);
     g_rom_exit_xip  = (rp_rom_void_t)rp_rom_func(ROM_FUNC_FLASH_EXIT_XIP);
     g_rom_enter_xip = (rp_rom_void_t)rp_rom_func(ROM_FUNC_FLASH_ENTER_CMD_XIP);
