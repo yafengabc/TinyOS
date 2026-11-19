@@ -9,6 +9,11 @@
 | --- | --- | --- |
 | `esp32c3-generic` | `tinyos-esp32c3-generic-full.bin`（推荐，一次写完）+ `tinyos-esp32c3-generic.bin` / `tinyos-ramdisk-esp32c3-generic.bin`（分体） | `esptool write-flash 0x0 tinyos-esp32c3-generic-full.bin`；分体见下 |
 | `rpi-pico` | `tinyos-rpi-pico.uf2` | BOOTSEL 后拖到 `RPI-RP2` |
+| `rpi-pico-smp` | `tinyos-rpi-pico-smp.uf2` | 同上（双核） |
+| `rpi-pico2` | `tinyos-rpi-pico2.uf2` | BOOTSEL 后拖到 `RP2350`（Cortex-M33） |
+| `rpi-pico2-smp` | `tinyos-rpi-pico2-smp.uf2` | 同上（双核） |
+| `rpi-pico2-rv32` | `tinyos-rpi-pico2-rv32.uf2` | 同上（Hazard3 单 hart） |
+| `rpi-pico2-rv32-smp` | `tinyos-rpi-pico2-rv32-smp.uf2` | 同上（Hazard3 双 hart） |
 | `atk-dnr2350am` | `tinyos-atk-dnr2350am.uf2` | BOOTSEL 后拖到 `RP2350` |
 | `atk-dnr2350am-smp` | `tinyos-atk-dnr2350am-smp.uf2` | 同上（双核） |
 | `atk-dnr2350am-rv32` | `tinyos-atk-dnr2350am-rv32.uf2` | 同上（RISC-V 核） |
@@ -38,6 +43,10 @@ features 与"是否读了 `tos.conf`"。
 tinyos-esp32c3-generic
 tinyos-rpi-pico
 tinyos-rpi-pico-smp
+tinyos-rpi-pico2
+tinyos-rpi-pico2-smp
+tinyos-rpi-pico2-rv32
+tinyos-rpi-pico2-rv32-smp
 tinyos-atk-dnr2350am
 tinyos-atk-dnr2350am-smp
 tinyos-atk-dnr2350am-rv32

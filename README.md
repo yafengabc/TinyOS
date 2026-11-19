@@ -76,7 +76,7 @@ baseline used to tell "SMP-specific" from "ordinary" bugs.
 - **Drivers** — UART (16550/CMSDK/PL011/C3/USJ), GPIO/ADC/PWM/SPI/I2C/DMA, PIO
   on all four RP targets, ST7789 panels, USB CDC (TinyUSB on RP, native USB on
   the C3), WiFi on the C3.
-- **Built and gated in CI** — seven flashable images per push, LLVM pinned to the
+- **Built and gated in CI** — eleven flashable images per push, LLVM pinned to the
   version the sizes were measured with, a QEMU smoke + soak job, and releases
   published from tags. Every image ships its build configuration
   (`build-config-<target>.txt`; `build/build-config.txt` in a local tree)

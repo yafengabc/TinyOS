@@ -323,7 +323,8 @@ notes:
 当前 `.github/workflows/images.yml` 覆盖：
 
 - `checks` job：`go test ./...`、`go vet ./...`（每个 push）；
-- 7 个发布镜像构建（esp32c3-generic、rpi-pico/smp、atk-dnr2350am/smp、atk-dnr2350am-rv32/smp），
+- 11 个发布镜像构建（esp32c3-generic、rpi-pico/smp、atk-dnr2350am/smp、
+  atk-dnr2350am-rv32/smp、rpi-pico2/smp、rpi-pico2-rv32/smp），
   统一加 `-config configs/release.conf`（`boot_trace = 0`）：发布件不打印 `[A]..[E]`、
   `[P1]/[P2]`、`[smp]`、`[mpu]` 等启动轨迹；
 - `smoke` 是**按目标并行**的一组 job（每个约 50–95 s）：
