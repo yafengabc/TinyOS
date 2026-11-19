@@ -404,6 +404,39 @@ __attribute__((weak)) uint32_t plat_usb_poll_ns(void)
     return 0u;
 }
 
+/* Optional port diagnostic: the console UART's live programming, twelve
+ * words, read by /proc/uart0.  A port that fills none of them has nothing to
+ * report and the node prints "not available". */
+__attribute__((weak)) void plat_uart_debug(uint32_t *out)
+{
+    int i;
+
+    for (i = 0; i < 12; i++)
+        out[i] = 0u;
+}
+
+/* Optional port self-test: does the TX pad actually move when the UART
+ * transmits?  Zero means the port cannot read its own pad back. */
+__attribute__((weak)) int plat_uart_tx_probe(uint32_t *out)
+{
+    int i;
+
+    for (i = 0; i < 8; i++)
+        out[i] = 0u;
+    return 0;
+}
+
+/* Optional port self-test: can the pad drive the line at all, from a
+ * peripheral other than the one that is failing? */
+__attribute__((weak)) int plat_gpio_drive_probe(uint32_t *out)
+{
+    int i;
+
+    for (i = 0; i < 4; i++)
+        out[i] = 0u;
+    return 0;
+}
+
 uint32_t plat_lfs_blocks(void)
 {
 #if TOS_HAS_FLASH

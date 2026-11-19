@@ -5061,6 +5061,48 @@ AIRCR 那段注释里描述过的形状。
 `scripts/rp2350/bootsel_poke.py <port> 25 --dtr` 能踢回 BOOTSEL，本轮两次靠它救回；
 1200-baud touch 对 TinyOS 无效（那是 pico-sdk 的复位接口）。另外 **刷机后 UART0 哑**
 在 ARM 镜像上稳定复现（0/20 轮无输出、CDC 20/20 正常），所以它和 RISC-V 端口无关，
-触发条件是“BOOTSEL 刷机后的那次启动”，根因仍未查。
+触发条件是“BOOTSEL 刷机后的那次启动”；根因当天就查清了，见 §84
+（不是固件：板子的 GP0 网络被拉在低电平）。
 
 卡片：`docs/acceptance/2026-11-20-pico2-smp-boot-gate.md`。
+
+## 84. 2026-11-20 UART0 只丢 TX：三个自检口，和一个是非题
+
+§83 留下的尾巴是「刷机后 UART0 哑，CDC 正常」。今天的结论是**它不是固件问题**，
+而板子现在能自己把这件事说清楚——为此加了三个端口无关的自检口（`kernel/platform.h`
+里三个弱钩子，没有实现的端口自动回 "not available"）：
+
+| 节点 | 钩子 | 回答什么 |
+| --- | --- | --- |
+| `/proc/uart0` | `plat_uart_debug()` | UART 现在的编程：`CR`、`FR`、`IBRD/FBRD`、`LCR_H`、TX/RX 两个引脚的 `GPIO_CTRL` 与焊盘、`clk_peri`、`RESETS_DONE` |
+| `/proc/uart0tx` | `plat_uart_tx_probe()` | 发 32 字节 `0x55`，跨整个帧采样 `SIO_GPIO_IN` 统计 GP0 的高低与跳变；gp1（适配器 TX）与 gp25（LED）当对照脚；另给一段发送前的空闲基线 |
+| `/proc/gp0drive` | `plat_gpio_drive_probe()` | 把 GP0 的 FUNCSEL 临时改成 SIO(5)、置 OE、输出 1/0 各读回 2048 次，并回读 `pin_mux`/`sio_oe` 证明写确实落地 |
+
+**问出来的三件事**（输出见 `docs/acceptance/2026-11-20-uart0-tx-diagnosis.md`）：
+
+1. UART0 的**收方向一直是好的**：在 UART0 上敲 `uptime`，回显从 CDC 出来。这一条
+   直接判死了「ROM 改了 pad/时钟、`plat_init` 没重做」的原假设——分频、RX、初始化都活着。
+2. `/proc/uart0` 与正常启动逐项相同：`cr=301`、`ibrd=0x51/fbrd=0x18`（150 MHz → 115200）、
+   引脚 `FUNCSEL=2`、焊盘 `0x56`（`iso=0 od=0 ie=1`），和 RX 侧字节相同。
+3. **GP0 这根线拉不高**：UART 空闲时读回全低（本应为高），发送时 65536 次采样只有 44 次
+   越过阈值；换 SIO 直接驱动、确认 `pin_mux=5`、`sio_oe` bit0 已置，仍然 2048/2048 读低。
+   同一时刻 gp1/gp25 稳定读高，回读链路和整个 bank 都正常。
+
+所以故障在 GP0 网络上（跳线错位/短地/适配器 RX 端强下拉，或这颗 pad 的输出级损坏），
+**改固件不会有任何变化**。顺带解释了「20/20 → 0/20 与刷机同步」：刷机时插拔线束碰到了
+这根线。人工确认只需两步（拔线再 `cat /proc/gp0drive`；断电量 GP0 对 GND 电阻），
+写进 `docs/OPEN-ITEMS.md` 第 5 条。
+
+**§83 那个 `mcause=0x3` 也解释清楚了**：3 = breakpoint = `ebreak`。全镜像 47 条 `ebreak`
+全部来自 TinyUSB 的 `TU_ASSERT/TU_VERIFY`（`tusb_verify.h:87`），所在函数清一色是 USB 栈
+（`tud_task_ext`、`process_set_config`、`dcd_event_handler`…），内核一条都没有。所以那
+次「照搬 ARM pump 就挂死」是 **TinyUSB 断言在本机被触发**，不是预算问题；panic 打印的
+PC 落在 USB 栈区间。具体是哪条断言对不上——11-19 的镜像是本地实验、未提交，地址在现行
+镜像里落在指令中间；按 `docs/OPEN-ITEMS.md` 第 4 条的安全做法重做才能钉死。
+本轮**故意没做**这个复现：断言型 hang 发生在枚举之前，而 UART0 现在又是哑的，
+刷进去就只能等人按 BOOTSEL。
+
+**走错的两步**（写进卡片了）：第一版采样在写完 DR 后立刻密集读，整个窗口落在**起始位**
+上，健康引脚也读成 `low=1533 high=3`，差点被当成"pad 没驱动"；另一版拿
+`IO_BANK0.GPIO0_STATUS` 的 bit17 当 `INFROMPAD`，读回 `0x2000/0x2200` 跟芯片布局对不上，
+换 `SIO_GPIO_IN` 后既不需要依赖 status 位布局，也顺手拿到了对照脚。

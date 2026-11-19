@@ -31,12 +31,14 @@
 
 #define CLOCKS_BASE     0x40008000u
 #define CLK_PERI_CTRL   (*(volatile uint32_t *)(CLOCKS_BASE + 0x48u))
+#define CLK_PERI_DIV    (*(volatile uint32_t *)(CLOCKS_BASE + 0x4cu))
 #define CLOCKS_CLK_SYS_CTRL  (*(volatile uint32_t *)(CLOCKS_BASE + 0x3cu))
 #define CLOCKS_CLK_SYS_DIV   (*(volatile uint32_t *)(CLOCKS_BASE + 0x40u))
 #define CLOCKS_CLK_SYS_SELECTED (*(volatile uint32_t *)(CLOCKS_BASE + 0x44u))
 
 #define IO_BANK0_BASE   0x40014000u
 #define PADS_BANK0_BASE 0x4001c000u
+#define SIO_BASE        0xd0000000u
 #define GPIO_CTRL(n) (*(volatile uint32_t *)(IO_BANK0_BASE + 0x04u + 8u * (n)))
 #define GPIO_PAD(n)  (*(volatile uint32_t *)(PADS_BANK0_BASE + 0x04u + 4u * (n)))
 
@@ -116,11 +118,130 @@ void dbg_uart_puts(const char *s)
     }
 }
 
-void dbg_uart_hex(uint32_t v)
-{
+void dbg_uart_hex(uint32_t v){
     static const char hex[] = "0123456789abcdef";
 
     dbg_uart_puts("0x");
     for (int shift = 28; shift >= 0; shift -= 4)
         dbg_uart_putc(hex[(v >> shift) & 0xfu]);
+}
+
+/* Console UART programming for /proc/uart0: CR, FR, IBRD, FBRD, LCR_H,
+ * GPIO0_CTRL, PAD0, GPIO1_CTRL, PAD1, CLK_PERI_CTRL, CLK_PERI_DIV,
+ * RESETS_DONE.  Read-only, so it is safe on a boot whose console works -
+ * the point is to be able to compare a working boot against one that has
+ * lost its transmitter. */
+void plat_uart_debug(uint32_t *out)
+{
+    out[0]  = UART_CR;
+    out[1]  = UART_FR;
+    out[2]  = UART_IBRD;
+    out[3]  = UART_FBRD;
+    out[4]  = UART_LCR_H;
+    out[5]  = GPIO_CTRL(0);
+    out[6]  = GPIO_PAD(0);
+    out[7]  = GPIO_CTRL(1);
+    out[8]  = GPIO_PAD(1);
+    out[9]  = CLK_PERI_CTRL;
+    out[10] = CLK_PERI_DIV;
+    out[11] = RESETS_DONE;
+}
+
+/* Transmit 0x55 and watch GP0 through SIO_GPIO_IN for whole frames, with
+ * GP25 (the LED) as the control pin - see kernel/platform.h.  Sampling only
+ * right after the write lands inside the start bit and reads "always low"
+ * on a healthy pin. */
+int plat_uart_tx_probe(uint32_t *out)
+{
+    uint32_t lo = 0, hi = 0, trans = 0, prev = 2u, spins;
+    uint32_t idle_lo = 0, idle_hi = 0, gp1_hi = 0, led_hi = 0;
+
+    for (int s = 0; s < 2048; s++) {
+        uint32_t v = *(volatile uint32_t *)(SIO_BASE + 0x004u);
+
+        if (v & 1u)
+            idle_hi++;
+        else
+            idle_lo++;
+    }
+
+    for (int n = 0; n < 32; n++) {
+        for (spins = 0; spins < 200000u; spins++)
+            if (!(UART_FR & UART_FR_TXFF))
+                break;
+        if (spins == 200000u)
+            return 0;
+        UART_DR = 0x55u;
+        for (int s = 0; s < 2048; s++) {
+            uint32_t v = *(volatile uint32_t *)(SIO_BASE + 0x004u);
+            uint32_t pin = v & 1u;
+
+            if (v & (1u << 25))
+                led_hi++;
+            if (v & 2u)
+                gp1_hi++;
+            if (pin)
+                hi++;
+            else
+                lo++;
+            if (prev != 2u && pin != prev)
+                trans++;
+            prev = pin;
+        }
+    }
+    for (spins = 0; spins < 2000000u; spins++)
+        if (!(UART_FR & (1u << 3)))          /* BUSY */
+            break;
+    out[0] = lo;
+    out[1] = hi;
+    out[2] = trans;
+    out[3] = UART_FR;
+    out[4] = idle_lo;
+    out[5] = idle_hi;
+    out[6] = gp1_hi;
+    out[7] = led_hi;
+    return 1;
+}
+
+/* Drive the TX pin from SIO and read it back: see the RP2350 port for why
+ * this is the question that separates "the pad cannot pull the line high"
+ * (hardware, no receiver will ever work) from "the UART's output is not
+ * reaching the pad". */
+int plat_gpio_drive_probe(uint32_t *out)
+{
+    uint32_t ctrl = *(volatile uint32_t *)(IO_BANK0_BASE + 0x04u);
+    uint32_t hi1 = 0, lo1 = 0, hi0 = 0, lo0 = 0;
+    volatile uint32_t *sio_in   = (volatile uint32_t *)(SIO_BASE + 0x004u);
+    volatile uint32_t *sio_out_s= (volatile uint32_t *)(SIO_BASE + 0x014u);
+    volatile uint32_t *sio_out_c= (volatile uint32_t *)(SIO_BASE + 0x018u);
+    volatile uint32_t *sio_oe_s = (volatile uint32_t *)(SIO_BASE + 0x024u);
+    volatile uint32_t *sio_oe_c = (volatile uint32_t *)(SIO_BASE + 0x028u);
+
+    *(volatile uint32_t *)(IO_BANK0_BASE + 0x04u) = 5u;   /* FUNCSEL_SIO */
+    *sio_oe_s = 1u;
+
+    *sio_out_s = 1u;
+    out[4] = *(volatile uint32_t *)(IO_BANK0_BASE + 0x04u);  /* must read 5 */
+    out[5] = *(volatile uint32_t *)(SIO_BASE + 0x020u);      /* must have bit 0 */
+    for (int s = 0; s < 2048; s++) {
+        if (*sio_in & 1u)
+            hi1++;
+        else
+            lo1++;
+    }
+    *sio_out_c = 1u;
+    for (int s = 0; s < 2048; s++) {
+        if (*sio_in & 1u)
+            hi0++;
+        else
+            lo0++;
+    }
+
+    *sio_oe_c = 1u;
+    *(volatile uint32_t *)(IO_BANK0_BASE + 0x04u) = ctrl;
+    out[0] = hi1;
+    out[1] = lo1;
+    out[2] = hi0;
+    out[3] = lo0;
+    return 1;
 }

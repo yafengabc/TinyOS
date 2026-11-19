@@ -749,6 +749,145 @@ static void uart_init(void)
                              RP_UART_CR_TXE | RP_UART_CR_RXE);
 }
 
+/* The console UART's live programming, for /proc/uart0.  Twelve words:
+ * CR, FR, IBRD, FBRD, LCR_H, GPIO0_CTRL, PAD0, GPIO1_CTRL, PAD1,
+ * CLK_PERI_CTRL, CLK_PERI_DIV, RESETS RESET_DONE.
+ *
+ * Read-only on purpose: this has to be safe to call from a *working* boot,
+ * so it must not touch a register that could disturb the wire.  It is here
+ * because the boot after a BOOTSEL flash loses UART0 TX while keeping RX,
+ * and the CDC console is the only way to see what the UART is programmed
+ * to do. */
+void plat_uart_debug(uint32_t *out)
+{
+    out[0]  = mmio_read32(RP_UART_CR);
+    out[1]  = mmio_read32(RP_UART_FR);
+    out[2]  = mmio_read32(RP_UART_IBRD);
+    out[3]  = mmio_read32(RP_UART_FBRD);
+    out[4]  = mmio_read32(RP_UART_LCR_H);
+    out[5]  = mmio_read32(RP_GPIO_CTRL(0));
+    out[6]  = mmio_read32(RP_GPIO_PAD(0));
+    out[7]  = mmio_read32(RP_GPIO_CTRL(1));
+    out[8]  = mmio_read32(RP_GPIO_PAD(1));
+    out[9]  = mmio_read32(CLOCKS_BASE + CLK_PERI_CTRL_OFFSET);
+    out[10] = mmio_read32(CLOCKS_BASE + CLK_PERI_DIV_OFFSET);
+    out[11] = mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET);
+}
+
+/* Transmit and watch the TX pin for the whole duration of each frame.
+ *
+ * SIO_GPIO_IN is the pad's view of every pin at once, so GPIO25 (the LED,
+ * driven high by us) is the control: if GP25 reads high the readout works,
+ * and what GP0 does is then a fact about GP0.  The sampling has to span the
+ * whole 87 us frame, not just the moment after the write: a tight read loop
+ * lands entirely inside the start bit, which is low by definition, and
+ * "always low" would be read as "not driving" on a perfectly healthy pin.
+ * (It was: 1533 low / 3 high, which was the start bit, not a dead pad.) */
+int plat_uart_tx_probe(uint32_t *out)
+{
+    uint32_t lo = 0, hi = 0, trans = 0, prev = 2u, spins;
+    uint32_t idle_lo = 0, idle_hi = 0, gp1_hi = 0, led_hi = 0;
+
+    /* Baseline: what the pin reads with the transmitter idle.  A working
+     * UART holds TX high between frames, so this is "must be 1". */
+    for (int s = 0; s < 2048; s++) {
+        uint32_t v = mmio_read32(SIO_GPIO_IN);
+
+        if (v & 1u)
+            idle_hi++;
+        else
+            idle_lo++;
+    }
+
+    for (int n = 0; n < 32; n++) {
+        for (spins = 0; spins < 200000u; spins++)
+            if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF))
+                break;
+        if (spins == 200000u)
+            return 0;                   /* FIFO wedged: not this question */
+        mmio_write32(RP_UART_DR, 0x55u);
+
+        /* 2048 reads is ~27-80 us depending on the loop's cost: enough to
+         * cross several bit times of the 87 us frame. */
+        for (int s = 0; s < 2048; s++) {
+            uint32_t v = mmio_read32(SIO_GPIO_IN);
+            uint32_t pin = v & 1u;
+
+            if (v & (1u << RP_LED_GPIO))
+                led_hi++;
+            if (v & 2u)
+                gp1_hi++;
+            if (pin)
+                hi++;
+            else
+                lo++;
+            if (prev != 2u && pin != prev)
+                trans++;
+            prev = pin;
+        }
+    }
+    for (spins = 0; spins < 2000000u; spins++)
+        if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_BUSY))
+            break;
+    out[0] = lo;
+    out[1] = hi;
+    out[2] = trans;
+    out[3] = mmio_read32(RP_UART_FR);
+    out[4] = idle_lo;
+    out[5] = idle_hi;
+    out[6] = gp1_hi;
+    out[7] = led_hi;
+    return 1;
+}
+
+/* Drive the TX pin from SIO for a moment and read it back.
+ *
+ * plat_uart_tx_probe() answers "does the UART move the pin".  When the
+ * answer is no, this says which half is broken: the *same* pad driver, told
+ * to output a 1 through a different peripheral, either pulls the pin high
+ * (so the pad, the package ball and the trace are fine, and the problem is
+ * whatever is on the other end of the wire or the UART's own output gate) or
+ * cannot (so nothing at this pin can ever read high and no receiver will
+ * ever see a frame, whatever the registers say).
+ *
+ * out[0]=samples high while driving 1, out[1]=low while driving 1,
+ * out[2]=samples high while driving 0, out[3]=low while driving 0.
+ */
+int plat_gpio_drive_probe(uint32_t *out)
+{
+    uint32_t ctrl = mmio_read32(RP_GPIO_CTRL(0));
+    uint32_t hi1 = 0, lo1 = 0, hi0 = 0, lo0 = 0;
+
+    /* FUNCSEL 5 is SIO on every pin of both chips. */
+    mmio_write32(RP_GPIO_CTRL(0), 5u);
+    mmio_write32(SIO_GPIO_OE_SET, 1u);
+
+    mmio_write32(SIO_GPIO_OUT_SET, 1u);
+    out[4] = mmio_read32(RP_GPIO_CTRL(0));   /* must read 5 */
+    out[5] = mmio_read32(SIO_BASE + 0x030u);  /* GPIO_OE, bit 0 */
+    for (int s = 0; s < 2048; s++) {
+        if (mmio_read32(SIO_GPIO_IN) & 1u)
+            hi1++;
+        else
+            lo1++;
+    }
+    mmio_write32(SIO_GPIO_OUT_CLR, 1u);
+    for (int s = 0; s < 2048; s++) {
+        if (mmio_read32(SIO_GPIO_IN) & 1u)
+            hi0++;
+        else
+            lo0++;
+    }
+
+    mmio_write32(SIO_GPIO_OE_CLR, 1u);
+    mmio_write32(RP_GPIO_CTRL(0), ctrl);
+    out[0] = hi1;
+    out[1] = lo1;
+    out[2] = hi0;
+    out[3] = lo0;
+    return 1;
+}
+
 #if TOS_DIAG
 /* One line of liveness, printed straight to the PL011 (the console ring needs
  * the tick, and the tick is exactly what stops when the machine wedges).

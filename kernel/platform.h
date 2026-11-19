@@ -284,6 +284,34 @@ uint32_t plat_lfs_blocks(void);
 void plat_flash_probe_debug(uint32_t *out);
 uint32_t plat_usb_poll_ns(void);
 
+/* Console UART in twelve words, for /proc/uart0.  A port that can lose its
+ * TX side without losing its RX side (the RP2350 after a BOOTSEL flash does
+ * exactly that) needs its programming - CR, the divider, the pad and the pin
+ * mux - readable from the *other* console, or the only way to tell "the
+ * board stopped transmitting" from "the adapter stopped receiving" is to
+ * guess.  All zero means the port has nothing to say. */
+void plat_uart_debug(uint32_t *out);
+
+/* Make the console UART transmit, and watch the TX pad's own input buffer
+ * while it does.  This is the only way a board can answer "am I still
+ * driving the wire?" about itself: the register programming can be perfect
+ * (UARTEN|TXE|RXE, correct divisor, pad not isolated, pin mux on UART) and
+ * the line can still be dead, and the adapter at the other end cannot tell
+ * the two apart.  Fills out[0]=samples the pad read low, out[1]=high,
+ * out[2]=transitions, out[3]=FR once the last byte has shifted out,
+ * out[4]/out[5]=the same two counts taken *before* the first byte (an idle
+ * UART must read high there), out[6]=high count of a control pin driven by
+ * the far end (the adapter's TX), out[7]=high count of the LED pin.
+ * Returns 1 when the probe ran, 0 when the port has no such pin readback. */
+int plat_uart_tx_probe(uint32_t *out);
+
+/* Drive the console UART's TX pad from the GPIO/SIO peripheral instead and
+ * read it back, which separates "the pad cannot pull the line high" from
+ * "the UART's output is not reaching the pad".  out[0..1]=samples read high
+ * and low while driving 1, out[2..3]=the same while driving 0.  Returns 1
+ * when it ran, 0 when the port cannot do it. */
+int plat_gpio_drive_probe(uint32_t *out);
+
 /* ---- physical memory ------------------------------------------------- */
 
 /* The flat model needs no frame allocator or page tables: every byte of RAM

@@ -103,16 +103,41 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    `2666 / 2666 / 2659 ns`，即 **2660 ns/poll，250 ms ≈ 94 000 次**。
    注意这条数据**否掉了原来的解释**：40 000 次 × 2.66 µs = 106 ms，远达不到挂死的
    量级，所以那次挂死不是“预算太大”，更可能是 RV32 现有循环里那个 **40 周期间隔**
-   被去掉导致的（ARM 的 pump 是紧循环）。要换有界 pump，先解释 2026-11-19 那个
-   `mcause=0x3 @ 0x10013d0a`（panic 路径）的 trap，再谈写法；直接照搬 ARM 的紧循环
-   仍会挂。
-5. **刷机后那次重启，UART0 哑掉**（CDC 与 shell 正常）。
-   2026-11-19 在 RV32 上两次观察到；2026-11-20 闸门复测时在 **ARM 镜像**上稳定复现：
-   BOOTSEL 刷机后的那一轮起，UART0 连续 **0/20** 轮无输出，而 CDC **20/20** 正常应答，
-   暖重启（ROM `BOOT_TYPE_NORMAL`）也没有把它救回来。所以触发条件是「BOOTSEL 刷机后的
-   那次启动」，和 RISC-V 端口无关，也不是句柄过期。根因未查（怀疑 ROM 进 BOOTSEL 时
-   把 UART pad/时钟改了，而 `plat_init` 的 UART 初始化没有重新做）。
-   影响：闸门/启动日志不能把 UART0 当唯一见证通道，刷机后先看 CDC。
+   被去掉导致的（ARM 的 pump 是紧循环）。
+
+   **2026-11-20 那个 trap 解释清楚了**：`mcause=0x3` 是 **breakpoint = `ebreak`**，
+   与访存错误无关。全镜像一共 47 条 `ebreak`，**全部**在 TinyUSB 的
+   `TU_ASSERT/TU_VERIFY`（`tusb_verify.h:87` 的 `__asm("ebreak\n")`）里，
+   所在函数清一色是 USB 栈：`tud_task_ext`(9)、`process_set_config`(5)、
+   `tu_edpt_validate`(4)、`usbd_open_edpt_pair`(4)、`dcd_event_handler`(3)…，
+   内核自己一条都没有。所以那次挂死**是 TinyUSB 的某个断言在本机被触发**，
+   panic 打印的 PC 落在 USB 栈区间（当前镜像同区间是 `dcd_rp2040_irq`/`dcd_event_handler`）。
+   触发器的具体断言没法定：11-19 那个镜像不在库里（本地实验，未提交），地址在现行
+   镜像里落在指令中间。要钉死它，按下面的安全方式重做，**不要**在只靠 CDC 的时候刷
+   （断言型 hang 在枚举前，UART0 又可能是哑的，只能人工按 BOOTSEL）：
+   ① 用 `TOS_KEEP_SYMS=1` 构建带符号镜像；② 只改 `usb_cdc_wait()` 的循环写法，
+   `ebreak` 的地址减去所在符号基址（`nm -n`）就能对到具体断言；③ 板子先接好
+   能用的 UART0（见第 5 条）再刷。
+5. **UART0 只丢发送（TX）方向——不是固件问题，是 GP0 这根线拉不高**（2026-11-20 结案）。
+   现象：BOOTSEL 刷机后的那一轮起 UART0 连续 **0/20** 无输出，CDC **20/20** 正常，
+   暖重启也救不回来（2026-11-19 RV32 两次，11-20 ARM 镜像稳定复现）。
+   2026-11-20 用三个新自检口把它查透了（卡片：
+   `docs/acceptance/2026-11-20-uart0-tx-diagnosis.md`）：
+   - **收方向一直正常**：在 UART0 上发 `uptime`，回显从 CDC 出来——时钟分频、RX、
+     `plat_init` 的 UART 初始化全都是好的，**原“ROM 改了 pad/时钟”的假设验伪**；
+   - `/proc/uart0`：`CR/IBRD/FBRD/LCR_H`、引脚 mux（FUNCSEL=2）、焊盘
+     （`iso=0 od=0 ie=1`）与正常启动逐项相同；
+   - `/proc/uart0tx`：GP0 **空闲读回低**（UART 空闲本应为高），发送时只有 44/65536
+     次采样越过阈值；
+   - `/proc/gp0drive`：改由 SIO 直接驱动拉高（回读 `pin_mux=5`、`sio_oe` bit0 已置），
+     **仍 2048/2048 读低**；同一时刻 gp1（适配器 TX）、gp25（LED）稳定读高，
+     证明回读链路与整个 bank 正常。
+   结论：**板侧能把字节写进 FIFO，但 GP0 网络被拉在低电平**（跳线错位/接到 GND/
+   适配器 RX 端强下拉，或这颗 pad 输出级损坏），固件无需改动。
+   待人工确认（2 分钟）：拔掉适配器的 GP0 线再 `cat /proc/gp0drive`——读到高就是
+   负载在适配器侧（换线/换适配器），仍全低就是 pad 坏；断电量 GP0 对 GND 电阻应 >10k。
+   影响：闸门/启动日志不能把 UART0 当唯一见证通道，刷机后先看 CDC；
+   但 UART0 的**输入**是可信的（本轮所有诊断命令都是经 UART0 发进去、CDC 读结果的）。
    附带结论：板子"卡死"时（CDC 枚举着但 shell 不应答）**Ctrl-D 仍然有效**——
    `scripts/rp2350/bootsel_poke.py <port> 25 --dtr` 能踢回 BOOTSEL，说明 tick 与 USB
    控制器还活着，只有 shell 不响应；1200-baud touch 对 TinyOS 无效（那是 pico-sdk 的

@@ -239,8 +239,95 @@ static uint32_t fmt_usbpoll(char *b, uint32_t cap)
                ns, (uint32_t)(250000000u / ns));
 }
 
-static uint32_t fmt_flash(char *b, uint32_t cap)
+/* The console UART exactly as the hardware has it programmed right now.
+ *
+ * This exists because a port can lose one direction and keep the other: on
+ * the RP2350 the boot after a BOOTSEL flash accepts input on UART0 (the
+ * shell answers a command sent on the wire) while transmitting nothing, and
+ * the same adapter reads the same pins fine on the next power-on.  Without
+ * the register state the only way to tell "the board stopped driving TX"
+ * from "the adapter stopped receiving" is to guess, and the guess is wrong
+ * about half the time.  Word order is fixed by the port; see
+ * plat_uart_debug(). */
+static uint32_t fmt_uart0(char *b, uint32_t cap)
 {
+    uint32_t r[12];
+    uint32_t off = 0;
+    uint32_t any = 0;
+    int i;
+
+    plat_uart_debug(r);
+    for (i = 0; i < 12; i++)
+        any |= r[i];
+    if (!any)
+        return put(b, cap, 0, "uart0: not available on this port\n");
+
+    off = put(b, cap, off, "uart0 (console, 115200 8N1)\n");
+    off = put(b, cap, off, "  cr        %08x  uarten=%u txe=%u rxe=%u\n",
+              r[0], r[0] & 1u, (r[0] >> 8) & 1u, (r[0] >> 9) & 1u);
+    off = put(b, cap, off, "  fr        %08x  txff=%u txfe=%u busy=%u rxfe=%u\n",
+              r[1], (r[1] >> 5) & 1u, (r[1] >> 7) & 1u,
+              (r[1] >> 3) & 1u, (r[1] >> 4) & 1u);
+    off = put(b, cap, off, "  ibrd      %08x  fbrd=%08x\n", r[2], r[3]);
+    off = put(b, cap, off, "  lcr_h     %08x  fen=%u wlen=%u\n",
+              r[4], (r[4] >> 4) & 1u, (r[4] >> 5) & 3u);
+    off = put(b, cap, off, "  tx  gpio  %08x  pad=%08x (iso=%u od=%u ie=%u)\n",
+              r[5], r[6], (r[6] >> 8) & 1u, (r[6] >> 7) & 1u, (r[6] >> 6) & 1u);
+    off = put(b, cap, off, "  rx  gpio  %08x  pad=%08x (iso=%u od=%u ie=%u)\n",
+              r[7], r[8], (r[8] >> 8) & 1u, (r[8] >> 7) & 1u, (r[8] >> 6) & 1u);
+    off = put(b, cap, off, "  clk_peri  ctrl=%08x div=%08x\n", r[9], r[10]);
+    off = put(b, cap, off, "  resets    done=%08x\n", r[11]);
+    return off;
+}
+
+/* Transmit on the console UART and report what the TX pad itself did.
+ *
+ * `/proc/uart0` proves the *programming* is right; this proves whether any
+ * voltage leaves the pin.  0x55 is the payload because it alternates on the
+ * wire, so even a handful of samples during one byte land on both levels. */
+static uint32_t fmt_uart0tx(char *b, uint32_t cap)
+{
+    uint32_t r[8];
+
+    if (!plat_uart_tx_probe(r))
+        return put(b, cap, 0, "uart0tx: no pad readback on this port\n");
+    return put(b, cap, 0,
+               "uart0tx: 32 bytes of 0x55 sent\n"
+               "  idle gp0     low=%u high=%u   <- must be high, a UART idles high\n"
+               "  tx   gp0     low=%u high=%u transitions=%u\n"
+               "  controls     gp1(adapter tx) high=%u  gp25(led) high=%u\n"
+               "  fr after     %08x (txfe=%u busy=%u)\n"
+               "  verdict      %s\n",
+               r[4], r[5], r[0], r[1], r[2], r[6], r[7],
+               r[3], (r[3] >> 7) & 1u, (r[3] >> 3) & 1u,
+               (r[4] || r[5]) == 0u
+                   ? "gp0 idles low: the line is held low, not driven high"
+                   : ((r[1] > (r[0] + r[1]) / 8u)
+                          ? "gp0 swings at both levels - the pin is driven"
+                          : "gp0 only spikes above ground - the line is loaded"));
+}
+
+/* Drive the TX pad from SIO and read it back.  The companion to
+ * /proc/uart0tx: when the UART's frames never reach the pin, this says
+ * whether the pad can pull the line high at all. */
+static uint32_t fmt_gp0drive(char *b, uint32_t cap)
+{
+    uint32_t r[6];
+
+    if (!plat_gpio_drive_probe(r))
+        return put(b, cap, 0, "gp0drive: not available on this port\n");
+    return put(b, cap, 0,
+               "gp0drive: pad driven from SIO (uart line briefly off)\n"
+               "  driving 1    high=%u low=%u\n"
+               "  driving 0    high=%u low=%u\n"
+               "  writes landed pin_mux=%08x sio_oe=%08x (want 5 / bit0)\n"
+               "  verdict      %s\n",
+               r[0], r[1], r[2], r[3], r[4], r[5],
+               r[0] ? "the pad pulls the line high - the board can drive it"
+                    : "the line stays low even when the pad drives 1");
+}
+
+static uint32_t fmt_flash(char *b, uint32_t cap){
 #if TOS_HAS_FLASH
     uint32_t configured = TOS_FLASH_BYTES;
     uint32_t offset = TOS_LFS_OFFSET;
@@ -304,6 +391,12 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_flash(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/usbpoll"))
         n = fmt_usbpoll(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/uart0"))
+        n = fmt_uart0(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/uart0tx"))
+        n = fmt_uart0tx(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/gp0drive"))
+        n = fmt_gp0drive(b, PROC_CAP);
 #if !TOS_PROC_LITE
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
@@ -378,6 +471,9 @@ void procfs_init(void)
     devfs_register("proc/execfmt", &proc_ops, NULL);
     devfs_register("proc/flash",  &proc_ops, NULL);
     devfs_register("proc/usbpoll", &proc_ops, NULL);
+    devfs_register("proc/uart0",   &proc_ops, NULL);
+    devfs_register("proc/uart0tx", &proc_ops, NULL);
+    devfs_register("proc/gp0drive", &proc_ops, NULL);
 #if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);
