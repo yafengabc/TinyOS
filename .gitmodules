@@ -2,7 +2,3 @@
 	path = rv32emu-c
 	url = git@github.com:yafengabc/RV32EMU-C.git
 
-[submodule "goc32"]
-	path = goc32
-	url = git@github.com:yafengabc/goc32.git
-
