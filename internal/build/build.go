@@ -85,9 +85,13 @@ type Target struct {
 	// XipFlashBase is where the kernel's code lives in flash when the board
 	// executes it in place instead of copying it into RAM.  0 means "copy
 	// everything to RAM", which is what every board but the ESP32-C3 does.
-	// The linker puts .text/.rodata at the IROM window base and the packer
-	// writes those bytes at this offset; the boot stub maps the window to it.
+	// The packer writes the code at this offset and the linker places it at
+	// 0x42000000 + (XipFlashBase - XipMapBase).
 	XipFlashBase uint32
+	// XipMapBase is the 64 KiB flash page the boot stub maps at 0x42000000.
+	// It equals XipFlashBase unless the code starts inside the mapping page,
+	// which is what lets the ESP32-C3 put code at 0x2000 instead of 0x10000.
+	XipMapBase uint32
 
 	// MaxProcs is the size of the process table (kernel/process.c), passed
 	// in as TOS_MAX_PROCS.  0 means "use the default of 16".  It exists
@@ -465,10 +469,12 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 			fmt.Sprintf("-DTOS_KSTACK_BYTES=%d", kstack))
 	}
 
-	// XIP: the boot stub needs the flash offset to map the IROM window to.
+	// XIP: the boot stub maps the IROM window to a 64 KiB flash page, while
+	// the code itself can start at a byte offset inside that page.
 	if b.Target.XipFlashBase != 0 {
 		archFlags = append(archFlags,
-			fmt.Sprintf("-DTOS_XIP_FLASH_BASE=0x%x", b.Target.XipFlashBase))
+			fmt.Sprintf("-DTOS_XIP_MAP_BASE=0x%x", b.Target.XipMapBase),
+			fmt.Sprintf("-DTOS_XIP_CODE_OFFSET=0x%x", b.Target.XipFlashBase))
 	}
 
 	// Process table size (kernel/process.c).  Left undefined on boards that
@@ -1234,8 +1240,11 @@ func (b *Builder) buildKernel() error {
 			// window; the number that matters for headroom is the RAM one.
 			if b.Target.XipFlashBase != 0 {
 				if ram, err2 := ELFEndBelow(elfPath, espXipVaddrLow); err2 == nil {
+					xipVaddr := uint32(espXipVaddrLow) +
+						(b.Target.XipFlashBase - b.Target.XipMapBase)
+					flashEnd := b.Target.XipFlashBase + (uint32(end) - xipVaddr)
 					b.logf("      kernel RAM ends at 0x%x, code at 0x%x (flash 0x%x)\n",
-						ram, end, b.Target.XipFlashBase)
+						ram, end, flashEnd)
 				}
 			} else {
 				b.logf("      kernel ends at 0x%x\n", end)
@@ -1255,7 +1264,10 @@ func (b *Builder) buildKernel() error {
 		 * packer - not this switch - decides whether there is a filesystem
 		 * partition to splice in. */
 		if b.Target.FSBacking == "flash" && chip == "esp32c3" {
-			img, segs, err := ESPImageFromELF(elfPath, true, b.Target.XipFlashBase)
+			xipVaddr := uint32(espXipVaddrLow) +
+				(b.Target.XipFlashBase - b.Target.XipMapBase)
+			img, segs, err := ESPImageFromELF(elfPath, true,
+				b.Target.XipFlashBase, xipVaddr)
 			if err != nil {
 				return err
 			}

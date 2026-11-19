@@ -165,12 +165,13 @@ func main() {
 		fs := flag.NewFlagSet("espimg", flag.ExitOnError)
 		sha := fs.Bool("sha", true, "append the SHA-256 digest the ROM checks")
 		xip := fs.Uint("xip", 0, "flash offset for segments linked at 0x42000000 (0 refuses them)")
+		xipv := fs.Uint("xipvaddr", 0x42000000, "virtual address of the first XIP blob byte")
 		fs.Parse(os.Args[2:])
 		if fs.NArg() != 2 {
-			fmt.Fprintln(os.Stderr, "usage: tos espimg [-sha] [-xip off] <elf> <out.bin>")
+			fmt.Fprintln(os.Stderr, "usage: tos espimg [-sha] [-xip off] [-xipvaddr vaddr] <elf> <out.bin>")
 			os.Exit(2)
 		}
-		img, segs, err := build.ESPImageFromELF(fs.Arg(0), *sha, uint32(*xip))
+		img, segs, err := build.ESPImageFromELF(fs.Arg(0), *sha, uint32(*xip), uint32(*xipv))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "tos:", err)
 			os.Exit(1)

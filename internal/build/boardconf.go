@@ -35,6 +35,7 @@ type BoardConfig struct {
 	FSBacking      string
 	RamdiskSectors int
 	XipFlashBase   uint32
+	XipMapBase     uint32
 	// Flash geometry, for boards whose filesystem lives on the QSPI chip.
 	// Both are board facts: the same silicon with a different flash part is a
 	// different board (or a different variant of one), not a different image.
@@ -209,6 +210,22 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 		}
 		bc.XipFlashBase = uint32(n)
 	}
+	xipMapSet := false
+	if v := strings.TrimSpace(s["xip_map_base"]); v != "" {
+		n, perr := strconv.ParseUint(v, 0, 32)
+		if perr != nil {
+			return nil, fmt.Errorf("%s: xip_map_base: %v", relName(root, path), perr)
+		}
+		bc.XipMapBase = uint32(n)
+		xipMapSet = true
+	}
+	/* The old board.conf only had xip_flash_base, which served as both the
+	 * mapping page and the code offset.  Keep that meaning unless the board
+	 * splits them; a XIP code offset inside the page then sets xip_map_base
+	 * to the page base explicitly. */
+	if !xipMapSet && bc.XipFlashBase != 0 {
+		bc.XipMapBase = bc.XipFlashBase
+	}
 	if v := strings.TrimSpace(s["xip_setup"]); v != "" {
 		switch v {
 		case "boot2-w25q080":
@@ -312,6 +329,7 @@ func (t *Target) applyBoard(bc *BoardConfig) error {
 	t.FSBacking = bc.FSBacking
 	t.RamdiskSectors = bc.RamdiskSectors
 	t.XipFlashBase = bc.XipFlashBase
+	t.XipMapBase = bc.XipMapBase
 	t.Drivers = bc.Drivers
 	t.DefaultFeatures = bc.DefaultFeatures
 	t.winGrain = bc.WindowGrain

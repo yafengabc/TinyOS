@@ -950,9 +950,9 @@ static void plat_clock_init(void)
  * the address itself: writing the byte address makes the window resolve to a
  * page number far past the end of the chip and the first fetch never
  * completes.  The boot stub (arch/rv32/start.S) writes page
- * TOS_XIP_FLASH_BASE / 64 KiB into entry 0 and so on, so the code half of the
- * image - linked at 0x42000000 and flashed at TOS_XIP_FLASH_BASE - is what
- * the window serves. */
+ * TOS_XIP_MAP_BASE / 64 KiB into entry 0 and so on, so the code half of the
+ * image - linked at 0x42000000 + (TOS_XIP_CODE_OFFSET - TOS_XIP_MAP_BASE)
+ * and flashed at TOS_XIP_CODE_OFFSET - is what the window serves. */
 #define MMU_TABLE      0x600C5000u
 #define MMU_PAGE       0x10000u
 #define MMU_PAGES      64u             /* 4 MiB part */
@@ -962,14 +962,17 @@ static void plat_clock_init(void)
  * arch/rv32/start.S maps the window to exactly this offset before the first
  * fetch; getting the base wrong here would remap the running kernel out from
  * under itself (measured: fetching flash 0 instead of the code, trap, hang). */
-#ifndef TOS_XIP_FLASH_BASE
-#define TOS_XIP_FLASH_BASE 0u
+#ifndef TOS_XIP_CODE_OFFSET
+#define TOS_XIP_CODE_OFFSET 0u
+#endif
+#ifndef TOS_XIP_MAP_BASE
+#define TOS_XIP_MAP_BASE 0u
 #endif
 
 /* A plain #ifdef would always be true: the fallback above defines the macro
  * to 0 for all-RAM builds.  In that build there is no MMU mapping to report
  * and reading 0x42000000 (an unmapped flash window) is not harmless. */
-#if TOS_XIP_FLASH_BASE
+#if TOS_XIP_CODE_OFFSET
 /* The boot stub (arch/rv32/start.S) owns the mapping: it writes the MMU table
  * at 0x600C5000 - one 4-byte entry per 64 KiB page, entry = physical address
  * / 64 KiB, 0x100 = unmapped - and invalidates the cache before the first
@@ -983,14 +986,14 @@ static void xip_report(void)
 {
     const volatile uint32_t *tbl = (const volatile uint32_t *)MMU_TABLE;
     const volatile uint8_t  *p   = (const volatile uint8_t *)0x42000000u;
-    uint32_t want = (uint32_t)(TOS_XIP_FLASH_BASE / MMU_PAGE);
+    uint32_t want = (uint32_t)(TOS_XIP_MAP_BASE / MMU_PAGE);
 
     kprintf("[xip] mmu[0]=%u want %u, window: %x %x %x %x\n",
             (unsigned)tbl[0], (unsigned)want,
             (unsigned)p[0], (unsigned)p[1],
             (unsigned)p[2], (unsigned)p[3]);
 }
-#endif  /* TOS_XIP_FLASH_BASE */
+#endif  /* TOS_XIP_CODE_OFFSET */
 
 /* ---- boot ------------------------------------------------------------ */
 
@@ -998,7 +1001,7 @@ void plat_board_early(void)
 {
     plat_console_init();
 
-#if TOS_XIP_FLASH_BASE
+#if TOS_XIP_CODE_OFFSET
     /* The stub mapped the window; just say what it ended up serving. */
     xip_report();
 #endif

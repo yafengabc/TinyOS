@@ -11,8 +11,9 @@
  * The packer (internal/build/espimage.go) sees segments in the 0x42000000
  * window, keeps them out of the ROM-loadable image, and writes them at flash
  * offset XipFlashBase instead.  The boot stub in arch/rv32/start.S maps the
- * window there before the first fetch, which is what makes the flash addresses
- * below resolve.
+ * 64 KiB page at XipMapBase to the window; XipFlashBase may sit inside that
+ * page (the 0x2000 variant), in which case the code VMA is
+ * 0x42000000 + (XipFlashBase - XipMapBase).
  *
  * What must stay in SRAM, and why:
  *   .text.boot   runs before any mapping exists - it cannot call or load
@@ -64,9 +65,10 @@ SECTIONS
     ASSERT(__app_base + 0x4000 <= 0x403DC000,
            "kernel leaves no room for a task window")
 
-    /* The code half.  Its vaddr must start exactly at the window base: the
-     * packer indexes the blob by (vaddr - 0x42000000). */
-    .text 0x42000000 : {
+    /* The code half.  Its vaddr is the window base plus the code offset
+     * inside the mapped 64 KiB page; the build passes it as
+     * XIP_TEXT_VADDR (--defsym) and the packer indexes the blob from there. */
+    .text XIP_TEXT_VADDR : {
         *(.text*)
         . = ALIGN(4);
         LONG(0);

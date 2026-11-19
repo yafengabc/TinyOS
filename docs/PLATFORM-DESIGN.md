@@ -1468,11 +1468,14 @@ C3 的内核原本整份装在 SRAM 里（`0x40380000`，175.6 KiB），`PLAT_KE
 
 `internal/build` 用 `XipFlashBase` 开关选 `board/esp32c3-generic/kernel-xip.ld`（板级目录里
 同时留着 `kernel.ld` 的全 RAM 布局，关掉 XIP 只是把这个字段清 0）。打包器看到
-`0x42000000` 的段就不把它们放进 ROM 可加载段，而是按 `vaddr - 0x42000000` 摆成
-`XipBlob` 追加到镜像的 `XipOffset`（64 KiB 对齐）——**ROM 不能把段加载到
-`0x42000000`，那是 flash 的只读别名**。
+`0x42000000` 的段就不把它们放进 ROM 可加载段，而是按 `vaddr - XipVaddrBase` 摆成
+`XipBlob` 追加到镜像的 `XipOffset`——**ROM 不能把段加载到
+`0x42000000`，那是 flash 的只读别名**。`XipMapBase` 必须 64 KiB 对齐；`XipOffset`
+可以落在该页内，此时 `XipVaddrBase = 0x42000000 + (XipOffset - XipMapBase)`。
+默认两者都是 `0x10000`；`configs/esp32c3-*-xip2k.conf` 设 `XipMapBase=0`、
+`XipOffset=0x2000`，代码从 `0x42002000` 取指，内核结束提前约 56 KiB。
 
-启动桩（`arch/rv32/start.S`，只在 `TOS_XIP_FLASH_BASE` 定义时汇编）做四件事，全部在
+启动桩（`arch/rv32/start.S`，只在 `TOS_XIP_CODE_OFFSET` 定义时汇编）做四件事，全部在
 RAM 里、不用字面量池、不碰数据：
 
 1. `ROM_Boot_Cache_Init`（`0x400004c8`）—— cache 的 owner/mode/enable 一步到位；

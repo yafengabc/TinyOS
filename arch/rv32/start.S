@@ -118,7 +118,7 @@ _start:
     .option pop
     csrw    mtvec, t0
 
-#ifdef TOS_XIP_FLASH_BASE
+#if TOS_XIP_CODE_OFFSET
     /* Map the IROM window onto the code half of the image.
      *
      * 0x42000000 is pure translation on this chip: one 4-byte MMU entry per
@@ -163,7 +163,7 @@ _start:
     la      t0, trap_vectors
     .option pop
     csrw    mtvec, t0
-#endif  /* TOS_XIP_FLASH_BASE */
+#endif  /* TOS_XIP_CODE_OFFSET */
 
     /* Into the kernel.  Everything from here on executes out of flash. */
     call    kmain
@@ -479,7 +479,7 @@ __kernel_stack_top:
 /* everything here has to work before the flash mapping exists, so it   */
 /* uses no literal pool, calls nothing, and loads nothing.              */
 
-#ifdef TOS_XIP_FLASH_BASE
+#if TOS_XIP_CODE_OFFSET
 
     .section .text.boot, "ax"
     .align 4
@@ -489,10 +489,12 @@ __kernel_stack_top:
  * One entry per 64 KiB page; the entry holds the physical address divided by
  * the page size, not the address itself - writing the byte address makes the
  * window address a page number far past the end of the chip, and the first
- * fetch through it never completes (measured). */
+ * fetch through it never completes (measured).  The page starts at
+ * TOS_XIP_MAP_BASE; the code itself may sit at an offset inside it
+ * (TOS_XIP_CODE_OFFSET). */
 xip_map_window:
     li      t0, 0x600C5000
-    li      t1, (TOS_XIP_FLASH_BASE >> 16)
+    li      t1, (TOS_XIP_MAP_BASE >> 16)
     li      t2, 56                  /* 3.5 MiB of code from the XIP base */
     li      t3, 1
 1:  sw      t1, 0(t0)
@@ -502,4 +504,4 @@ xip_map_window:
     bnez    t2, 1b
     ret
 
-#endif  /* TOS_XIP_FLASH_BASE */
+#endif  /* TOS_XIP_CODE_OFFSET */

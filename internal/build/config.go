@@ -48,6 +48,13 @@ type Config struct {
 	MaxProcs  int
 	KStack    int
 	Opt       string
+	// XIP placement override, for a variant that puts the code inside the
+	// mapped page (e.g. C3 at 0x2000 instead of 0x10000).  Zero means "use
+	// the board's xip_flash_base".  XipMapBaseSet distinguishes an explicit
+	// map base of 0 from "not set".
+	XipCodeOffset uint32
+	XipMapBase    uint32
+	XipMapBaseSet bool
 	// Threads compiles the cooperative user-space thread library (user/
 	// thread.c and its per-arch switch) into every program.  Off by default:
 	// a program that does not call thread_create() pays nothing either way,
@@ -111,6 +118,21 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, bad("kstack", err)
 		}
 		c.Opt = strings.TrimSpace(s["opt"])
+		if raw := strings.TrimSpace(s["xip_code_offset"]); raw != "" {
+			n, err := parseSize(raw)
+			if err != nil {
+				return nil, bad("xip_code_offset", err)
+			}
+			c.XipCodeOffset = uint32(n)
+		}
+		if raw := strings.TrimSpace(s["xip_map_base"]); raw != "" {
+			n, err := parseSize(raw)
+			if err != nil {
+				return nil, bad("xip_map_base", err)
+			}
+			c.XipMapBase = uint32(n)
+			c.XipMapBaseSet = true
+		}
 		if c.Threads, err = parseOnOff(s["threads"]); err != nil {
 			return nil, bad("threads", err)
 		}
@@ -344,6 +366,14 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	b.MaxProcs = c.MaxProcs
 	b.KStack = c.KStack
 	b.Opt = c.Opt
+	if c.XipCodeOffset != 0 {
+		b.Target.XipFlashBase = c.XipCodeOffset
+		if c.XipMapBaseSet {
+			b.Target.XipMapBase = c.XipMapBase
+		} else {
+			b.Target.XipMapBase = c.XipCodeOffset
+		}
+	}
 	b.Threads = c.Threads
 	b.HistBytes = c.HistBytes
 	b.ProcLite = c.ProcLite
@@ -396,6 +426,22 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	}
 	b.WiFiLDSymbol = c.WiFiLDSymbol
 	b.LDExtra = c.LDExtra
+	if b.Target.XipFlashBase != 0 {
+		// start.S maps 56 64 KiB pages from XipMapBase.  The code may start
+		// inside the first page, but not below it or past the mapped range.
+		if b.Target.XipMapBase%espXipPageSize != 0 {
+			return fmt.Errorf("target %s: xip map base 0x%x is not 64 KiB aligned",
+				b.Target.Name, b.Target.XipMapBase)
+		}
+		if b.Target.XipFlashBase < b.Target.XipMapBase {
+			return fmt.Errorf("target %s: xip code offset 0x%x is below the map base 0x%x",
+				b.Target.Name, b.Target.XipFlashBase, b.Target.XipMapBase)
+		}
+		if b.Target.XipFlashBase-b.Target.XipMapBase >= 56*espXipPageSize {
+			return fmt.Errorf("target %s: xip code offset 0x%x is outside the mapped window",
+				b.Target.Name, b.Target.XipFlashBase)
+		}
+	}
 	return nil
 }
 
@@ -477,6 +523,10 @@ func (b *Builder) ensureDriverDirs() {
 // free-form [ld] extra flags.
 func (b *Builder) kernelLDArgs() []string {
 	args := append([]string(nil), b.LDExtra...)
+	if b.Target.XipFlashBase != 0 {
+		vaddr := uint32(espXipVaddrLow) + (b.Target.XipFlashBase - b.Target.XipMapBase)
+		args = append(args, fmt.Sprintf("--defsym=XIP_TEXT_VADDR=0x%x", vaddr))
+	}
 	if b.feature("wifi") || os.Getenv("TOS_WIFI_LIB") != "" {
 		if b.WiFiLDScript != "" {
 			args = append(args, "-T", b.WiFiLDScript)

@@ -47,6 +47,11 @@ func (b *Builder) writeBoardHeader() error {
 		fmt.Fprintf(&sb, "#define TOS_LFS_BLOCKS %du\n", uint32(bc.LFSBlocks()))
 		sb.WriteString("\n")
 	}
+	if b.Target.XipFlashBase != 0 {
+		fmt.Fprintf(&sb, "#define TOS_XIP_MAP_BASE %#xu\n", b.Target.XipMapBase)
+		fmt.Fprintf(&sb, "#define TOS_XIP_CODE_OFFSET %#xu\n", b.Target.XipFlashBase)
+		sb.WriteString("\n")
+	}
 	for _, p := range boardPeripherals {
 		v := 0
 		if bc.Peripherals[p] {

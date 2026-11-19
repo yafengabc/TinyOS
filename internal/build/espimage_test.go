@@ -243,7 +243,7 @@ func TestESPImageFromELFRefusesForeignBoard(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skip("kernel-rv32.elf not built")
 	}
-	_, _, err := ESPImageFromELF(path, false, 0)
+	_, _, err := ESPImageFromELF(path, false, 0, 0)
 	if err == nil {
 		t.Fatalf("packaged a qemu-virt kernel without complaint")
 	}
@@ -258,6 +258,7 @@ func TestESPImageXipBlob(t *testing.T) {
 	img := twoSegments()
 	img.XipBlob = bytes.Repeat([]byte{0xA5}, 512)
 	img.XipOffset = 0x10000
+	img.XipVaddrBase = 0x42000000
 
 	out, err := BuildESPImage(img)
 	if err != nil {
@@ -285,16 +286,38 @@ func TestESPImageXipBlob(t *testing.T) {
 func TestESPImageXipBlobRejects(t *testing.T) {
 	bad := twoSegments()
 	bad.XipBlob = []byte{1, 2, 3, 4}
-	bad.XipOffset = 0x8000 /* not a 64 KiB page */
+	bad.XipOffset = 0x8000
+	bad.XipVaddrBase = 0x40000000 /* outside the flash window */
 	if _, err := BuildESPImage(bad); err == nil {
-		t.Error("misaligned XIP offset was accepted")
+		t.Error("XIP base outside the flash window was accepted")
 	}
 
 	overlap := twoSegments()
 	overlap.XipBlob = []byte{1, 2, 3, 4}
 	overlap.XipOffset = 0 /* the segments are already past zero */
+	overlap.XipVaddrBase = 0x42000000
 	if _, err := BuildESPImage(overlap); err == nil {
 		t.Error("XIP offset inside the segment area was accepted")
+	}
+}
+
+// The code can start inside the mapped 64 KiB page: the blob is written at
+// 0x2000 and the CPU fetches it at 0x42002000, not at the window base.
+func TestESPImageXipBlobInsidePage(t *testing.T) {
+	img := twoSegments()
+	img.XipBlob = []byte{1, 2, 3, 4}
+	img.XipOffset = 0x2000
+	img.XipVaddrBase = 0x42002000
+
+	out, err := BuildESPImage(img)
+	if err != nil {
+		t.Fatalf("BuildESPImage: %v", err)
+	}
+	if want := 0x2004; len(out) != want {
+		t.Fatalf("image length = %d, want %d", len(out), want)
+	}
+	if !bytes.Equal(out[0x2000:], img.XipBlob) {
+		t.Errorf("XIP blob is not at flash offset 0x2000")
 	}
 }
 
@@ -305,7 +328,7 @@ func TestXipBlobLayout(t *testing.T) {
 	blob := xipBlob([]ESPSegment{
 		{Addr: 0x42000000, Data: []byte{1, 2, 3, 4}},
 		{Addr: 0x42000010, Data: []byte{9, 9}},
-	})
+	}, 0x42000000)
 	if len(blob) != 0x12 {
 		t.Fatalf("blob length = %d, want 0x12", len(blob))
 	}
@@ -320,7 +343,14 @@ func TestXipBlobLayout(t *testing.T) {
 			t.Fatalf("gap byte %d is %#x, want 0", i+4, b)
 		}
 	}
-	if xipBlob(nil) != nil {
+	if xipBlob(nil, 0x42000000) != nil {
 		t.Errorf("empty input should give no blob")
+	}
+
+	inside := xipBlob([]ESPSegment{
+		{Addr: 0x42002000, Data: []byte{7, 7, 7, 7}},
+	}, 0x42002000)
+	if !bytes.Equal(inside, []byte{7, 7, 7, 7}) {
+		t.Errorf("blob inside the page = % x, want the segment at byte 0", inside)
 	}
 }

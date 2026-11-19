@@ -82,11 +82,15 @@ type ESPImage struct {
 	   copied into SRAM.  The ROM cannot load it (0x42000000 is a read-only
 	   alias of flash, not RAM), so it is appended past the checksum at
 	   XipOffset and the kernel's own cache/MMU bring-up maps that page.
-	   XipOffset must be 64 KiB aligned - one MMU page - and must be past
-	   the segments.  The checksum and digest only cover the segments, so
-	   these trailing bytes are invisible to the ROM's verifier. */
-	XipBlob   []byte
-	XipOffset uint32
+	   XipOffset is the flash offset of the blob's first byte and must be past
+	   the segments.  XipVaddrBase is the virtual address the CPU fetches for
+	   that first byte: normally 0x42000000, or 0x42000000 + (XipOffset -
+	   map base) when the code starts inside the mapped 64 KiB page.  The
+	   checksum and digest only cover the segments, so these trailing bytes
+	   are invisible to the ROM's verifier. */
+	XipBlob      []byte
+	XipOffset    uint32
+	XipVaddrBase uint32
 }
 
 /* One cache MMU page.  Cache_Ibus_MMU_Set() takes its page size in KiB and
@@ -229,9 +233,13 @@ func BuildESPImage(img ESPImage) ([]byte, error) {
 	}
 
 	if len(img.XipBlob) > 0 {
-		if img.XipOffset%espXipPageSize != 0 {
-			return nil, fmt.Errorf("esp image: XIP offset 0x%x is not 64 KiB aligned (%d pages)",
-				img.XipOffset, img.XipOffset/espXipPageSize)
+		if img.XipOffset%4 != 0 {
+			return nil, fmt.Errorf("esp image: XIP offset 0x%x is not 4-byte aligned",
+				img.XipOffset)
+		}
+		if img.XipVaddrBase < espXipVaddrLow || img.XipVaddrBase >= espXipVaddrHigh {
+			return nil, fmt.Errorf("esp image: XIP vaddr base 0x%x is outside the flash window",
+				img.XipVaddrBase)
 		}
 		if len(img.XipBlob)%4 != 0 {
 			return nil, fmt.Errorf("esp image: XIP blob is %d bytes, not a multiple of 4",
@@ -273,7 +281,7 @@ func espChecksum(segs []ESPSegment) byte {
 // blob[vaddr - 0x42000000] is the byte the CPU will fetch from vaddr.  The
 // boot stub maps 0x42000000 -> xipOffset and hops in.  Pass xipOffset 0 to
 // refuse such a segment (the qemu targets have none).
-func ESPImageFromELF(path string, withSHA256 bool, xipOffset uint32) ([]byte, []ESPSegment, error) {
+func ESPImageFromELF(path string, withSHA256 bool, xipOffset, xipVaddrBase uint32) ([]byte, []ESPSegment, error) {
 	f, err := elf.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -297,6 +305,10 @@ func ESPImageFromELF(path string, withSHA256 bool, xipOffset uint32) ([]byte, []
 			if xipOffset == 0 {
 				return nil, nil, fmt.Errorf("%s: segment at 0x%x is in the flash window but no XIP offset was given",
 					path, p.Vaddr)
+			}
+			if uint32(p.Vaddr) < xipVaddrBase {
+				return nil, nil, fmt.Errorf("%s: XIP segment at 0x%x is below the blob base 0x%x",
+					path, p.Vaddr, xipVaddrBase)
 			}
 			/* Vendor blobs can leave a 2-byte tail section at the end
 			 * of .text; pad the flash blob rather than failing the image.
@@ -348,8 +360,9 @@ func ESPImageFromELF(path string, withSHA256 bool, xipOffset uint32) ([]byte, []
 		Segments:     segs,
 		FlashMode:    ESPFlashDIO,
 		AppendSHA256: withSHA256,
-		XipBlob:      xipBlob(xip),
+		XipBlob:      xipBlob(xip, xipVaddrBase),
 		XipOffset:    xipOffset,
+		XipVaddrBase: xipVaddrBase,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
@@ -358,20 +371,27 @@ func ESPImageFromELF(path string, withSHA256 bool, xipOffset uint32) ([]byte, []
 }
 
 /* Lay the XIP segments out the way the CPU will address them: byte k of the
- * blob is what the window returns for 0x42000000+k. */
-func xipBlob(xip []ESPSegment) []byte {
+ * blob is what the window returns for xipVaddrBase+k.  The default base is
+ * 0x42000000; a code offset inside the mapped page shifts it (C3 at 0x2000). */
+func xipBlob(xip []ESPSegment, xipVaddrBase uint32) []byte {
 	if len(xip) == 0 {
 		return nil
 	}
 	var end uint32
 	for _, s := range xip {
-		if e := s.Addr - espXipVaddrLow + uint32(len(s.Data)); e > end {
+		if s.Addr < xipVaddrBase {
+			continue
+		}
+		if e := s.Addr - xipVaddrBase + uint32(len(s.Data)); e > end {
 			end = e
 		}
 	}
 	blob := make([]byte, end)
 	for _, s := range xip {
-		copy(blob[s.Addr-espXipVaddrLow:], s.Data)
+		if s.Addr < xipVaddrBase {
+			continue
+		}
+		copy(blob[s.Addr-xipVaddrBase:], s.Data)
 	}
 	return blob
 }

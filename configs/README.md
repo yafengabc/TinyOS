@@ -44,6 +44,13 @@ exclude = ping,net,dhcp
   diagnostics"); the default is on because `scripts/rp2350/accept33.py` reads
   the `[A]`..`[E]` markers.  `configs/release.conf` is the quiet file to pass
   for a shipping image.
+- `xip_code_offset` and `xip_map_base` (ESP32-C3 XIP only) split the code
+  offset from the 64 KiB MMU mapping page.  `xip_map_base` must be 64 KiB
+  aligned; when it is omitted the old board layout is kept (both equal
+  `xip_flash_base`).  `configs/esp32c3-xip2k.conf` and
+  `configs/esp32c3-wifi-xip2k.conf` set `xip_code_offset = 8192` (0x2000) and
+  `xip_map_base = 0`, moving the code inside the boot page and freeing about
+  56 KiB before the filesystem.
 - `[features]` turns on `-DTOS_<NAME>` for every source (e.g. `wifi` →
   `-DTOS_WIFI`, `net` → `-DTOS_NET`).  `false` leaves it undefined.
   A target can also declare default features: `rpi-pico` starts with
@@ -88,6 +95,8 @@ Examples:
 | `configs/esp32c3-wifi.conf` | C3 + WiFi + DHCP/ICMP, all commands |
 | `configs/esp32c3-wifi-softmin.conf` | the same, with the saturating float runtime |
 | `configs/esp32c3-wifi-nonet.conf` | C3 + WiFi association only |
+| `configs/esp32c3-xip2k.conf` | C3 without WiFi, XIP code at 0x2000 (56 KiB more room before the fs) |
+| `configs/esp32c3-wifi-xip2k.conf` | C3 + WiFi/net, XIP code at 0x2000, `-Oz`; the BLE-headroom variant |
 | `configs/rpi-pico.conf` | RP2040, WiFi commands excluded |
 | `configs/rp2350.conf` | RP2350, WiFi commands excluded |
 | `configs/atk-dnr2350am-rv32.conf` | RP2350 Hazard3, WiFi commands excluded |
