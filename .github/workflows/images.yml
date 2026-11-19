@@ -192,6 +192,104 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  tools:
+    name: host tools (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            os: windows-latest
+            ext: .exe
+            archive: zip
+          - name: linux-amd64
+            os: ubuntu-24.04
+            ext: ""
+            archive: tar.gz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Go tools are self-contained binaries, so users do not need Go.
+      # goc32 and rv32emu-c are submodules; .gitmodules names ssh URLs that
+      # a runner cannot use, so rewrite them for this fetch.
+      - name: Fetch the tool submodules
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf="git@github.com:"
+          git submodule update --init --recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Install MSYS2 gcc (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/tools
+          go build -trimpath -ldflags "-s -w" -o "dist/tools/tos${{ matrix.ext }}" ./cmd/tos
+          go build -trimpath -ldflags "-s -w" -o "dist/tools/tostest${{ matrix.ext }}" ./cmd/tostest
+          (cd goc32 && go build -trimpath -ldflags "-s -w" -o "../dist/tools/goc32${{ matrix.ext }}" .)
+          (cd tools/tosput && go build -trimpath -ldflags "-s -w" -o "../../dist/tools/tosput-cli${{ matrix.ext }}" .)
+          (cd rv32emu-c && go run ./cmd/rv32emu-build emu)
+          cp "rv32emu-c/build/rv32emu-c${{ matrix.ext }}" dist/tools/
+          cat > dist/tools/README.txt <<'EOF'
+          TinyOS host tools
+          =================
+
+          rv32emu-c
+            Try TinyOS without a board:
+              rv32emu-c -flashimg tinyos-esp32c3-generic-full.bin
+            Download that image from the TinyOS release page.
+
+          goc32
+            Build a user program (no clang needed):
+              goc32 -target esp32c3 -o hello.tos user/hello.c
+
+          tosput-cli
+            Send a .tos to a running board over its console:
+              tosput-cli COM4 hello.tos /bin/hello
+
+          tos, tostest
+            Build images and run QEMU smoke tests.  These still need
+            clang + ld.lld on PATH; they are not needed just to try
+            TinyOS or to build a single user program.
+          EOF
+
+      - name: Pack the tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/tools/* -DestinationPath "dist/tinyos-tools-${{ matrix.name }}.zip"
+
+      - name: Pack the tools (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar -C dist/tools -czf "dist/tinyos-tools-${{ matrix.name }}.tar.gz" .
+
+      - name: Upload the tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyos-tools-${{ matrix.name }}
+          path: dist/tinyos-tools-${{ matrix.name }}.*
+          if-no-files-found: error
+          retention-days: 30
+
   smoke:
     name: qemu smoke (${{ matrix.target }})
     runs-on: ubuntu-24.04
@@ -243,7 +341,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [checks, build, smoke]
+    needs: [checks, build, smoke, tools]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -275,5 +373,5 @@ jobs:
             gh release create "$tag" "${files[@]}" \
               --repo "$repo" \
               --title "TinyOS $tag" \
-              --notes "TinyOS $tag flashable images for ESP32-C3, RP2040 and RP2350 (ARM/RISC-V, single and dual core)."
+              --notes "TinyOS $tag flashable images for ESP32-C3, RP2040 and RP2350 (ARM/RISC-V, single and dual core), plus standalone host tools for Windows and Linux."
           fi

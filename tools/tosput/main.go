@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 // tosput - a Windows GUI that puts a file onto a TinyOS board over the
