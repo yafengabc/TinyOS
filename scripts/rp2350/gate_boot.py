@@ -128,6 +128,27 @@ class Chan:
         return self.wait_prompt(timeout)
 
 
+def ask_gp0drive(cdc_port):
+    """Ask a booted board whether its TX pad can pull the line high.
+
+    A silent UART0 is ambiguous to every observer on the outside: the board
+    may have stopped driving, or the adapter may have stopped listening.
+    /proc/gp0drive drives the pad from SIO and reads it back, so this
+    distinguishes them - and printing it at gate start means the bench state
+    is recorded instead of being guessed at from a run of silent cycles.
+    Returns the two lines that matter, or "" when the node is not there.
+    """
+    c = Chan(cdc_port, dtr=True)
+    if not c.open():
+        return ""
+    c.write("cat /proc/gp0drive")
+    _, txt, _ = c.wait_prompt(6.0)
+    c.close()
+    keep = [l.strip() for l in txt.splitlines()
+            if "driving 1" in l or "verdict" in l]
+    return " | ".join(keep)
+
+
 def run_cycle(uart, cdc_port, cpus, timeout, uart_wanted):
     """One boot: reset, then see who answers.  Returns a dict of findings."""
     rec = {
@@ -177,8 +198,10 @@ def run_cycle(uart, cdc_port, cpus, timeout, uart_wanted):
     uart.drain(0.2)
 
     # UART0 first, but only if it was answering before the reset: on this board
-    # a BOOTSEL flash leaves UART0 silent (OPEN-ITEMS 5b-5), and waiting the
-    # full window for a channel that is known dead just burns the cycle.
+    # the adapter's lead can leave GP0 held low (OPEN-ITEMS item 5), and waiting
+    # the full window for a channel that is known dead just burns the cycle.
+    # A silent UART0 is never a gate failure on its own - the CDC leg is the
+    # authority - but /proc/gp0drive below says which side lost the line.
     t0 = time.time()
     if uart_wanted:
         ok, text, dt = uart.wait_prompt(min(timeout, 12.0))
@@ -223,6 +246,24 @@ def run_cycle(uart, cdc_port, cpus, timeout, uart_wanted):
     if not rec["cdc_open"]:
         rec["note"] = (rec["note"] + "; CDC never opened").strip("; ")
 
+    # UART0 was expected to answer and did not: ask the board which side of
+    # the wire is at fault.  /proc/gp0drive drives the pad from SIO and reads
+    # it back, so "the pad cannot be pulled high" (adapter/lead) and "the pad
+    # pulls high but the UART did not reach it" (firmware) stop being
+    # indistinguishable.
+    if uart_wanted and not rec["uart_boot"] and rec["cdc_boot"]:
+        for p in cdc_ports():
+            c = Chan(p, dtr=True)
+            if not c.open():
+                continue
+            c.write("cat /proc/gp0drive")
+            _, txt, _ = c.wait_prompt(6.0)
+            c.close()
+            for line in txt.splitlines():
+                if "driving 1" in line or "verdict" in line:
+                    rec["note"] = (rec["note"] + "; " + line.strip()).strip("; ")
+            break
+
     # Fall back to UART for the cpu count when CDC is the broken side.
     if rec["cpus"] is None and rec["uart_boot"] and uart.alive:
         uart.write("uptime")
@@ -260,7 +301,11 @@ def main():
     uart_alive = uart.sync(4.0)[0]
     if not uart_alive:
         print("UART0 is silent; using CDC as the reset channel "
-              "(OPEN-ITEMS 5b-5)")
+              "(OPEN-ITEMS item 5)")
+        if cdc:
+            why = ask_gp0drive(cdc)
+            if why:
+                print(f"  bench check: {why}")
 
     rows = []
     for i in range(1, args.cycles + 1):
