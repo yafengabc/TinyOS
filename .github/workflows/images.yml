@@ -312,10 +312,10 @@ jobs:
       - name: Boot and drive it
         if: matrix.target != 'read-only'
         run: |
+          # rv32 TCG can be very slow under runner load (and -Oz/-Os make it
+          # far worse); 4 s was a flake, not a test failure.
           go run ./cmd/tostest smoke -target "${{ matrix.target }}" \
             -commands "ps, ls /bin | wc, cat /proc/execfmt, piperace, prot stack, deep 3, rselftest" \
-            # rv32 TCG can be very slow under runner load (and -Oz/-Os
-            # make it far worse); 4 s was a flake, not a test failure.
             -commandwait-ms 10000
 
   release:
