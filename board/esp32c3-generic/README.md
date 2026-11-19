@@ -71,24 +71,26 @@ ROM 可加载的 boot 段目前约占 `0x1A00`，所以这里留了约 9.5 KiB �
 
 | 指标 | WiFi 关 | WiFi 开 | 无 WiFi + 16 KiB 堆（16 槽） |
 | --- | ---: | ---: | ---: |
-| 内核 flash（`.text`+`.rodata`） | 75.6 KiB | 357.9 KiB | 75.6 KiB |
-| 内核 RAM（`.data`+`.bss`） | 121.3 KiB | 187.2 KiB | 64.0 KiB |
+| 内核镜像（烧写 `.bin`） | 96.8 KiB | 379.0 KiB | 97.2 KiB |
+| 内核 RAM（`.data`+`.bss`） | 120.0 KiB | 185.8 KiB | 61.5 KiB |
 | 其中内核堆 arena（`heap=`） | 80 KiB | 80 KiB | **16 KiB** |
-| 内核 RAM 结束地址 | `0x4039e520` | `0x403aece0` | `0x4038ffe0` |
+| 内核 RAM 结束地址 | `0x4039dfc0` | `0x403ae760` | `0x4038f600` |
 | 任务区（16 KiB 对齐到 `0x403DC000`） | 240 KiB | 176 KiB | **304 KiB** |
 | 16 KiB 窗口数 | 15 | 11 | **19** |
 | 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 | 9 |
-| 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB） | 2（余 48 KiB） |
+| 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB）* | 2（余 48 KiB） |
 | 进程槽（`max_procs`） | 8 | 8 | **16** |
-| `tinyos-esp32c3-generic.bin` 烧写镜像 | 139.6 KiB | 421.9 KiB | 139.6 KiB |
+
+\* WiFi 版的 128 KiB 是容量上限；实测 `py` 可能因 128 KiB 对齐放不下
+（`/bin/py needs a 116 KiB window, the largest free block is 160 KiB`）。
 
 - 前两列的内核堆都是 target 默认的 **80 KiB**（`[build] heap=` 可覆盖）；WiFi 吃掉的是
   它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。
 - 第三列是 `configs/esp32c3-16k.conf`：堆降到 16 KiB（实测峰值 1.5 KiB）并把进程槽
-  提到 16。任务区因此回到 304 KiB / 19 个窗口；代价是内核结束地址只剩 32 B 余量，
-  内核再长一点就会掉一个窗口。
-- flash 的大头是 WiFi blob（XIP 常驻）。WiFi 开后内核结束在 `0x7B6A8`，离 littlefs
-  的 `0x80000` 只剩约 21 KiB——再加驱动就要先腾空间。
+  提到 16。任务区因此回到 304 KiB / 19 个窗口；内核结束到 16 KiB 边界还有约 2.5 KiB。
+- flash 的大头是 WiFi blob（XIP 常驻）。XIP 默认从 `0x4000` 起，WiFi `-O2` 内核结束在
+  `0x5EBF8`，离 littlefs 的 `0x80000` 约 133 KiB；`esp32c3-wifi-ble` 用 `-Oz`，结束在
+  `0x58248`，余量约 159 KiB。
 - 窗口按 16 KiB 粒度分配，默认栈 4 KiB、栈下护栏 4 KiB。`py` 的 128 KiB 窗口两边
   都放得下，但 WiFi 开后只剩 48 KiB 给别的任务同时跑。
 
