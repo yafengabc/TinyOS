@@ -69,18 +69,18 @@ ROM 可加载的 boot 段目前约占 `0x1A00`，所以这里留了约 9.5 KiB �
 
 同一块 C3 上 `configs/esp32c3.conf`（关）与 `configs/esp32c3-wifi.conf`（开）：
 
-| 指标 | WiFi 关 | WiFi 开 | 无 WiFi + 16 KiB 堆（16 槽） | 无 WiFi + 8K 堆 + 8K 栈（16 槽） |
+| 指标 | WiFi 关 | WiFi 开 | 无 WiFi + 16 KiB 堆（16 槽） | 无 WiFi + 8K 堆 + 8K 栈（18 槽） |
 | --- | ---: | ---: | ---: | ---: |
-| 内核镜像（烧写 `.bin`） | 96.8 KiB | 379.0 KiB | 97.2 KiB | 97.2 KiB |
-| 内核 RAM（`.data`+`.bss`） | 120.0 KiB | 185.8 KiB | 61.5 KiB | **45.5 KiB** |
+| 内核镜像（烧写 `.bin`） | 96.8 KiB | 379.0 KiB | 97.2 KiB | 97.1 KiB |
+| 内核 RAM（`.data`+`.bss`） | 120.0 KiB | 185.8 KiB | 61.5 KiB | **46.9 KiB** |
 | 其中内核堆 arena（`heap=`） | 80 KiB | 80 KiB | **16 KiB** | **8 KiB** |
 | 其中内核栈（`kstack=`） | 16 KiB | 16 KiB | 16 KiB | **8 KiB** |
-| 内核 RAM 结束地址 | `0x4039dfc0` | `0x403ae760` | `0x4038f600` | `0x4038b600` |
+| 内核 RAM 结束地址 | `0x4039dfc0` | `0x403ae760` | `0x4038f600` | `0x4038bb90` |
 | 任务区（16 KiB 对齐到 `0x403DC000`） | 240 KiB | 176 KiB | **304 KiB** | **320 KiB** |
 | 16 KiB 窗口数 | 15 | 11 | **19** | **20** |
 | 32 KiB 窗口数（`msh`/`edit`） | 7 | 5 | 9 | 10 |
 | 128 KiB 窗口（`py`） | 1（余 112 KiB） | 1（余 48 KiB）* | 2（余 48 KiB） | 2（余 64 KiB） |
-| 进程槽（`max_procs`） | 8 | 8 | **16** | **16** |
+| 进程槽（`max_procs`） | 8 | 8 | **16** | **18** |
 
 \* WiFi 版的 128 KiB 是容量上限；实测 `py` 可能因 128 KiB 对齐放不下
 （`/bin/py needs a 116 KiB window, the largest free block is 160 KiB`）。
@@ -89,9 +89,10 @@ ROM 可加载的 boot 段目前约占 `0x1A00`，所以这里留了约 9.5 KiB �
   它自己的 `.data`/`.bss`（约 +66 KiB），把任务区从 240 KiB 压到 176 KiB。
 - 16 KiB 堆列是 `configs/esp32c3-16k.conf`：堆降到 16 KiB（实测峰值 1.5 KiB）并把进程槽
   提到 16。任务区因此回到 304 KiB / 19 个窗口；内核结束到 16 KiB 边界还有约 2.5 KiB。
-- 8 KiB 堆列是 `configs/esp32c3-8k.conf`：堆 8 KiB、内核栈 8 KiB、进程槽 16，内核 RAM
-  45.5 KiB，任务区 320 KiB / 20 窗口；20 轮 soak 通过。默认内核栈是 16 KiB，砍到 8 KiB
-  又省 8 KiB；任务栈仍保持默认 4 KiB。
+- 8 KiB 堆列是 `configs/esp32c3-8k.conf`：堆 8 KiB、内核栈 8 KiB、进程槽 18，内核 RAM
+  46.9 KiB，任务区 320 KiB / 20 窗口；16 个后台任务 + shell + 1 个诊断命令实测通过，
+  20 轮 soak 也通过。默认内核栈是 16 KiB，砍到 8 KiB 又省 8 KiB；任务栈仍保持默认
+  4 KiB。19 槽是 20 窗口的上限。
 - flash 的大头是 WiFi blob（XIP 常驻）。XIP 默认从 `0x4000` 起，WiFi `-O2` 内核结束在
   `0x5EBF8`，离 littlefs 的 `0x80000` 约 133 KiB；`esp32c3-wifi-ble` 用 `-Oz`，结束在
   `0x58248`，余量约 159 KiB。
@@ -102,13 +103,14 @@ ROM 可加载的 boot 段目前约占 `0x1A00`，所以这里留了约 9.5 KiB �
 `py pytest.py`（54 项）加 320 KiB 的 `dd` 写读后峰值 1.5 KiB；任务区因此从
 240 KiB 增到 **304 KiB**（15 → 19 个窗口），内核 RAM 降到 61.5 KiB。再降到
 `heap = 8192`、并把内核栈从默认 16 KiB 降到 8 KiB（`configs/esp32c3-8k.conf`），
-内核 RAM 45.5 KiB、任务区 **320 KiB / 20 窗口**，16 个进程槽；20 轮 soak 通过。
-任务栈没有动，`msh` 仍显式声明 4 KiB。
+内核 RAM 46.9 KiB、任务区 **320 KiB / 20 窗口**，18 个进程槽；16 个后台任务 +
+shell + 1 个诊断命令实测通过，20 轮 soak 通过。任务栈没有动，`msh` 仍显式声明 4 KiB。
 
 同时能跑多少任务受 `max_procs` 限制，不是窗口数：C3 默认 8 槽，即使有 20 个窗口
-也只能同时存在 8 个任务。8K 堆 + 8K 栈的 16 槽配置实测 20 窗口 / 16 任务；
-16K 堆 + 16K 栈的 16 槽配置是 304 KiB / 19 窗口。两者的内核结束到 `0x40390000`
-都还有约 2.5 KiB，再长会少一个窗口。
+也只能同时存在 8 个任务。8K 堆 + 8K 栈的 18 槽配置实测 20 窗口 / 18 槽（16 个
+后台 + shell + 1 个诊断）；16K 堆 + 16K 栈的 16 槽配置是 304 KiB / 19 窗口。
+8K/8K 的内核结束到 `0x4038C000` 还有约 1.1 KiB，16K/16K 到 `0x40390000` 约 2.5 KiB；
+内核再长会少一个窗口。
 
 WiFi 构建不要照做。
 
