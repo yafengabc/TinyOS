@@ -1,0 +1,270 @@
+package native32
+
+import "sort"
+
+// findDirectAllocas reports the scalar allocas whose address never escapes.
+// Such a local is only ever the pointer operand of a load or a store, so the
+// back end can address its storage directly as sp+offset instead of
+// materialising the pointer at every access.  This is the low-risk half of
+// mem2reg: values still live in memory across blocks, but the address
+// computation and the pointer load/store pair disappear.
+
+func findDirectAllocas(f *Func) map[string]bool {
+	direct, _, _ := analyzeAllocas(f)
+	out := map[string]bool{}
+	for name, ok := range direct {
+		if ok {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// allocaCandidates lists the non-escaping scalar allocas that are worth a
+// callee-saved register: four bytes and at least minCount loads/stores, hottest
+// first.  planRegVars and the load-forwarding pass share it so that forwarding
+// never takes a load away from an object that is about to live in a register.
+func allocaCandidates(f *Func, minCount int) []allocaCand {
+	direct, count, size := analyzeAllocas(f)
+	var cs []allocaCand
+	for name, ok := range direct {
+		if ok && size[name] == 4 && count[name] >= minCount {
+			cs = append(cs, allocaCand{name, count[name]})
+		}
+	}
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].n != cs[j].n {
+			return cs[i].n > cs[j].n
+		}
+		return cs[i].name < cs[j].name
+	})
+	return cs
+}
+
+type allocaCand struct {
+	name string
+	n    int
+}
+
+// planRegVars picks the hottest non-escaping scalar locals and gives each a
+// callee-saved register for the whole function.  Because the address never
+// escapes, every load and store of that object is visible here, so a register
+// is a faithful replacement for its memory cell across calls and blocks.
+func planRegVars(f *Func, regs []string, minCount int) (map[string]string, []string) {
+	cs := allocaCandidates(f, minCount)
+	vars := map[string]string{}
+	var used []string
+	for i, c := range cs {
+		if i >= len(regs) {
+			break
+		}
+		vars[c.name] = regs[i]
+		used = append(used, regs[i])
+	}
+	return vars, used
+}
+
+func remainingRegs(all, used []string) []string {
+	taken := map[string]bool{}
+	for _, r := range used {
+		taken[r] = true
+	}
+	var out []string
+	for _, r := range all {
+		if !taken[r] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// planParamRegs gives immutable parameters with a high use count a
+// callee-saved register too.  A parameter used as a phi source is skipped:
+// the phi copy reads its memory slot directly.
+func planParamRegs(f *Func, regs []string, minCount int) (map[string]string, []string) {
+	uses := map[string]int{}
+	phiUse := map[string]bool{}
+	for _, blk := range f.Blocks {
+		for _, in := range blk.Insts {
+			for _, op := range in.Ops {
+				if op.Kind == VLocal {
+					uses[op.Name]++
+				}
+			}
+			for _, c := range in.Cases {
+				if c.Val.Kind == VLocal {
+					uses[c.Val.Name]++
+				}
+			}
+			if in.Indirect && in.Callee != "" {
+				uses[in.Callee]++
+			}
+			if in.Op == "phi" {
+				for _, op := range in.Ops {
+					if op.Kind == VLocal {
+						phiUse[op.Name] = true
+					}
+				}
+			}
+		}
+	}
+	type cand struct {
+		name string
+		n    int
+	}
+	var cs []cand
+	for _, p := range f.Params {
+		if p.Ty == nil || p.Ty.Size() != 4 || phiUse[p.Name] || uses[p.Name] < minCount {
+			continue
+		}
+		cs = append(cs, cand{p.Name, uses[p.Name]})
+	}
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].n != cs[j].n {
+			return cs[i].n > cs[j].n
+		}
+		return cs[i].name < cs[j].name
+	})
+	out := map[string]string{}
+	var used []string
+	for i, c := range cs {
+		if i >= len(regs) {
+			break
+		}
+		out[c.name] = regs[i]
+		used = append(used, regs[i])
+	}
+	return out, used
+}
+
+// findParamStores spots the common front-end shape
+//
+//	store i32 %param, ptr %local
+//
+// at the top of the entry block, where %local is a direct scalar alloca.  The
+// incoming argument register is still live there, so the prologue can write
+// it straight to the local and the store instruction can be dropped.
+func findParamStores(f *Func, direct map[string]bool, regVar map[string]string) (map[string]string, map[*Inst]bool) {
+	uses := map[string]int{}
+	for _, blk := range f.Blocks {
+		for _, in := range blk.Insts {
+			for _, op := range in.Ops {
+				if op.Kind == VLocal {
+					uses[op.Name]++
+				}
+			}
+			for _, c := range in.Cases {
+				if c.Val.Kind == VLocal {
+					uses[c.Val.Name]++
+				}
+			}
+			if in.Indirect && in.Callee != "" {
+				uses[in.Callee]++
+			}
+		}
+	}
+	isParam := map[string]bool{}
+	for _, p := range f.Params {
+		isParam[p.Name] = true
+	}
+	out := map[string]string{}
+	skip := map[*Inst]bool{}
+	if len(f.Blocks) == 0 {
+		return out, skip
+	}
+	for _, p := range f.Params {
+		if p.Ty == nil || p.Ty.Size() != 4 || uses[p.Name] != 1 {
+			continue
+		}
+		okPrefix := true
+		for _, in := range f.Blocks[0].Insts {
+			if in.Op == "store" && len(in.Ops) >= 2 &&
+				in.Ops[0].Kind == VLocal && in.Ops[0].Name == p.Name &&
+				in.Ops[1].Kind == VLocal && in.Ty != nil && in.Ty.Size() == 4 &&
+				(direct[in.Ops[1].Name] || regVar[in.Ops[1].Name] != "") && okPrefix {
+				out[p.Name] = in.Ops[1].Name
+				skip[in] = true
+				break
+			}
+			if in.Op == "alloca" || in.Op == "phi" {
+				continue
+			}
+			if in.Op == "store" && len(in.Ops) >= 2 && in.Ops[0].Kind == VLocal && isParam[in.Ops[0].Name] {
+				continue
+			}
+			okPrefix = false
+		}
+	}
+	return out, skip
+}
+
+func analyzeAllocas(f *Func) (map[string]bool, map[string]int, map[string]int) {
+	type info struct {
+		direct bool
+		count  int
+		size   int
+	}
+	allocas := map[string]*info{}
+	for _, blk := range f.Blocks {
+		for _, in := range blk.Insts {
+			if in.Op != "alloca" || in.Dst == "" || in.Ty == nil {
+				continue
+			}
+			// Direct sp-relative loads/stores handle the scalar sizes the
+			// back end can address without a pointer: byte, half, word and
+			// the two-word pair.  Aggregates and arrays keep the pointer path.
+			sz := in.Ty.Size()
+			allocas[in.Dst] = &info{
+				direct: sz == 1 || sz == 2 || sz == 4 || sz == 8,
+				size:   sz,
+			}
+		}
+	}
+	if len(allocas) == 0 {
+		return nil, nil, nil
+	}
+	escape := func(v Value) {
+		if v.Kind != VLocal {
+			return
+		}
+		if inf := allocas[v.Name]; inf != nil {
+			inf.direct = false
+		}
+	}
+	for _, blk := range f.Blocks {
+		for _, in := range blk.Insts {
+			for i, op := range in.Ops {
+				if op.Kind != VLocal {
+					continue
+				}
+				inf := allocas[op.Name]
+				if inf == nil {
+					continue
+				}
+				switch {
+				case in.Op == "load" && i == 0:
+					inf.count++
+				case in.Op == "store" && i == 1:
+					inf.count++
+				default:
+					inf.direct = false
+				}
+			}
+			for _, c := range in.Cases {
+				escape(c.Val)
+			}
+			if in.Indirect && in.Callee != "" {
+				escape(Value{Kind: VLocal, Name: in.Callee})
+			}
+		}
+	}
+	direct := map[string]bool{}
+	count := map[string]int{}
+	size := map[string]int{}
+	for name, inf := range allocas {
+		direct[name] = inf.direct
+		count[name] = inf.count
+		size[name] = inf.size
+	}
+	return direct, count, size
+}

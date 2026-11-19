@@ -1,0 +1,326 @@
+[English](README.md) | [中文](README.zh.md)
+
+# goc32 — TinyOS user-space C compiler (RV32 + Thumb)
+
+`goc32` is a trimmed, libLLVM-free C compiler for TinyOS user programs. It is a
+subproject of [TinyOS](https://github.com/yafengabc/TinyOS) and a direct
+descendant of the [goc](https://github.com/yafengabc/goc) front end.
+
+One command takes a C source and produces the exact **LZ4TOS** envelope TinyOS
+places in littlefs:
+
+```
+goc32 user/hello.c
+```
+
+Pipeline:
+
+```
+C -> goc front end -> pure-Go IR text -> native32 -> RV32IM / Thumb asm
+  -> goc32/as (assemble) -> goc32/ld (link) -> LZ4TOS envelope
+```
+
+No cgo, no `libLLVM.dll`, and **no external toolchain**: the assembler
+(`internal/as`) and the linker (`internal/ld`) are part of the compiler. The
+only things needed to build a user program are the command and the TinyOS
+checkout (for `user.ld`, the libc sources and the headers).
+
+## Build
+
+```powershell
+.\build.ps1            # -> bin/goc32.exe
+```
+
+or `bash build.sh`. Go 1.25+ is required.
+
+## Usage
+
+```powershell
+# Run from a TinyOS checkout (or pass -tos DIR). The target defaults to rv32.
+goc32 user/hello.c
+# -> hello.tos
+
+goc32 -target esp32c3 -o build/hello.tos user/hello.c
+goc32 -target rp2040  -o build/hello.tos user/hello.c
+goc32 -target rp2350  -o build/hello.tos user/hello.c
+goc32 -target arm     -o build/hello.tos user/hello.c
+```
+
+Targets:
+
+| `-target` | ISA | core | assembler |
+|---|---|---|---|
+| `rv32` (default), `esp32c3` | RV32IMC | any RV32 | `RV32` |
+| `rv32nc` | RV32IM | rv32im (no compressed) | `RV32` |
+| `arm` | Thumb / ARMv7-M | Cortex-M3 | `Thumb2` |
+| `rp2040` | Thumb-1 / ARMv6-M | Cortex-M0+ | `Thumb1` |
+| `rp2350` | Thumb / ARMv8-M | Cortex-M33 | `Thumb2` |
+
+Diagnostics: `-S` (assembly), `-ir` (gocl IR), `-E` (preprocessed C), `-keep`,
+`-v`, `-pack` (wrap an already linked ELF in LZ4TOS without compiling), `-ll`
+(treat the input as LLVM IR text and emit assembly). Extra includes/defines:
+`-I`, `-D`. `GOC32_MAP=1` prints every live section and its address while
+linking.
+
+Feature defines follow the build. `goc32` reads
+`build/build-config-<target>.txt` (or the shared `build-config.txt`) written by
+`tos build` and applies the same user-program macros: `TOS_THREADS`,
+`TOS_MAILBOX`, and one `TOS_<FEATURE>` per enabled menuconfig feature. With
+`TOS_THREADS` it also links `user/thread.c` and `user/thread_switch.S`; with
+`TOS_KTHREADS` it links `user/kthread.c`. `-no-build-defines` turns that off
+for a self-contained build of one file.
+
+The compiler finds the TinyOS checkout by walking up from the input source (it
+looks for `user/lib.c`, `user/user.ld`, `include/tos.h`). Use `-tos DIR` or
+`TOS_ROOT` when the source is outside a checkout.
+
+## Output
+
+The output is not a raw ELF. It is the hinted `LZ4TOS` envelope:
+
+```
+0  "LZ4TOS" (6)
+6  u16 flags = 1
+8  u32 raw ELF size
+12 u32 compressed size
+16 u32 span        (page-rounded PT_LOAD range)
+20 u32 stack_ask   (.note.tos TOS_STACK, 0 = board default)
+24 u32 heap_ask    (.note.tos TOS_HEAP, 0 = none)
+28 LZ4 block
+```
+
+The span/stack/heap values are derived exactly like `tools/mklfs.c`, so the
+kernel can size the task window before decompressing. `mklfs` copies a file
+that is not an ELF verbatim, so dropping the `.tos` into `build/fs-stage/bin/`
+and rebuilding the ramdisk installs it without recompression.
+
+Tested end to end against QEMU:
+
+- RV32 (`qemu-system-riscv32`): `hello`, `ls`, `cat`, `wc`, `echo`, `free`,
+  `mem` (heap growth), `df`, `uptime`, `piperace` (pipes/threads), `prot`
+  (intentional faults) and `msh` driving builtins;
+- ARM (`qemu-system-arm`, Cortex-M3): the same set, plus a second `msh` as a
+  child process (`gmsh` ? `ls`, `free`, `ps`);
+- `TOS_STACK`/`TOS_HEAP` notes survive the link (8 KiB/6 KiB test program).
+
+111 of the 132 `user/*.c` builds (each file for RV32 and ARM) go through the
+whole pipeline. The remaining files are the floating-point/soft-float ones,
+the extended-asm ones, and the library translation units that have no `main`
+(`lib.c`, `syscall.c`, `thread.c`, ...), not assembler or linker failures.
+
+## Known compiler limitations
+
+The assembler and linker are complete for the instruction subset native32
+emits, and every non-branch instruction in the generated RV32/Thumb assembly
+has been diffed byte-for-byte against clang's assembler. Two limits are worth stating:
+
+- **goc32 code is larger than clang's**: no compressed RISC-V instructions and
+  no branch relaxation into `c.j`/`c.b`, plus inline literal words on ARM. This
+  is deliberate: release images and the prebuilt `msh` are built with clang,
+  and goc32 is the single-file development loop, so size is not the metric.
+- **front-end gaps**: float IR and most GCC extended asm are rejected before
+  code generation. Declarations in `for` initialisers and empty asm barriers
+  with clobbers now work.
+
+## Code size
+
+The back end is mostly a stack machine: SSA values normally get a frame slot,
+with a small block-local register allocator layered on top.  Measured over all
+37 `user/*.c` programs (RV32IMC, `-O2` clang baseline from
+`build/fs-stage/bin`):
+
+| | goc32 | clang | ratio |
+|---|---:|---:|---:|
+| raw ELF total | 132,476 | 87,630 | 1.51x |
+| LZ4TOS total | 95,488 | 66,850 | 1.43x |
+
+Examples (raw ELF / LZ4TOS):
+
+| program | goc32 | clang |
+|---|---:|---:|
+| `hello` | 1,560 / 1,112 | 998 / 724 |
+| `hello_printf` | 2,644 / 1,905 | 1,606 / 1,202 |
+| `reloc` | 2,040 / 1,440 | 1,142 / 856 |
+| `wheap` | 3,400 / 2,477 | 1,974 / 1,550 |
+| `sh` | 21,380 / 14,571 | 16,054 / 12,589 |
+
+The first measurement was 4.94x raw / 3.94x compressed.  The biggest wins
+after the peephole were:
+
+- array subscripts and pointer arithmetic now emit a real `getelementptr`
+  with an i32 index instead of `ptrtoint -> mul i64 -> add i64 -> inttoptr`;
+  the old form dragged every subscript through a 64-bit pair and carry chain.
+  The GEP also consumes a base or index already in a register directly and
+  folds constant offsets into one `addi`;
+- a non-escaping scalar local (`char`, `short`, `int`, pointer, double) is
+  addressed directly as `sp+offset` for its loads and stores, so the alloca
+  pointer is never materialised and the object needs no pointer slot;
+- a non-escaping word local that is read or written at least five times is
+  kept in a callee-saved register (`s0-s7` on RV32).  A load is a snapshot of
+  that register, so its uses can read the register directly instead of a
+  stack slot; a store updates it.  Hot parameters use the remaining registers;
+- a parameter whose only use is the initial store to a direct local is written
+  straight from its incoming argument register in the prologue, and the store
+  instruction disappears;
+- a value whose live range stays inside one basic block with no call is
+  allocated to a caller-saved register (`a0-a3`, falling back to `a6`/`a7`),
+  and the producer writes that register directly, so the value never gets a
+  frame slot.  Caller-saved registers need no prologue save.  A value is only
+  allocated when some use would otherwise need a copy out of `q0`; a value
+  that every use can read from the scratch register is left in place.
+  Values crossing a block, allocas, phi destinations and blocks containing a
+  call keep their slots.  Cross-block values were also measured against the
+  free `s0-s7` registers, but the front end keeps C locals in allocas, so the
+  remaining temporaries are too few (and too cheap after `q0` forwarding) to
+  repay the prologue save/restore;
+- a call result consumed by the next instruction stays in `a0` instead of
+  taking the stack round trip, and memory stores use an already-live value or
+  pointer register directly;
+- dead pure SSA computations are removed before code generation, as are loads
+  from non-escaping locals (a stack load cannot fault), and an unread local is
+  dropped together with its stores;
+- RV32 computes through `q0`/`q1` pseudo-temporaries that become `a4`/`a5`
+  after the peephole.  Both are in `x8-x15`, so the assembler can use the
+  compressed `c.*` forms; the peephole canonicalises the alias, so cached
+  values are killed when the same physical register is written as a call
+  argument;
+- no-op casts (`ptrtoint`/`inttoptr`, same-width `bitcast`/`trunc`/`zext`/`sext`)
+  are replaced by their operand, which removes the copy gocl emits for every
+  pointer passed through TinyOS's i32 ABI;
+- a load of a scalar local whose address never escapes is replaced by the SSA
+  value the preceding store (or load) left in that local, both within a block
+  and across a block edge when every predecessor agrees on the same value; the
+  hottest locals are excluded because they already live in a callee-saved
+  register;
+- the RV32 peephole forwards loads, deletes dead stores, sinks small constants
+  into ALU instructions, turns multiply/divide by a power of two into shifts,
+  rewrites `li 0 + sw` as `sw zero`, drops jumps to the following label, and
+  inverts a `bnez/beqz` + `j` pair when the branch target is the fallthrough;
+- a comparison whose only consumer is a branch is fused into that branch
+  (`slt` + `xori 1` + `beqz` becomes `blt`, `snez` + `beqz` becomes `beqz`,
+  a bare `xori 1` flips the branch), and `xori x, y, 0` disappears; this
+  removes most of the boolean materialisation the stack-machine emitter
+  produces;
+- `addi p, base, off; load/store x, 0(p)` (with any base register, and with
+  `addi p, p, add` GEP steps folded in) becomes a direct `off(base)` access
+  when `p` is dead afterwards, removing the pointer materialisation; the run
+  stops if the base itself is written, and one address computation can feed
+  several accesses;
+- empty RV32 blocks that contain only a `j` are threaded away, the same way as
+  the Thumb ones;
+- a function called exactly once that is at most 40 IR instructions is inlined
+  at that call site, and the out-of-line body is dropped when its address is
+  never taken.  gocl emits C `static` functions with `internal` linkage, and
+  only those are candidates: a sibling translation unit cannot reference the
+  removed symbol, so the pass is safe for multi-file programs too (it used to
+  be single-input only).  Larger functions stay out of line: the stack-machine
+  frame grows when the callee's values merge into the caller, and that already
+  costs more than the removed call at around 80 instructions.  ARMv6-M is
+  excluded for the same reason;
+- small RV32 functions keep one slot per value so the peephole can prove stores
+  dead per value; frames over 2 KiB use a per-block liveness pool instead.
+  Thumb cares more about frame size than about per-value store proof, so it
+  always uses the pool and keeps the hottest slots at short offsets.
+  The pool indices are ranked by access count, so hot temporaries get the
+  short offsets Thumb and RVC can encode compactly; `deep`'s recursive frame
+  falls from 2,224 to 2,112 bytes.  Thumb additionally puts the hot scalar
+  allocas below the pool and large aggregate allocas at the top of the frame,
+  keeping the common accesses inside a short `sp` offset.
+
+The same register-variable and parameter-store fusion runs on Thumb, using
+`r5-r7` (ARMv6-M ALU instructions only encode low registers) and writing
+parameters straight from `r0-r3`.  ARMv7-M/ARMv8-M extend that set with
+`r8-r11`, which Thumb-2 accepts as ALU operands and in the 32-bit
+load/store forms (ARMv6-M must stay on low registers); only the rare `muls`
+with a high operand needs a low-register copy.  Thumb GEPs consume an
+already-loaded base or index directly and fold small offsets into `adds`; a
+conditional branch is inverted when no literal pool sits between it and its
+fallthrough target, and `.ltorg` is emitted only for blocks that actually use
+a pool.  A comparison whose result is used only by a branch is emitted as a
+direct `cmp` + conditional branch instead of materialising a 0/1 value,
+storing it to the stack frame and reloading it for the branch; a `xor 1`
+around that comparison becomes the inverted branch.  The text pass also folds
+the register copies left by the slot cache into the consuming `cmp`/store, and
+turns `movs rX, #imm; cmp rD, rX` / `adds rD, rN, rX` into the immediate forms
+when the scratch register is dead afterwards.  A copy is also folded into a
+load/store base, a sign/zero extend, or a second move.  Empty blocks that contain only
+a `b` are threaded away; ARMv7-M/ARMv8-M can branch anywhere in the function,
+while ARMv6-M retargets only within the short conditional/unconditional range.
+The cache keeps word-sized `str/ldr [sp,#off]` pairs within a block, so a
+value stored and read again becomes a register move (or disappears); word
+stores that no surviving load reads are deleted, except the outgoing stack
+argument area and the vararg register save area (`@ goc32keep`).  On
+ARMv6-M, `add r4, sp, #off` followed by `[r4]` addresses the same slot, so
+frames past the 124-byte sp range get the same treatment; the cached offset
+is invalidated by any other write to r4.
+
+A block-local value whose use would otherwise copy it out of `r0` (a second
+ALU operand or a store address) can live in `r2`; the producer writes `r2`
+directly, so the definition store and the copy at each use disappear.  `r2` is
+caller-saved and unused by scalar code, but blocks containing a 64-bit
+operation, an aggregate/8-byte memory access, a division helper or an
+intrinsic keep their slots because those paths use `r2` as scratch.  `r3` is
+not offered to the allocator: the range-independent Thumb-1 jump materialises
+its target there.  A constant that is a byte shifted into place is built with
+`movs` + `lsls` instead of a literal; on ARMv6-M that is 4 bytes rather than
+the 12-byte inline literal block.
+
+A large part of the old Thumb size was the conservative long-branch veneer
+(trampoline): every unconditional jump used `ldr r3,.LbrN; mov pc,r3;
+.balign 4; .word target`, and `sh` had 1,665 of them (6.6 KiB of words plus
+instructions).  The post-pass now replaces a trampoline with a direct branch
+when its target is in range (always on ARMv7-M/v8-M, line-distance guarded on
+ARMv6-M).  What remains is inherent to Thumb-1: 3,929 of `sh`'s 4,850
+sp-relative accesses need the 32-bit `ldr/str` form because the frame offset
+is past 124, two-operand ALU operations need a setting `movs`, ARMv6-M can
+hold register variables only in `r5-r7`, and constants/symbol addresses use
+literal pools.  ARM `sh` is now 25,832 bytes / 16,751 compressed on the
+Cortex-M3 target and 30,460 / 17,563 for the RP2040, down from 72 KB / 84 KB
+before the trampoline rewrite and 199 KB originally.  On ARMv7-M/ARMv8-M a
+numeric constant uses `movw`/`movt` instead of a literal (four bytes to 16
+bits, eight above, and no pool pressure); a block-end forward pool for
+ARMv6-M was measured as well, and although it cut about 2 KB of raw text it
+compressed worse than the inline `ldr`/word pairs, so ARMv6-M keeps the
+inline form.
+
+The frame is the other visible cost. `deep.c` deliberately overflows the 8 KiB
+default stack and relies on the kernel doubling it once.  After the slot
+layout work the `recurse` frame is 2,112 bytes, the image stays inside one
+16 KiB window grain, and `deep 6` now grows the stack and completes with its
+journal intact (the deliberate `deep 6 0 8` variant still dies in the heap
+tail, as its documentation says it should).
+
+## Layout
+
+```
+main.go                 one-click driver: compile, assemble, link, pack
+internal/frontend/      C lexer/parser/checker (from goc)
+internal/common/        preprocessor and shared program types (from goc)
+internal/ir/            gocl's pure-Go IR translator, with the LLVM DLL
+                        loader and object emitter removed
+internal/goa/           two-function stub for the assembler queries the IR
+                        translator makes (TinyOS never takes that path)
+internal/native32/      IR parser + RV32IM and Thumb emitters
+internal/as/            two-pass RV32/Thumb assembler
+internal/ld/            PIE linker: --gc-sections, user.ld layout, .rela.dyn
+internal/obj/           in-memory object: sections, symbols, relocations
+internal/lz4tos/        LZ4 block compressor, ELF window hint, envelope
+cmd/asprobe/            dev-only: dump one file's assembled bytes
+tinyos/goc/             usys.h shim + __tos_syscall for ecall/svc
+```
+
+## Current coverage and limits
+
+The back ends cover the integer/pointer/array/struct/function/variadic subset
+used by `user/lib.c` and the small user programs. Floating point, `long double`,
+atomics, TLS and inline asm are not implemented yet. Values normally live in
+frame slots (a stack machine); the local peephole, slot reuse and the RV32
+block-local register allocator above shrink the output, but there is no
+function-wide register allocator, so correctness and size still come before
+speed.
+
+`rp2040` emits the ARMv6-M subset; `arm` (Cortex-M3) and `rp2350` (Cortex-M33)
+use the wider Thumb-2 offset forms, so binaries are built per board. Absolute
+words in `.text` (Thumb-1 jump targets and `ldr rX, =expr` literals) are emitted
+as `R_ARM_RELATIVE` entries in `.rela.dyn`, and TinyOS's loader applies them
+together with the load bias, so no `-z notext` is involved.
