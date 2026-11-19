@@ -79,7 +79,7 @@ baseline used to tell "SMP-specific" from "ordinary" bugs.
 - **Built and gated in CI** — eleven flashable images per push, LLVM pinned to the
   version the sizes were measured with, a QEMU smoke + soak job, and releases
   published from tags. Every image ships its build configuration
-  (`build-config-<target>.txt`; `build/build-config.txt` in a local tree)
+  (`tinyos-<target>.build-config.txt`; `build/build-config.txt` in a local tree)
   saying what it was built from.
 
 ## Quick start

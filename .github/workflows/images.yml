@@ -161,7 +161,7 @@ jobs:
               echo "writes; tinyos-esp32c3-generic-full.bin just pads to the filesystem offset."
               echo
               echo "Put the board in download mode first (hold BOOT, tap RESET)."
-            } > "$out/FLASH-$target.txt"
+            } > "$out/tinyos-$target.flash.txt"
           else
             cp "build/tinyos-$target.uf2" "$out/"
             {
@@ -170,13 +170,14 @@ jobs:
               echo "Hold BOOTSEL while connecting USB, then copy the .uf2"
               echo "file to the RPI-RP2 (or RP2350) mass-storage drive."
               echo "The board reboots into TinyOS when the copy completes."
-            } > "$out/FLASH-$target.txt"
+            } > "$out/tinyos-$target.flash.txt"
           fi
 
           # What this image was built from: a menuconfig build and the release
           # defaults differ in heap/opt/programs, and that must be visible in
-          # the artifact rather than inferred from the tag.
-          cp build/build-config.txt "$out/build-config-$target.txt" 2>/dev/null || true
+          # the artifact rather than inferred from the tag.  Same prefix as the
+          # image so every file belonging to a target sorts together.
+          cp build/build-config.txt "$out/tinyos-$target.build-config.txt" 2>/dev/null || true
 
           for f in "$out"/*; do
             test -s "$f" || { echo "empty file: $f"; exit 1; }

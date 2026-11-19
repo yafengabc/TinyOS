@@ -66,7 +66,7 @@ blob。
   目标上的 PIO、ST7789 屏、USB CDC（RP 用 TinyUSB，C3 用原生 USB）、C3 的 WiFi。
 - **CI 既构建也运行**——每次推送出十一个可刷写镜像，LLVM 固定到量尺寸时的版本，
   另有 QEMU 冒烟 + soak job，tag 自动发 Release。每个产物都带
-  `build-config-<target>.txt`（本地树里是 `build/build-config.txt`），
+  `tinyos-<target>.build-config.txt`（本地树里是 `build/build-config.txt`），
   写明它是按什么配置构建的。
 
 ## 快速开始

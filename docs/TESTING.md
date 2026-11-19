@@ -17,7 +17,7 @@
 | 级别 | 内容 | 是否阻塞提交 | 典型耗时 |
 |---|---|---|---|
 | **T0 静态/单元** | gofmt、`go build`、`go vet`、`go test`（含 skip 审计）、goc32/native32 测试 | **总是** | 1–3 min |
-| **T1 构建矩阵** | 所有可构建目标 + 受影响的板级 target；检查产物和 `build-config-<target>.txt` | 代码/构建改动**总是** | 3–10 min |
+| **T1 构建矩阵** | 所有可构建目标 + 受影响的板级 target；检查产物和 `build/build-config.txt` | 代码/构建改动**总是** | 3–10 min |
 | **T2 QEMU** | rv32 / rv32smp / arm 的 smoke + soak；必要时 compat | 内核/arch/驱动/用户态改动**总是** | 3–8 min |
 | **T3 真机** | 两块门槛：**心跳级**（新板最低线，§5.0）与**平权级**（C3、ATK RP2350 ARM/RV32、RP2040 的验收/目视项） | 板级/驱动/控制台/SMP 改动**按需但必须明确** | 5 min（心跳）/ 10–40 min（平权） |
 | **T4 压力** | 1000 轮 `dd`+`rm`、SMP soak、长时间 flash/窗口抖动 | 锁/内存/flash/窗口改动 | 10–60 min |
@@ -83,7 +83,7 @@ go run ./cmd/tos build all          # 15 个目标逐个构建；失败会汇总
 
 - 每个目标检查产物：`build/tinyos-<target>.uf2`、`build/tinyos-esp32c3*.bin`、
   `build/kernel-<target>.elf`、`build/build-config.txt`。
-- 记录 `build-config-<target>.txt` 的 `target`/`features`/`user-defines`，尤其是构建系统改动。
+- 记录 `build/build-config.txt` 的 `target`/`features`/`user-defines`，尤其是构建系统改动。
 - **只读镜像也算一个目标**：只要碰了 `kernel/ramdisk.c`、`TOS_LFS_RO` 或“某段代码在
   `#ifdef` 块里外”的边界，就额外跑 `go run ./cmd/tos build -config configs/rv32-fsro.conf`
   （x86 能建就再跑一次 x86 的 RO 构建）。默认 configs 都不开 `fs_ro`，否则这条只在别人

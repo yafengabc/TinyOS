@@ -19,8 +19,8 @@
 | `atk-dnr2350am-rv32` | `tinyos-atk-dnr2350am-rv32.uf2` | 同上（RISC-V 核） |
 | `atk-dnr2350am-rv32-smp` | `tinyos-atk-dnr2350am-rv32-smp.uf2` | 同上（RISC-V 双核） |
 
-每个目标还会带一个 `FLASH-<target>.txt`，里面是简短的刷写说明，以及一份
-**`build-config-<target>.txt`**：这次构建用的 `heap` / `max_procs` / `kstack` / `opt` /
+每个目标还会带一个 `tinyos-<target>.flash.txt`，里面是简短的刷写说明，以及一份
+**`tinyos-<target>.build-config.txt`**：这次构建用的 `heap` / `max_procs` / `kstack` / `opt` /
 features 与"是否读了 `tos.conf`"。
 
 最后一份是这次新加的，因为**发布镜像和上板验收用的构建可能不是同一份**：CI 没有
@@ -28,7 +28,7 @@ features 与"是否读了 `tos.conf`"。
 两者都能跑，但"验收过"这个结论不能直接搬到发布物上——现在产物里写明了它是按什么
 构建的，比对一眼就够。
 
-`build-config-<target>.txt` 里还有三行 `check-grain` / `check-stack` / `check-guard`：那是
+`tinyos-<target>.build-config.txt` 里还有三行 `check-grain` / `check-stack` / `check-guard`：那是
 **构建期 `TOS_WINDOW()` 校验**用的几何，不是运行时几何（运行时看
 `board/*/layout.c`，两者的差异见 OPEN-ITEMS §36）。
 
