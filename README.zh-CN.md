@@ -57,7 +57,7 @@ blob。
 - **一套真用户态**——从 littlefs 加载的 PIE ELF：`msh` 加带管道/重定向的 `sh`，
   40 多个工具（`ls dd df free ps cat wc edit gpio adc pwm spi i2c dma pio crash deep
   piperace`），一个 Python 解释器（`py`），以及线程、管道、邮箱、信号的示例。
-- **能活下来的文件系统**——flash / ATA / 内嵌三种后端上的 littlefs 2.x，驱动前有
+- **可保留的文件系统**——flash / ATA / 内嵌三种后端上的 littlefs 2.x，驱动前有
   块缓存；C3 上还有**一体刷机镜像**（`esptool write-flash 0x0` 一次写完）。
 - **接口**——devfs（`/dev/gpio4`、`/dev/lcd0`…）配 `ioctl` 设备模型、procfs
   （`/proc/ps`、`/proc/mem`…）、管道、信号、消息邮箱。
