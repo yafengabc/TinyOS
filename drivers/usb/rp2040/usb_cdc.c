@@ -208,22 +208,20 @@ void usb_cdc_e15_request(void)
 }
 
 /* Busy-wait `ms` milliseconds at the current clk_sys.  The USB bring-up is
- * the only caller and it runs before the 1 ms tick exists, so this cannot
- * use plat_uptime_ms().  At 12 MHz the old hand-tuned 600000-iteration loop
- * was ~200 ms; keeping the same spins-per-ms ratio makes the pull-up drop
- * survive the move to 125 MHz (where the constant had shrunk to ~19 ms,
- * too short for a host to tear the old device node down). */
+ * the only caller and it runs before the 1 ms tick exists, so this cannot use
+ * plat_uptime_ms(). */
 static void usb_delay_ms(uint32_t ms)
 {
-    /* At 12 MHz the original hand-tuned loop used 4000 iterations per ms
-     * (about 3 cycles each).  Keep that ratio instead of the 3000/ms value
-     * that made the E15 forced-J hold only ~0.75 ms - shorter than the
-     * 800 us the SIE requires, so it never reached CONNECTED and stayed
-     * muxed to GPIO while the host sent the next SETUP. */
-    uint32_t n = (g_usb_clk_hz / 3000u) * ms;
+    /* One iteration of this loop measures ~9.2 cycles on this port (the
+     * pull-up drop below was timed against the UART: 200 nominal took 614 ms
+     * at 125 MHz with the old /3000 divisor, which assumed 3 cycles).  /9000
+     * puts the real duration back on the requested one - 200 ms for the
+     * disconnect a hub needs to tear the old device node down, ~1 ms for the
+     * E15 forced-J hold the SIE wants to see at least 800 us of. */
+    uint32_t n = (g_usb_clk_hz / 9000u) * ms;
 
-    if (n < 4000u * ms)
-        n = 4000u * ms;
+    if (n < 1200u * ms)
+        n = 1200u * ms;
     for (volatile uint32_t i = 0; i < n; i++)
         ;
 }
