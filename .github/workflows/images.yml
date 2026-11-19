@@ -172,7 +172,7 @@ jobs:
           # What this image was built from: a menuconfig build and the release
           # defaults differ in heap/opt/programs, and that must be visible in
           # the artifact rather than inferred from the tag.
-          cp build/build-config.txt "$out/" 2>/dev/null || true
+          cp build/build-config.txt "$out/build-config-$target.txt" 2>/dev/null || true
 
           for f in "$out"/*; do
             test -s "$f" || { echo "empty file: $f"; exit 1; }
