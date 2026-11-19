@@ -5015,3 +5015,52 @@ FLASH_DEVINFO，也就是 OTP 配置；未编程时那是**保守默认 16 MiB�
 `ramdisk_init()`，用户进程在其后，而用户程序本身就在被定尺寸的那个 littlefs 里；
 ② QMI / SSI 都是特权外设（M33 MPU、RV32 PMP）；③ 关 XIP 是全局的（中断须关、
 SMP 须 park 另一核）。用户态只保留 `flashinfo` 读 `/proc/flash`。
+
+## 83. 2026-11-20 Pico 2 SMP 闸门复测：`reboot` 没停从核（`109a61e`）
+
+**动机**：SMP 镜像在 RP2350 上有过“间歇楔死”的历史，闸门的做法是把上电路径反复
+走一遍，看每次能否回到 shell。用 `reboot` 而不是拔电：`plat_reboot()` 走 ROM 的
+`BOOT_TYPE_NORMAL`，它会重新扫 flash 里的 IMAGE_DEF 再引导同一个镜像，就是上电走
+的那条路。
+
+**结果**（修复前后对比，同一台 Pico 2、同一批 HEAD 镜像）：
+
+| 镜像 | 修复前 | 修复后 | 每轮 uptime |
+| --- | --- | --- | --- |
+| `rpi-pico2-smp` | 1/3 | **20/20** | 0.52–0.53 s |
+| `rpi-pico2-rv32-smp` | 1/15 | **35/38**（20 s 窗）、**10/10**（45 s 窗） | 0.40–0.45 s |
+
+RV32 那 3 次未过不是启动失败：CDC 在 20 s 内没枚举完，而**下一轮同一块板能被复位**
+（卡死的板是复位不动的），45 s 窗口下 10/10，属主机侧枚举延迟。
+
+**根因**：`plat_reboot()` 在另一个核还在跑旧内核时就让 ROM 重启了 core 0。同一个文件
+里的 `rom_enter_bootsel()` 一直有 `rom_stop_other_core()`，重启路径却没有。症状是
+“第一次 reboot 能回来，第二次留一个枚举得出来、打得开、永远不答话的 CDC”——正是
+AIRCR 那段注释里描述过的形状。
+
+- ARM 端：`rom_reboot()` 前调 `rom_stop_other_core()`；`g_core1_stopped` 让被停的核
+  留在循环里，不需要再 unpark。
+- RV32 端：ports 里没有对应机制，用 flash-park 的握手加一个 `g_hart1_stopped`，
+  并新增 `RP_PARK_STOP_FOREVER()` 钩子——被 park 的 hart 停在 RAM 里喂狗，不回到
+  即将被替换的内核。
+
+**#29 顺带量到**：新增 `/proc/usbpoll`（`plat_usb_poll_ns()`，其他端口弱符号 0），
+在固定时间片里用 mtime 测稳态单次 `usb_cdc_poll()`：`2666 / 2666 / 2659 ns`，
+即 **2660 ns/poll、250 ms ≈ 94 000 次**。这条数据**否掉了原来的解释**——40 000 次
+× 2.66 µs 只有 106 ms，所以 2026-11-19 那次“照搬 ARM pump 就挂死”不是预算太大，
+更可能是 RV32 现有循环里那个 **40 周期间隔**被去掉造成的。换有界 pump 之前要先解释
+`mcause=0x3 @ 0x10013d0a`（panic 路径）那个 trap。
+
+**方法论两条**（都写进脚本了）：① CDC 的 DTR 必须拉高，否则固件按“主机不在”丢弃
+输出，看起来和死板一样；② 每轮必须验 `uptime` 归零，否则“复位没发生”和“复位成功”
+无法区分——第一版闸门就这样“15/15 通过”过。
+
+**未跑**：#31 RP2040 pump 四项测量全部 `NOT RUN`（RP2040 不在台上，代码在、没验）。
+
+**附带结论**：板子“卡死”（CDC 枚举着、shell 不应答）时 **Ctrl-D 仍然有效**，
+`scripts/rp2350/bootsel_poke.py <port> 25 --dtr` 能踢回 BOOTSEL，本轮两次靠它救回；
+1200-baud touch 对 TinyOS 无效（那是 pico-sdk 的复位接口）。另外 **刷机后 UART0 哑**
+在 ARM 镜像上稳定复现（0/20 轮无输出、CDC 20/20 正常），所以它和 RISC-V 端口无关，
+触发条件是“BOOTSEL 刷机后的那次启动”，根因仍未查。
+
+卡片：`docs/acceptance/2026-11-20-pico2-smp-boot-gate.md`。
