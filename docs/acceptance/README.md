@@ -125,3 +125,4 @@
 | 2026-11-20 | csc3 `break`/`continue`、`do-while`、`for` 声明、`+=`/`++` | `1528681` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 flow 26/3/4；csc3 100 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 flow](2026-11-20-csc3-flow-esp32c3-1528681.md) |
 | 2026-11-20 | csc3 成员/数组元素的 `+=` 与 `++/--` | `52969da` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 flow2 5/30/9，ret 44；csc3 100 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 lvalue](2026-11-20-csc3-lvalue-compound-esp32c3-52969da.md) |
 | 2026-11-20 | csc3 `enum` + `switch/case/default` | `d8913f9` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 switch 105/2/3；csc3 108 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 switch](2026-11-20-csc3-switch-enum-esp32c3-d8913f9.md) |
+| 2026-11-20 | csc3 错误信息带源码行号 | `2f2bac6` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 parse/codegen 都报 line 3；csc3 108 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 lines](2026-11-20-csc3-line-numbers-esp32c3-2f2bac6.md) |
