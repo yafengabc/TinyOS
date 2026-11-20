@@ -10,7 +10,7 @@
 
 TOS_STACK(16 * 1024);
 
-#ifdef __riscv
+#if defined(__riscv) || defined(__arm__)
 #define RIR_MAX   40960
 #define TEXT_MAX  49152
 #define LABEL_MAX 4096
@@ -229,7 +229,13 @@ static int frame_for(int fid)
     return (frame + 15) & ~15;
 }
 
+#if defined(__riscv) || defined(RCC_ARCH_RV32)
 #include "rv32.inc"
+#elif defined(__arm__) || defined(RCC_ARCH_THUMB2)
+#include "thumb2.inc"
+#else
+#error "rcc: no backend selected (RCC_ARCH_RV32 / RCC_ARCH_THUMB2)"
+#endif
 
 static void write_elf_header(int data_off, int data_filesz, int data_memsz)
 {

@@ -1,0 +1,759 @@
+/* Thumb-2 backend (ARMv7-M / ARMv8-M Mainline).  Included by rcc.c when the
+ * target is Cortex-M3/M33.  Stage 1 of the port: integer core, calls,
+ * globals/arrays, print int and bounds.  Strings, floats and the native
+ * syscalls are still refused with a diagnostic so a half-built backend cannot
+ * pretend to have compiled a program.
+ *
+ * ABI chosen here: the first seven RIR registers live in r4..r10 (callee
+ * saved), RIR 7..15 live in frame slots, r0..r3/r12 are scratch and r0 is the
+ * return value.  Arguments travel through the same `data_argbuf` word array
+ * the RV32 backend uses, so no argument registers have to survive a nested
+ * call.
+ */
+#if defined(__arm__) || defined(RCC_ARCH_THUMB2)
+
+#define ARM_SCRATCH0 0
+#define ARM_SCRATCH1 1
+#define ARM_SCRATCH2 2
+#define ARM_SCRATCH3 3
+#define ARM_TMP      12
+#define ARM_SP       13
+#define ARM_LR       14
+#define ARM_PC       15
+
+#define VREG_IN_REG 7          /* RIR 0..6 -> r4..r10                  */
+#define SLOT_BYTES 40          /* 9 slots (RIR 7..15) + alignment      */
+
+/* ---- instruction encoders ------------------------------------------- */
+
+static void e16(uint16_t v)
+{
+    uint8_t b[2];
+    b[0] = (uint8_t)v;
+    b[1] = (uint8_t)(v >> 8);
+    e_bytes(b, 2);
+}
+
+static void e_add_imm(int rd, int rn, int imm);
+static void e_sub_imm(int rd, int rn, int imm);
+
+static void e32h(uint16_t a, uint16_t b)
+{
+    e16(a);
+    e16(b);
+}
+
+static void e_movw(int rd, uint32_t v)
+{
+    e32h((uint16_t)(0xF240 | (((v >> 11) & 1) << 10) | ((v >> 12) & 0xF)),
+         (uint16_t)((((v >> 8) & 7) << 12) | ((rd & 0xF) << 8) | (v & 0xFF)));
+}
+
+static void e_movt(int rd, uint32_t v)
+{
+    e32h((uint16_t)(0xF2C0 | (((v >> 27) & 1) << 10) | ((v >> 28) & 0xF)),
+         (uint16_t)((((v >> 24) & 7) << 12) | ((rd & 0xF) << 8) |
+                    ((v >> 16) & 0xFF)));
+}
+
+static void e_li(int rd, uint32_t v)
+{
+    e_movw(rd, v);
+    if (v > 0xFFFFu)
+        e_movt(rd, v);
+}
+
+static void e_mov_w(int rd, int rm)
+{
+    e32h((uint16_t)(0xEA4F), (uint16_t)((rd << 8) | (rm & 0xF)));
+}
+
+static void e_add_reg(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xEB00 | (rn & 0xF)), (uint16_t)((rd << 8) | (rm & 0xF)));
+}
+
+static void e_sub_reg(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xEBA0 | (rn & 0xF)), (uint16_t)((rd << 8) | (rm & 0xF)));
+}
+
+static void e_add_imm(int rd, int rn, int imm)
+{
+    if (imm < 0) {
+        e_sub_imm(rd, rn, -imm);
+        return;
+    }
+    if (imm == 0) {
+        e_mov_w(rd, rn);
+        return;
+    }
+    e32h((uint16_t)(0xF100 | (((imm >> 11) & 1) << 10) | (rn & 0xF)),
+         (uint16_t)((((imm >> 8) & 7) << 12) | ((rd & 0xF) << 8) | (imm & 0xFF)));
+}
+
+static void e_sub_imm(int rd, int rn, int imm)
+{
+    if (imm < 0) {
+        e_add_imm(rd, rn, -imm);
+        return;
+    }
+    if (imm == 0) {
+        e_mov_w(rd, rn);
+        return;
+    }
+    e32h((uint16_t)(0xF1A0 | (((imm >> 11) & 1) << 10) | (rn & 0xF)),
+         (uint16_t)((((imm >> 8) & 7) << 12) | ((rd & 0xF) << 8) | (imm & 0xFF)));
+}
+
+static void e_mul(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xFB00 | (rn & 0xF)),
+         (uint16_t)(0xF000 | ((rd & 0xF) << 8) | (rm & 0xF)));
+}
+
+static void e_sdiv(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xFB90 | (rn & 0xF)),
+         (uint16_t)(0xF0F0 | ((rd & 0xF) << 8) | (rm & 0xF)));
+}
+
+static void e_udiv(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xFBB0 | (rn & 0xF)),
+         (uint16_t)(0xF0F0 | ((rd & 0xF) << 8) | (rm & 0xF)));
+}
+
+static void e_mls(int rd, int rn, int rm, int ra)
+{
+    e32h((uint16_t)(0xFB00 | (rn & 0xF)),
+         (uint16_t)(((ra & 0xF) << 12) | ((rd & 0xF) << 8) | 0x10 | (rm & 0xF)));
+}
+
+static void e_cmp(int rn, int rm)
+{
+    e32h((uint16_t)(0xEBB0 | (rn & 0xF)), (uint16_t)(0x0F00 | (rm & 0xF)));
+}
+
+static void e_cmp_zero(int rn)
+{
+    e32h((uint16_t)(0xF1B0 | (rn & 0xF)), 0x0F00);
+}
+
+static void e_shift_imm(int rd, int rm, int sh, int type)
+{
+    e32h(0xEA4F,
+         (uint16_t)(((sh >> 2) << 12) | ((rd & 0xF) << 8) |
+                    ((sh & 3) << 6) | (type << 4) | (rm & 0xF)));
+}
+
+static void e_lsl_imm(int rd, int rm, int sh) { e_shift_imm(rd, rm, sh, 0); }
+static void e_lsr_imm(int rd, int rm, int sh) { e_shift_imm(rd, rm, sh, 1); }
+static void e_asr_imm(int rd, int rm, int sh) { e_shift_imm(rd, rm, sh, 2); }
+
+static void e_ldr_imm(int rd, int rn, int off)
+{
+    e32h((uint16_t)(0xF8D0 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | (off & 0xFFF)));
+}
+
+static void e_str_imm(int rd, int rn, int off)
+{
+    e32h((uint16_t)(0xF8C0 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | (off & 0xFFF)));
+}
+
+static void e_ldrb_imm(int rd, int rn, int off)
+{
+    e32h((uint16_t)(0xF890 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | (off & 0xFFF)));
+}
+
+static void e_strb_imm(int rd, int rn, int off)
+{
+    e32h((uint16_t)(0xF880 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | (off & 0xFFF)));
+}
+
+static void e_ldrb_reg(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xF810 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | (rm & 0xF)));
+}
+
+static void e_strb_reg(int rd, int rn, int rm)
+{
+    e32h((uint16_t)(0xF800 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | (rm & 0xF)));
+}
+
+static void e_ldr_reg_shift(int rd, int rn, int rm, int sh)
+{
+    e32h((uint16_t)(0xF850 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | ((sh & 3) << 4) | (rm & 0xF)));
+}
+
+static void e_str_reg_shift(int rd, int rn, int rm, int sh)
+{
+    e32h((uint16_t)(0xF840 | (rn & 0xF)),
+         (uint16_t)(((rd & 0xF) << 12) | ((sh & 3) << 4) | (rm & 0xF)));
+}
+
+static void e_bic_imm(int rd, int rn, int imm)
+{
+    e32h((uint16_t)(0xF020 | (((imm >> 11) & 1) << 10) | (rn & 0xF)),
+         (uint16_t)((((imm >> 8) & 7) << 12) | ((rd & 0xF) << 8) | (imm & 0xFF)));
+}
+
+static void e_push(void)  { e32h(0xE92D, 0x4FF0); }   /* {r4-r11, lr} */
+static void e_pop(void)   { e32h(0xE8BD, 0x8FF0); }   /* {r4-r11, pc} */
+static void e_svc0(void)  { e16(0xDF00); }
+static void e_movs_imm8(int rd, int imm) { e16((uint16_t)(0x2000 | ((rd & 7) << 8) | (imm & 0xFF))); }
+static void e_b_self(void) { e16(0xE7FE); }
+
+/* Branch offset: label_off is a link-time address, PC reads as insn+4. */
+static int32_t br_off(int label)
+{
+    return (int32_t)label_off[label] - (int32_t)(text_len + 4);
+}
+
+static void e_b(int label)
+{
+    uint32_t u = (uint32_t)br_off(label);
+    uint32_t s = (u >> 24) & 1, i1 = (u >> 23) & 1, i2 = (u >> 22) & 1;
+    uint32_t j1 = (~(i1 ^ s)) & 1, j2 = (~(i2 ^ s)) & 1;
+    e32h((uint16_t)(0xF000 | (s << 10) | ((u >> 12) & 0x3FF)),
+         (uint16_t)(0x9000 | (j1 << 13) | (j2 << 11) | ((u >> 1) & 0x7FF)));
+}
+
+static void e_bl(int label)
+{
+    uint32_t u = (uint32_t)br_off(label);
+    uint32_t s = (u >> 24) & 1, i1 = (u >> 23) & 1, i2 = (u >> 22) & 1;
+    uint32_t j1 = (~(i1 ^ s)) & 1, j2 = (~(i2 ^ s)) & 1;
+    e32h((uint16_t)(0xF000 | (s << 10) | ((u >> 12) & 0x3FF)),
+         (uint16_t)(0xD000 | (j1 << 13) | (j2 << 11) | ((u >> 1) & 0x7FF)));
+}
+
+/* Conditional branch, cond is the ARM condition code (EQ=0, NE=1, ...). */
+static void e_bcond(int cond, int label)
+{
+    uint32_t u = (uint32_t)br_off(label);
+    uint32_t s = (u >> 24) & 1;
+    uint32_t j2 = (u >> 23) & 1, j1 = (u >> 22) & 1;
+    e32h((uint16_t)(0xF000 | (s << 10) | ((uint32_t)cond << 6) | ((u >> 12) & 0x3F)),
+         (uint16_t)(0x8000 | (j1 << 13) | (j2 << 11) | ((u >> 1) & 0x7FF)));
+}
+
+/* Materialise a label address without relocations: the BL records the address
+ * of the next instruction in LR, and the label is a link-time offset from
+ * there.  LR is saved by every prologue/helper, so clobbering it is safe. */
+static void e_la(int rd, int label)
+{
+    uint32_t here = (uint32_t)(text_len + 4);
+    int32_t delta = (int32_t)label_off[label] - (int32_t)here;
+    e32h(0xF000, 0xF800);            /* bl .+4  -> lr = here */
+    e_bic_imm(rd, ARM_LR, 1);
+    e_movw(ARM_TMP, (uint32_t)delta);
+    e_movt(ARM_TMP, (uint32_t)delta);
+    e_add_reg(rd, rd, ARM_TMP);
+}
+
+static int pc_label_for(int pc)
+{
+    int l;
+    if (pc < 0 || pc >= PC_MAX)
+        die("pc out of range");
+    if (pc_label[pc] != PC_LABEL_NONE) {
+        int lbl = (int)pc_label[pc];
+        if (emit_pass == 2 && !label_seen[lbl]) {
+            l = alloc_label();
+            label_seen[lbl] = 1;
+            if (l != lbl)
+                die("label order mismatch");
+        }
+        return lbl;
+    }
+    l = alloc_label();
+    if (l >= (int)PC_LABEL_NONE)
+        die("too many labels");
+    pc_label[pc] = (uint16_t)l;
+    return l;
+}
+
+/* ---- RIR register mapping ------------------------------------------- */
+
+static void die_unsupported(const char *what)
+{
+    puts("rcc: thumb2: ");
+    puts(what);
+    puts(" not implemented yet\n");
+    exit(1);
+}
+
+static int vreg_ok(int v)
+{
+    if (v < 0 || v > 15)
+        die("bad RIR register");
+    return v;
+}
+
+static void ld_vreg(int tmp, int v)
+{
+    vreg_ok(v);
+    if (v < VREG_IN_REG)
+        e_mov_w(tmp, 4 + v);
+    else
+        e_ldr_imm(tmp, ARM_SP, 4 * (v - VREG_IN_REG));
+}
+
+static void st_vreg(int v, int src)
+{
+    vreg_ok(v);
+    if (v < VREG_IN_REG)
+        e_mov_w(4 + v, src);
+    else
+        e_str_imm(src, ARM_SP, 4 * (v - VREG_IN_REG));
+}
+
+/* ---- labels and per-function emission ------------------------------- */
+
+static int L_bounds, L_pi, L_pin, rodata_msg;
+static int data_bss_size;
+static int func_epi[FUNC_MAX];
+
+static int func_label_for(int fid)
+{
+    int l;
+    if (func_label[fid] >= 0) {
+        if (emit_pass == 2 && !label_seen[func_label[fid]]) {
+            l = alloc_label();
+            label_seen[func_label[fid]] = 1;
+            if (l != func_label[fid])
+                die("label order mismatch");
+        }
+        return func_label[fid];
+    }
+    l = alloc_label();
+    func_label[fid] = l;
+    return l;
+}
+
+static void emit_prologue(int fid, int argc, int frame)
+{
+    int i;
+    bind_label(func_label_for(fid));
+    e_push();
+    e_sub_imm(ARM_SP, ARM_SP, frame);
+    if (argc > 0) {
+        int n = argc > 9 ? 9 : argc;
+        e_la(ARM_SCRATCH0, data_argbuf);
+        for (i = 0; i < n; i++) {
+            e_ldr_imm(ARM_SCRATCH1, ARM_SCRATCH0, 4 * i);
+            st_vreg(i, ARM_SCRATCH1);
+        }
+    }
+}
+
+static void emit_epilogue(int fid, int frame)
+{
+    bind_label(func_epi[fid]);
+    e_add_imm(ARM_SP, ARM_SP, frame);
+    e_pop();
+}
+
+/* ---- instruction selection ------------------------------------------ */
+
+static int inv_cond(int c)
+{
+    switch (c) {
+    case 0:  return 1;    /* EQ <-> NE  */
+    case 1:  return 0;
+    case 10: return 11;   /* GE <-> LT  */
+    case 11: return 10;
+    case 12: return 13;   /* GT <-> LE  */
+    case 13: return 12;
+    default: return c ^ 1;
+    }
+}
+
+/* compare a,b and leave 1/0 in tmp */
+static void emit_setcc(int cond, int tmp, int ra, int rb)
+{
+    int done = new_label();
+    e_li(tmp, 0);
+    e_cmp(ra, rb);
+    e_bcond(inv_cond(cond), done);
+    e_li(tmp, 1);
+    bind_label(done);
+}
+
+static void emit_insn(int fid, int pc)
+{
+    int op = ir_op(pc);
+    int a = ir_a(pc), b = ir_b(pc), c = ir_c(pc), d = ir_d(pc);
+
+    switch (op) {
+    case R_CONST: e_li(ARM_SCRATCH0, (uint32_t)a); st_vreg(d, ARM_SCRATCH0); break;
+    case R_MOV: ld_vreg(ARM_SCRATCH0, a); st_vreg(d, ARM_SCRATCH0); break;
+    case R_ADD: ld_vreg(0, a); ld_vreg(1, b); e_add_reg(2, 0, 1); st_vreg(d, 2); break;
+    case R_SUB: ld_vreg(0, a); ld_vreg(1, b); e_sub_reg(2, 0, 1); st_vreg(d, 2); break;
+    case R_MUL: ld_vreg(0, a); ld_vreg(1, b); e_mul(2, 0, 1); st_vreg(d, 2); break;
+    case R_DIV: ld_vreg(0, a); ld_vreg(1, b); e_sdiv(2, 0, 1); st_vreg(d, 2); break;
+    case R_MOD: {
+        int nz = new_label(), end = new_label(), zero = new_label();
+        ld_vreg(0, a);
+        ld_vreg(1, b);
+        e_cmp_zero(1);
+        e_bcond(1 /* NE */, nz);
+        e_li(2, 0);
+        e_b(end);
+        bind_label(nz);
+        e_sdiv(2, 0, 1);
+        e_mls(2, 2, 1, 0);
+        bind_label(end);
+        (void)zero;
+        st_vreg(d, 2);
+        break;
+    }
+    case R_LT: ld_vreg(0, a); ld_vreg(1, b); emit_setcc(11 /* LT */, 2, 0, 1); st_vreg(d, 2); break;
+    case R_GT: ld_vreg(0, a); ld_vreg(1, b); emit_setcc(12 /* GT */, 2, 0, 1); st_vreg(d, 2); break;
+    case R_EQ: ld_vreg(0, a); ld_vreg(1, b); emit_setcc(0 /* EQ */, 2, 0, 1); st_vreg(d, 2); break;
+    case R_NE: ld_vreg(0, a); ld_vreg(1, b); emit_setcc(1 /* NE */, 2, 0, 1); st_vreg(d, 2); break;
+    case R_LE: ld_vreg(0, a); ld_vreg(1, b); emit_setcc(13 /* LE */, 2, 0, 1); st_vreg(d, 2); break;
+    case R_GE: ld_vreg(0, a); ld_vreg(1, b); emit_setcc(10 /* GE */, 2, 0, 1); st_vreg(d, 2); break;
+    case R_JZ:
+        ld_vreg(0, a);
+        e_cmp_zero(0);
+        e_bcond(0 /* EQ */, pc_label_for(b));
+        break;
+    case R_JMP: e_b(pc_label_for(a)); break;
+    case R_RET:
+        ld_vreg(0, a);
+        e_b(func_epi[fid]);
+        break;
+    case R_HALT:
+        e_movs_imm8(0, 0);
+        e_svc0();
+        break;
+    case R_LOADG:
+        e_la(ARM_SCRATCH0, data_g);
+        e_ldr_imm(1, ARM_SCRATCH0, a * 4);
+        st_vreg(d, 1);
+        break;
+    case R_STOREG:
+        e_la(ARM_SCRATCH0, data_g);
+        ld_vreg(1, b);
+        e_str_imm(1, ARM_SCRATCH0, a * 4);
+        break;
+    case R_LOADA:
+    case R_STOREA:
+    case R_STOREA_I: {
+        int lim = (op == R_LOADA) ? c : d;
+        int ok = new_label();
+        e_la(ARM_SCRATCH0, data_g);
+        ld_vreg(1, b);
+        e_li(2, (uint32_t)lim);
+        e_cmp(1, 2);
+        e_bcond(3 /* CC: idx < len */, ok);
+        e_bl(L_bounds);
+        bind_label(ok);
+        if (a)
+            e_add_imm(ARM_SCRATCH0, ARM_SCRATCH0, a * 4);
+        e_lsl_imm(1, 1, 2);
+        e_add_reg(ARM_SCRATCH0, ARM_SCRATCH0, 1);
+        if (op == R_LOADA) {
+            e_ldr_imm(1, ARM_SCRATCH0, 0);
+            st_vreg(d, 1);
+        } else if (op == R_STOREA) {
+            ld_vreg(2, c);
+            e_str_imm(2, ARM_SCRATCH0, 0);
+        } else {
+            e_li(2, (uint32_t)c);
+            e_str_imm(2, ARM_SCRATCH0, 0);
+        }
+        break;
+    }
+    case R_PRINT:
+        ld_vreg(0, a);
+        e_bl(L_pi);
+        break;
+    case R_PRINTV:
+        ld_vreg(0, a);
+        e_bl(L_pin);
+        break;
+    case R_PRINTN:
+    case R_PRINTS: {
+        int n = b;
+        if (op == R_PRINTS) {
+            int off = a;
+            n = 0;
+            if (off >= 0 && off < strsize)
+                while (off + n < strsize && strpool[off + n])
+                    n++;
+        }
+        e_la(1, data_strpool);
+        if (a) {
+            e_li(2, (uint32_t)a);
+            e_add_reg(1, 1, 2);
+        }
+        e_li(3, (uint32_t)n);   /* len */
+        e_mov_w(2, 1);          /* buf */
+        e_li(1, 1);             /* fd  */
+        e_li(0, 1);             /* SYS_write */
+        e_svc0();
+        break;
+    }
+    case R_ARG:
+        e_la(ARM_SCRATCH0, data_argbuf);
+        ld_vreg(1, b);
+        e_str_imm(1, ARM_SCRATCH0, a * 4);
+        break;
+    case R_CALL:
+        e_bl(func_label_for(a));
+        st_vreg(b, 0);
+        break;
+    case R_LOADL:
+        e_ldr_imm(0, ARM_SP, 36 + 4 * a);
+        st_vreg(d, 0);
+        break;
+    case R_STOREL:
+        ld_vreg(0, a);
+        e_str_imm(0, ARM_SP, 36 + 4 * b);
+        break;
+    case R_INC: ld_vreg(0, a); e_add_imm(2, 0, 1); st_vreg(d, 2); break;
+    case R_DEC: ld_vreg(0, a); e_add_imm(2, 0, -1); st_vreg(d, 2); break;
+    case R_ADDI:
+        ld_vreg(0, a);
+        e_li(1, (uint32_t)b);
+        e_add_reg(2, 0, 1);
+        st_vreg(d, 2);
+        break;
+    case R_SUBI:
+        ld_vreg(0, a);
+        e_li(1, (uint32_t)b);
+        e_sub_reg(2, 0, 1);
+        st_vreg(d, 2);
+        break;
+    case R_MULI:
+        ld_vreg(0, a);
+        e_li(1, (uint32_t)b);
+        e_mul(2, 0, 1);
+        st_vreg(d, 2);
+        break;
+    case R_JLT: ld_vreg(0, a); ld_vreg(1, b); e_cmp(0, 1); e_bcond(11, pc_label_for(c)); break;
+    case R_JGE: ld_vreg(0, a); ld_vreg(1, b); e_cmp(0, 1); e_bcond(10, pc_label_for(c)); break;
+    case R_JGT: ld_vreg(0, a); ld_vreg(1, b); e_cmp(0, 1); e_bcond(12, pc_label_for(c)); break;
+    case R_JLE: ld_vreg(0, a); ld_vreg(1, b); e_cmp(0, 1); e_bcond(13, pc_label_for(c)); break;
+    case R_JEQ: ld_vreg(0, a); ld_vreg(1, b); e_cmp(0, 1); e_bcond(0, pc_label_for(c)); break;
+    case R_JNE: ld_vreg(0, a); ld_vreg(1, b); e_cmp(0, 1); e_bcond(1, pc_label_for(c)); break;
+    case R_JLT_I:
+        ld_vreg(0, a); e_li(1, (uint32_t)b); e_cmp(0, 1); e_bcond(11, pc_label_for(c)); break;
+    case R_JGE_I:
+        ld_vreg(0, a); e_li(1, (uint32_t)b); e_cmp(0, 1); e_bcond(10, pc_label_for(c)); break;
+    case R_JGT_I:
+        ld_vreg(0, a); e_li(1, (uint32_t)b); e_cmp(0, 1); e_bcond(12, pc_label_for(c)); break;
+    case R_JLE_I:
+        ld_vreg(0, a); e_li(1, (uint32_t)b); e_cmp(0, 1); e_bcond(13, pc_label_for(c)); break;
+    case R_JEQ_I:
+        ld_vreg(0, a); e_li(1, (uint32_t)b); e_cmp(0, 1); e_bcond(0, pc_label_for(c)); break;
+    case R_JNE_I:
+        ld_vreg(0, a); e_li(1, (uint32_t)b); e_cmp(0, 1); e_bcond(1, pc_label_for(c)); break;
+    case R_NOP: e16(0xBF00); break;
+    case R_SHLI:
+        ld_vreg(0, a); e_lsl_imm(2, 0, b); st_vreg(d, 2); break;
+    case R_SHRI:
+        ld_vreg(0, a); e_asr_imm(2, 0, b); st_vreg(d, 2); break;
+    case R_LOADD:
+        ld_vreg(1, a);
+        e_lsl_imm(1, 1, 2);
+        if (b)
+            e_add_imm(1, 1, b * 4);
+        e_la(0, data_g);
+        e_add_reg(0, 0, 1);
+        e_ldr_imm(1, 0, 0);
+        st_vreg(d, 1);
+        break;
+    case R_STORED:
+        ld_vreg(1, a);
+        e_lsl_imm(1, 1, 2);
+        if (b)
+            e_add_imm(1, 1, b * 4);
+        e_la(0, data_g);
+        e_add_reg(0, 0, 1);
+        ld_vreg(2, c);
+        e_str_imm(2, 0, 0);
+        break;
+    case R_LOADB:
+        e_la(ARM_SCRATCH0, data_arena);
+        ld_vreg(1, a);
+        e_add_reg(ARM_SCRATCH0, ARM_SCRATCH0, 1);
+        ld_vreg(1, b);
+        e_ldrb_reg(2, ARM_SCRATCH0, 1);
+        st_vreg(d, 2);
+        break;
+    case R_STOREB:
+        e_la(ARM_SCRATCH0, data_arena);
+        ld_vreg(1, a);
+        e_add_reg(ARM_SCRATCH0, ARM_SCRATCH0, 1);
+        ld_vreg(1, b);
+        ld_vreg(2, c);
+        e_strb_reg(2, ARM_SCRATCH0, 1);
+        break;
+    case R_BOUNDS: {
+        int ok = new_label();
+        ld_vreg(0, a);
+        e_li(1, (uint32_t)b);
+        e_cmp(0, 1);
+        e_bcond(3 /* CC: index < len */, ok);
+        e_bl(L_bounds);
+        bind_label(ok);
+        break;
+    }
+    default:
+        {
+            char b[8];
+            b[0] = (char)('0' + op / 10);
+            b[1] = (char)('0' + op % 10);
+            b[2] = 0;
+            die_unsupported(b);
+        }
+    }
+}
+
+static void emit_function(int fid)
+{
+    int pc;
+    int epi = new_label();
+    int frame = frame_for(fid);
+    if (frame < SLOT_BYTES)
+        frame = SLOT_BYTES;
+    func_epi[fid] = epi;
+    emit_prologue(fid, max_argc[fid], frame);
+    for (pc = func_start[fid]; pc < func_end[fid]; pc++) {
+        int l = pc_label_for(pc);
+        if (label_off[l] < 0)
+            bind_label(l);
+        emit_insn(fid, pc);
+    }
+    emit_epilogue(fid, frame);
+}
+
+/* ---- runtime helpers ------------------------------------------------ */
+
+static void emit_print_helper(void)
+{
+    /* r0 = value, r1 = newline flag; writes decimal to fd 1. */
+    int pos = new_label(), digit = new_label(), sign = new_label(), nowrap = new_label();
+    e_push();
+    e_sub_imm(ARM_SP, ARM_SP, 32);
+    e_str_imm(ARM_LR, ARM_SP, 24);
+    e_str_imm(1, ARM_SP, 28);               /* newline flag */
+    e_mov_w(4, 0);                          /* r4 = value (save) */
+    e_mov_w(0, 4);
+    e_li(6, 0);                             /* negative flag */
+    e_cmp_zero(0);
+    e_bcond(10 /* GE */, pos);
+    e_li(6, 1);
+    e_li(1, 0);
+    e_sub_reg(0, 1, 0);                     /* -value */
+    bind_label(pos);
+    /* digits are written backwards from sp+20 */
+    e_add_imm(7, ARM_SP, 20);               /* end pointer */
+    e_mov_w(8, 7);                          /* cursor */
+    e_li(9, 10);
+    bind_label(digit);
+    e_udiv(1, 0, 9);                        /* q = v / 10 */
+    e_mls(2, 1, 9, 0);                      /* rem = v - q*10 */
+    e_add_imm(2, 2, '0');
+    e_sub_imm(8, 8, 1);
+    e_strb_imm(2, 8, 0);
+    e_mov_w(0, 1);
+    e_cmp_zero(0);
+    e_bcond(1 /* NE */, digit);
+    e_cmp_zero(6);
+    e_bcond(0 /* EQ */, sign);
+    e_sub_imm(8, 8, 1);
+    e_li(2, '-');
+    e_strb_imm(2, 8, 0);
+    bind_label(sign);
+    e_ldr_imm(2, ARM_SP, 28);
+    e_cmp_zero(2);
+    e_bcond(0 /* EQ */, nowrap);
+    e_li(2, '\n');
+    e_strb_imm(2, 7, 0);
+    e_add_imm(7, 7, 1);
+    bind_label(nowrap);
+    /* write(1, cursor, end-cursor) */
+    e_sub_reg(3, 7, 8);                     /* len */
+    e_mov_w(2, 8);                          /* buf */
+    e_li(1, 1);                             /* fd  */
+    e_li(0, 1);                             /* SYS_write */
+    e_svc0();
+    e_ldr_imm(ARM_LR, ARM_SP, 24);
+    e_add_imm(ARM_SP, ARM_SP, 32);
+    e_pop();
+}
+
+static int L_picommon;
+
+static void emit_helpers(void)
+{
+    bind_label(L_bounds);
+    e_la(2, rodata_msg);
+    e_li(3, 7);
+    e_li(1, 1);
+    e_li(0, 1);                 /* SYS_write(1, "bounds\n", 7) */
+    e_svc0();
+    e_li(1, 1);                 /* status */
+    e_li(0, 0);                 /* SYS_exit */
+    e_svc0();
+
+    bind_label(L_pi);
+    e_li(1, 1);
+    e_b(L_picommon);
+    bind_label(L_pin);
+    e_li(1, 0);
+    bind_label(L_picommon);
+    emit_print_helper();
+}
+
+static void emit_rodata(void)
+{
+    bind_label(rodata_msg);
+    e_bytes((const uint8_t *)"bounds\n", 7);
+}
+
+void rcc_arch_emit_body(void)
+{
+    int i, halt;
+    text_len = 0;
+    halt = new_label();
+    e_bl(func_label_for(main_fid));
+    e_movs_imm8(0, 0);
+    e_svc0();
+    bind_label(halt);
+    e_b_self();
+    for (i = 0; i < nfunc; i++)
+        emit_function(func_order[i]);
+    emit_helpers();
+    emit_rodata();
+}
+
+void rcc_arch_init_labels(void)
+{
+    L_bounds = new_label();
+    L_pi = new_label();
+    L_pin = new_label();
+    L_picommon = new_label();
+    rodata_msg = new_label();
+}
+
+int rcc_arch_machine(void) { return 40; }          /* EM_ARM */
+uint32_t rcc_arch_flags(void) { return 0x05000000u; } /* EABI v5 */
+int rcc_arch_labels(void) { return label_next; }
+
+#else
+typedef int rcc_thumb2_backend_not_selected;
+int rcc_arch_labels(void) { return 0; }
+#endif
