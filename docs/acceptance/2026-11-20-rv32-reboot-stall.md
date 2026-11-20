@@ -136,9 +136,16 @@ python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
 实测（最终镜像，刷机后连跑）：
 
 ```text
+# rpi-pico2-rv32-smp（修的是这个镜像）
 12/12 cycles clean
   prompt: min 0.50 s, max 0.56 s, mean 0.52 s
   uptime 每轮都是 0.08 s   <- 真的复位了
+
+# rpi-pico2-smp（ARM 对照，代码路径不同，用来证明判据本身没坏）
+12/12 cycles clean
+  prompt: min 0.38 s, max 0.38 s, mean 0.38 s
+  uptime 每轮 0.08–0.09 s
+  双通道闸门 5/5 PASS（uart0 5/5、cdc 5/5、uptime 0.60 s）
 ```
 
 负向验证：`--max 0.2` 时 2/2 FAIL、退出码 1，说明判据本身能报错。

@@ -1,5 +1,18 @@
 """Measure how long a reboot takes, on both console channels at once.
 
+SUPERSEDED (2026-11-20).  Use the pair that replaced it:
+
+    scripts/rp2350/reboot_soak.py    pass/fail on reboot time *and* a real
+                                     reset (the new shell's own uptime), which
+                                     is what the regression gate needs
+    scripts/rp2350/stall_probe.py    when a cycle IS slow: watches the UART,
+                                     the CDC node and whether it answers
+
+Kept because its "two independent witnesses" idea was the right one, and its
+history is part of how the 33 s stall was found.  Its own CDC leg is still
+buggy (the reopen logic reports NEVER after the re-enumeration gap), so do not
+read its numbers as a verdict.
+
 Built after a scan that looked like "one reboot in five hangs for 34 s": 34 s
 is exactly two 16.78 s watchdog periods, and the phase marker in
 WATCHDOG_SCRATCH(3) said the doomed boots reached usb_cdc_console_init().  The
