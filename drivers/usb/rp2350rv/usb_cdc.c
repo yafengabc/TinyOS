@@ -71,15 +71,42 @@ static void serial_from_chip_id(void);
  * and could corrupt tu_fifo bookkeeping - the same failure that wedged
  * atk-dnr2350am-smp's idle core forever inside tty_poll.  Hold times are bounded:
  * tud_task() drains the event queue and returns; nothing inside waits on
- * the other hart. */
+ * the other hart.
+ *
+ * LOCK ORDER, and it is not advisory.  Four entry points, three of them take
+ * one lock each, and only usb_tx_drain() takes two:
+ *
+ *   usb_critical_enter()      the USB lock alone   (SIO spinlock 30)
+ *   usb_cdc_putc()            g_tx_lock alone
+ *   usb_tx_drain()            g_tx_lock, then the USB lock, in that order
+ *
+ * Nothing may hold the USB lock and then ask for g_tx_lock.  usb_cdc_flush()
+ * did exactly that (it took the USB lock and then called usb_tx_drain()), so
+ * core 0 waiting for g_tx_lock and core 1's tick waiting for the USB lock
+ * deadlocked each other; the visible symptom was `reboot` going silent for
+ * 33.5 s in about half of all attempts (HISTORY §85).  Every caller that
+ * needs both locks must go through usb_tx_drain() rather than nesting it.
+ *
+ * Both locks also mask interrupts locally first, so a hart holding either one
+ * cannot be pre-empted out of it by its own tick. */
 static uint32_t usb_critical_enter(void)
 {
     uint32_t irq = plat_irq_save();
 
     /* Non-zero = acquired.  RP2350 answers one-hot (bit 30 for lock 30); a
-     * bit-31 test reads that as "still held" and hangs the console path. */
-    while (USB_SIO_SPINLOCK == 0u)
-        ;
+     * bit-31 test reads that as "still held" and hangs the console path.
+     *
+     * The first read is also the contention probe: it either takes the lock
+     * or says somebody else has it.  Recording only the contended case keeps
+     * the boot ring from filling with normal acquisitions, and leaves a
+     * "ph=3c" as the last entry whenever a machine ever hangs here again -
+     * which is exactly the shape the 2026-11-20 deadlock took, only without
+     * the 33 s of silence to explain it afterwards. */
+    if (USB_SIO_SPINLOCK == 0u) {
+        plat_boot_stage(0x3cu);
+        while (USB_SIO_SPINLOCK == 0u)
+            ;
+    }
     __asm__ volatile("fence iorw, iorw" ::: "memory");
     return irq;
 }
@@ -603,9 +630,14 @@ static void usb_tx_drain(void)
     plat_spin_acquire(&g_tx_lock);
     /* The ring bookkeeping is g_tx_lock's business; the CDC FIFO the loop
      * feeds is TinyUSB state and races the other hart's tud_task() - so the
-     * fifo access sits inside the cross-core USB critical section.  Order
-     * is always g_tx_lock then the USB lock, and no g_tx_lock holder ever
-     * waits for the USB lock except this drain, so the two cannot cycle. */
+     * fifo access sits inside the cross-core USB critical section.
+     *
+     * This is the one place that holds both, and the order is fixed:
+     * g_tx_lock then the USB lock.  The claim that used to stand here - "no
+     * g_tx_lock holder ever waits for the USB lock except this drain, so the
+     * two cannot cycle" - was simply false: usb_cdc_flush() held the USB lock
+     * and called in here, which is the cycle.  See the lock-order note above
+     * usb_critical_enter(). */
     usbpm = usb_critical_enter();
     while (g_tx_tail != g_tx_head && tud_cdc_write_available() != 0) {
         tud_cdc_write_char(g_tx_ring[g_tx_tail % USB_TX_RING]);
