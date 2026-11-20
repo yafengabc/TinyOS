@@ -185,6 +185,7 @@ board/*/README.md     每块板子的使用说明与移植进度（构建、烧�
 docs/PLATFORM-DESIGN.md  无 MMU 平坦模型的设计与路线图
 docs/SHELL-GUIDE.md   shell 脚本与优先级的详细使用说明（示例均为实跑输出）
 docs/OPEN-ITEMS.md   已评估、还没拍板的事项（决策队列，含实测数字）
+docs/TOOLCHAIN.md    csc / rvm / rcc 的入口、能力边界与独立仓库文档链接
 third_party/littlefs/  上游 littlefs v2.9.3（lfs.c/lfs.h/lfs_util.*）
 tools/mklfs.c        host 端 littlefs 打包/校验工具
 tools/lz4.c          host 端 LZ4 压缩器（只用于打包）
