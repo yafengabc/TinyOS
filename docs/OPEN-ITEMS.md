@@ -98,10 +98,21 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    - 所以"进 BOOTSEL 没进过"这件事，唯一可能读到的证据是**进 `usb_clock_init()`
      之前**的 `RESETS.RESET` 这一位（USBCTRL 是否已被 ROM 放开）以及放开之后、
      `tud_init()` 之前的 `SIE_STATUS` 快照。两者都还是假设，得靠 A/B 数据说话。
-   - 测法：在 `usb_cdc_init()` 开头与 `tud_init()` 之前各存一份
-     `RESETS.RESET`/`RESET_DONE`/`SIE_STATUS`/`SIE_CTRL`，先从 CDC 控制台打出来；
-     然后对比 ① 断电冷启动、② ROM `reboot`（暖重启）、③ BOOTSEL 刷机后首启
-     三种情况。只有三组数据分得开，才谈得上"仅在被需要时掉电重连"。
+   - 测法已落地：新增 `/proc/usbboot`（`g_usb_boot[8]`，三个 CDC 驱动在
+     `usb_cdc_init()` 里填），输出进 `usb_clock_init()` 之前的 `RESETS.RESET`、
+     `tud_init()` 之前的 `SIE_STATUS`/`SIE_CTRL`、焊盘写完之后与 D+ 重连之后的
+     `SIE_STATUS`、以及掉电期间的总线状态。
+   - **2026-11-20 已有两组数据（Pico 2 RV32 SMP）**：
+     ① **BOOTSEL 刷机后首启**：`resets_at_entry=087db93f usbctrl_released=1`、
+        `sie pre-tud_init=00000005`（VBUS + 全速）、`sie while down=00080001`；
+     ② **ROM `reboot`（暖重启）**：**逐字节相同**。
+     也就是说"USBCTRL 是否已被 ROM 放开"这一位**分不开**这两种情况——ROM 的普通
+     启动路径同样把 USB 留在活的状态（它要靠 USB 判定进不进 BOOTSEL）。
+   - 因此 A3 的前提被削弱：真正需要 200 ms 掉电重连的恰恰是这两种情况，而候选判据
+     对它们没有区分度。**结论倾向"不做"**：这 200 ms 换不来正确性，只是每次启动
+     省 200 ms；而判据若错，代价是 CDC 不枚举（本机 UART0 TX 又是坏的）。
+     还剩③冷启动一组数据没取（要人工拔电，见第 5 条与 A4）；若冷启动也读
+     `usbctrl_released=1`，这条优化直接关掉、不再讨论。
    - 风险：改错的后果是 CDC 不枚举，而本机 UART0 的 TX 现在又是坏的（第 5 条），
      等于板子要人工按 BOOTSEL 才能救。**动手前先修好 UART0**，或者确认
      `bootsel_poke` 那条 CDC Ctrl-D 通路在"枚举成功但 shell 不答"时仍然有效

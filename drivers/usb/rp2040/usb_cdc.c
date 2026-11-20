@@ -383,10 +383,21 @@ static int usb_clock_init(void)
 
 /* ---- bring-up ----------------------------------------------------------- */
 
+/* Filled in by usb_cdc_init() and read by /proc/usbboot. */
+extern volatile uint32_t g_usb_boot[8];
+
 void usb_cdc_init(void)
 {
     g_hw_ready = 0;
     g_init_stage = 0;
+
+    /* /proc/usbboot: what the boot path left behind.  USBCTRL is released
+     * only by a boot path that used it - the BOOTSEL mass-storage ROM - so
+     * this one bit separates "the host is still holding the device node from
+     * before" from "the cable was never enumerated".  It is the candidate
+     * signal for skipping the 200 ms D+ drop on cold boots (OPEN-ITEMS 3). */
+    g_usb_boot[0] = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
+    g_usb_boot[1] = (g_usb_boot[0] & RESETS_USBCTRL) ? 0u : 1u;
 
     /* A warm boot can land with the cross-core USB spinlock still held by
      * the previous run - the SIO block survives a core reset.  This is the
@@ -420,6 +431,8 @@ void usb_cdc_init(void)
      * the only step in between, so the pad write has to follow it. */
     usb_pads_setup();
     g_ss_pads = usb_hw->sie_status;
+    g_usb_boot[2] = usb_hw->sie_status;
+    g_usb_boot[3] = usb_hw->sie_ctrl;
 
     /* The pull-up was raised inside tud_init(), before the pad's input buffer
      * existed.  Drop and re-raise it so the connect is detected against the
@@ -432,9 +445,13 @@ void usb_cdc_init(void)
      * may have left D+ pulled up, so a host that never observes SE0 keeps
      * talking to the old device and our CDC is never enumerated. */
     usb_delay_ms(200);
+    g_usb_boot[6] = 1u;                     /* the D+ drop ran ...       */
+    g_usb_boot[7] = usb_hw->sie_status;     /* ... and the bus went idle */
     usb_hw_set->sie_ctrl = USB_SIE_CTRL_PULLUP_EN_BITS;
     usb_delay_ms(5);
     g_ss_retrig = usb_hw->sie_status;
+    g_usb_boot[4] = g_ss_pads;
+    g_usb_boot[5] = g_ss_retrig;
 
     /* The NVIC gate must be open BEFORE usb_cdc_console_init() starts its
      * bounded enumeration wait: at that point the 1 ms tick does not exist

@@ -44,6 +44,9 @@ extern char __bss_end[];
 volatile uint32_t g_cdc_fix = 1;
 volatile uint32_t g_cdc_diag[6];
 
+/* Filled in by the CDC driver's usb_cdc_init(); see /proc/usbboot. */
+volatile uint32_t g_usb_boot[8];
+
 /* Append formatted text, returning the new offset.  kvsnprintf is what the
  * kernel already prints with, so /proc output and the boot log cannot drift
  * apart in their number formatting. */
@@ -77,6 +80,38 @@ static uint32_t fmt_uptime(char *b, uint32_t cap)
  * change anything: it is the device-side criterion for "is output still
  * piling up while nobody reads", which is immune to the 1 ms timing noise
  * that makes smpbench useless on a rebuilt image. */
+/* What the boot path handed the USB controller, and what the controller
+ * looked like at each step of init.
+ *
+ * Exists for one question (OPEN-ITEMS 3): the 200 ms D+ drop at the end of
+ * usb_cdc_init() is there for a host that still holds the device node from a
+ * previous boot, and there is no reason to pay it after a plain power-on.
+ * The candidate signal is whether USBCTRL was already out of reset when the
+ * kernel took over - only a boot path that actually used USB (the BOOTSEL
+ * mass-storage ROM) leaves it that way.  Whether that bit really separates
+ * cold, warm and post-flash boots is a measurement, not an argument, so the
+ * measurement is what this node returns. */
+static uint32_t fmt_usbboot(char *b, uint32_t cap)
+{
+    uint32_t any = 0;
+
+    for (int i = 0; i < 8; i++)
+        any |= g_usb_boot[i];
+    if (!any)
+        return put(b, cap, 0, "usbboot: no USB controller on this board\n");
+    return put(b, cap, 0,
+               "usbboot\n"
+               "  resets_at_entry  %08x  usbctrl_released=%u\n"
+               "  sie pre-tud_init %08x  sie_ctrl=%08x\n"
+               "  sie after pads   %08x  after retrigger=%08x\n"
+               "  dplus drop       %s  sie while down=%08x\n",
+               g_usb_boot[0], g_usb_boot[1],
+               g_usb_boot[2], g_usb_boot[3],
+               g_usb_boot[4], g_usb_boot[5],
+               g_usb_boot[6] ? "ran (200 ms)" : "skipped",
+               g_usb_boot[7]);
+}
+
 static uint32_t fmt_cdc_state(char *b, uint32_t cap)
 {
     return put(b, cap, 0,
@@ -397,6 +432,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_uart0tx(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/gp0drive"))
         n = fmt_gp0drive(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/usbboot"))
+        n = fmt_usbboot(b, PROC_CAP);
 #if !TOS_PROC_LITE
     else if (!strcmp(d->name, "proc/mem"))
         n = fmt_mem(b, PROC_CAP);
@@ -474,6 +511,7 @@ void procfs_init(void)
     devfs_register("proc/uart0",   &proc_ops, NULL);
     devfs_register("proc/uart0tx", &proc_ops, NULL);
     devfs_register("proc/gp0drive", &proc_ops, NULL);
+    devfs_register("proc/usbboot", &proc_ops, NULL);
 #if !TOS_PROC_LITE
     devfs_register("proc/mem",    &proc_ops, NULL);
     devfs_register("proc/lfs",    &proc_ops, NULL);
