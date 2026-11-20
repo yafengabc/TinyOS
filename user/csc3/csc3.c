@@ -30,6 +30,7 @@ struct Node {
     int alen;
     int stype;
     int ftype;      /* 1 = Q16.16 float literal/value */
+    int line;
     char name[32];
     char field[32];
     Node *lhs, *rhs;
@@ -111,6 +112,7 @@ static int nfuncs;
 #define SBUF 256
 static char sbuf[SBUF];
 static int slen, spos, seof;
+static int src_line = 1;
 static int src_fd;
 static char tok[64];
 static int tok_kind; /* 0 eof, 1 ident, 2 num, 3 punct, 4 string, 5 float */
@@ -143,6 +145,18 @@ static void die(const char *s)
 {
     puts("csc3: ");
     puts(s);
+    puts(" at line ");
+    putint(src_line);
+    puts("\n");
+    exit(1);
+}
+
+static void die_node(Node *n, const char *s)
+{
+    puts("csc3: ");
+    puts(s);
+    puts(" at line ");
+    putint(n ? n->line : src_line);
     puts("\n");
     exit(1);
 }
@@ -178,8 +192,11 @@ static int src_peek(int k)
 static int src_get(void)
 {
     int c = src_peek(0);
-    if (c >= 0)
+    if (c >= 0) {
         spos++;
+        if (c == '\n')
+            src_line++;
+    }
     return c;
 }
 
@@ -189,6 +206,7 @@ static void src_rewind(void)
     slen = 0;
     spos = 0;
     seof = 0;
+    src_line = 1;
 }
 
 static void next(void)
@@ -301,6 +319,7 @@ static Node *node(int kind)
     Node *n = &nodes[nnode++];
     memset(n, 0, sizeof *n);
     n->kind = kind;
+    n->line = src_line;
     return n;
 }
 
@@ -616,7 +635,7 @@ static Node *assign_from_load(Node *load, Node *value)
         n->rhs = value;
         break;
     default:
-        die("invalid assignment target");
+        die_node(load, "invalid assignment target");
     }
     return n;
 }
@@ -1189,9 +1208,9 @@ static int gen_value(Node *n)
                 last_type = 0;
                 return d;
             }
-            die("unknown variable");
+            die_node(n, "unknown variable");
         }
-        if (s->is_array) die("array used as value");
+        if (s->is_array) die_node(n, "array used as value");
         if (s->is_struct) {
             int d;
             last_type = 0;
@@ -1264,10 +1283,10 @@ static int gen_expr_into(Node *n, int dst)
                 last_type = 0;
                 return dst;
             }
-            die("unknown variable");
+            die_node(n, "unknown variable");
         }
-        if (s->is_array) die("array used as value");
-        if (s->is_struct) die("struct used as scalar");
+        if (s->is_array) die_node(n, "array used as value");
+        if (s->is_struct) die_node(n, "struct used as scalar");
         if (s->global) {
             emit(R_LOADG, s->offset, 0, 0, dst);
         } else if (s->reg != dst) {
@@ -1277,8 +1296,8 @@ static int gen_expr_into(Node *n, int dst)
         return dst;
     case N_INDEX:
         s = sym_find(n->name);
-        if (!s || !s->is_array) die("array expected");
-        if (s->is_struct) die("struct array element needs a field");
+        if (!s || !s->is_array) die_node(n, "array expected");
+        if (s->is_struct) die_node(n, "struct array element needs a field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         emit(R_LOADA, s->offset, a, s->alen, dst);
@@ -1287,9 +1306,9 @@ static int gen_expr_into(Node *n, int dst)
     case N_MEMBER: {
         int fi;
         s = sym_find(n->name);
-        if (!s || !s->is_struct) die("struct variable expected");
+        if (!s || !s->is_struct) die_node(n, "struct variable expected");
         fi = struct_field(s->stype, n->field);
-        if (fi < 0) die("unknown struct field");
+        if (fi < 0) die_node(n, "unknown struct field");
         if (s->is_param) emit(R_LOADD, s->reg, fi, 0, dst);
         else emit(R_LOADG, s->offset + fi, 0, 0, dst);
         last_type = 0;
@@ -1298,9 +1317,9 @@ static int gen_expr_into(Node *n, int dst)
     case N_ASSIGN_MEMBER: {
         int fi;
         s = sym_find(n->name);
-        if (!s || !s->is_struct) die("struct variable expected");
+        if (!s || !s->is_struct) die_node(n, "struct variable expected");
         fi = struct_field(s->stype, n->field);
-        if (fi < 0) die("unknown struct field");
+        if (fi < 0) die_node(n, "unknown struct field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         if (s->is_param) emit(R_STORED, s->reg, fi, a, 0);
@@ -1311,9 +1330,9 @@ static int gen_expr_into(Node *n, int dst)
     case N_MEMBER_INDEX: {
         int fi, base;
         s = sym_find(n->name);
-        if (!s || !s->is_struct || !s->is_array) die("struct array expected");
+        if (!s || !s->is_struct || !s->is_array) die_node(n, "struct array expected");
         fi = struct_field(s->stype, n->field);
-        if (fi < 0) die("unknown struct field");
+        if (fi < 0) die_node(n, "unknown struct field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         emit(R_BOUNDS, a, s->alen, 0, 0);
@@ -1325,9 +1344,9 @@ static int gen_expr_into(Node *n, int dst)
     case N_ASSIGN_MEMBER_INDEX: {
         int fi, base;
         s = sym_find(n->name);
-        if (!s || !s->is_struct || !s->is_array) die("struct array expected");
+        if (!s || !s->is_struct || !s->is_array) die_node(n, "struct array expected");
         fi = struct_field(s->stype, n->field);
-        if (fi < 0) die("unknown struct field");
+        if (fi < 0) die_node(n, "unknown struct field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         emit(R_BOUNDS, a, s->alen, 0, 0);
@@ -1340,15 +1359,15 @@ static int gen_expr_into(Node *n, int dst)
     }
     case N_ASSIGN:
         s = sym_find(n->name);
-        if (!s) die("unknown variable");
+        if (!s) die_node(n, "unknown variable");
         if (s->is_struct) {
             Sym *src;
             int nf, i;
-            if (s->is_array || s->is_param) die("struct assignment target");
-            if (n->lhs->kind != N_VAR) die("struct assignment source");
+            if (s->is_array || s->is_param) die_node(n, "struct assignment target");
+            if (n->lhs->kind != N_VAR) die_node(n, "struct assignment source");
             src = sym_find(n->lhs->name);
             if (!src || !src->is_struct || src->is_array || src->stype != s->stype)
-                die("struct type mismatch");
+                die_node(n, "struct type mismatch");
             nf = structs[s->stype - 1].nfields;
             for (i = 0; i < nf; i++) {
                 int v = new_temp();
@@ -1359,7 +1378,7 @@ static int gen_expr_into(Node *n, int dst)
             last_type = 0;
             return 0;
         }
-        if (s->is_array) die("scalar assignment expected");
+        if (s->is_array) die_node(n, "scalar assignment expected");
         if (s->global) {
             a = gen_value(n->lhs);
             a = coerce_to(a, last_type, s->is_float);
@@ -1379,8 +1398,8 @@ static int gen_expr_into(Node *n, int dst)
         return s->reg;
     case N_ASSIGN_INDEX:
         s = sym_find(n->name);
-        if (!s || !s->is_array) die("array assignment expected");
-        if (s->is_struct) die("struct array element needs a field");
+        if (!s || !s->is_array) die_node(n, "array assignment expected");
+        if (s->is_struct) die_node(n, "struct array element needs a field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         if (n->rhs->kind == N_NUM && !n->rhs->ftype) {
@@ -1409,24 +1428,24 @@ static int gen_expr_into(Node *n, int dst)
                 else if (argc == 2) a2 = v;
                 argc++;
             }
-            if (argc != nargs) die("native argument count");
+            if (argc != nargs) die_node(n, "native argument count");
             if (hasret) emit(R_NATIVER, nid, a0, a1, dst);
             else emit(R_NATIVE, nid, a0, a1, a2);
             last_type = 0;
             return dst;
         }
         fid = func_lookup(n->name);
-        if (fid < 0) die("unknown function");
+        if (fid < 0) die_node(n, "unknown function");
         for (Node *p = n->args; p; p = p->next) {
             int v, to;
-            if (argc >= funcs[fid].nparams) die("too many arguments");
+            if (argc >= funcs[fid].nparams) die_node(n, "too many arguments");
             to = funcs[fid].ptype[argc] < 0 ? 1 :
                  funcs[fid].ptype[argc] > 0 ? -1 : 0;
             v = gen_value(p);
             if (to >= 0) v = coerce_to(v, last_type, to);
             emit(R_ARG, argc++, v, 0, 0);
         }
-        if (argc != funcs[fid].nparams) die("wrong argument count");
+        if (argc != funcs[fid].nparams) die_node(n, "wrong argument count");
         emit(R_CALL, fid, dst, argc, 0);
         last_type = funcs[fid].rtype;
         return dst;
@@ -1434,7 +1453,7 @@ static int gen_expr_into(Node *n, int dst)
     case N_STR:
     case N_PRINTF:
     case N_PUTS:
-        die("string/printf not allowed in expression");
+        die_node(n, "string/printf not allowed in expression");
     case N_ADD: case N_SUB: case N_MUL: case N_DIV:
     case N_LT: case N_GT: case N_EQ:
         /* Destination hint removes the temporary + MOV around assignments.
@@ -1833,7 +1852,7 @@ static void gen_stmt(Node *n)
         break;
     }
     default:
-        die("bad statement");
+        die_node(n, "bad statement");
     }
 }
 
