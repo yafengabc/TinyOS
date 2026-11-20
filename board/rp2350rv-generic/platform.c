@@ -235,11 +235,17 @@ static void *rp_rom_func(uint32_t code)
  *
  * A JEDEC part answering 0xff/0x00 reads as a missing or floating bus and
  * returns 0 (mirrors the ESP32-C3 port's flash_detect_from_rom()). */
+
+/* Bound for the two QMI FIFO waits below.  A real exchange needs a handful of
+ * cycles; this is roughly 20 ms at 150 MHz - far beyond any legitimate
+ * transfer, short enough to be a timeout instead of a hang. */
+#define QMI_SPIN_LIMIT  1000000u
+
 static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
 {
     uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
-    uint32_t id;
+    uint32_t id, spins = 0;
 
     flash_init_boot2_copyout();
     g_rom_connect();
@@ -255,19 +261,36 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
      * the exchange still drains because DIRECT_RX reads of an empty FIFO
      * return the last byte shifted (0xff on a floating bus). */
     for (uint32_t i = 0; i < 5u; i++) {
-        while (mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_TXFULL)
-            ;
+        /* Both waits are bounded.  On a healthy part they finish in
+         * microseconds, so a timeout means the QMI block itself stopped
+         * answering - and an unbounded spin here is an invisible failure:
+         * the console does not exist yet, so the only thing that would
+         * happen is the watchdog resetting the chip 16.78 s later, which
+         * reads exactly like "the boot wedged for no reason".  Give up,
+         * restore XIP, and report the capacity as unknown. */
+        for (spins = 0; spins < QMI_SPIN_LIMIT; spins++)
+            if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_TXFULL))
+                break;
+        if (spins == QMI_SPIN_LIMIT)
+            break;
         mmio_write32(QMI_DIRECT_TX, tx[i]);
-        while (mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY)
-            ;
+        for (spins = 0; spins < QMI_SPIN_LIMIT; spins++)
+            if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY))
+                break;
+        if (spins == QMI_SPIN_LIMIT)
+            break;
         rx[i] = (uint8_t)mmio_read32(QMI_DIRECT_RX);
     }
 
     /* Deassert CS0n and leave direct mode. */
     mmio_write32(QMI_DIRECT_CSR, 0u);
 
-    /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID. */
-    id = ((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3];
+    /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID.
+     * A timed-out exchange leaves id at 0, i.e. "unknown", which the caller
+     * already treats as "fall back to board.conf". */
+    id = (spins == QMI_SPIN_LIMIT)
+         ? 0u
+         : (((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3]);
     if (id == 0u || id == 0xffffffu)
         id = 0u;
 
@@ -1939,10 +1962,23 @@ TOS_NOINIT static boot_step_t g_boot_log[BOOT_LOG_N];
 TOS_NOINIT static uint32_t g_boot_log_wr;
 TOS_NOINIT static uint32_t g_boot_seq;
 
+/* .noinit survives a reset, but it is NOT initialised by anything: the first
+ * boot after a UF2 flash finds whatever SRAM happened to hold.  Without this
+ * word, that boot would read a random sequence number out of the "log" and
+ * either print nonsense as the previous boot's trail or skip the dump
+ * entirely.  One magic value fixes both. */
+#define BOOT_LOG_MAGIC  0x544f5342u     /* "TOSB" */
+TOS_NOINIT static uint32_t g_boot_log_magic;
+
 static void boot_step(uint32_t phase)
 {
     boot_step_t *e;
 
+    if (g_boot_log_magic != BOOT_LOG_MAGIC) {
+        g_boot_log_magic = BOOT_LOG_MAGIC;
+        g_boot_log_wr = 0;
+        g_boot_seq = 0;
+    }
     if (phase == 1u)
         g_boot_seq++;
     e = &g_boot_log[g_boot_log_wr & (BOOT_LOG_N - 1u)];
@@ -1964,7 +2000,11 @@ static void boot_step(uint32_t phase)
  * nothing at all - this only speaks when a boot died. */
 static void boot_log_dump(void)
 {
-    uint32_t prev = g_boot_seq - 1u;
+    uint32_t prev;
+
+    if (g_boot_log_magic != BOOT_LOG_MAGIC || g_boot_seq == 0u)
+        return;
+    prev = g_boot_seq - 1u;
     uint32_t n = g_boot_log_wr < BOOT_LOG_N ? g_boot_log_wr : BOOT_LOG_N;
     uint32_t first = g_boot_log_wr - n;
     uint32_t shown = 0;

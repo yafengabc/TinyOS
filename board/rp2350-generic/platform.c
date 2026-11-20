@@ -200,6 +200,12 @@ static void *rp_rom_func(uint32_t code)
     return (void *)((uintptr_t)lookup(code, RT_FLAG_FUNC_ARM_SEC) | 1u);
 }
 
+/* Bound for the two QMI FIFO waits below (~20 ms at 150 MHz).  Real
+ * exchanges need a handful of cycles; this turns "the QMI stopped answering"
+ * from a silent hang into a capacity of 0, which the caller already handles. */
+#define QMI_SPIN_LIMIT  1000000u
+
+
 /* Issue JEDEC RDID (0x9F) through QMI direct mode and return the 3-byte
  * manufacturer/dev-id/capacity code as one 24-bit value, or 0 on failure.
  * The ROM cannot do this: FLASH_OP covers erase/program/read only, so the
@@ -221,7 +227,7 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
 {
     uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
-    uint32_t id;
+    uint32_t id, spins = 0;
 
     flash_init_boot2_copyout();
     g_rom_connect();
@@ -237,19 +243,31 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
      * the exchange still drains because DIRECT_RX reads of an empty FIFO
      * return the last byte shifted (0xff on a floating bus). */
     for (uint32_t i = 0; i < 5u; i++) {
-        while (mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_TXFULL)
-            ;
+        /* Bounded, for the same reason as the RV32 port: a QMI block that
+         * stops answering would otherwise be an invisible boot hang, with
+         * the watchdog's 16.78 s reset as the only symptom. */
+        for (spins = 0; spins < QMI_SPIN_LIMIT; spins++)
+            if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_TXFULL))
+                break;
+        if (spins == QMI_SPIN_LIMIT)
+            break;
         mmio_write32(QMI_DIRECT_TX, tx[i]);
-        while (mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY)
-            ;
+        for (spins = 0; spins < QMI_SPIN_LIMIT; spins++)
+            if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY))
+                break;
+        if (spins == QMI_SPIN_LIMIT)
+            break;
         rx[i] = (uint8_t)mmio_read32(QMI_DIRECT_RX);
     }
 
     /* Deassert CS0n and leave direct mode. */
     mmio_write32(QMI_DIRECT_CSR, 0u);
 
-    /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID. */
-    id = ((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3];
+    /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID.
+     * A timed-out exchange leaves id at 0 = "unknown". */
+    id = (spins == QMI_SPIN_LIMIT)
+         ? 0u
+         : (((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3]);
     if (id == 0u || id == 0xffffffu)
         id = 0u;
 
