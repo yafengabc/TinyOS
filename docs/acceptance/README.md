@@ -127,3 +127,4 @@
 | 2026-11-20 | csc3 `enum` + `switch/case/default` | `d8913f9` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 switch 105/2/3；csc3 108 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 switch](2026-11-20-csc3-switch-enum-esp32c3-d8913f9.md) |
 | 2026-11-20 | csc3 错误信息带源码行号 | `2f2bac6` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 parse/codegen 都报 line 3；csc3 108 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 lines](2026-11-20-csc3-line-numbers-esp32c3-2f2bac6.md) |
 | 2026-11-20 | csc3 整数常量折叠 + 保守 DCE | `66712b3` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 fold 14/3/ret17，ir=14；csc3 108 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 fold](2026-11-20-csc3-const-dce-esp32c3-66712b3.md) |
+| 2026-11-20 | csc3 整数 `%` / `%=` | `04d72ae` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 mod 2/2/2/2，ret 6；csc3 108 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 mod](2026-11-20-csc3-modulo-esp32c3-04d72ae.md) |
