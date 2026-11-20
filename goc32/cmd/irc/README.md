@@ -63,6 +63,19 @@ Runtime helpers in the generated image:
 Conditional branches are emitted as an inverted short branch over a `j`
 (±1 MiB), so RV32's ±4 KiB B-type range cannot break large functions.
 
+## Measured on ESP32-C3
+
+Same RIR2 image, `rirvm` vs this backend, timed with the program's own
+`uptime()` calls:
+
+| workload | rirvm | native | speed-up |
+|---|---:|---:|---:|
+| recursive `fib(24)` | 242 ms | 84 ms | 2.9x |
+| 10,000,000-iteration loop | 8286 ms | 578 ms | 14.3x |
+
+The recursive case pays for saving/restoring 13 RIR registers per call; the
+loop case shows the removal of the interpreter dispatch.
+
 ## C port
 
 This Go tool is the reference implementation.  The final `irc` is meant to be
