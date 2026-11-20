@@ -522,28 +522,139 @@ static Node *parse_rel(void)
 
 static Node *parse_expr(void) { return parse_rel(); }
 
+/* ---- lvalue helpers for compound assignment and ++/-- ------------------ */
+
+static Node *mk_one(void)
+{
+    Node *n = node(N_NUM);
+    n->val = 1;
+    return n;
+}
+
+static Node *mk_bin(int kind, Node *a, Node *b)
+{
+    Node *n = node(kind);
+    n->lhs = a;
+    n->rhs = b;
+    return n;
+}
+
+/* Build the assignment that writes `value` back to the same place as `load`. */
+static Node *assign_from_load(Node *load, Node *value)
+{
+    Node *n;
+
+    switch (load->kind) {
+    case N_VAR:
+        n = node(N_ASSIGN);
+        strncpy(n->name, load->name, sizeof(n->name) - 1);
+        n->lhs = value;
+        break;
+    case N_MEMBER:
+        n = node(N_ASSIGN_MEMBER);
+        strncpy(n->name, load->name, sizeof(n->name) - 1);
+        strncpy(n->field, load->field, sizeof(n->field) - 1);
+        n->lhs = value;
+        break;
+    case N_INDEX:
+        n = node(N_ASSIGN_INDEX);
+        strncpy(n->name, load->name, sizeof(n->name) - 1);
+        n->lhs = load->lhs;
+        n->rhs = value;
+        break;
+    case N_MEMBER_INDEX:
+        n = node(N_ASSIGN_MEMBER_INDEX);
+        strncpy(n->name, load->name, sizeof(n->name) - 1);
+        strncpy(n->field, load->field, sizeof(n->field) - 1);
+        n->lhs = load->lhs;
+        n->rhs = value;
+        break;
+    default:
+        die("invalid assignment target");
+    }
+    return n;
+}
+
+static int compound_kind(void)
+{
+    if (tok_kind != 3)
+        return 0;
+    if (!strcmp(tok, "+=")) return N_ADD;
+    if (!strcmp(tok, "-=")) return N_SUB;
+    if (!strcmp(tok, "*=")) return N_MUL;
+    if (!strcmp(tok, "/=")) return N_DIV;
+    return 0;
+}
+
+/* Parse an optional postfix ++/-- or compound operator after `load`.  The
+ * caller has already parsed the place.  Returns NULL when the token is a
+ * plain '=' (or another statement form). */
+static Node *parse_place_tail(Node *load, int semi)
+{
+    int ck = compound_kind();
+
+    if (ck) {
+        next();
+        return assign_from_load(load, mk_bin(ck, load, parse_expr()));
+    }
+    if (accept("++"))
+        return assign_from_load(load, mk_bin(N_ADD, load, mk_one()));
+    if (accept("--"))
+        return assign_from_load(load, mk_bin(N_SUB, load, mk_one()));
+    if (tok_kind == 3 && !strcmp(tok, "%="))
+        die("%= unsupported");
+    (void)semi;
+    return NULL;
+}
+
 /* Declaration or assignment, optionally consuming the trailing semicolon.
  * Used by normal statements and by for(init; cond; step). */
 static Node *parse_simple(int semi)
 {
     if (tok_kind == 3 && (!strcmp(tok, "++") || !strcmp(tok, "--"))) {
         int inc = tok[0] == '+';
-        Node *n, *v, *x, *one;
+        char name[32];
+        Node *load, *val, *as;
         next();
         if (tok_kind != 1) die("variable expected");
-        n = node(N_ASSIGN);
-        v = node(N_VAR);
-        strncpy(n->name, tok, sizeof(n->name) - 1);
-        strncpy(v->name, tok, sizeof(v->name) - 1);
+        strncpy(name, tok, sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
         next();
-        x = node(inc ? N_ADD : N_SUB);
-        one = node(N_NUM);
-        one->val = 1;
-        x->lhs = v;
-        x->rhs = one;
-        n->lhs = x;
+        if (accept(".")) {
+            char member[32];
+            if (tok_kind != 1) die("field name expected");
+            strncpy(member, tok, sizeof(member) - 1);
+            member[sizeof(member) - 1] = 0;
+            next();
+            load = node(N_MEMBER);
+            strncpy(load->name, name, sizeof(load->name) - 1);
+            strncpy(load->field, member, sizeof(load->field) - 1);
+        } else if (accept("[")) {
+            Node *idx = parse_expr();
+            expect("]");
+            if (accept(".")) {
+                char member[32];
+                if (tok_kind != 1) die("field name expected");
+                strncpy(member, tok, sizeof(member) - 1);
+                member[sizeof(member) - 1] = 0;
+                next();
+                load = node(N_MEMBER_INDEX);
+                strncpy(load->name, name, sizeof(load->name) - 1);
+                strncpy(load->field, member, sizeof(load->field) - 1);
+                load->lhs = idx;
+            } else {
+                load = node(N_INDEX);
+                strncpy(load->name, name, sizeof(load->name) - 1);
+                load->lhs = idx;
+            }
+        } else {
+            load = node(N_VAR);
+            strncpy(load->name, name, sizeof(load->name) - 1);
+        }
+        val = mk_bin(inc ? N_ADD : N_SUB, load, mk_one());
+        as = assign_from_load(load, val);
         if (semi) expect(";");
-        return n;
+        return as;
     }
     if (is_kw("struct")) {
         int sid;
@@ -629,6 +740,17 @@ static Node *parse_simple(int semi)
                 if (semi) expect(";");
                 return call;
             }
+            {
+                Node *load = node(N_MEMBER);
+                Node *tail;
+                strncpy(load->name, name, sizeof(load->name) - 1);
+                strncpy(load->field, member, sizeof(load->field) - 1);
+                tail = parse_place_tail(load, semi);
+                if (tail) {
+                    if (semi) expect(";");
+                    return tail;
+                }
+            }
             expect("=");
             {
                 Node *n = node(N_ASSIGN_MEMBER);
@@ -664,6 +786,18 @@ static Node *parse_simple(int semi)
                 strncpy(member, tok, sizeof(member) - 1);
                 member[sizeof(member) - 1] = 0;
                 next();
+                {
+                    Node *load = node(N_MEMBER_INDEX);
+                    Node *tail;
+                    strncpy(load->name, name, sizeof(load->name) - 1);
+                    strncpy(load->field, member, sizeof(load->field) - 1);
+                    load->lhs = idx;
+                    tail = parse_place_tail(load, semi);
+                    if (tail) {
+                        if (semi) expect(";");
+                        return tail;
+                    }
+                }
                 expect("=");
                 n = node(N_ASSIGN_MEMBER_INDEX);
                 strncpy(n->name, name, sizeof(n->name) - 1);
@@ -672,6 +806,17 @@ static Node *parse_simple(int semi)
                 n->rhs = parse_expr();
                 if (semi) expect(";");
                 return n;
+            }
+            {
+                Node *load = node(N_INDEX);
+                Node *tail;
+                strncpy(load->name, name, sizeof(load->name) - 1);
+                load->lhs = idx;
+                tail = parse_place_tail(load, semi);
+                if (tail) {
+                    if (semi) expect(";");
+                    return tail;
+                }
             }
             {
                 Node *n = node(N_ASSIGN_INDEX);
