@@ -134,3 +134,4 @@
 | 2026-11-20 | csc3 嵌套 struct + struct 返回 | `5e5edd8` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 nest result=21 ir=147，sret result=17 ir=118；T4 `NOT RUN` | [csc3 structs](2026-11-20-csc3-structs-esp32c3-5e5edd8.md) |
 | 2026-11-20 | goc32 `irc` RIR2→RV32 原生 ELF | `04e67e2` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；17 个测试全部原生编译，板载 fold/str/sa3/nest/sret/fmt/hw 等与 rirvm 一致；T4 `NOT RUN` | [irc native](2026-11-20-irc-native-rv32-04e67e2.md) |
 | 2026-11-20 | 板上 C `irc`（RIR2→RV32 ELF） | `4859ec6` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板上 csc3→irc→exec 覆盖 fold/str/sa3/nest/sret/native/fmt 等；bench 83 ms / 578 ms；T4 `NOT RUN` | [irc C](2026-11-20-irc-c-esp32c3-4859ec6.md) |
+| 2026-11-20 | irc 流式输出（72 KiB window） | `6d54b5a` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；去掉 out/fixup 缓冲，window 156→72 KiB，/bin irc 40.8→18.1 KiB；T4 `NOT RUN` | [irc stream](2026-11-20-irc-stream-esp32c3-6d54b5a.md) |
