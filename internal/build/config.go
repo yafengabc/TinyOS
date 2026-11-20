@@ -317,12 +317,12 @@ func parseSize(s string) (int, error) {
 // (and compile when named explicitly) but no target ships them: py is the
 // experimental interpreter and is weaker than the csc compiler; avm and rvm
 // are VM experiments; csc3 + rirvm are the register-IR experiment.
-var defaultUserExclude = []string{"avm", "py", "rvm", "csc3", "rirvm"}
+var defaultUserExclude = []string{"avm", "py", "rvm", "csc3", "rirvm", "irc"}
 
-// csc3UserPrograms are the experimental AST -> register-IR pair.  They are
-// excluded unless a config asks for [features] csc3 = true, so the supported
-// csc + pvm images do not grow.
-var csc3UserPrograms = []string{"csc3", "rirvm"}
+// csc3UserPrograms are the experimental AST -> register-IR pair and its
+// native backend.  They are excluded unless a config asks for
+// [features] csc3 = true, so the supported csc + pvm images do not grow.
+var csc3UserPrograms = []string{"csc3", "rirvm", "irc"}
 
 // applyCsc3Exclude is the same feature gate as applyScriptingExclude: called
 // after board defaults and again after the config file, so a config can turn

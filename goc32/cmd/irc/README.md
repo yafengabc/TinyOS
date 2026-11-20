@@ -1,11 +1,10 @@
 # irc — RIR2 to RV32 ELF
 
-`irc` is the native backend for `csc3`'s RIR2 images.  It reuses the goc32 RV32
-assembler, ELF linker and LZ4TOS packer, so its output is directly loadable by
-TinyOS `exec`.
-
-The RIR2 producer and the interpreter live in the separate `tinyos-script`
-project (`src/csc3.c`, `src/rirvm.c`).  `rirvm` remains the differential oracle.
+`irc` is the native backend for `csc3`'s RIR2 images.  The board-side C
+implementation now lives in `tinyos-script/src/irc.c` and is pinned as TinyOS
+`user/irc.c`; this Go program remains the reference lowering and the
+convenient host-side generator (it reuses goc32's assembler, linker and
+LZ4TOS packer).
 
 ## Usage
 
@@ -79,20 +78,11 @@ dispatch.
 
 ## C port
 
-This Go tool is the reference implementation.  The final `irc` is meant to be
-a TinyOS C user program so native compilation can happen on the board (the
-PC-side path already has goc32).  The port needs, in order:
-
-1. RIR2 reader and the same lowering table.
-2. RV32 instruction encoders plus a label/fixup list (no assembler text).
-3. ELF32 `ET_DYN` writer matching `user/user.ld` and `kernel/elf.c`.
-4. A stored-LZ4TOS wrapper (one literal run is a valid LZ4 block) so `exec`
-   accepts the written file.
-5. The same runtime helpers, emitted as bytes with the Go assembly above as
-   the pattern.
-
-The register mapping and hidden struct-return argument stay unchanged, so both
-backends can be compared on the same RIR2 image.
+The Go tool is the reference implementation; the final board-side C `irc` now
+lives in `tinyos-script/src/irc.c` (pinned as TinyOS `user/irc.c`).  It emits
+machine code directly, writes an ELF32 `ET_DYN` image and a stored-LZ4TOS
+envelope.  The register mapping and hidden struct-return argument are
+unchanged, so both backends can be compared on the same RIR2 image.
 
 ## Limits
 
