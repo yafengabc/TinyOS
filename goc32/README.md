@@ -306,6 +306,7 @@ internal/ld/            PIE linker: --gc-sections, user.ld layout, .rela.dyn
 internal/obj/           in-memory object: sections, symbols, relocations
 internal/lz4tos/        LZ4 block compressor, ELF window hint, envelope
 cmd/asprobe/            dev-only: dump one file's assembled bytes
+cmd/irc/                RIR2 (csc3) -> RV32 ELF/LZ4TOS native backend
 tinyos/goc/             usys.h shim + __tos_syscall for ecall/svc
 ```
 
