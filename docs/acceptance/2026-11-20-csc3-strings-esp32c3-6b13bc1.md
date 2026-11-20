@@ -1,4 +1,4 @@
-commit: 52657bb
+commit: 6b13bc1
 change: csc3 char arrays, `string` variables, string parameters/returns, and string builtins; RIR2 arena + LOADB/STOREB/STRCPY/STRCAT/STRLEN/STRCMP/ATOI/PRINTSTR
 baseline: bdd2b17
 target/config: esp32c3-generic / configs/esp32c3-csc3.conf
