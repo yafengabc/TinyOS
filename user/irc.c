@@ -13,15 +13,11 @@ TOS_STACK(16 * 1024);
 #ifdef __riscv
 #define RIR_MAX   16384
 #define TEXT_MAX  24576
-#define OUT_MAX   36864
 #define LABEL_MAX 768
-#define FIX_MAX   1024
 #else
 #define RIR_MAX   65536
 #define TEXT_MAX  65536
-#define OUT_MAX   98304
 #define LABEL_MAX 2048
-#define FIX_MAX   4096
 #endif
 #define PC_MAX    1024
 #define FUNC_MAX  32
@@ -45,12 +41,13 @@ enum {
 };
 
 static uint8_t rir_buf[RIR_MAX];
-static uint8_t out[OUT_MAX];
 
 static int rir_len;
 static int text_len;
 static int out_len;
 static const char *out_path;
+static int emit_pass;
+static int out_fd;
 
 static const uint8_t *code;
 static int nir;
@@ -63,16 +60,12 @@ static const uint8_t *arena;
 static int dsize;
 
 static int label_off[LABEL_MAX];
-static int nlabel;
+static uint8_t label_seen[LABEL_MAX];
+static int label_next;
+static int label_total;
+static int label_base;
 static int pc_label[PC_MAX];
 static int func_label[FUNC_MAX];
-
-enum { FX_JAL, FX_BRANCH, FX_PCREL };
-struct fix {
-    int at, label, kind;
-};
-static struct fix fixes[FIX_MAX];
-static int nfix;
 
 static void die(const char *s)
 {
@@ -81,6 +74,8 @@ static void die(const char *s)
     puts("\n");
     exit(1);
 }
+
+static int write_all_fd(int fd, const uint8_t *p, int n);
 
 static uint32_t get32(const uint8_t *p)
 {
@@ -170,9 +165,14 @@ static uint32_t enc_j(int32_t off, int rd)
 
 static void e32(uint32_t v)
 {
+    uint8_t b[4];
     if (text_len + 4 > TEXT_MAX)
         die("text overflow");
-    put32(out + TEXT_OFF + text_len, v);
+    if (emit_pass == 2) {
+        put32(b, v);
+        if (write_all_fd(out_fd, b, 4) < 0)
+            die("write failed");
+    }
     text_len += 4;
 }
 
@@ -180,7 +180,8 @@ static void e_bytes(const uint8_t *p, int n)
 {
     if (text_len + n > TEXT_MAX)
         die("text overflow");
-    memcpy(out + TEXT_OFF + text_len, p, (size_t)n);
+    if (emit_pass == 2 && write_all_fd(out_fd, p, n) < 0)
+        die("write failed");
     text_len += n;
 }
 
@@ -235,29 +236,31 @@ static void e_li(int rd, int32_t v)
 
 /* ---- labels and fixups ---------------------------------------------- */
 
+static int alloc_label(void)
+{
+    int l = label_next++;
+    if (l >= LABEL_MAX)
+        die("too many labels");
+    if (emit_pass == 2 && l >= label_total) {
+        puts("irc: alloc order l="); putint(l);
+        puts(" total="); putint(label_total); puts("\n");
+        die("label order mismatch");
+    }
+    if (l >= label_total) {
+        label_off[l] = -1;
+        label_total = l + 1;
+    }
+    return l;
+}
+
 static int new_label(void)
 {
-    if (nlabel >= LABEL_MAX)
-        die("too many labels");
-    label_off[nlabel] = -1;
-    return nlabel++;
+    return alloc_label();
 }
 
 static void bind_label(int l)
 {
-    if (label_off[l] >= 0)
-        die("label bound twice");
     label_off[l] = text_len;
-}
-
-static void add_fix(int kind, int at, int label)
-{
-    if (nfix >= FIX_MAX)
-        die("too many fixups");
-    fixes[nfix].kind = kind;
-    fixes[nfix].at = at;
-    fixes[nfix].label = label;
-    nfix++;
 }
 
 static int pc_label_for(int pc)
@@ -265,9 +268,16 @@ static int pc_label_for(int pc)
     int l;
     if (pc < 0 || pc >= PC_MAX)
         die("pc out of range");
-    if (pc_label[pc] >= 0)
+    if (pc_label[pc] >= 0) {
+        if (emit_pass == 2 && !label_seen[pc_label[pc]]) {
+            l = alloc_label();
+            label_seen[pc_label[pc]] = 1;
+            if (l != pc_label[pc])
+                die("label order mismatch");
+        }
         return pc_label[pc];
-    l = new_label();
+    }
+    l = alloc_label();
     pc_label[pc] = l;
     return l;
 }
@@ -277,28 +287,50 @@ static int data_va;
 
 static void e_la(int rd, int label)
 {
-    add_fix(FX_PCREL, text_len, label);
-    e32(((uint32_t)rd << 7) | 0x17);      /* auipc rd, 0 */
-    e_addi(rd, rd, 0);
+    if (emit_pass == 1) {
+        text_len += 8;
+        return;
+    }
+    {
+        int32_t d = label_off[label] - text_len;
+        int32_t hi = (d + 0x800) >> 12;
+        int32_t lo = d - (hi << 12);
+        e32(((uint32_t)hi & 0xfffff) << 12 | ((uint32_t)rd << 7) | 0x17);
+        e_addi(rd, rd, lo);
+    }
 }
 
 static void e_call(int label)
 {
-    add_fix(FX_PCREL, text_len, label);
-    e32((uint32_t)X_RA << 7 | 0x17);      /* auipc ra, 0 */
-    e32(enc_i(0, X_RA, X_RA, 0, 0x67));   /* jalr ra, ra, 0 */
+    if (emit_pass == 1) {
+        text_len += 8;
+        return;
+    }
+    {
+        int32_t d = label_off[label] - text_len;
+        int32_t hi = (d + 0x800) >> 12;
+        int32_t lo = d - (hi << 12);
+        e32(((uint32_t)hi & 0xfffff) << 12 | ((uint32_t)X_RA << 7) | 0x17);
+        e32(enc_i(lo, X_RA, X_RA, 0, 0x67));
+    }
 }
 
 static void e_j(int label)
 {
-    add_fix(FX_JAL, text_len, label);
-    e32(enc_j(0, X_ZERO));
+    if (emit_pass == 1) {
+        text_len += 4;
+        return;
+    }
+    e32(enc_j(label_off[label] - text_len, X_ZERO));
 }
 
 static void e_branch_to(int f3, int rs1, int rs2, int label)
 {
-    add_fix(FX_BRANCH, text_len, label);
-    e32(enc_b(0, rs1, rs2, (uint32_t)f3));
+    if (emit_pass == 1) {
+        text_len += 4;
+        return;
+    }
+    e32(enc_b(label_off[label] - text_len, rs1, rs2, (uint32_t)f3));
 }
 
 /* Branch when the condition is true, using an inverted near branch over a
@@ -401,9 +433,19 @@ static int data_bss_size;
 
 static int func_label_for(int fid)
 {
-    if (func_label[fid] < 0)
-        func_label[fid] = new_label();
-    return func_label[fid];
+    int l;
+    if (func_label[fid] >= 0) {
+        if (emit_pass == 2 && !label_seen[func_label[fid]]) {
+            l = alloc_label();
+            label_seen[func_label[fid]] = 1;
+            if (l != func_label[fid])
+                die("label order mismatch");
+        }
+        return func_label[fid];
+    }
+    l = alloc_label();
+    func_label[fid] = l;
+    return l;
 }
 
 static int func_epi[FUNC_MAX];
@@ -1424,12 +1466,12 @@ static void emit_rodata(void)
     int i;
 
     while (text_len & 3)
-        out[TEXT_OFF + text_len++] = 0;
+        e_bytes(&zero, 1);
     bind_label(rodata_msg);
     e_bytes(msg, 7);
 
     while (text_len & 3)
-        out[TEXT_OFF + text_len++] = 0;
+        e_bytes(&zero, 1);
     bind_label(rodata_empty);
     e_bytes(&zero, 1);
     bind_label(data_strpool);
@@ -1438,48 +1480,16 @@ static void emit_rodata(void)
     e_bytes(&zero, 1);
 
     while (text_len & 3)
-        out[TEXT_OFF + text_len++] = 0;
+        e_bytes(&zero, 1);
     bind_label(rodata_p10);
     for (i = 0; i < 5; i++)
         e32((uint32_t)p10[i]);
 }
 
-static void resolve_fixups(void)
-{
-    int i;
-    for (i = 0; i < nfix; i++) {
-        int v = label_off[fixes[i].label];
-        int at = fixes[i].at;
-        uint8_t *p;
-        if (v < 0)
-            die("unbound label");
-        p = out + TEXT_OFF + at;
-        if (fixes[i].kind == FX_JAL) {
-            uint32_t ins = get32(p);
-            int rd = (ins >> 7) & 0x1f;
-            put32(p, enc_j(v - at, rd));
-        } else if (fixes[i].kind == FX_BRANCH) {
-            uint32_t ins = get32(p);
-            int rs1 = (ins >> 15) & 0x1f;
-            int rs2 = (ins >> 20) & 0x1f;
-            int f3 = (ins >> 12) & 7;
-            put32(p, enc_b(v - at, rs1, rs2, (uint32_t)f3));
-        } else {
-            int32_t delta = v - at;
-            int32_t hi = (delta + 0x800) >> 12;
-            int32_t lo = delta - (hi << 12);
-            uint32_t a = get32(p);
-            uint32_t b = get32(p + 4);
-            put32(p, (a & 0xfff) | (((uint32_t)hi & 0xfffff) << 12));
-            put32(p + 4, (b & 0xfffff) | (((uint32_t)lo & 0xfff) << 20));
-        }
-    }
-}
-
 static void write_elf_header(int data_off, int data_filesz, int data_memsz)
 {
-    uint8_t *h = out;
-    memset(h, 0, TEXT_OFF);
+    uint8_t h[TEXT_OFF];
+    memset(h, 0, sizeof h);
     h[0] = 0x7f; h[1] = 'E'; h[2] = 'L'; h[3] = 'F';
     h[4] = 1; h[5] = 1; h[6] = 1;
     put16(h + 16, 3);                      /* ET_DYN */
@@ -1515,6 +1525,9 @@ static void write_elf_header(int data_off, int data_filesz, int data_memsz)
     put32(h + 104, (uint32_t)data_memsz);
     put32(h + 108, 6);
     put32(h + 112, 16);
+
+    if (write_all_fd(out_fd, h, TEXT_OFF) < 0)
+        die("write failed");
 }
 
 static int lz4_size(int n)
@@ -1536,7 +1549,7 @@ static int write_all_fd(int fd, const uint8_t *p, int n)
     return 0;
 }
 
-static int lz4_write(int fd, const uint8_t *src, int n)
+static int lz4_token(int fd, int n)
 {
     uint8_t hdr[256];
     int hn = 0;
@@ -1551,9 +1564,7 @@ static int lz4_write(int fd, const uint8_t *src, int n)
         }
         hdr[hn++] = (uint8_t)rem;
     }
-    if (write_all_fd(fd, hdr, hn) < 0)
-        return -1;
-    return write_all_fd(fd, src, n);
+    return write_all_fd(fd, hdr, hn);
 }
 
 static int load_rir(const char *path)
@@ -1604,11 +1615,37 @@ static void parse_rir(void)
 static int align16(int v) { return (v + 15) & ~15; }
 static int align4k(int v) { return (v + 4095) & ~4095; }
 
+static void write_zeros(int fd, int n)
+{
+    static const uint8_t z[64];
+    while (n > 0) {
+        int k = n > (int)sizeof z ? (int)sizeof z : n;
+        if (write_all_fd(fd, z, k) < 0)
+            die("write failed");
+        n -= k;
+    }
+}
+
+static void emit_body(void)
+{
+    int i, halt;
+    text_len = 0;
+    halt = new_label();
+    e_call(func_label_for(main_fid));
+    e_li(X_A7, 0);
+    e_ecall();
+    bind_label(halt);
+    e_j(halt);
+    for (i = 0; i < nfunc; i++)
+        emit_function(func_order[i]);
+    emit_helpers();
+    emit_rodata();
+}
+
 static void generate(void)
 {
     int data_off, data_filesz, bss, g_bytes, arena_bytes, argbuf_off, pwm_off;
-    int i;
-    int l_halt;
+    int text_final, span, blen, fd;
 
     data_strpool = new_label();
     data_arena = new_label();
@@ -1633,35 +1670,18 @@ static void generate(void)
     rodata_msg = new_label();
     rodata_p10 = new_label();
     rodata_empty = new_label();
-    (void)l_halt;
 
     analyze();
-    memset(out, 0, sizeof out);
-    text_len = 0;
-    nfix = 0;
+    label_base = label_next;
 
-    /* _start */
-    l_halt = new_label();
-    e_call(func_label_for(main_fid));
-    e_li(X_A7, 0);
-    e_ecall();
-    bind_label(l_halt);
-    e_j(l_halt);
+    emit_pass = 1;
+    emit_body();
+    text_final = text_len;
 
-    for (i = 0; i < nfunc; i++)
-        emit_function(func_order[i]);
-    emit_helpers();
-    emit_rodata();
-
-    data_va = align16(text_len);
-    data_off = align16(TEXT_OFF + text_len);
+    data_va = align16(text_final);
+    data_off = align16(TEXT_OFF + text_final);
     arena_bytes = (dsize + 3) & ~3;
     data_filesz = arena_bytes;
-    if (data_off + data_filesz > OUT_MAX)
-        die("output overflow");
-    if (dsize > 0)
-        memcpy(out + data_off, arena, (size_t)dsize);
-
     g_bytes = gsize * 4;
     if (g_bytes <= 0)
         g_bytes = 4;
@@ -1675,39 +1695,51 @@ static void generate(void)
     label_off[data_pwmreq] = data_va + arena_bytes + pwm_off;
     data_bss_size = bss;
 
-    resolve_fixups();
     out_len = data_off + data_filesz;
-    write_elf_header(data_off, data_filesz, data_filesz + bss);
+    span = align4k(data_va + data_filesz + bss);
+    blen = lz4_size(out_len);
 
+    fd = create(out_path);
+    if (fd < 0)
+        die("cannot create output");
+    out_fd = fd;
     {
-        int span = align4k(data_va + data_filesz + bss);
         uint8_t hdr[28];
-        int blen;
-        int fd;
         memset(hdr, 0, sizeof hdr);
         memcpy(hdr, "LZ4TOS", 6);
         put16(hdr + 6, 1);
         put32(hdr + 8, (uint32_t)out_len);
-        blen = lz4_size(out_len);
         put32(hdr + 12, (uint32_t)blen);
         put32(hdr + 16, (uint32_t)span);
         put32(hdr + 20, 0);
         put32(hdr + 24, 0);
-        fd = create(out_path);
-        if (fd < 0)
-            die("cannot create output");
-        if (write_all_fd(fd, hdr, 28) < 0 ||
-            lz4_write(fd, out, out_len) < 0)
+        if (write_all_fd(fd, hdr, 28) < 0)
             die("write failed");
-        close(fd);
-        puts("irc: ");
-        putint(text_len);
-        puts(" text, ");
-        putint(out_len);
-        puts(" elf, ");
-        putint(blen + 28);
-        puts(" tos\n");
     }
+    if (lz4_token(fd, out_len) < 0)
+        die("write failed");
+    text_len = text_final;
+    write_elf_header(data_off, data_filesz, data_filesz + bss);
+
+    emit_pass = 2;
+    label_next = label_base;
+    memset(label_seen, 0, sizeof label_seen);
+    emit_body();
+    if (text_len != text_final)
+        die("pass size mismatch");
+    write_zeros(fd, data_off - (TEXT_OFF + text_final));
+    if (dsize > 0 && write_all_fd(fd, arena, dsize) < 0)
+        die("write failed");
+    write_zeros(fd, arena_bytes - dsize);
+    close(fd);
+
+    puts("irc: ");
+    putint(text_final);
+    puts(" text, ");
+    putint(out_len);
+    puts(" elf, ");
+    putint(blen + 28);
+    puts(" tos\n");
 }
 
 int main(int argc, char **argv)
