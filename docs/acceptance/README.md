@@ -114,3 +114,5 @@
 | 2026-11-19 | RP2040 flash 容量探测（PL022 SSI） | `ac0796e` | Pico 1（COM19/COM17）+ 18 目标 | T1–T3 PASS、T4/T5 先 FAIL 后 PASS（`58a45e8`）；原因记在卡里 | [rp2040 rdid](2026-11-19-rp2040-jedec-rdid-ac0796e.md) |
 | 2026-11-20 | Pico 2 SMP 冷启动闸门 + `reboot` 停从核 | `5948bd8` `109a61e` | rpi-pico2-smp / rpi-pico2-rv32-smp | ARM 20/20、RV32 35/38（修前 1/3、1/15）；`#31` RP2040 四项 `NOT RUN` | [boot gate](2026-11-20-pico2-smp-boot-gate.md) |
 | 2026-11-20 | UART0 只丢 TX 的自检口（`/proc/uart0{,tx}`、`/proc/gp0drive`） | `bc84675` | Pico 2 RV32 SMP（COM27/COM19） | 板侧编程正确、GP0 拉不高 → 故障在线/适配器；RP2040 与 ARM `NOT RUN` | [uart0 tx](2026-11-20-uart0-tx-diagnosis.md) |
+| 2026-11-20 | csc + pvm 脚本栈（改名；py/avm/rvm 排除） | `9b0ae91` | host + 18 目标 + QEMU 3 | T0/T1/T2 PASS；Pico2/Pico/ATK 真机 `NOT RUN` | [host/QEMU](2026-11-20-scripting-host-qemu-9b0ae91.md) |
+| 2026-11-20 | csc + pvm 脚本栈（C3 8K） | `9b0ae91` | ESP32-C3 COM4 + 8K profile | T3 PASS；csc 100 KiB 窗口；`/bin` 无 py | [C3](2026-11-20-scripting-c3-9b0ae91.md) |
