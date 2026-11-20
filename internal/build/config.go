@@ -313,6 +313,33 @@ func parseSize(s string) (int, error) {
 	return n * mul, nil
 }
 
+// defaultUserExclude lists development-only programs.  They stay in user/
+// (and compile when named explicitly) but no target ships them: py is the
+// experimental interpreter and is weaker than the csc compiler; avm and rvm
+// are VM experiments.
+var defaultUserExclude = []string{"avm", "py", "rvm"}
+
+// scriptingUserPrograms are the supported on-board scripting pair.  They are
+// optional because csc + pvm cost tens of kilobytes: boards that enable
+// [features] scripting carry them, the 300 KiB embedded images that do not
+// stay small.
+var scriptingUserPrograms = []string{"csc", "pvm"}
+
+// applyScriptingExclude keeps the scripting pair out of images whose board
+// did not ask for it.  It is called after the board features and again after
+// the config features, because a config can turn scripting on or off.
+func (b *Builder) applyScriptingExclude() {
+	if b.feature("scripting") {
+		for _, n := range scriptingUserPrograms {
+			delete(b.UserExclude, n)
+		}
+		return
+	}
+	for _, n := range scriptingUserPrograms {
+		b.UserExclude[n] = true
+	}
+}
+
 // ApplyConfig copies the parsed values into the builder and resolves paths
 // against the tree root.  A target already chosen on the command line wins
 // over the config file.
@@ -343,6 +370,14 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	 * [user] exclude is the separate "this image omits it" list and is
 	 * added below. */
 	b.UserExclude = map[string]bool{}
+	/* Prototype VMs and the first compiler are development artifacts, not
+	 * part of a shipped image: keeping them in user/ lets them build, but
+	 * every target would carry ~32 KiB of programs nobody runs, and that
+	 * overflowed the 300 KiB littlefs images.  csc2 and pvm are the
+	 * supported scripting pair. */
+	for _, n := range defaultUserExclude {
+		b.UserExclude[n] = true
+	}
 	if b.BoardConfig != nil {
 		for _, n := range b.BoardConfig.UserExclude {
 			b.UserExclude[n] = true
@@ -356,12 +391,14 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	for _, f := range b.Target.DefaultFeatures {
 		b.Features[f] = true
 	}
+	b.applyScriptingExclude()
 	if c == nil {
 		return nil
 	}
 	for name, on := range c.Features {
 		b.Features[name] = on
 	}
+	b.applyScriptingExclude()
 	b.HeapBytes = c.HeapBytes
 	b.MaxProcs = c.MaxProcs
 	b.KStack = c.KStack

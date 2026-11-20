@@ -13,6 +13,7 @@ typedef signed long long   int64_t;
 typedef unsigned int size_t;
 typedef int          ssize_t;
 typedef unsigned int uintptr_t;
+typedef int          intptr_t;
 
 #define NULL ((void *)0)
 
