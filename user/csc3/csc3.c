@@ -565,7 +565,41 @@ static Node *parse_rel(void)
     return n;
 }
 
-static Node *parse_expr(void) { return parse_rel(); }
+static Node *fold_const(Node *n)
+{
+    if (!n)
+        return n;
+    n->lhs = fold_const(n->lhs);
+    n->rhs = fold_const(n->rhs);
+    if (n->lhs && n->rhs &&
+        n->lhs->kind == N_NUM && n->rhs->kind == N_NUM &&
+        !n->lhs->ftype && !n->rhs->ftype &&
+        (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
+         n->kind == N_DIV || n->kind == N_LT || n->kind == N_GT ||
+         n->kind == N_EQ)) {
+        int a = n->lhs->val, b = n->rhs->val, v = 0;
+        if (n->kind == N_ADD) v = a + b;
+        else if (n->kind == N_SUB) v = a - b;
+        else if (n->kind == N_MUL) v = a * b;
+        else if (n->kind == N_DIV) {
+            if (b == 0)
+                return n;
+            v = a / b;
+        } else if (n->kind == N_LT) v = a < b;
+        else if (n->kind == N_GT) v = a > b;
+        else v = a == b;
+        n->kind = N_NUM;
+        n->val = v;
+        n->ftype = 0;
+        n->lhs = n->rhs = NULL;
+    }
+    return n;
+}
+
+static Node *parse_expr(void)
+{
+    return fold_const(parse_rel());
+}
 
 static int parse_const_expr(void)
 {
@@ -1986,6 +2020,51 @@ static void peephole(void)
     }
 }
 
+static int rir_pure(int op)
+{
+    switch (op) {
+    case R_CONST: case R_MOV:
+    case R_ADD: case R_SUB: case R_MUL:
+    case R_LT: case R_GT: case R_EQ:
+    case R_ADDI: case R_SUBI: case R_MULI:
+    case R_INC: case R_DEC:
+    case R_SHLI: case R_SHRI:
+    case R_LOADG: case R_LOADL:
+    case R_FMUL: case R_FDIV:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Conservative DCE: if a virtual register has no readers anywhere in the
+ * function, a pure definition of it is dead.  Vregs reused for unrelated
+ * values stay untouched, so this cannot drop a live definition. */
+static void dce(void)
+{
+    int used[VREG_MAX];
+
+    memset(used, 0, sizeof used);
+    for (int i = 0; i < nir; i++) {
+        int f[3], n = rir_uses(&ir[i], f);
+        for (int k = 0; k < n; k++) {
+            int v = rir_get(&ir[i], f[k]);
+            if (v >= 0 && v < VREG_MAX)
+                used[v] = 1;
+        }
+    }
+    for (int i = 0; i < nir; i++) {
+        int d = rir_dest_field(&ir[i]);
+        if (d < 0 || !rir_pure(ir[i].op))
+            continue;
+        {
+            int v = rir_get(&ir[i], d);
+            if (v >= 0 && v < VREG_MAX && !used[v])
+                ir[i].op = R_NOP;
+        }
+    }
+}
+
 static void allocate_func(int fi, int lo, int hi)
 {
     int first[VREG_MAX], last[VREG_MAX];
@@ -2416,6 +2495,7 @@ static void parse_program(int pass)
                     emit(R_RET, z, 0, 0, 0);
                 }
                 peephole();
+                dce();
                 regalloc_one(fi);
                 f->entry_pc = out_nir;
 
