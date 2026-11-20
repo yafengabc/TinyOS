@@ -70,7 +70,7 @@ func TestBranchLabels(t *testing.T) {
 
 // Every opcode must survive emission and assembling, even if this image is
 // not meant to execute.  This is the guard against a new RIR2 opcode silently
-// reaching only rirvm.
+// reaching only rvm.
 func TestAllOpcodesAssemble(t *testing.T) {
 	img := &image{
 		dsize:   16,

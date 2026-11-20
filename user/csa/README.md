@@ -1,11 +1,11 @@
-# csc
+# csa
 
-`csc` 是跑在 TinyOS 用户态的小型 C 子集编译器。它直接生成 AMX core
+`csa` 是跑在 TinyOS 用户态的小型 C 子集编译器。它直接生成 AMX core
 P-code（`.amx`），由 `pvm` 执行，不依赖 Pawn 的宿主编译器，也不依赖
 `pvm` 的 float/printf 扩展。
 
 ```sh
-csc /bin/demo.c /bin/demo.amx
+csa /bin/demo.c /bin/demo.amx
 pvm /bin/demo.amx
 ```
 
@@ -43,9 +43,9 @@ printf("%.2f\n", b);       /* 3.25 */
 
 ## 字符串
 
-`csc` 使用自己的**字节字符串 ABI**：1 个字符 1 字节，连续存放并以 NUL
+`csa` 使用自己的**字节字符串 ABI**：1 个字符 1 字节，连续存放并以 NUL
 结尾；`string` 是 4 字节句柄（data 段字节地址），`char[N]` 是 N 字节的
-可修改缓冲区。Pawn 的 `tos_print` 仍保留，`csc` 用 `tos_prints`。
+可修改缓冲区。Pawn 的 `tos_print` 仍保留，`csa` 用 `tos_prints`。
 
 ```c
 string s;
@@ -173,5 +173,5 @@ int main() {
 
 ## 资源
 
-在 ESP32-C3 上，`csc` 的窗口约 100 KiB（`-Oz` + 流式写 `.amx`：span 82K + 16K 栈 + 4K guard）；`pvm`（整数 core + fix16 + 字节字符串 + 系统调用）约 28 KiB。
+在 ESP32-C3 上，`csa` 的窗口约 100 KiB（`-Oz` + 流式写 `.amx`：span 82K + 16K 栈 + 4K guard）；`pvm`（整数 core + fix16 + 字节字符串 + 系统调用）约 28 KiB。
 两者都作为普通用户程序运行，不进入内核，也不使用 XIP。

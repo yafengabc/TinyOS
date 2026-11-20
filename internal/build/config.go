@@ -315,35 +315,35 @@ func parseSize(s string) (int, error) {
 
 // defaultUserExclude lists development-only programs.  They stay in user/
 // (and compile when named explicitly) but no target ships them: py is the
-// experimental interpreter and is weaker than the csc compiler; avm and rvm
-// are VM experiments; csc3 + rirvm are the register-IR experiment.
-var defaultUserExclude = []string{"avm", "py", "rvm", "csc3", "rirvm", "irc"}
+// experimental interpreter and csc + rvm + rcc are the register-IR
+// experiment.
+var defaultUserExclude = []string{"py", "csc", "rvm", "rcc"}
 
-// csc3UserPrograms are the experimental AST -> register-IR pair and its
-// native backend.  They are excluded unless a config asks for
-// [features] csc3 = true, so the supported csc + pvm images do not grow.
-var csc3UserPrograms = []string{"csc3", "rirvm", "irc"}
+// rirUserPrograms are the experimental AST -> register-IR toolchain.  They
+// are excluded unless a config asks for [features] rir = true, so the
+// supported csa + pvm images do not grow.
+var rirUserPrograms = []string{"csc", "rvm", "rcc"}
 
-// applyCsc3Exclude is the same feature gate as applyScriptingExclude: called
+// applyRirExclude is the same feature gate as applyScriptingExclude: called
 // after board defaults and again after the config file, so a config can turn
 // the experiment on or off.
-func (b *Builder) applyCsc3Exclude() {
-	if b.feature("csc3") {
-		for _, n := range csc3UserPrograms {
+func (b *Builder) applyRirExclude() {
+	if b.feature("rir") {
+		for _, n := range rirUserPrograms {
 			delete(b.UserExclude, n)
 		}
 		return
 	}
-	for _, n := range csc3UserPrograms {
+	for _, n := range rirUserPrograms {
 		b.UserExclude[n] = true
 	}
 }
 
 // scriptingUserPrograms are the supported on-board scripting pair.  They are
-// optional because csc + pvm cost tens of kilobytes: boards that enable
+// optional because csa + pvm cost tens of kilobytes: boards that enable
 // [features] scripting carry them, the 300 KiB embedded images that do not
 // stay small.
-var scriptingUserPrograms = []string{"csc", "pvm"}
+var scriptingUserPrograms = []string{"csa", "pvm"}
 
 // applyScriptingExclude keeps the scripting pair out of images whose board
 // did not ask for it.  It is called after the board features and again after
@@ -412,7 +412,7 @@ func (b *Builder) ApplyConfig(c *Config) error {
 		b.Features[f] = true
 	}
 	b.applyScriptingExclude()
-	b.applyCsc3Exclude()
+	b.applyRirExclude()
 	if c == nil {
 		return nil
 	}
@@ -420,7 +420,7 @@ func (b *Builder) ApplyConfig(c *Config) error {
 		b.Features[name] = on
 	}
 	b.applyScriptingExclude()
-	b.applyCsc3Exclude()
+	b.applyRirExclude()
 	b.HeapBytes = c.HeapBytes
 	b.MaxProcs = c.MaxProcs
 	b.KStack = c.KStack

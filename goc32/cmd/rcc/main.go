@@ -1,6 +1,6 @@
-// irc: translate a RIR2 image into a TinyOS-loadable RV32 ELF (LZ4TOS).
+// rcc: translate a RIR2 image into a TinyOS-loadable RV32 ELF (LZ4TOS).
 //
-// This is the native counterpart of rirvm.  RIR2 already carries physical
+// This is the native counterpart of rvm.  RIR2 already carries physical
 // register numbers, so the backend maps r0..r12 to callee-saved RV32
 // registers and treats r13..r15 as per-instruction scratch.
 package main
@@ -1371,7 +1371,7 @@ func main() {
 	asmOut := flag.String("asm", "", "write the generated assembly here")
 	elfOut := flag.String("elf", "", "write the raw ELF here as well")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: irc [-asm file.s] [-elf file.elf] input.rir output.tos\n")
+		fmt.Fprintf(os.Stderr, "usage: rcc [-asm file.s] [-elf file.elf] input.rir output.tos\n")
 	}
 	flag.Parse()
 	if flag.NArg() != 2 {
@@ -1382,7 +1382,7 @@ func main() {
 
 	img, err := loadImage(in)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 		os.Exit(1)
 	}
 	g := &gen{img: img}
@@ -1395,42 +1395,42 @@ func main() {
 		return g.gen()
 	}()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 		os.Exit(1)
 	}
 	if *asmOut != "" {
 		if err := os.WriteFile(*asmOut, []byte(text), 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+			fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 			os.Exit(1)
 		}
 	}
 	elf, err := buildELF(text, in+".s")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 		os.Exit(1)
 	}
-	tmp, err := os.CreateTemp("", "irc-*.elf")
+	tmp, err := os.CreateTemp("", "rcc-*.elf")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 		os.Exit(1)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(elf); err != nil {
 		tmp.Close()
-		fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 		os.Exit(1)
 	}
 	tmp.Close()
 	if *elfOut != "" {
 		if err := os.WriteFile(*elfOut, elf, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "irc: %v\n", err)
+			fmt.Fprintf(os.Stderr, "rcc: %v\n", err)
 			os.Exit(1)
 		}
 	}
 	res, err := lz4tos.Pack(tmpName, out)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "irc: pack: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rcc: pack: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("%s -> %s (%d -> %d bytes, span %d)\n", filepath.Base(in),

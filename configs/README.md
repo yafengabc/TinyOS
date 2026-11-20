@@ -56,9 +56,9 @@ exclude = ping,net,dhcp
   `pwm`, `uart1`, `spi` and `i2c` on, so `tos build -target rpi-pico` needs no
   config; writing `pwm = false` (what menuconfig saves) compiles that driver
   and its user command out.
-- `[features] csc3 = true` opts the experimental `csc3` + `rirvm` pair into
-  the image; both are excluded by default.  Pair it with `scripting = false`
-  when you want only the register-IR experiment (`configs/esp32c3-csc3.conf`).
+- `[features] rir = true` opts the experimental `csc` + `rvm` + `rcc` trio into
+  the image; all three are excluded by default.  Pair it with `scripting = false`
+  when you want only the register-IR experiment (`configs/esp32c3-rir.conf`).
 - Both numeric runtimes are always linked: `user/fix16.c` provides the
   explicit Q16.16 API (`fix16_*`, +/-32767.99998, step 1/65536, the small/fast
   path) and `user/softfloat32.c` backs ordinary `float` syntax with IEEE
@@ -104,9 +104,9 @@ Examples:
 | `configs/x86-threads.conf` | x86 with the cooperative thread library (`swcost`, `threadtest`) |
 | `configs/c3-kthreads.conf` | ESP32-C3 with the experimental kernel-thread API (`threadbench`) |
 | `configs/esp32c3-16k.conf` | ESP32-C3 without WiFi, 16 KiB heap and 16 task slots (measured peak 1.5 KiB; 12 background jobs) |
-| `configs/esp32c3-8k.conf` | ESP32-C3 without WiFi, 8 KiB heap + 8 KiB kernel stack, 18 task slots; 320 KiB task area / 20 windows; `scripting = true`: `csc` + `pvm` (`csc` ~100 KiB window) |
+| `configs/esp32c3-8k.conf` | ESP32-C3 without WiFi, 8 KiB heap + 8 KiB kernel stack, 18 task slots; 320 KiB task area / 20 windows; `scripting = true`: `csa` + `pvm` (`csa` ~100 KiB window) |
 | `configs/esp32c3-8k-float.conf` | the same, with `pvm-float = true`: pvm gets float/printf/args; pvm ~19K / 36K window |
-| `configs/esp32c3-csc3.conf` | the 8 KiB C3 image with the experimental `csc3` + `rirvm` pair instead of `csc` + `pvm` (`csc3` ~100 KiB window, `rirvm` ~28 KiB) |
+| `configs/esp32c3-rir.conf` | the 8 KiB C3 image with the experimental `csc` + `rvm` + `rcc` trio instead of `csa` + `pvm` (`csc` ~124 KiB, `rvm` 32 KiB, `rcc` 72 KiB windows) |
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
 | `configs/atk-dnr2350am-smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
 | `configs/atk-dnr2350am-rv32-smp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |

@@ -1,6 +1,6 @@
-/* irc: RIR2 -> RV32 ELF (TinyOS userland), C implementation.
+/* rcc: RIR2 -> RV32 ELF (TinyOS userland), C implementation.
  *
- * This is the board-side counterpart of rirvm.  It emits machine code
+ * This is the board-side counterpart of rvm.  It emits machine code
  * directly, writes an ELF32 ET_DYN image and wraps it in a stored LZ4TOS
  * envelope so exec() accepts it.  No assembler text and no libc are needed.
  */
@@ -69,7 +69,7 @@ static int func_label[FUNC_MAX];
 
 static void die(const char *s)
 {
-    puts("irc: ");
+    puts("rcc: ");
     puts(s);
     puts("\n");
     exit(1);
@@ -241,11 +241,8 @@ static int alloc_label(void)
     int l = label_next++;
     if (l >= LABEL_MAX)
         die("too many labels");
-    if (emit_pass == 2 && l >= label_total) {
-        puts("irc: alloc order l="); putint(l);
-        puts(" total="); putint(label_total); puts("\n");
+    if (emit_pass == 2 && l >= label_total)
         die("label order mismatch");
-    }
     if (l >= label_total) {
         label_off[l] = -1;
         label_total = l + 1;
@@ -1733,7 +1730,7 @@ static void generate(void)
     write_zeros(fd, arena_bytes - dsize);
     close(fd);
 
-    puts("irc: ");
+    puts("rcc: ");
     putint(text_final);
     puts(" text, ");
     putint(out_len);
@@ -1745,7 +1742,7 @@ static void generate(void)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        puts("usage: irc input.rir output.tos\n");
+        puts("usage: rcc input.rir output.tos\n");
         return 2;
     }
     out_path = argv[2];
