@@ -713,6 +713,56 @@ static Node *parse_lor(void)
     return n;
 }
 
+static int to_fix(int v)
+{
+    return (int)((uint32_t)v << 16);
+}
+
+/* Same Q16.16 arithmetic as rirvm's fmul16/fdiv16, so compile-time folding
+ * and runtime results agree bit for bit. */
+static int fix_mul(int a, int b)
+{
+    uint32_t ua, ub, a0, a1, b0, b1, p0, p1, p2, p3, mid, hi, r;
+    int neg = (a < 0) != (b < 0);
+
+    ua = a < 0 ? (uint32_t)0 - (uint32_t)a : (uint32_t)a;
+    ub = b < 0 ? (uint32_t)0 - (uint32_t)b : (uint32_t)b;
+    a0 = ua & 0xFFFFu; a1 = ua >> 16;
+    b0 = ub & 0xFFFFu; b1 = ub >> 16;
+    p0 = a0 * b0; p1 = a0 * b1; p2 = a1 * b0; p3 = a1 * b1;
+    mid = (p0 >> 16) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu);
+    hi = p3 + (p1 >> 16) + (p2 >> 16) + (mid >> 16);
+    r = (hi << 16) | (mid & 0xFFFFu);
+    return (int)(neg ? (uint32_t)0 - r : r);
+}
+
+static int fix_div(int a, int b)
+{
+    uint32_t ua, ub, q, r, frac, carry;
+    int neg, i;
+
+    if (b == 0)
+        return a < 0 ? (int)0x80000000 : 0x7fffffff;
+    neg = (a < 0) != (b < 0);
+    ua = a < 0 ? (uint32_t)0 - (uint32_t)a : (uint32_t)a;
+    ub = b < 0 ? (uint32_t)0 - (uint32_t)b : (uint32_t)b;
+    q = ua / ub;
+    r = ua % ub;
+    if (q > 0x7FFFu)
+        return neg ? (int)0x80000000 : 0x7fffffff;
+    frac = 0;
+    for (i = 0; i < 16; i++) {
+        carry = r >> 31;
+        r <<= 1;
+        if (carry || r >= ub) {
+            r -= ub;
+            frac |= 1u << (15 - i);
+        }
+    }
+    q = (q << 16) | frac;
+    return (int)(neg ? (uint32_t)0 - q : q);
+}
+
 static Node *fold_const(Node *n)
 {
     if (!n)
@@ -721,22 +771,28 @@ static Node *fold_const(Node *n)
     n->rhs = fold_const(n->rhs);
     if (n->lhs && n->rhs &&
         n->lhs->kind == N_NUM && n->rhs->kind == N_NUM &&
-        !n->lhs->ftype && !n->rhs->ftype &&
         (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
          n->kind == N_DIV || n->kind == N_MOD ||
          n->kind == N_LT || n->kind == N_GT || n->kind == N_EQ ||
          n->kind == N_NE || n->kind == N_LE || n->kind == N_GE ||
          n->kind == N_AND || n->kind == N_OR)) {
-        int a = n->lhs->val, b = n->rhs->val, v = 0;
-        if (n->kind == N_ADD) v = a + b;
-        else if (n->kind == N_SUB) v = a - b;
-        else if (n->kind == N_MUL) v = a * b;
+        int isf = n->lhs->ftype || n->rhs->ftype;
+        int a = n->lhs->val, b = n->rhs->val, v = 0, rfloat = 0;
+
+        if (isf) {
+            if (!n->lhs->ftype) a = to_fix(a);
+            if (!n->rhs->ftype) b = to_fix(b);
+        }
+        if (n->kind == N_ADD) { v = a + b; rfloat = isf; }
+        else if (n->kind == N_SUB) { v = a - b; rfloat = isf; }
+        else if (n->kind == N_MUL) { v = isf ? fix_mul(a, b) : a * b; rfloat = isf; }
         else if (n->kind == N_DIV) {
             if (b == 0)
                 return n;
-            v = a / b;
+            v = isf ? fix_div(a, b) : a / b;
+            rfloat = isf;
         } else if (n->kind == N_MOD) {
-            if (b == 0)
+            if (isf || b == 0)
                 return n;
             v = a % b;
         } else if (n->kind == N_LT) v = a < b;
@@ -749,7 +805,7 @@ static Node *fold_const(Node *n)
         else v = (a != 0) || (b != 0);
         n->kind = N_NUM;
         n->val = v;
-        n->ftype = 0;
+        n->ftype = rfloat;
         n->lhs = n->rhs = NULL;
     }
     return n;
@@ -2459,6 +2515,67 @@ static int rir_dest_field(const RIR *q)
     }
 }
 
+/* Mark instruction indices that can be entered from a branch. */
+static void mark_targets(char *target)
+{
+    memset(target, 0, IR_MAX);
+    for (int i = 0; i < nir; i++) {
+        int op = ir[i].op;
+        int t = -1;
+        if (op == R_JMP) t = ir[i].a;
+        else if (op == R_JZ) t = ir[i].b;
+        else if (branch_is_fused(op)) t = ir[i].c;
+        if (t >= 0 && t < IR_MAX)
+            target[t] = 1;
+    }
+}
+
+/* Straight-line copy propagation: after `MOV src, dst`, rewrite later reads
+ * of dst to src until dst/src is redefined, a basic-block boundary, or a
+ * branch target.  The MOV is left in place; DCE removes it if it becomes
+ * unread.  Conservative by construction: it never rewrites across a target. */
+static void copy_prop(void)
+{
+    char target[IR_MAX];
+    int i, j;
+
+    mark_targets(target);
+    for (i = 0; i < nir; i++) {
+        int src, dst;
+
+        if (ir[i].op != R_MOV)
+            continue;
+        src = ir[i].a;
+        dst = ir[i].d;
+        if (src < 0 || src >= VREG_MAX || dst < 0 || dst >= VREG_MAX)
+            continue;
+        if (src == dst) {
+            ir[i].op = R_NOP;
+            continue;
+        }
+        for (j = i + 1; j < nir; j++) {
+            int f[3], n, k, dfield, dv;
+
+            if (target[j])
+                break;
+            n = rir_uses(&ir[j], f);
+            for (k = 0; k < n; k++)
+                if (rir_get(&ir[j], f[k]) == dst)
+                    rir_put(&ir[j], f[k], src);
+            if (ir[j].op == R_JMP || ir[j].op == R_JZ ||
+                ir[j].op == R_RET || ir[j].op == R_HALT ||
+                branch_is_fused(ir[j].op))
+                break;
+            dfield = rir_dest_field(&ir[j]);
+            if (dfield >= 0) {
+                dv = rir_get(&ir[j], dfield);
+                if (dv == dst || dv == src)
+                    break;
+            }
+        }
+    }
+}
+
 /* Straight-line dead-store elimination.  Keeps indexes stable by replacing
  * the instruction with NOP instead of removing it. */
 static int rir_pure(int op);
@@ -2468,14 +2585,7 @@ static void peephole(void)
     char target[IR_MAX];
     int i, j;
 
-    memset(target, 0, sizeof target);
-    for (i = 0; i < nir; i++) {
-        int op = ir[i].op;
-        if (op == R_JMP) target[ir[i].a] = 1;
-        else if (op == R_JZ) target[ir[i].b] = 1;
-        else if (op == R_CALL) target[ir[i].a] = 1;
-        else if (branch_is_fused(op)) target[ir[i].c] = 1;
-    }
+    mark_targets(target);
 
     for (i = 0; i < nir; i++) {
         int d = rir_dest_field(&ir[i]);
@@ -2499,8 +2609,9 @@ static void peephole(void)
                 ir[i].op = R_NOP;
                 break;
             }
-            if (ir[j].op == R_JMP || ir[j].op == R_RET ||
-                ir[j].op == R_HALT || branch_is_fused(ir[j].op))
+            if (ir[j].op == R_JMP || ir[j].op == R_JZ ||
+                ir[j].op == R_RET || ir[j].op == R_HALT ||
+                branch_is_fused(ir[j].op))
                 break;
         }
     }
@@ -2551,6 +2662,32 @@ static void dce(void)
                 ir[i].op = R_NOP;
         }
     }
+}
+
+/* Drop NOPs and remap branch targets.  A target that lands on a NOP maps to
+ * the next real instruction; jumping to the end maps to the new end. */
+static void compact(void)
+{
+    int map[IR_MAX + 1];
+    int old_nir = nir;
+    int out = 0;
+
+    for (int i = 0; i < old_nir; i++) {
+        map[i] = out;
+        if (ir[i].op != R_NOP)
+            newir[out++] = ir[i];
+    }
+    map[old_nir] = out;
+
+    for (int i = 0; i < out; i++) {
+        RIR *q = &newir[i];
+        if (q->op == R_JMP && q->a >= 0 && q->a <= old_nir) q->a = map[q->a];
+        else if (q->op == R_JZ && q->b >= 0 && q->b <= old_nir) q->b = map[q->b];
+        else if (branch_is_fused(q->op) && q->c >= 0 && q->c <= old_nir)
+            q->c = map[q->c];
+    }
+    memcpy(ir, newir, (size_t)out * sizeof(RIR));
+    nir = out;
 }
 
 static void allocate_func(int fi, int lo, int hi)
@@ -2898,8 +3035,10 @@ static void parse_function(int pass, int rtype, const char *name, int *fi)
         emit(R_CONST, 0, 0, 0, z);
         emit(R_RET, z, 0, 0, 0);
     }
+    copy_prop();
     peephole();
     dce();
+    compact();
     regalloc_one(*fi);
     f->entry_pc = out_nir;
 
