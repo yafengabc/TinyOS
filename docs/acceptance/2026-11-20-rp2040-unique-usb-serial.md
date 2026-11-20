@@ -47,10 +47,24 @@ CDC COM29 serial = E6609CB2D34AB733
 - `reboot` 后仍是同一个序列号（同一块 flash，符合预期）；
 - `flash.py --smoke`（走 UART）**7/7 PASS**；启动日志无 trap。
 
+## 双板验证（同日 18:40 补）
+
+用户接上第二块 RP2040（**只有板载 CDC、没有 UART0**，所以看不到 `[uid]` 启动行），
+按住 BOOTSEL 刷入同一镜像 `rpi-pico-smp`。Windows 同时枚举出两个 CDC，序列号不同：
+
+```text
+COM29  E6609CB2D34AB733    (第一块，flash 2 MiB detected=2 MiB)
+COM30  464A383332112312    (第二块，/proc/flash: detected 16 MiB, configured 2 MiB)
+```
+
+第二块板上 `uptime`、`cat /proc/flash` 正常；同一进程内发 `reboot`，uptime
+**29.01 → 3.05 s**（确认真复位），重启后两个序列号都不变。"两块板同插不撞号"
+从"按部件保证"变成**实测通过**，且两块 flash 型号/容量不同也能各自取到 ID。
+
 ## 边界
 
-- 台上只有一块 RP2040，"两块板同插不撞号"没有直接双板验证；序列号来自 flash 的
-  出厂 64 位 ID，按部件保证唯一。
+- 第二块板只有 CDC、没有 UART0，`[uid]` 原始帧只在第一块（W25Q16JV）上核过；
+  第二块 16 MiB flash 的 4Bh 应答窗口按同一实现取 `rx[5..12]`，结果是有效唯一 ID。
 - 若 4Bh 不应答或读到全 0/FF，仍回退到 16 个 0（所有板相同）——但至少不会静默挂死；
   `[uid]` 启动行会打出实际读到的字节，便于发现回退。
 - 本轮没有重跑 #31 的冷启动三组数据（那是在加这个早期 flash 命令之前测的）；

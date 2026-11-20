@@ -5340,3 +5340,20 @@ UID 就在 `rx[5..12]`，pico-sdk 也是读这个窗口；SFDP 的 `53 46 44 50`
 `flash.py --smoke` 7/7，无 trap。台上只有一块 RP2040，双板不撞号没有直接验；
 读不到时仍回退 16 个 0，但 `[uid]` 启动行会打出原始字节。卡片：
 `docs/acceptance/2026-11-20-rp2040-unique-usb-serial.md`。
+
+## 93. 2026-11-20 双 RP2040 同插：序列号实测不撞
+
+§92 留的边界是"台上只有一块 RP2040，双板不撞号未直接验"。用户接上第二块
+（**只有板载 CDC、无 UART0**），按住 BOOTSEL 刷同一 `rpi-pico-smp` 镜像，
+Windows 同时枚举出两个 CDC：
+
+```text
+COM29  E6609CB2D34AB733   (W25Q16JV, 2 MiB)
+COM30  464A383332112312   (/proc/flash: detected 16 MiB)
+```
+
+第二块板 shell 正常（`uptime`、`cat /proc/flash`）；同一进程内 `reboot` 后
+uptime 29.01 → 3.05 s 确认真复位，两个序列号都不变。两块 flash 型号/容量不同
+也各自取到唯一 ID，说明取 `rx[5..12]` 的实现不依赖第一块的具体部件。
+
+这补上了 §92 的唯一直接证据缺口；没有改产品代码，只回填验收卡与 OPEN-ITEMS 第 2 条。

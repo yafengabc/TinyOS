@@ -95,8 +95,9 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    RP2040 改为从 flash 发 4Bh 读 W25Q16JV 的 64 位 UID——`plat_flash_unique_id()`
    弱钩子 + RAM 里的 SSI 命令，板上 CDC 序列号从 `0001` 变成
    `E6609CB2D34AB733`，重启后不变。注意这块 flash 的 4Bh 应答**没有 08h 长度字节**，
-   UID 直接在 `rx[5..12]`（与 pico-sdk 一致）。台上只有一块 RP2040，双板不撞号
-   没有直接验；读不到时回退 16 个 0。卡片：
+   UID 直接在 `rx[5..12]`（与 pico-sdk 一致）。**双板不撞号已实测**：第二块
+   RP2040（16 MiB flash、只有 CDC）同插得 `464A383332112312`，与第一块的
+   `E6609CB2D34AB733` 不同，重启后均不变。读不到时回退 16 个 0。卡片：
    `docs/acceptance/2026-11-20-rp2040-unique-usb-serial.md`。
 3. **主机侧枚举延迟**：固件侧 `usb init done` 已降到 158 ms（RP2040 实测），但
    Windows 把 CDC 配置起来仍要几秒——`usb_cdc_init()` 里 200 ms 的 D+ 掉电重连是
