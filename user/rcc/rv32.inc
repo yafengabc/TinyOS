@@ -303,6 +303,22 @@ static void emit_native(int op, int id, int a0, int a1, int a2, int dst)
         e_li(X_A7, 9); e_ecall();
         if (d >= 0) e_mv(rreg(d), X_A0);
         break;
+    case 11: /* run(path) -> spawn + wait, return exit code */
+        e_la(X_A0, data_arena);
+        e_add(X_A0, X_A0, r0);
+        e_li(X_A1, 0);
+        e_li(X_A2, 0);
+        e_li(X_A7, 3);                 /* SYS_EXEC */
+        e_ecall();
+        {
+            int skip = new_label();
+            e_branch_to(4, X_A0, X_ZERO, skip);   /* pid < 0 */
+            e_li(X_A7, 12);                       /* SYS_WAIT */
+            e_ecall();
+            bind_label(skip);
+        }
+        if (d >= 0) e_mv(rreg(d), X_A0);
+        break;
     default:
         die("bad native id");
     }

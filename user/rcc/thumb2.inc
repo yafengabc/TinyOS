@@ -1214,6 +1214,25 @@ static void emit_native(int op, int id, int a0, int a1, int a2, int dst)
         e_li(0, 9); e_svc0();
         if (d >= 0) st_vreg(d, 0);
         break;
+    case 11: /* run(path) -> spawn + wait, return exit code */
+        {
+            int skip = new_label();
+            ld_vreg(1, a0);
+            e_la(0, data_arena);
+            e_add_reg(1, 0, 1);
+            e_li(2, 0);
+            e_li(3, 0);
+            e_li(0, 3);                /* SYS_EXEC */
+            e_svc0();
+            e_cmp_zero(0);
+            e_bcond(11, skip);         /* pid < 0 */
+            e_mov_w(1, 0);
+            e_li(0, 12);               /* SYS_WAIT */
+            e_svc0();
+            bind_label(skip);
+            if (d >= 0) st_vreg(d, 0);
+        }
+        break;
     default:
         die("bad native id");
     }

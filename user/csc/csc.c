@@ -1536,7 +1536,7 @@ static int func_lookup_hash(uint64_t h)
 enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
-    NAT_SLEEP, NAT_UPTIME
+    NAT_SLEEP, NAT_UPTIME, NAT_RUN
 };
 
 static int native_lookup(const char *name, int *nargs, int *hasret)
@@ -1553,6 +1553,7 @@ static int native_lookup(const char *name, int *nargs, int *hasret)
         { "pwm_off",    NAT_PWM_OFF,    1, 0 },
         { "sleep",      NAT_SLEEP,      1, 0 },
         { "uptime",     NAT_UPTIME,     0, 1 },
+        { "run",        NAT_RUN,        1, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (!strcmp(name, tab[i].name)) {
@@ -1577,6 +1578,7 @@ static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
         { "pwm_off",    NAT_PWM_OFF,    1, 0 },
         { "sleep",      NAT_SLEEP,      1, 0 },
         { "uptime",     NAT_UPTIME,     0, 1 },
+        { "run",        NAT_RUN,        1, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (str_hash(tab[i].name) == h) {
@@ -2241,9 +2243,17 @@ static int gen_expr_into(Node *n, int dst)
         nid = native_lookup_hash(n->hash, &nargs, &hasret);
         if (nid >= 0) {
             int a0 = -1, a1 = -1, a2 = -1;
+            /* Bit i: argument i is a string (an arena offset), not an int.
+             * `run(path)` is the first such native; file paths will follow. */
+            int strargs = (nid == NAT_RUN) ? 1 : 0;
             for (Node *p = n->args; p; p = p->next) {
                 int v = gen_value(p);
-                v = coerce_to(v, last_type, 0);
+                if (strargs & (1 << argc)) {
+                    if (last_type != 2)
+                        die_node(p, "string argument expected");
+                } else {
+                    v = coerce_to(v, last_type, 0);
+                }
                 if (argc == 0) a0 = v;
                 else if (argc == 1) a1 = v;
                 else if (argc == 2) a2 = v;

@@ -23,7 +23,7 @@ enum {
 enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
-    NAT_SLEEP, NAT_UPTIME
+    NAT_SLEEP, NAT_UPTIME, NAT_RUN
 };
 
 typedef struct { int op, a, b, c, d; } RIR;
@@ -477,6 +477,20 @@ int main(int argc, char **argv)
                 case NAT_ADC_READ: res = adc_read(a0); break;
                 case NAT_PWM_COUNT: res = pwm_count(); break;
                 case NAT_UPTIME: res = uptime(); break;
+                case NAT_RUN: {
+#if defined(__riscv) || defined(__arm__)
+                    int pid;
+                    if (a0 < 0 || a0 >= arena_size) {
+                        res = -1;
+                        break;
+                    }
+                    pid = exec((const char *)(arena + a0), 0, 0);
+                    res = pid < 0 ? pid : wait(pid);
+#else
+                    res = -1;      /* host build has no child processes */
+#endif
+                    break;
+                }
                 }
                 r[q.d] = res;
                 (void)a1;

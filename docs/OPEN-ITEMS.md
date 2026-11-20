@@ -408,3 +408,27 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。
+
+## 14. 脚本文件 IO 还没暴露（2026-11-21）
+
+`csc` 现在有 `run(path)`（spawn + wait，不替换自己），但脚本还不能读写文件：
+`open/create/read/write/close/unlink` 在 `user/lib.h` 里都有，native 表里没有。
+
+卡在 IR 的 native 编码上：`NATIVER` 只有 **两个** 参数加一个返回值，而
+`read(fd, buf, len)` / `write(fd, buf, len)` 是三参数带返回值，现有指令装不下。
+两条可行路线：
+
+1. 新增一条 `NATIVEC id, dst`：参数先从 `ARG` 写进 `data_argbuf`，native 从
+   参数区取；csc/rvm/rcc 两边都加少量代码，以后任意参数个数都能扩。
+2. 不改 IR：`read/write` 用三参数的 `NATIVE` 发射，把 syscall 返回值存进
+   一个 BSS 字（`data_ioresult`），再用一个 0 参数的 `NATIVER(last)` 取回。
+   改动更小，但多一条隐含依赖。
+
+`open/create/close/unlink/run` 都是“1 个字符串参数 + 返回值”，现有
+`NATIVER` 直接够用；只有 `read/write` 需要上面的扩展。实现时还要：
+
+- csc 的 native 表要能标记“第 i 个参数是字符串”（`run` 已经这样标记）；
+- rcc 两个后端把 arena 偏移转成指针（`data_arena + offset`）；
+- 测试放 QEMU（宿主 `rvm` 没有 TinyOS 文件系统），沿用 `exec1` 的
+  target-only 模式；
+- `read` 的缓冲长度来自调用方，越界由内核按用户内存检查兜底。
