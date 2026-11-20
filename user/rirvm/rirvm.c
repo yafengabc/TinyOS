@@ -13,7 +13,8 @@ enum {
     R_JLT_I, R_JGE_I, R_JGT_I, R_JLE_I, R_JEQ_I, R_JNE_I,
     R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
     R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
-    R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV
+    R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
+    R_BOUNDS, R_PRINTFIXN
 };
 
 enum {
@@ -95,6 +96,30 @@ static void print_fix(int v, int nl)
     while (n > 1 && buf[n - 1] == '0') n--;
     for (i = 0; i < n; i++) putchar(buf[i]);
     if (nl) putchar('\n');
+}
+
+static void print_fix_n(int v, int decimals)
+{
+    static const unsigned p10[5] = { 1u, 10u, 100u, 1000u, 10000u };
+    unsigned u, ip, frac;
+    int i;
+
+    if (decimals < 0) decimals = 0;
+    if (decimals > 4) decimals = 4;
+    if (v < 0) { putchar('-'); u = (unsigned)0 - (unsigned)v; }
+    else u = (unsigned)v;
+    ip = u >> 16;
+    frac = (unsigned)((((u & 0xffff) * p10[decimals]) + 32768u) >> 16);
+    if (frac >= p10[decimals]) {
+        frac -= p10[decimals];
+        ip++;
+    }
+    putint((int)ip);
+    if (decimals > 0) {
+        putchar('.');
+        for (i = decimals - 1; i >= 0; i--)
+            putchar((char)('0' + (frac / p10[i]) % 10u));
+    }
 }
 
 typedef struct {
@@ -244,6 +269,10 @@ int main(int argc, char **argv)
             case R_FDIV: r[q.d] = fdiv16(r[q.a], r[q.b]); break;
             case R_PRINTFIX: if (verbose) print_fix(r[q.a], 1); break;
             case R_PRINTFIXV: if (verbose) print_fix(r[q.a], 0); break;
+            case R_PRINTFIXN: if (verbose) print_fix_n(r[q.a], q.b); break;
+            case R_BOUNDS:
+                if (r[q.a] < 0 || r[q.a] >= q.b) { puts("bounds\n"); return 1; }
+                break;
             case R_INC: r[q.d] = r[q.a] + 1; break;
             case R_DEC: r[q.d] = r[q.a] - 1; break;
             case R_ADDI: r[q.d] = r[q.a] + q.b; break;

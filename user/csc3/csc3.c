@@ -43,7 +43,8 @@ enum {
     N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR,
     N_INDEX, N_ASSIGN_INDEX, N_PRINT, N_CALL,
     N_STR, N_PRINTF, N_PUTS,
-    N_MEMBER, N_ASSIGN_MEMBER
+    N_MEMBER, N_ASSIGN_MEMBER,
+    N_MEMBER_INDEX, N_ASSIGN_MEMBER_INDEX
 };
 
 typedef struct {
@@ -88,7 +89,8 @@ enum {
     R_JLT_I, R_JGE_I, R_JGT_I, R_JLE_I, R_JEQ_I, R_JNE_I,
     R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
     R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
-    R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV
+    R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
+    R_BOUNDS, R_PRINTFIXN
 };
 
 typedef struct {
@@ -296,6 +298,18 @@ static Sym *sym_add_struct(const char *name, int stype, int global)
     return s;
 }
 
+static Sym *sym_add_struct_array(const char *name, int stype, int len, int global)
+{
+    Sym *s = sym_add(name, global);
+    s->is_struct = 1;
+    s->is_array = 1;
+    s->stype = stype;
+    s->alen = len;
+    s->offset = gdata_next;
+    gdata_next += structs[stype - 1].nfields * len;
+    return s;
+}
+
 static Sym *sym_add_float(const char *name, int global)
 {
     Sym *s = sym_add(name, global);
@@ -348,11 +362,27 @@ static Node *parse_primary(void)
             return n;
         }
         if (accept("[")) {
-            Node *n = node(N_INDEX);
-            strncpy(n->name, name, sizeof(n->name) - 1);
-            n->lhs = parse_expr();
+            Node *idx = parse_expr();
             expect("]");
-            return n;
+            if (accept(".")) {
+                char member[32];
+                Node *n;
+                if (tok_kind != 1) die("field name expected");
+                strncpy(member, tok, sizeof(member) - 1);
+                member[sizeof(member) - 1] = 0;
+                next();
+                n = node(N_MEMBER_INDEX);
+                strncpy(n->name, name, sizeof(n->name) - 1);
+                strncpy(n->field, member, sizeof(n->field) - 1);
+                n->lhs = idx;
+                return n;
+            }
+            {
+                Node *n = node(N_INDEX);
+                strncpy(n->name, name, sizeof(n->name) - 1);
+                n->lhs = idx;
+                return n;
+            }
         }
         if (accept(".")) {
             char member[32];
@@ -448,6 +478,12 @@ static Node *parse_simple(int semi)
         n->stype = sid;
         strncpy(n->name, tok, sizeof(n->name) - 1);
         next();
+        if (accept("[")) {
+            if (tok_kind != 2) die("struct array length expected");
+            n->alen = tok_num;
+            next();
+            expect("]");
+        }
         if (semi) expect(";");
         return n;
     }
@@ -533,14 +569,33 @@ static Node *parse_simple(int semi)
             return n;
         }
         if (accept("[")) {
-            Node *n = node(N_ASSIGN_INDEX);
-            strncpy(n->name, name, sizeof(n->name) - 1);
-            n->lhs = parse_expr();
+            Node *idx = parse_expr();
             expect("]");
-            expect("=");
-            n->rhs = parse_expr();
-            if (semi) expect(";");
-            return n;
+            if (accept(".")) {
+                char member[32];
+                Node *n;
+                if (tok_kind != 1) die("field name expected");
+                strncpy(member, tok, sizeof(member) - 1);
+                member[sizeof(member) - 1] = 0;
+                next();
+                expect("=");
+                n = node(N_ASSIGN_MEMBER_INDEX);
+                strncpy(n->name, name, sizeof(n->name) - 1);
+                strncpy(n->field, member, sizeof(n->field) - 1);
+                n->lhs = idx;
+                n->rhs = parse_expr();
+                if (semi) expect(";");
+                return n;
+            }
+            {
+                Node *n = node(N_ASSIGN_INDEX);
+                strncpy(n->name, name, sizeof(n->name) - 1);
+                n->lhs = idx;
+                expect("=");
+                n->rhs = parse_expr();
+                if (semi) expect(";");
+                return n;
+            }
         }
         {
             Node *n = node(N_ASSIGN);
@@ -690,7 +745,10 @@ static void declare_locals(Node *n)
             declare_locals(n->body);
             break;
         case N_DECL:
-            if (n->stype > 0) sym_add_struct(n->name, n->stype, 0);
+            if (n->stype > 0) {
+                if (n->alen > 0) sym_add_struct_array(n->name, n->stype, n->alen, 0);
+                else sym_add_struct(n->name, n->stype, 0);
+            }
             else if (n->ftype) sym_add_float(n->name, 0);
             else if (n->alen > 0) sym_add_array(n->name, n->alen, 0);
             else sym_add(n->name, 0);
@@ -767,6 +825,25 @@ static int gen_value(Node *n)
     return gen_expr(n);
 }
 
+/* Base register of a struct object, or of one element when idx >= 0. */
+static int struct_base(Sym *s, int idx)
+{
+    if (idx < 0) {
+        int d;
+        if (s->is_param) return s->reg;
+        d = new_temp();
+        emit(R_CONST, s->offset, 0, 0, d);
+        return d;
+    }
+    {
+        int nf = structs[s->stype - 1].nfields;
+        int t = new_temp();
+        emit(R_MULI, idx, nf, 0, t);
+        emit(R_ADDI, t, s->offset, 0, t);
+        return t;
+    }
+}
+
 static int arith_op(int kind)
 {
     switch (kind) {
@@ -810,6 +887,7 @@ static int gen_expr_into(Node *n, int dst)
     case N_INDEX:
         s = sym_find(n->name);
         if (!s || !s->is_array) die("array expected");
+        if (s->is_struct) die("struct array element needs a field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         emit(R_LOADA, s->offset, a, s->alen, dst);
@@ -839,9 +917,58 @@ static int gen_expr_into(Node *n, int dst)
         last_type = 0;
         return a;
     }
+    case N_MEMBER_INDEX: {
+        int fi, base;
+        s = sym_find(n->name);
+        if (!s || !s->is_struct || !s->is_array) die("struct array expected");
+        fi = struct_field(s->stype, n->field);
+        if (fi < 0) die("unknown struct field");
+        a = gen_value(n->lhs);
+        a = coerce_to(a, last_type, 0);
+        emit(R_BOUNDS, a, s->alen, 0, 0);
+        base = struct_base(s, a);
+        emit(R_LOADD, base, fi, 0, dst);
+        last_type = 0;
+        return dst;
+    }
+    case N_ASSIGN_MEMBER_INDEX: {
+        int fi, base;
+        s = sym_find(n->name);
+        if (!s || !s->is_struct || !s->is_array) die("struct array expected");
+        fi = struct_field(s->stype, n->field);
+        if (fi < 0) die("unknown struct field");
+        a = gen_value(n->lhs);
+        a = coerce_to(a, last_type, 0);
+        emit(R_BOUNDS, a, s->alen, 0, 0);
+        base = struct_base(s, a);
+        b = gen_value(n->rhs);
+        b = coerce_to(b, last_type, 0);
+        emit(R_STORED, base, fi, b, 0);
+        last_type = 0;
+        return b;
+    }
     case N_ASSIGN:
         s = sym_find(n->name);
-        if (!s || s->is_array || s->is_struct) die("scalar assignment expected");
+        if (!s) die("unknown variable");
+        if (s->is_struct) {
+            Sym *src;
+            int nf, i;
+            if (s->is_array || s->is_param) die("struct assignment target");
+            if (n->lhs->kind != N_VAR) die("struct assignment source");
+            src = sym_find(n->lhs->name);
+            if (!src || !src->is_struct || src->is_array || src->stype != s->stype)
+                die("struct type mismatch");
+            nf = structs[s->stype - 1].nfields;
+            for (i = 0; i < nf; i++) {
+                int v = new_temp();
+                if (src->is_param) emit(R_LOADD, src->reg, i, 0, v);
+                else emit(R_LOADG, src->offset + i, 0, 0, v);
+                emit(R_STOREG, s->offset + i, v, 0, 0);
+            }
+            last_type = 0;
+            return 0;
+        }
+        if (s->is_array) die("scalar assignment expected");
         if (s->global) {
             a = gen_value(n->lhs);
             a = coerce_to(a, last_type, s->is_float);
@@ -862,6 +989,7 @@ static int gen_expr_into(Node *n, int dst)
     case N_ASSIGN_INDEX:
         s = sym_find(n->name);
         if (!s || !s->is_array) die("array assignment expected");
+        if (s->is_struct) die("struct array element needs a field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         if (n->rhs->kind == N_NUM && !n->rhs->ftype) {
@@ -1041,6 +1169,7 @@ static void gen_stmt(Node *n)
     case N_ASSIGN:
     case N_ASSIGN_INDEX:
     case N_ASSIGN_MEMBER:
+    case N_ASSIGN_MEMBER_INDEX:
     case N_PRINT:
     case N_CALL:
         gen_expr(n);
@@ -1049,12 +1178,22 @@ static void gen_stmt(Node *n)
         emit(R_PRINTS, n->val, 0, 0, 0);
         break;
     case N_PRINTF: {
-        int off = n->val, len = n->alen, p = -1;
+        int off = n->val, len = n->alen, p = -1, prec = -1, after = -1;
         char conv = 0;
         for (int i = 0; i + 1 < len; i++)
             if (strpool[off + i] == '%') {
-                conv = strpool[off + i + 1];
-                p = i;
+                int j = i + 1;
+                if (j < len && strpool[off + j] == '.') {
+                    j++;
+                    prec = 0;
+                    while (j < len && strpool[off + j] >= '0' && strpool[off + j] <= '9')
+                        prec = prec * 10 + (strpool[off + j++] - '0');
+                }
+                if (j < len) {
+                    conv = strpool[off + j];
+                    after = j + 1;
+                    p = i;
+                }
                 break;
             }
         if (p < 0) {
@@ -1065,14 +1204,15 @@ static void gen_stmt(Node *n)
             v = gen_value(n->args);
             if (conv == 'f') {
                 v = coerce_to(v, last_type, 1);
-                emit(R_PRINTFIXV, v, 0, 0, 0);
+                if (prec >= 0) emit(R_PRINTFIXN, v, prec, 0, 0);
+                else emit(R_PRINTFIXV, v, 0, 0, 0);
             } else if (conv == 'd' || conv == 'i' || conv == 'u') {
                 v = coerce_to(v, last_type, 0);
                 emit(R_PRINTV, v, 0, 0, 0);
             } else {
                 die("printf: unsupported conversion");
             }
-            if (p + 2 < len) emit(R_PRINTN, off + p + 2, len - (p + 2), 0, 0);
+            if (after >= 0 && after < len) emit(R_PRINTN, off + after, len - after, 0, 0);
         }
         break;
     }
@@ -1186,6 +1326,7 @@ static int rir_uses(const RIR *q, int *f)
     case R_SHLI: case R_SHRI: f[0] = 0; return 1;
     case R_FMUL: case R_FDIV: f[0] = 0; f[1] = 1; return 2;
     case R_PRINTFIX: case R_PRINTFIXV: f[0] = 0; return 1;
+    case R_BOUNDS: case R_PRINTFIXN: f[0] = 0; return 1;
     default: return 0;
     }
 }
@@ -1516,7 +1657,16 @@ int main(int argc, char **argv)
             strncpy(vname, tok, sizeof(vname) - 1);
             vname[sizeof(vname) - 1] = 0;
             next();
-            sym_add_struct(vname, sid, 1);
+            if (accept("[")) {
+                int len;
+                if (tok_kind != 2) die("struct array length expected");
+                len = tok_num;
+                next();
+                expect("]");
+                sym_add_struct_array(vname, sid, len, 1);
+            } else {
+                sym_add_struct(vname, sid, 1);
+            }
             expect(";");
             if (tok_kind == 0) die("main required");
             continue;
