@@ -1,7 +1,11 @@
 # TinyOS 架构演进提案：稳定 v1（接缝先行）
 
-- **状态**：提案，未实施。本文只定结构与契约，不实现具体功能。
-- **基线**：当前 `main`（代码 `fea309f`，2026-11-16；本文档提交在其后）。行号会漂移，定位以函数名/符号名为准。
+- **状态**：契约已冻结；Phase A 全部落地、Phase B 部分落地（截至 2026-11-20）。
+  本文定结构与契约，不实现具体功能；各项的实现状态就近写在 A-x / B-x 条目和
+  #2 索引表里。判定以那些状态行和 `docs/acceptance/` 卡片为准，不以此处旧措辞为准。
+- **基线**：原始基线 `main`（代码 `fea309f`，2026-11-16）。行号会漂移，定位以函数名/符号名为准。
+  "12 个既有目标"指原始基线当时的目标数；当前 `tos build all` 是 **18/18**，
+  兼容性按当前全部目标计（比基线更严），不是只按 12 个计。
 - **本版目标**：**一次性把稳定架构的"接缝"和"兼容承诺"定对**，实现允许分批；不追求一个大 PR 把所有板子/驱动/格式一起改完。
 - **与 review 的边界**：`PROJECT-REVIEW-2026-11-16.md` 的具体小修继续由执行流处理；本文只处理跨子系统、会改变目录或接口契约的部分。
 
@@ -13,7 +17,8 @@
 
 1. **契约稳定**：板级能力、ABI/格式、跨核独占、内存域、驱动接缝、等待语义、远端端点各有唯一入口和版本号；
 2. **实现可替换**：接缝后面可以换实现（RP → P4、本地 → companion），接缝本身不变；
-3. **既有目标语义不变**：12 个目标的行为、shell、窗口、SMP 性能在 Phase A 前后一致。
+3. **既有目标语义不变**：全部既有目标（基线 12 个，当前 18 个）的行为、shell、
+   窗口、SMP 性能在 Phase A 前后一致。
 
 "一次性"指的是**一次把接缝和兼容承诺定对**，不是一次把所有实现写完。
 
@@ -34,7 +39,7 @@
 - 既有 syscall 编号**只追加，不改语义**；
 - 既有结构**只追加字段，不重排**；`_Static_assert(sizeof(...))` 守住；
 - 旧 V0 `.tos`（`flags=0x0001`）在新内核继续加载；
-- 12 个既有目标在**正常路径、合法输入**下的可观察语义不变（Phase A 的例外见 §4）；
+- 全部既有目标在**正常路径、合法输入**下的可观察语义不变（Phase A 的例外见 §4）；
 - 每条契约各自有版本策略（见 §0.4）；扩展是加字段/加 handler，不是重写；
 - 不把 Pico 2 的未解决问题带进回归基线（`OPEN-ITEMS.md` §1b）。
 
@@ -188,7 +193,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - (b) 内部不变量从静默容忍改 halt：A-8，依 §0.3；
 - (c) 等待循环按主频折算：A-6，"等到状态就绪"的语义不变，只是上限可换算。
 
-**Phase A 结束条件：12 目标构建 + QEMU smoke/soak + 有硬件的板级基线完全不变**
+**Phase A 结束条件：全目标构建（基线 12，当前 18）+ QEMU smoke/soak + 有硬件的板级基线完全不变**
 （按上面的定义判，不按字面"一个字节都不变"判）。
 
 ### A-0｜SMP exec 并发（先做，BUG-A/B）
@@ -236,6 +241,18 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 - `platform.h` 加 `plat_flash_exclusive_begin/end`；RP 三块板先包一层现有 park，行为不变。
 - 加 `plat_icache_sync()`、`plat_dcache_clean/invalidate(range)`、`PLAT_CACHE_LINE`；现有板 no-op。
 - **不做**：通用 `plat_core_pause/resume`；不做三块板协议合并（Phase B）。
+
+**C3 的早期单核例外（2026-11-20 补）**：C3 的独占入口约束的是**多核运行时**的
+flash 独占。在 `plat_console_init()` / `ramdisk_init()` 阶段（早于 `cpu_init()`、
+中断未开、只有核 0）直接关 XIP 读 flash 的探测路径不进 park，这是合法的：
+
+- `board/rpi-pico/platform.c` 的 `rp_flash_rdid(&id, 0)`（JEDEC 容量探测）与
+  `rp_flash_cmd()`（4Bh 读唯一 ID，`plat_flash_unique_id()` 调用）都在 RAM 函数里
+  直接驱 SSI，不经 `plat_flash_exclusive_begin()`；`park=0` 参数即表示此例外。
+- 判据是**调用时机**而非"是否碰 flash"：这两处都在第二核起来之前，没有可 park 的
+  对象。C3 要求"独占入口唯一"是指多核阶段的 flash 改写必须走它，早期单核探测不在此列。
+- 后果：以后若在早期探测之后、SMP 起来之前插入新的 XIP 关闭路径，要重新确认时机；
+  若把探测挪到 SMP 之后，必须改走独占入口。
 
 ### A-5｜内存域接缝（C4）——已落地（2026-11-17）
 - `kernel/mem_domain.h/.c`：`struct mem_domain {name, base, size, grain, flags}`，
@@ -306,7 +323,7 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
 
 | 项 | 内容 | 依赖/验收 |
 |---|---|---|
-| B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；12 目标几何不变；见下方三层事实 |
+| B-1 | 生成 `build/gen/board_config.h`，搬 `layout.c`/ld 常量 | A-1 稳定；全目标几何不变；**B-1a/b/c/d 已落地**（`0b1bbb1`/`e783748`/`c56cc5c`/`45fc869`，镜像清单已进 `targets/*.conf`）；见下方三层事实 |
 | B-2 | RP park 四件套共享骨架；内核接 `plat_flash_exclusive_*` | A-4；200 轮 dd + smpbench；**状态（§57）、握手顺序（§67）与进入/退出序列（§70）已全部共享，#17 关闭** |
 | B-3 | LZ4TOS flags 高字节版本 + V0 分支；goc32 黄金向量 | A-2/A-3；旧 `.tos` 加载 |
 | B-4 | LCD upper/lower + mock 测试；P4 补 lower | A-7；显示/DMA 回归。**B-4a 协议层共享 + 真机目视（HISTORY §64）；B-4b 两 ISA 合并成一份驱动（§66）** |
@@ -421,7 +438,7 @@ xip_flash_base/drivers/default_features 来自 `board.conf`，由 `applyBoard()`
 - 全量驱动 upper/lower 迁移；
 - P4 第一阶段 PSRAM 可执行窗口；
 - 合并 msh/sh 或两份 libc；
-- 为了架构好看改 12 个既有目标的运行时语义。
+- 为了架构好看改任何既有目标的运行时语义。
 
 ---
 
@@ -438,7 +455,7 @@ Phase A 收口条件只含上面六项，A-5 已于 2026-11-17 落地。以下�
   A-7 LCD lowops   -> 与 B-4 一起（LCD 板适配时）
 
 Phase B（A 稳定后）
-  B-1 配置生成（B-1a/b/c 已落地，剩镜像清单）
+  B-1 配置生成（B-1a/b/c/d 已全部落地）
   B-2 park 骨架 + 独占接口
   B-3 LZ4TOS 版本 + 黄金向量
   B-4 LCD upper/lower
@@ -449,7 +466,7 @@ Phase B（A 稳定后）
 
 **每项提交的验收**：
 - `go build ./...`、`go vet ./...`、`go test ./... -count=1`；
-- 12 目标构建（x86 与 `configs/rv32-fsro.conf` 同样算，见 `TESTING.md` §3）；
+- 全目标构建（x86 与 `configs/rv32-fsro.conf` 同样算，见 `TESTING.md` §3）；
 - QEMU `rv32/rv32smp/arm` smoke + soak；
 - 有硬件的板按 `docs/TESTING.md` 跑 T3；
 - **复现/压力类测试必须记命令行**（不是只写"跑过了"），并在
@@ -486,7 +503,7 @@ Phase B（A 稳定后）
 |---|---|---|
 | 配置事实 | 4 处 | chip/board/image 三层各一处 + 生成头（B-1a/b/c 已落地） |
 | conf/target 冲突 | 静默 | 构建期明确报错 |
-| 新板需改内核文件 | 多处 | 0；Go 只剩"镜像清单"（单核/双核） |
+| 新板需改内核文件 | 多处 | 0；Go 只剩"镜像清单"（单核/双核），B-1d 后清单也在 `targets/*.conf` |
 | ABI 偏移 | 内核硬编码 | 单一头 + `offsetof` 静态断言 |
 | 格式版本 | flags 精确匹配 | 高字节版本 + V0 兼容 |
 | exec 注册 | 单实例调用 | 表 + 循环（已落地；第二容器 mock 验证已关闭 #5，`2ab6745`）；`/proc/execfmt` 打印版本 |
@@ -509,7 +526,10 @@ Phase B（A 稳定后）
 4. **LP 核**：谁拉起、共享内存边界、mailbox 协议（接口形状见 C7；容量参数未定）。
 5. **companion**：ESP-Hosted 全栈还是窄帧接口（C7 只冻结消息形状与任务上下文约束）。
 6. **生成文件**：`build/gen/` 不入库；CI 可复现命令固定。
-7. **Pico 2**：`PC=0xeffffffe` 根因；variant 的 LED/LCD/flash 几何；稳定前不进回归基线。
+7. ~~**Pico 2**：`PC=0xeffffffe` 根因~~ —— 已修（`cff442f`，三处叠加：flash 内切
+   `clk_sys`、`boot2` 时序被重复配置、首行串口用固定 12 MHz 猜分频）；结论见
+   `docs/PICO2-VS-ATK-BOOT.md` 与 `OPEN-ITEMS.md` §1b。variant 的 LED/LCD/flash
+   几何已进板级数据，两块 RV32 板均已上板。
 8. **goc32**：~~按 §3.1 入库 syscall 快照~~ —— 已落地（#19，`f4e1b27` / goc32 `d3b6cd0`）：
    快照随 goc32 走，两侧各一个测试，CI 会取子模块后比对。
 
