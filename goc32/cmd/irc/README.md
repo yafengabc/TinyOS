@@ -65,16 +65,17 @@ Conditional branches are emitted as an inverted short branch over a `j`
 
 ## Measured on ESP32-C3
 
-Same RIR2 image, `rirvm` vs this backend, timed with the program's own
-`uptime()` calls:
+Same source and workload, timed with the program's own `uptime()` calls:
 
-| workload | rirvm | native | speed-up |
+| workload | csc + pvm | csc3 + rirvm | native irc |
 |---|---:|---:|---:|
-| recursive `fib(24)` | 242 ms | 84 ms | 2.9x |
-| 10,000,000-iteration loop | 8286 ms | 578 ms | 14.3x |
+| recursive `fib(24)` | 608 ms | 242 ms | 84 ms |
+| 10,000,000-iteration loop | 53698 ms | 8286 ms | 578 ms |
 
-The recursive case pays for saving/restoring 13 RIR registers per call; the
-loop case shows the removal of the interpreter dispatch.
+Native is 7.2x faster than the original `csc + pvm` pair on recursion and
+92.9x faster on the loop.  The recursive case pays for saving/restoring 13 RIR
+registers per call; the loop case shows the removal of the interpreter
+dispatch.
 
 ## C port
 
