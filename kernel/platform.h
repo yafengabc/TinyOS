@@ -277,6 +277,12 @@ uint32_t plat_block_count(void);
  * the only answer).  Implemented per chip; a weak default returns 0. */
 uint32_t plat_flash_detected_bytes(void);
 
+/* 8-byte unique id from the flash part itself, for the USB serial string.
+ * RP2350 gets this from SYS_INFO, but RP2040 has no such register: its W25Qxx
+ * answers command 0x4B.  A port that cannot read it returns 0 and the caller
+ * falls back to a constant; a weak default says "not available". */
+int plat_flash_unique_id(uint8_t out[8]);
+
 /* Effective filesystem size in blocks: the detected capacity clamped to the
  * board's configured flash_bytes, minus the partition offset.  Generic: it
  * only needs plat_flash_detected_bytes(). */

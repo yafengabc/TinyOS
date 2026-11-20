@@ -52,6 +52,10 @@ void board_config_check(void);
  * machine reached; the default does nothing.  See kernel/platform.h. */
 __attribute__((weak)) void plat_boot_stage(uint32_t n) { (void)n; }
 
+/* Flash unique id for the USB serial; ports without a readable id say no. */
+__attribute__((weak)) int plat_flash_unique_id(uint8_t out[8])
+{ (void)out; return 0; }
+
 void kmain(void)
 {
     plat_early_init();

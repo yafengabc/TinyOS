@@ -5318,3 +5318,25 @@ CDC 在 0.50 s 内出现、shell 正常、`[U] cfg=1`；`usb_cdc_wait()` 回到�
 不在 #31 范围。新工具 `scripts/rp2350/cold_watch.py` 本轮补上了 RP2040 的
 `[rp2040] boot clk=` banner 识别（此前只认 RP2350 的 `[A] pre-pll`）。
 卡片：`docs/acceptance/2026-11-20-rp2040-boot-pump-31.md`。
+
+## 92. 2026-11-20 RP2040 USB 序列号：4Bh 没有长度字节
+
+RP2350 的 CDC 序列号从 `SYS_INFO_CHIP_INFO` 取芯片 ID，RP2040 没有这个寄存器，
+一直写死 `0001`。本轮加弱钩子 `plat_flash_unique_id(uint8_t out[8])`，在
+`board/rpi-pico/platform.c` 里用 flash 的 4Bh（Read Unique ID）读 64 位出厂 ID；
+调用点在 `plat_console_init()`，早于 `plat_board_init()`，所以三个 ROM flash
+辅助函数按需解析。实际 SSI 收发放在 `.data.flash_ram` 的 RAM 函数里：复制 boot2、
+`flash_exit_xip`、用 QSPI pad override 拉 CS、逐帧收发（所有等待有上限）、
+`flush_cache` + boot2 恢复 XIP。驱动把 8 字节转成 16 位十六进制放进 `iSerialNumber`。
+
+排查花了一次刷机：第一版按"4Bh + 4 dummy + 08h 长度字节 + 8 字节 UID"解析，
+读回全 FF 就回退了。同一点 RDID 能读到 `ef4015`，说明早期 flash 访问是好的；
+一次刷机跑四组对照（9F / 4B×13 / 4B×17 / 5A×13）后发现
+`4b13: ff ff ff ff ff e6 60 9c b2 d3 4a b7 33`——**没有 08h 长度字节**，
+UID 就在 `rx[5..12]`，pico-sdk 也是读这个窗口；SFDP 的 `53 46 44 50` 说明
+多字节帧本身没问题。假设一个不存在的长度字节，等于把好读数扔掉。
+
+上板：Windows 报 `CDC COM29 serial = E6609CB2D34AB733`，`reboot` 后不变；
+`flash.py --smoke` 7/7，无 trap。台上只有一块 RP2040，双板不撞号没有直接验；
+读不到时仍回退 16 个 0，但 `[uid]` 启动行会打出原始字节。卡片：
+`docs/acceptance/2026-11-20-rp2040-unique-usb-serial.md`。

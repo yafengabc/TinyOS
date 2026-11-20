@@ -40,6 +40,11 @@
 #include "console.h"
 #include "uart_dbg.h"
 
+/* Fills g_serial from the flash part's unique id; defined with the
+ * descriptors below.  Every board used to send "0001", which made two
+ * RP2040s on one host look like one device. */
+static void serial_from_chip_id(void);
+
 /* SIO hardware spinlock 30 (0xD0000000 + 0x100 + 4*30).  31 is the kernel's
  * spin gate on the SMP-capable ARM port.  Defined at the top because
  * usb_cdc_init() force-releases it before anything else can take it - the
@@ -390,6 +395,7 @@ void usb_cdc_init(void)
 {
     g_hw_ready = 0;
     g_init_stage = 0;
+    serial_from_chip_id();
 
     /* /proc/usbboot: what the boot path left behind.  USBCTRL is released
      * only by a boot path that used it - the BOOTSEL mass-storage ROM - so
@@ -927,12 +933,33 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
  * uint16_t and the length/type pair is packed into element 0. */
 static uint16_t desc_str[32];
 
+/* The W25Qxx answers command 4Bh with an 8-byte id (see
+ * board/rpi-pico/platform.c).  Unlike the RP2350 ports there is no ROM
+ * SYS_INFO call here, so the board reads the part itself; a part that does
+ * not answer falls back to 16 zeroes rather than a shared "0001". */
+static char g_serial[17];
+
+static void serial_from_chip_id(void)
+{
+    static const char hex[] = "0123456789abcdef";
+    uint8_t id[8] = {0};
+
+    if (!plat_flash_unique_id(id)) {
+        memcpy(g_serial, "0000000000000000", sizeof(g_serial));
+        return;
+    }
+    for (int i = 0; i < 8; i++) {
+        g_serial[2 * i]     = hex[id[i] >> 4];
+        g_serial[2 * i + 1] = hex[id[i] & 0x0fu];
+    }
+}
+
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
     static char const *const str_table[] = {
         "TinyOS",                   /* iManufacturer */
         "TinyOS CDC-ACM",           /* iProduct      */
-        "0001",                     /* iSerialNumber */
+        g_serial,                   /* iSerialNumber: the flash's own id */
     };
     uint8_t chr_count;
 

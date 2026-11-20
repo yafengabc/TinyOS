@@ -90,10 +90,14 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    所以“200 ms”实际约 614 ms（RP2040，`998efe5` 之后 `usb init` 里剩的那 0.7 s
    基本就是它）。要么按实测重算，要么只在 `SIE_STATUS.CONNECTED` 为真时才做
    D+ 掉电重连（冷启动不需要），见本条第 3 点。
-2. **USB 序列号**：RP2350 两个端口已改成芯片唯一 ID（`d5e2b7d` 之后，
-   ROM 的 `SYS_INFO_CHIP_INFO`，实测 ATK 为 `DB8EA31104F9F060`，M33 与 Hazard3 一致）。
-   **RP2040 仍是 `"0001"`**：它没有 SYS_INFO，唯一 ID 要从 flash 发 0x4B 读，
-   需要在 USB init 时走 SSI/ROM flash 序列，尚未实现；两块 RP2040 同时插仍会撞。
+2. **USB 序列号（2026-11-20 三项都已完成）**：RP2350 两个端口从
+   `SYS_INFO_CHIP_INFO` 取芯片 ID（ATK 实测 `DB8EA31104F9F060`，M33/Hazard3 一致）；
+   RP2040 改为从 flash 发 4Bh 读 W25Q16JV 的 64 位 UID——`plat_flash_unique_id()`
+   弱钩子 + RAM 里的 SSI 命令，板上 CDC 序列号从 `0001` 变成
+   `E6609CB2D34AB733`，重启后不变。注意这块 flash 的 4Bh 应答**没有 08h 长度字节**，
+   UID 直接在 `rx[5..12]`（与 pico-sdk 一致）。台上只有一块 RP2040，双板不撞号
+   没有直接验；读不到时回退 16 个 0。卡片：
+   `docs/acceptance/2026-11-20-rp2040-unique-usb-serial.md`。
 3. **主机侧枚举延迟**：固件侧 `usb init done` 已降到 158 ms（RP2040 实测），但
    Windows 把 CDC 配置起来仍要几秒——`usb_cdc_init()` 里 200 ms 的 D+ 掉电重连是
    给"刷完 UF2 后 ROM 的 MSC 节点"准备的，冷启动时并不需要。目标是只在需要时做，

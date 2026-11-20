@@ -1214,6 +1214,124 @@ uint32_t plat_flash_detected_bytes(void)
     return cached;
 }
 
+/* ---- flash unique id: command 4Bh for the USB serial ------------------ */
+/* RP2350 reads its id from SYS_INFO, but RP2040 has no such register.  The
+ * W25Qxx on the board answers "Read Unique ID" (4Bh): opcode + 4 dummy bytes,
+ * then 8 bytes of id.  On this W25Q16JV there is NO length byte ahead of the
+ * id (pico-sdk reads the same rx[5..12] window) - assuming an 08h length byte
+ * silently rejected a good reading.  As with RDID, rx[0] is the idle byte,
+ * not an opcode echo, and the SSI stays in the state flash_exit_xip() left it
+ * in: only the pad override drives CS.
+ *
+ * Called from plat_console_init(), i.e. inside plat_board_early() - earlier
+ * than plat_board_init(), which normally resolves the ROM flash API.  So the
+ * three entries needed here are looked up on demand; plat_board_init() later
+ * resolves them again harmlessly. */
+static int __attribute__((noinline, section(".data.flash_ram")))
+rp_flash_cmd(uint8_t op, uint32_t nframes, uint8_t *out)
+{
+    const volatile uint32_t *src = (const volatile uint32_t *)XIP_BASE;
+    volatile uint32_t *dst = g_boot2_copy;
+    uint8_t tx[20];
+    uint32_t i;
+    int ok = 1;
+
+    for (i = 0; i < sizeof(tx); i++)
+        tx[i] = 0u;
+    tx[0] = op;
+
+    for (i = 0; i < 64u; i++)
+        dst[i] = src[i];
+    __asm__ volatile("dsb\n isb" ::: "memory");
+
+    g_rom_connect();
+    g_rom_exit_xip();
+    if (!(mmio_read32(SSI_SSIENR) & 1u))
+        mmio_write32(SSI_SSIENR, 1u);
+
+    for (i = 0; i < 16u; i++) {
+        if (mmio_read32(SSI_RXFLR) == 0u)
+            break;
+        (void)mmio_read32(SSI_DR0);
+    }
+
+    rp_flash_cs_force(0);
+    for (i = 0; i < nframes; i++) {
+        uint32_t spins = 200000u;
+
+        while (!(mmio_read32(SSI_SR) & SSI_SR_TFNF) && --spins)
+            ;
+        if (!spins) { ok = 0; break; }
+        mmio_write32(SSI_DR0, tx[i]);
+
+        spins = 200000u;
+        while (mmio_read32(SSI_RXFLR) == 0u && --spins)
+            ;
+        if (!spins) { ok = 0; break; }
+        out[i] = (uint8_t)mmio_read32(SSI_DR0);
+    }
+    rp_flash_cs_force(1);
+
+    g_rom_flush();
+    ((void (*)(void))((uintptr_t)g_boot2_copy + 1u))();
+    __asm__ volatile("dsb\n isb" ::: "memory");
+    return ok ? 0 : -1;
+}
+
+int plat_flash_unique_id(uint8_t out[8])
+{
+    static uint8_t cached[8];
+    static int done;
+    int i;
+
+    if (done) {
+        for (i = 0; i < 8; i++)
+            if (cached[i])
+                break;
+        if (i == 8)
+            return 0;
+        memcpy(out, cached, 8);
+        return 1;
+    }
+    done = 1;
+
+    if (!g_rom_connect || !g_rom_exit_xip || !g_rom_flush) {
+        g_rom_flush   = (rp_rom_flush_t)rp_rom_func(ROM_FUNC_FLASH_FLUSH_CACHE);
+        g_rom_connect = (rp_rom_simple_t)rp_rom_func(ROM_FUNC_CONNECT_INTERNAL_FLASH);
+        g_rom_exit_xip = (rp_rom_simple_t)rp_rom_func(ROM_FUNC_FLASH_EXIT_XIP);
+    }
+    if (!g_rom_connect || !g_rom_exit_xip || !g_rom_flush)
+        return 0;
+    {
+        uint8_t raw[20];
+
+        for (i = 0; i < sizeof(raw); i++)
+            raw[i] = 0u;
+        if (rp_flash_cmd(0x4bu, 13u, raw) != 0)
+            return 0;
+        /* Measured on this W25Q16JV: ff ff ff ff ff e6 60 9c b2 d3 4a b7 33.
+         * rx[0] is the idle byte and rx[1..4] are the dummy clocks; the 64-bit
+         * id starts at rx[5] with no length byte ahead of it.  The pico-sdk
+         * reads the same five-plus-eight window. */
+        for (i = 0; i < 8; i++)
+            cached[i] = raw[5 + i];
+
+        dbg_uart_puts("[uid]");
+        for (i = 0; i < 8; i++) {
+            dbg_uart_puts(" ");
+            dbg_uart_hex(cached[i]);
+        }
+        dbg_uart_puts("\n");
+    }
+    for (i = 0; i < 8; i++)
+        if (cached[i] != 0x00u && cached[i] != 0xffu)
+            break;
+    if (i == 8)
+        return 0;
+    memcpy(out, cached, 8);
+    return 1;
+}
+
 int plat_block_read(uint32_t lba, uint32_t count, void *buf)
 {
     BOOT_PROBE("[p] bd read");
