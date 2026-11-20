@@ -81,6 +81,27 @@ notes:             未修复；仪表本身会改变命中率（TOS_DIAG 内）�
 - 这条本身是线索：USB 初始化（PLL_USB、`tud_init`、枚举窗口）内部有多个“按次数
   换算成时间”的等待，改动前后的差别足以决定它是否撞上某个窗口。
 
+## 已排除：JEDEC 探测的 XIP 关/开窗口
+
+把 `plat_board_init()` 里的 `rp2350_flash_detect()` 直接短路（`g_flash_detected = 0`）
+再测 8 轮：**7/8 仍然 34.02 s**。所以不是"探测把 XIP 关掉又打开"留下的状态。
+
+## 关键矛盾（下一轮从这里接）
+
+阶段标记说那次启动走到了 **17**（`plat_board_init()` 结束，说明 `[A]/[B]/[U]` 和
+TinyOS banner 都该打印过了），可是那 33.6 秒里线上 **一个字节都没有**。两者只能同时
+成立于一种情况：**CPU 在跑，但 UART 的发送端没有时钟**——`plat_console_putc` 把字节
+写进 DR，FIFO 却从不排空，于是全部丢弃，而代码继续往下走，最后卡在后面某处
+（`ramdisk_init()` 一带，`banner()` 之前）。
+
+这与第 12 阶段快照并不矛盾：`CLK_PERI_CTRL=0x10000800` 只证明"写进去的是这个值"，
+不证明 clk_peri 真的在跑。下一轮要抓的是：
+
+- `CLK_PERI_SELECTED`（0x50）与 `CLK_SYS_SELECTED`（0x44）在阶段 12 的实际值；
+- 阶段 12/16 各读一次 `RP_UART_FR`（TXFE/BUSY），看 FIFO 有没有在排空；
+- 若确认 clk_peri 没跑：`CLOCKS_CLK_PERI_CTRL` 的 AUXSRC 字段在 RP2350 上是否真如
+  注释所说 0 = clk_sys（0x10000800 的 bit28 至今没解释）。
+
 ## 试过但没结论的
 
 - `WATCHDOG_SCRATCH(7)` 想记录“ROM 重启返回了没有”（写 `"RBOO"`/`"FAIL"`），

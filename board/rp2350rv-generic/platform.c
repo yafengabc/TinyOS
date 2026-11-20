@@ -2022,6 +2022,7 @@ void plat_board_early(void)
      * controller is up.  Empty when built for polling.  mstatus.MIE is still
      * closed here, so nothing can fire until the scheduler starts. */
     usb_cdc_irq_enable();
+    BOOT_PHASE(15u);
 
     early_puts("[U] usb hw=");
     early_puts(g_usb_ready ? "1" : "0");
@@ -2034,6 +2035,7 @@ void plat_board_early(void)
     early_puts("TinyOS/RP2350  rv32  uart0=115200  usb-cdc=");
     early_puts(g_usb_ready ? "up" : "down");
     early_puts("\r\n");
+    BOOT_PHASE(16u);
 }
 
 void plat_board_init(void)
@@ -2056,6 +2058,7 @@ void plat_board_init(void)
      * configured upper bound or the ROM's conservative 16 MiB default.
      * Nothing rewrites the bootram copy afterwards. */
     g_flash_detected = rp2350_flash_detect();
+    BOOT_PHASE(17u);
 
     /* The USB controller is polled, not interrupt driven, and its state
      * machine must not run in interrupt context - hook it into the
