@@ -1,4 +1,4 @@
-/* rirvm: run csc3's register IR (.rir). Experimental, C3 prototype. */
+/* rirvm: run csc3's register IR. Format is detected by the RIR2 magic. */
 #include "lib.h"
 
 TOS_STACK(8 * 1024);
@@ -132,24 +132,29 @@ typedef struct {
 static Frame frames[NFRAME];
 static int argbuf[16];
 static int entry_pc;
+#define FUNCMAX 64
+static int func_pc[FUNCMAX];
+static int nfunc;
 
 static int load_rir(const char *path)
 {
     int fd = open(path);
-    uint32_t hdr[5];
+    uint32_t hdr[7];
     int m, gs, ss, i, got = 0;
 
     if (fd < 0)
         return -1;
-    if (read(fd, hdr, 20) != 20 || hdr[0] != 0x31524952u) {
+    if (read(fd, hdr, 28) != 28 || hdr[0] != 0x32524952u) {
         close(fd);
         return -1;
     }
     m = (int)hdr[1];
     gs = (int)hdr[2];
     entry_pc = (int)hdr[3];
-    ss = (int)hdr[4];
-    if (m <= 0 || m > IRMAX || gs < 0 || gs > GMAX || ss < 0 || ss > SMAX) {
+    nfunc = (int)hdr[4];
+    ss = (int)hdr[5];
+    if (m <= 0 || m > IRMAX || gs < 0 || gs > GMAX ||
+        nfunc <= 0 || nfunc > FUNCMAX || ss < 0 || ss > SMAX) {
         close(fd);
         return -1;
     }
@@ -161,6 +166,12 @@ static int load_rir(const char *path)
     }
     if (got != m * (int)sizeof(RIR))
         { close(fd); return -1; }
+    for (i = 0; i < nfunc; i++) {
+        uint32_t v;
+        if (read(fd, &v, 4) != 4) { close(fd); return -1; }
+        func_pc[i] = (int)v;
+        if (func_pc[i] < 0 || func_pc[i] >= m) { close(fd); return -1; }
+    }
     if (ss > 0) {
         int rgot = 0;
         while (rgot < ss) {
@@ -183,14 +194,14 @@ int main(int argc, char **argv)
     int t0, t1;
     int *regs, *spillp;
 
-    if (argc < 2) { puts("usage: rirvm file.rir [reps]\n"); return 2; }
+    if (argc < 2) { puts("usage: rirvm file [reps]\n"); return 2; }
     if (argc > 2) {
         reps = atoi(argv[2]);
         if (reps < 1) reps = 1;
     }
     verbose = (reps == 1);
     m = load_rir(argv[1]);
-    if (m < 0) { puts("rirvm: bad or missing .rir\n"); return 1; }
+    if (m < 0) { puts("rirvm: bad or missing image\n"); return 1; }
 
     t0 = uptime();
     for (rep = 0; rep < reps; rep++) {
@@ -249,6 +260,7 @@ int main(int argc, char **argv)
             case R_PRINTV: if (verbose) putint(r[q.a]); break;
             case R_ARG: argbuf[q.a] = r[q.b]; break;
             case R_CALL:
+                if (q.a < 0 || q.a >= nfunc) { puts("rirvm: bad call\n"); return 1; }
                 if (nframe + 1 >= NFRAME) { puts("rirvm: call depth\n"); return 1; }
                 nframe++;
                 regs = frames[nframe].r;
@@ -257,7 +269,7 @@ int main(int argc, char **argv)
                 frames[nframe].dst = q.b;
                 for (int k = 0; k < q.c && k < 16; k++)
                     frames[nframe].r[k] = argbuf[k];
-                pc = q.a;
+                pc = func_pc[q.a];
                 break;
             case R_LOADL: r[q.d] = spillp[q.a]; break;
             case R_STOREL: spillp[q.b] = r[q.a]; break;

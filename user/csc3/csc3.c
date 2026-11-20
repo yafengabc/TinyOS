@@ -103,18 +103,16 @@ typedef struct {
     int entry_pc;
 } Func;
 
-#if defined(__riscv) || defined(__arm__)
-#define FUNC_MAX 16
-#else
 #define FUNC_MAX 32
-#endif
 static Func funcs[FUNC_MAX];
 static int nfuncs;
 
-static char src[SRC_MAX];
-static int src_len, pos;
+#define SBUF 256
+static char sbuf[SBUF];
+static int slen, spos, seof;
+static int src_fd;
 static char tok[64];
-static int tok_kind; /* 0 eof, 1 ident, 2 num, 3 punct, 4 string */
+static int tok_kind; /* 0 eof, 1 ident, 2 num, 3 punct, 4 string, 5 float */
 static int tok_num;
 static char strpool[1024];
 static int strsize;
@@ -130,7 +128,6 @@ static int gdata_next;
 static RIR ir[IR_MAX];
 static int nir;
 static int vreg;
-static int entry_pc;
 static int last_type;
 static int cur_rtype;
 
@@ -142,42 +139,97 @@ static void die(const char *s)
     exit(1);
 }
 
+static int src_fill(void)
+{
+    if (spos > 0) {
+        memmove(sbuf, sbuf + spos, (size_t)(slen - spos));
+        slen -= spos;
+        spos = 0;
+    }
+    if (slen >= SBUF)
+        return 0;
+    {
+        int n = read(src_fd, sbuf + slen, SBUF - slen);
+        if (n <= 0) {
+            seof = 1;
+            return 0;
+        }
+        slen += n;
+    }
+    return 1;
+}
+
+static int src_peek(int k)
+{
+    while (spos + k >= slen && !seof)
+        if (!src_fill())
+            break;
+    return (spos + k < slen) ? (unsigned char)sbuf[spos + k] : -1;
+}
+
+static int src_get(void)
+{
+    int c = src_peek(0);
+    if (c >= 0)
+        spos++;
+    return c;
+}
+
+static void src_rewind(void)
+{
+    lseek(src_fd, 0, 0);
+    slen = 0;
+    spos = 0;
+    seof = 0;
+}
+
 static void next(void)
 {
-    while (pos < src_len) {
-        char c = src[pos];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') pos++;
-        else if (c == '/' && pos + 1 < src_len && src[pos + 1] == '/') {
-            while (pos < src_len && src[pos] != '\n') pos++;
-        } else break;
+    int c;
+    for (;;) {
+        c = src_peek(0);
+        if (c < 0) { tok_kind = 0; tok[0] = 0; return; }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { src_get(); continue; }
+        if (c == '/' && src_peek(1) == '/') {
+            src_get(); src_get();
+            while ((c = src_peek(0)) >= 0 && c != '\n') src_get();
+            continue;
+        }
+        if (c == '/' && src_peek(1) == '*') {
+            src_get(); src_get();
+            while ((c = src_peek(0)) >= 0) {
+                if (c == '*' && src_peek(1) == '/') { src_get(); src_get(); break; }
+                src_get();
+            }
+            continue;
+        }
+        break;
     }
-    if (pos >= src_len) { tok_kind = 0; tok[0] = 0; return; }
-    char c = src[pos];
     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
         int n = 0;
-        while (pos < src_len) {
-            c = src[pos];
+        while ((c = src_peek(0)) >= 0) {
             if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                   (c >= '0' && c <= '9') || c == '_')) break;
-            if (n < (int)sizeof(tok) - 1) tok[n++] = c;
-            pos++;
+            if (n < (int)sizeof(tok) - 1) tok[n++] = (char)c;
+            src_get();
         }
         tok[n] = 0; tok_kind = 1;
     } else if (c >= '0' && c <= '9') {
         int v = 0;
-        while (pos < src_len && src[pos] >= '0' && src[pos] <= '9')
-            v = v * 10 + (src[pos++] - '0');
-        if (pos + 1 < src_len && src[pos] == '.' &&
-            src[pos + 1] >= '0' && src[pos + 1] <= '9') {
+        while ((c = src_peek(0)) >= 0 && c >= '0' && c <= '9') {
+            v = v * 10 + (c - '0');
+            src_get();
+        }
+        if (src_peek(0) == '.' && src_peek(1) >= '0' && src_peek(1) <= '9') {
             int frac = 0, scale = 1, fd = 0;
-            pos++;
-            while (pos < src_len && src[pos] >= '0' && src[pos] <= '9') {
+            src_get();
+            while ((c = src_peek(0)) >= 0 && c >= '0' && c <= '9') {
                 if (fd < 4) {
-                    frac = frac * 10 + (src[pos] - '0');
+                    frac = frac * 10 + (c - '0');
                     scale *= 10;
                     fd++;
                 }
-                pos++;
+                src_get();
             }
             tok_num = v * 65536 + (frac * 65536 + scale / 2) / scale;
             tok_kind = 5;
@@ -187,28 +239,29 @@ static void next(void)
         }
     } else if (c == '"') {
         int start = strsize;
-        pos++;
-        while (pos < src_len && src[pos] != '"') {
-            char ch = src[pos++];
-            if (ch == '\\' && pos < src_len) {
-                ch = src[pos++];
-                if (ch == 'n') ch = '\n';
-                else if (ch == 't') ch = '\t';
-                else if (ch == 'r') ch = '\r';
+        src_get();
+        while ((c = src_peek(0)) >= 0 && c != '"') {
+            char ch = (char)src_get();
+            if (ch == '\\') {
+                int e = src_get();
+                if (e == 'n') ch = '\n';
+                else if (e == 't') ch = '\t';
+                else if (e == 'r') ch = '\r';
+                else if (e >= 0) ch = (char)e;
             }
             if (strsize < (int)sizeof(strpool) - 1)
                 strpool[strsize++] = ch;
         }
-        if (pos < src_len) pos++;
+        if (src_peek(0) == '"') src_get();
         if (strsize < (int)sizeof(strpool))
             strpool[strsize++] = 0;
         tok_num = start;
         tok_kind = 4;
     } else {
-        char a = src[pos++];
-        char b = pos < src_len ? src[pos] : 0;
+        char a = (char)src_get();
+        char b = (char)src_peek(0);
         if ((a == '=' || a == '!' || a == '<' || a == '>') && b == '=') {
-            tok[0] = a; tok[1] = '='; tok[2] = 0; pos++;
+            tok[0] = a; tok[1] = '='; tok[2] = 0; src_get();
         } else { tok[0] = a; tok[1] = 0; }
         tok_kind = 3;
     }
@@ -1270,13 +1323,11 @@ static void gen_stmt(Node *n)
 #define NPHYS 16
 #define NSCRATCH 3          /* physical 13,14,15 reserved for spill reloads/stores */
 
-static int func_phys[FUNC_MAX][VREG_MAX];
-static int func_slot[FUNC_MAX][VREG_MAX];
-static int func_remat[FUNC_MAX][VREG_MAX];
-static int func_cval[FUNC_MAX][VREG_MAX];
-static int func_nspill[FUNC_MAX];
+static int func_phys[VREG_MAX];
+static int func_slot[VREG_MAX];
+static int func_remat[VREG_MAX];
+static int func_cval[VREG_MAX];
 static RIR newir[IR_MAX];
-static int rewrite_map[IR_MAX];
 
 static int rir_get(const RIR *q, int f)
 {
@@ -1403,13 +1454,13 @@ static void allocate_func(int fi, int lo, int hi)
     int defcnt[VREG_MAX], isconst[VREG_MAX], cval[VREG_MAX];
     int order[VREG_MAX], m = 0;
     int reg_end[NPHYS];
-    int *phys = func_phys[fi], *slot = func_slot[fi];
+    int *phys = func_phys, *slot = func_slot;
     int nparams = funcs[fi].nparams;
 
     for (int v = 0; v < VREG_MAX; v++) {
         first[v] = -1; last[v] = -1; phys[v] = -1; slot[v] = -1;
         defcnt[v] = 0; isconst[v] = 1; cval[v] = 0;
-        func_remat[fi][v] = 0;
+        func_remat[v] = 0;
     }
     for (int pc = lo; pc < hi; pc++) {
         int f[3], n = rir_uses(&ir[pc], f);
@@ -1461,42 +1512,31 @@ static void allocate_func(int fi, int lo, int hi)
             slot[v] = nspill++;
         }
     }
-    func_nspill[fi] = nspill;
     for (int v = 0; v < VREG_MAX; v++)
         if (phys[v] == -1 && defcnt[v] == 1 && isconst[v] && v >= nparams) {
-            func_remat[fi][v] = 1;
-            func_cval[fi][v] = cval[v];
+            func_remat[v] = 1;
+            func_cval[v] = cval[v];
         }
 }
 
-static int func_at(int pc)
-{
-    for (int i = 0; i < nfuncs; i++) {
-        int lo = funcs[i].entry_pc;
-        int hi = (i + 1 < nfuncs) ? funcs[i + 1].entry_pc : nir;
-        if (pc >= lo && pc < hi) return i;
-    }
-    return -1;
-}
-
-static void rewrite(void)
+static void rewrite_one(int fi)
 {
     int map[IR_MAX];
     int out = 0;
 
     for (int pc = 0; pc < nir; pc++) {
-        int fi = func_at(pc), extra = 0;
+        int extra = 0;
         map[pc] = out;
-        if (fi >= 0) {
+        {
             int f[3], n = rir_uses(&ir[pc], f);
             for (int k = 0; k < n; k++) {
                 int v = rir_get(&ir[pc], f[k]);
-                if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) extra++;
+                if (v >= 0 && v < VREG_MAX && func_phys[v] == -1) extra++;
             }
             int d = rir_dest_field(&ir[pc]);
             if (d >= 0) {
                 int v = rir_get(&ir[pc], d);
-                if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) extra++;
+                if (v >= 0 && v < VREG_MAX && func_phys[v] == -1) extra++;
             }
         }
         out += 1 + extra;
@@ -1505,35 +1545,33 @@ static void rewrite(void)
 
     out = 0;
     for (int pc = 0; pc < nir; pc++) {
-        int fi = func_at(pc);
         RIR q = ir[pc];
         int d, df, f[3], n;
 
-        if (fi < 0) { newir[out++] = q; continue; }
         n = rir_uses(&q, f);
         for (int k = 0; k < n; k++) {
             int v = rir_get(&q, f[k]);
-            if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) {
+            if (v >= 0 && v < VREG_MAX && func_phys[v] == -1) {
                 int sc = NPHYS - NSCRATCH + k;   /* 13 for first, 14 for second */
-                if (func_remat[fi][v])
-                    newir[out++] = (RIR){ R_CONST, func_cval[fi][v], 0, 0, sc };
+                if (func_remat[v])
+                    newir[out++] = (RIR){ R_CONST, func_cval[v], 0, 0, sc };
                 else
-                    newir[out++] = (RIR){ R_LOADL, func_slot[fi][v], 0, 0, sc };
+                    newir[out++] = (RIR){ R_LOADL, func_slot[v], 0, 0, sc };
                 rir_put(&q, f[k], sc);
             } else if (v >= 0 && v < VREG_MAX) {
-                rir_put(&q, f[k], func_phys[fi][v]);
+                rir_put(&q, f[k], func_phys[v]);
             }
         }
         d = rir_dest_field(&q);
         df = -1;
         if (d >= 0) {
             int v = rir_get(&q, d);
-            if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) {
-                if (!func_remat[fi][v])
-                    df = func_slot[fi][v];
+            if (v >= 0 && v < VREG_MAX && func_phys[v] == -1) {
+                if (!func_remat[v])
+                    df = func_slot[v];
                 rir_put(&q, d, NPHYS - 1);       /* 15 */
             } else if (v >= 0 && v < VREG_MAX) {
-                rir_put(&q, d, func_phys[fi][v]);
+                rir_put(&q, d, func_phys[v]);
             }
         }
         newir[out++] = q;
@@ -1544,85 +1582,132 @@ static void rewrite(void)
     for (int i = 0; i < out; i++) {
         if (newir[i].op == R_JMP) newir[i].a = map[newir[i].a];
         else if (newir[i].op == R_JZ) newir[i].b = map[newir[i].b];
-        else if (newir[i].op == R_CALL) newir[i].a = map[newir[i].a];
         else if (branch_is_fused(newir[i].op)) newir[i].c = map[newir[i].c];
     }
-    memcpy(rewrite_map, map, (size_t)nir * sizeof(int));
     memcpy(ir, newir, (size_t)out * sizeof(RIR));
     nir = out;
 }
 
-static void regalloc(void)
+static void regalloc_one(int fi)
 {
-    for (int i = 0; i < nfuncs; i++) {
-        int hi = (i + 1 < nfuncs) ? funcs[i + 1].entry_pc : nir;
-        allocate_func(i, funcs[i].entry_pc, hi);
-    }
-    rewrite();
+    allocate_func(fi, 0, nir);
+    rewrite_one(fi);
 }
 
-static int backend_ir(const char *path)
+/* ---- streaming output: RIR2 ------------------------------------------- */
+
+#define OUT_HDR 28
+
+static int out_fd;
+static int out_nir;
+
+static void put32(uint8_t *p, int v)
 {
-    /* Header: "RIR1", instruction count, global words, entry pc, string bytes. */
-    static uint8_t out[IR_MAX * 20 + 20 + sizeof(strpool)];
-    int n = 0;
-    out[n++] = 'R'; out[n++] = 'I'; out[n++] = 'R'; out[n++] = '1';
-    out[n++] = (uint8_t)nir; out[n++] = (uint8_t)(nir >> 8);
-    out[n++] = (uint8_t)(nir >> 16); out[n++] = (uint8_t)(nir >> 24);
-    out[n++] = (uint8_t)gdata_next; out[n++] = (uint8_t)(gdata_next >> 8);
-    out[n++] = (uint8_t)(gdata_next >> 16); out[n++] = (uint8_t)(gdata_next >> 24);
-    out[n++] = (uint8_t)entry_pc; out[n++] = (uint8_t)(entry_pc >> 8);
-    out[n++] = (uint8_t)(entry_pc >> 16); out[n++] = (uint8_t)(entry_pc >> 24);
-    out[n++] = (uint8_t)strsize; out[n++] = (uint8_t)(strsize >> 8);
-    out[n++] = (uint8_t)(strsize >> 16); out[n++] = (uint8_t)(strsize >> 24);
-    for (int i = 0; i < nir; i++) {
-        RIR *q = &ir[i];
-        int v[5] = { q->op, q->a, q->b, q->c, q->d };
-        for (int k = 0; k < 5; k++) {
-            out[n++] = (uint8_t)v[k];
-            out[n++] = (uint8_t)(v[k] >> 8);
-            out[n++] = (uint8_t)(v[k] >> 16);
-            out[n++] = (uint8_t)(v[k] >> 24);
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static void write_u32(int fd, int v)
+{
+    uint8_t b[4];
+    put32(b, v);
+    write_all(fd, b, 4);
+}
+
+static void write_ir(const RIR *q)
+{
+    uint8_t b[20];
+    int v[5];
+    v[0] = q->op; v[1] = q->a; v[2] = q->b; v[3] = q->c; v[4] = q->d;
+    for (int k = 0; k < 5; k++)
+        put32(b + k * 4, v[k]);
+    write_all(out_fd, b, 20);
+}
+
+static int out_begin(const char *path)
+{
+    uint8_t z[OUT_HDR];
+    memset(z, 0, sizeof z);
+    out_fd = create(path);
+    if (out_fd < 0)
+        return -1;
+    return write_all(out_fd, z, OUT_HDR) == OUT_HDR ? 0 : -1;
+}
+
+static int out_finish(int mainid)
+{
+    uint8_t h[OUT_HDR];
+
+    for (int i = 0; i < nfuncs; i++)
+        write_u32(out_fd, funcs[i].entry_pc);
+    if (strsize > 0)
+        write_all(out_fd, strpool, strsize);
+
+    memset(h, 0, sizeof h);
+    h[0] = 'R'; h[1] = 'I'; h[2] = 'R'; h[3] = '2';
+    put32(h + 4, out_nir);
+    put32(h + 8, gdata_next);
+    put32(h + 12, funcs[mainid].entry_pc);
+    put32(h + 16, nfuncs);
+    put32(h + 20, strsize);
+    put32(h + 24, 0);
+
+    if (lseek(out_fd, 0, 0) < 0)
+        return -1;
+    if (write_all(out_fd, h, OUT_HDR) != OUT_HDR)
+        return -1;
+    close(out_fd);
+    return 0;
+}
+
+/* Skip a balanced { ... } in pass 1, without collecting strings or building
+ * AST nodes.  The current token must be '{'. */
+static void skip_balanced(void)
+{
+    int depth = 1;
+    int c;
+
+    if (!accept("{"))
+        die("block expected");
+    while (depth > 0) {
+        c = src_get();
+        if (c < 0)
+            die("unterminated block");
+        if (c == '"') {
+            while ((c = src_get()) >= 0) {
+                if (c == '\\') { src_get(); continue; }
+                if (c == '"') break;
+            }
+        } else if (c == '/' && src_peek(0) == '/') {
+            while ((c = src_peek(0)) >= 0 && c != '\n')
+                src_get();
+        } else if (c == '/' && src_peek(0) == '*') {
+            src_get();
+            while ((c = src_get()) >= 0) {
+                if (c == '*' && src_peek(0) == '/') { src_get(); break; }
+            }
+        } else if (c == '{') {
+            depth++;
+        } else if (c == '}') {
+            depth--;
         }
     }
-    for (int i = 0; i < strsize; i++)
-        out[n++] = (uint8_t)strpool[i];
-    int fd = create(path);
-    if (fd < 0) return -1;
-    int w = write_all(fd, out, n);
-    close(fd);
-    return w == n ? 0 : -1;
+    next();
 }
 
-static int backend_mc(const char *path)
+/* pass 1: struct/global layout + function signatures, bodies skipped.
+ * pass 2: function bodies parsed and emitted one at a time. */
+static void parse_program(int pass)
 {
-    (void)path;
-    puts("csc3: machine-code backend not implemented yet\n");
-    return -1;
-}
-
-typedef int (*BackendFn)(const char *path);
-
-int main(int argc, char **argv)
-{
-    const char *in, *out, *be = "ir";
-    int fd, n;
-
-    if (argc < 3) { puts("usage: csc3 [-b ir|mc] in.c out.rir\n"); return 2; }
-    int ai = 1;
-    if (!strcmp(argv[ai], "-b")) { be = argv[ai + 1]; ai += 2; }
-    in = argv[ai]; out = argv[ai + 1];
-
-    fd = open(in);
-    if (fd < 0) die("cannot open input");
-    src_len = 0;
-    while (src_len < SRC_MAX && (n = read(fd, src + src_len, SRC_MAX - src_len)) > 0)
-        src_len += n;
-    close(fd);
+    int fi = 0;
 
     next();
-    /* Top level: globals (int g; / int a[N];) and functions. */
     for (;;) {
+        if (tok_kind == 0)
+            break;
+
         if (is_kw("struct")) {
             char sname[32], vname[32];
             int sid;
@@ -1631,26 +1716,33 @@ int main(int argc, char **argv)
             strncpy(sname, tok, sizeof(sname) - 1);
             sname[sizeof(sname) - 1] = 0;
             next();
-            if (accept("{")) {
-                StructType *st;
-                if (nstructs >= STRUCT_MAX) die("too many struct types");
-                st = &structs[nstructs];
-                memset(st, 0, sizeof *st);
-                strncpy(st->name, sname, sizeof(st->name) - 1);
-                while (!accept("}")) {
-                    if (!is_kw("int")) die("int field expected");
-                    next();
-                    if (tok_kind != 1) die("field name expected");
-                    if (st->nfields >= 8) die("too many fields");
-                    strncpy(st->fields[st->nfields++], tok, 32 - 1);
-                    next();
+
+            if (tok_kind == 3 && !strcmp(tok, "{")) {
+                if (pass == 1) {
+                    StructType *st;
+                    if (nstructs >= STRUCT_MAX) die("too many struct types");
+                    st = &structs[nstructs];
+                    memset(st, 0, sizeof *st);
+                    strncpy(st->name, sname, sizeof(st->name) - 1);
+                    accept("{");
+                    while (!accept("}")) {
+                        if (!is_kw("int")) die("int field expected");
+                        next();
+                        if (tok_kind != 1) die("field name expected");
+                        if (st->nfields >= 8) die("too many fields");
+                        strncpy(st->fields[st->nfields++], tok, 32 - 1);
+                        next();
+                        expect(";");
+                    }
+                    expect(";");
+                    nstructs++;
+                } else {
+                    skip_balanced();
                     expect(";");
                 }
-                expect(";");
-                nstructs++;
-                if (tok_kind == 0) die("main required");
                 continue;
             }
+
             sid = struct_lookup(sname);
             if (sid <= 0) die("unknown struct type");
             if (tok_kind != 1) die("variable name expected");
@@ -1663,129 +1755,185 @@ int main(int argc, char **argv)
                 len = tok_num;
                 next();
                 expect("]");
-                sym_add_struct_array(vname, sid, len, 1);
-            } else {
+                if (pass == 1)
+                    sym_add_struct_array(vname, sid, len, 1);
+            } else if (pass == 1) {
                 sym_add_struct(vname, sid, 1);
             }
             expect(";");
-            if (tok_kind == 0) die("main required");
             continue;
         }
-        int is_f = 0;
-        if (is_kw("float")) { is_f = 1; next(); }
-        else {
-            if (!is_kw("int")) die("int expected");
-            next();
-        }
-        if (tok_kind != 1) die("name expected");
 
-        char name[32];
-        strncpy(name, tok, sizeof(name) - 1);
-        name[sizeof(name) - 1] = 0;
-        next();
-
-        if (accept("(")) {
+        {
+            int is_f = 0;
+            char name[32];
             Func *f;
-            if (nfuncs >= FUNC_MAX) die("too many functions");
-            f = &funcs[nfuncs++];
-            memset(f, 0, sizeof *f);
-            f->rtype = is_f;
-            strncpy(f->name, name, sizeof(f->name) - 1);
-            if (!accept(")")) {
-                for (;;) {
-                    int ptype = 0, pi;
-                    if (is_kw("struct")) {
-                        next();
-                        if (tok_kind != 1) die("struct type expected");
-                        ptype = struct_lookup(tok);
-                        if (ptype <= 0) die("unknown struct type");
-                        next();
-                    } else if (is_kw("float")) {
-                        next();
-                        ptype = -1;
-                    } else {
-                        if (!is_kw("int")) die("int parameter expected");
-                        next();
-                    }
-                    if (tok_kind != 1) die("parameter name expected");
-                    if (f->nparams >= 8) die("too many parameters");
-                    pi = f->nparams++;
-                    strncpy(f->params[pi], tok, 32 - 1);
-                    f->ptype[pi] = ptype;
-                    next();
-                    if (accept(")")) break;
-                    expect(",");
-                }
-            }
-            f->body = parse_stmt();
-            if (tok_kind == 0) break;
-            continue;
-        }
+            Node *body;
 
-        if (accept("[")) {
-            if (is_f) die("float arrays not supported");
-            if (tok_kind != 2) die("global array length expected");
-            int len = tok_num;
+            if (is_kw("float")) { is_f = 1; next(); }
+            else {
+                if (!is_kw("int")) die("int expected");
+                next();
+            }
+            if (tok_kind != 1) die("name expected");
+            strncpy(name, tok, sizeof(name) - 1);
+            name[sizeof(name) - 1] = 0;
             next();
-            expect("]");
-            sym_add_array(name, len, 1);
-        } else if (is_f) {
-            sym_add_float(name, 1);
-        } else {
-            sym_add_global(name);
-        }
-        expect(";");
-        if (tok_kind == 0) die("main required");
-    }
 
-    nglobals = nsyms;
+            if (accept("(")) {
+                if (pass == 1) {
+                    if (nfuncs >= FUNC_MAX) die("too many functions");
+                    f = &funcs[nfuncs++];
+                    memset(f, 0, sizeof *f);
+                    f->rtype = is_f;
+                    strncpy(f->name, name, sizeof(f->name) - 1);
+                } else {
+                    if (fi >= nfuncs) die("function table mismatch");
+                    f = &funcs[fi];
+                    if (strcmp(f->name, name)) die("function order mismatch");
+                    f->nparams = 0;
+                }
 
-    /* Generate one function at a time (function-level streaming). */
-    for (int i = 0; i < nfuncs; i++) {
-        Func *f = &funcs[i];
-        nsyms = nglobals;
-        nlocals = 0;
-        f->entry_pc = nir;
-        for (int p = 0; p < f->nparams; p++) {
-            Sym *ps = sym_add(f->params[p], 0);
-            if (f->ptype[p] > 0) {
-                ps->is_struct = 1;
-                ps->stype = f->ptype[p];
-                ps->is_param = 1;
-            } else if (f->ptype[p] < 0) {
-                ps->is_float = 1;
+                if (!accept(")")) {
+                    for (;;) {
+                        int ptype = 0, pi;
+                        if (is_kw("struct")) {
+                            next();
+                            if (tok_kind != 1) die("struct type expected");
+                            ptype = struct_lookup(tok);
+                            if (ptype <= 0) die("unknown struct type");
+                            next();
+                        } else if (is_kw("float")) {
+                            next();
+                            ptype = -1;
+                        } else {
+                            if (!is_kw("int")) die("int parameter expected");
+                            next();
+                        }
+                        if (tok_kind != 1) die("parameter name expected");
+                        if (f->nparams >= 8) die("too many parameters");
+                        pi = f->nparams++;
+                        strncpy(f->params[pi], tok, 32 - 1);
+                        f->ptype[pi] = ptype;
+                        next();
+                        if (accept(")")) break;
+                        expect(",");
+                    }
+                }
+
+                if (pass == 1) {
+                    skip_balanced();
+                    continue;
+                }
+
+                nnode = 0;
+                body = parse_stmt();
+
+                nsyms = nglobals;
+                nlocals = 0;
+                nir = 0;
+                for (int p = 0; p < f->nparams; p++) {
+                    Sym *ps = sym_add(f->params[p], 0);
+                    if (f->ptype[p] > 0) {
+                        ps->is_struct = 1;
+                        ps->stype = f->ptype[p];
+                        ps->is_param = 1;
+                    } else if (f->ptype[p] < 0) {
+                        ps->is_float = 1;
+                    }
+                }
+                declare_locals(body);
+                vreg = nlocals;
+                cur_rtype = f->rtype;
+                gen_stmt(body);
+                {
+                    int z = new_temp();
+                    emit(R_CONST, 0, 0, 0, z);
+                    emit(R_RET, z, 0, 0, 0);
+                }
+                peephole();
+                regalloc_one(fi);
+                f->entry_pc = out_nir;
+
+                for (int pc = 0; pc < nir; pc++) {
+                    RIR q = ir[pc];
+                    if (q.op == R_JMP)
+                        q.a += out_nir;
+                    else if (q.op == R_JZ)
+                        q.b += out_nir;
+                    else if (branch_is_fused(q.op))
+                        q.c += out_nir;
+                    write_ir(&q);
+                }
+                out_nir += nir;
+                fi++;
+                if (tok_kind == 0) break;
+                continue;
             }
+
+            /* global int/float variable */
+            if (accept("[")) {
+                int len;
+                if (is_f) die("float arrays not supported");
+                if (tok_kind != 2) die("global array length expected");
+                len = tok_num;
+                next();
+                expect("]");
+                if (pass == 1)
+                    sym_add_array(name, len, 1);
+            } else if (pass == 1) {
+                if (is_f) sym_add_float(name, 1);
+                else sym_add_global(name);
+            }
+            expect(";");
         }
-        declare_locals(f->body);
-        vreg = nlocals;
-        cur_rtype = f->rtype;
-        gen_stmt(f->body);
-        int z = new_temp();
-        emit(R_CONST, 0, 0, 0, z);
-        emit(R_RET, z, 0, 0, 0);
     }
 
-    for (int i = 0; i < nir; i++)
-        if (ir[i].op == R_CALL) {
-            int fid = ir[i].a;
-            if (fid < 0 || fid >= nfuncs) die("bad call target");
-            ir[i].a = funcs[fid].entry_pc;
-        }
+    if (pass == 2 && fi != nfuncs)
+        die("function table mismatch");
+}
 
-    peephole();
-    regalloc();
+int main(int argc, char **argv)
+{
+    const char *in, *out, *be = "ir";
+    int ai = 1;
 
-    for (int i = 0; i < nfuncs; i++)
-        funcs[i].entry_pc = rewrite_map[funcs[i].entry_pc];
+    if (argc < 3) {
+        puts("usage: csc3 [-b ir|mc] input output\n");
+        return 2;
+    }
+    if (!strcmp(argv[ai], "-b")) {
+        be = argv[ai + 1];
+        ai += 2;
+    }
+    in = argv[ai];
+    out = argv[ai + 1];
 
-    int mainid = func_lookup("main");
-    if (mainid < 0) die("main required");
-    entry_pc = funcs[mainid].entry_pc;
+    if (strcmp(be, "ir")) {
+        if (!strcmp(be, "mc"))
+            puts("csc3: machine-code backend not implemented yet\n");
+        else
+            puts("csc3: unknown backend\n");
+        return 1;
+    }
 
-    BackendFn fn = !strcmp(be, "ir") ? backend_ir :
-                   !strcmp(be, "mc") ? backend_mc : NULL;
-    if (!fn) die("unknown backend");
-    if (fn(out) != 0) die("backend failed");
+    src_fd = open(in);
+    if (src_fd < 0)
+        die("cannot open input");
+
+    parse_program(1);
+    nglobals = nsyms;
+    src_rewind();
+    if (out_begin(out) != 0)
+        die("cannot create output");
+    parse_program(2);
+
+    {
+        int mainid = func_lookup("main");
+        if (mainid < 0) die("main required");
+        if (out_finish(mainid) != 0) die("write failed");
+    }
+
     puts("csc3: ");
     puts(in);
     puts(" -> ");
