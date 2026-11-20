@@ -41,7 +41,9 @@ struct Node {
 
 enum {
     N_NUM, N_VAR, N_ADD, N_SUB, N_MUL, N_DIV, N_MOD,
-    N_LT, N_GT, N_EQ, N_ASSIGN, N_DECL, N_RETURN,
+    N_LT, N_GT, N_EQ, N_NE, N_LE, N_GE,
+    N_AND, N_OR,
+    N_ASSIGN, N_DECL, N_RETURN,
     N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR, N_DO,
     N_BREAK, N_CONTINUE, N_SWITCH, N_CASE,
     N_INDEX, N_ASSIGN_INDEX, N_PRINT, N_CALL,
@@ -98,7 +100,8 @@ enum {
     R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
     R_BOUNDS, R_PRINTFIXN, R_MOD,
     R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
-    R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR
+    R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR,
+    R_NE, R_LE, R_GE
 };
 
 typedef struct {
@@ -321,6 +324,8 @@ static void next(void)
         else if ((a == '+' || a == '-' || a == '*' || a == '/' || a == '%') && b == '=')
             two = 1;
         else if ((a == '+' || a == '-') && b == a)
+            two = 1;
+        else if ((a == '&' || a == '|') && b == a)
             two = 1;
         if (two) {
             tok[0] = a; tok[1] = b; tok[2] = 0; src_get();
@@ -623,13 +628,36 @@ static Node *parse_primary(void)
     return NULL;
 }
 
+static Node *parse_unary(void)
+{
+    if (accept("-")) {
+        Node *z = node(N_NUM);
+        Node *x = node(N_SUB);
+        z->val = 0;
+        x->lhs = z;
+        x->rhs = parse_unary();
+        return x;
+    }
+    if (accept("+"))
+        return parse_unary();
+    if (accept("!")) {
+        Node *z = node(N_NUM);
+        Node *x = node(N_EQ);
+        z->val = 0;
+        x->lhs = parse_unary();
+        x->rhs = z;
+        return x;
+    }
+    return parse_primary();
+}
+
 static Node *parse_mul(void)
 {
-    Node *n = parse_primary();
+    Node *n = parse_unary();
     for (;;) {
-        if (accept("*")) { Node *x = node(N_MUL); x->lhs = n; x->rhs = parse_primary(); n = x; }
-        else if (accept("/")) { Node *x = node(N_DIV); x->lhs = n; x->rhs = parse_primary(); n = x; }
-        else if (accept("%")) { Node *x = node(N_MOD); x->lhs = n; x->rhs = parse_primary(); n = x; }
+        if (accept("*")) { Node *x = node(N_MUL); x->lhs = n; x->rhs = parse_unary(); n = x; }
+        else if (accept("/")) { Node *x = node(N_DIV); x->lhs = n; x->rhs = parse_unary(); n = x; }
+        else if (accept("%")) { Node *x = node(N_MOD); x->lhs = n; x->rhs = parse_unary(); n = x; }
         else break;
     }
     return n;
@@ -650,10 +678,37 @@ static Node *parse_rel(void)
 {
     Node *n = parse_add();
     for (;;) {
-        if (accept("<")) { Node *x = node(N_LT); x->lhs = n; x->rhs = parse_add(); n = x; }
+        if (accept("<=")) { Node *x = node(N_LE); x->lhs = n; x->rhs = parse_add(); n = x; }
+        else if (accept(">=")) { Node *x = node(N_GE); x->lhs = n; x->rhs = parse_add(); n = x; }
+        else if (accept("!=")) { Node *x = node(N_NE); x->lhs = n; x->rhs = parse_add(); n = x; }
+        else if (accept("<")) { Node *x = node(N_LT); x->lhs = n; x->rhs = parse_add(); n = x; }
         else if (accept(">")) { Node *x = node(N_GT); x->lhs = n; x->rhs = parse_add(); n = x; }
         else if (accept("==")) { Node *x = node(N_EQ); x->lhs = n; x->rhs = parse_add(); n = x; }
         else break;
+    }
+    return n;
+}
+
+static Node *parse_land(void)
+{
+    Node *n = parse_rel();
+    while (accept("&&")) {
+        Node *x = node(N_AND);
+        x->lhs = n;
+        x->rhs = parse_rel();
+        n = x;
+    }
+    return n;
+}
+
+static Node *parse_lor(void)
+{
+    Node *n = parse_land();
+    while (accept("||")) {
+        Node *x = node(N_OR);
+        x->lhs = n;
+        x->rhs = parse_land();
+        n = x;
     }
     return n;
 }
@@ -669,7 +724,9 @@ static Node *fold_const(Node *n)
         !n->lhs->ftype && !n->rhs->ftype &&
         (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
          n->kind == N_DIV || n->kind == N_MOD ||
-         n->kind == N_LT || n->kind == N_GT || n->kind == N_EQ)) {
+         n->kind == N_LT || n->kind == N_GT || n->kind == N_EQ ||
+         n->kind == N_NE || n->kind == N_LE || n->kind == N_GE ||
+         n->kind == N_AND || n->kind == N_OR)) {
         int a = n->lhs->val, b = n->rhs->val, v = 0;
         if (n->kind == N_ADD) v = a + b;
         else if (n->kind == N_SUB) v = a - b;
@@ -684,7 +741,12 @@ static Node *fold_const(Node *n)
             v = a % b;
         } else if (n->kind == N_LT) v = a < b;
         else if (n->kind == N_GT) v = a > b;
-        else v = a == b;
+        else if (n->kind == N_EQ) v = a == b;
+        else if (n->kind == N_NE) v = a != b;
+        else if (n->kind == N_LE) v = a <= b;
+        else if (n->kind == N_GE) v = a >= b;
+        else if (n->kind == N_AND) v = (a != 0) && (b != 0);
+        else v = (a != 0) || (b != 0);
         n->kind = N_NUM;
         n->val = v;
         n->ftype = 0;
@@ -695,7 +757,7 @@ static Node *fold_const(Node *n)
 
 static Node *parse_expr(void)
 {
-    return fold_const(parse_rel());
+    return fold_const(parse_lor());
 }
 
 static int parse_const_expr(void)
@@ -1357,9 +1419,11 @@ static int node_float_hint(Node *n)
         return (s && s->is_float) ? 1 : 0;
     }
     if (n->kind == N_INDEX || n->kind == N_MEMBER) return 0;
+    if (n->kind == N_AND || n->kind == N_OR) return 0;
     if (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
-        n->kind == N_DIV || n->kind == N_MOD || n->kind == N_LT ||
-        n->kind == N_GT || n->kind == N_EQ) {
+        n->kind == N_DIV || n->kind == N_MOD ||
+        n->kind == N_LT || n->kind == N_GT || n->kind == N_EQ ||
+        n->kind == N_NE || n->kind == N_LE || n->kind == N_GE) {
         int l = node_float_hint(n->lhs), r = node_float_hint(n->rhs);
         if (l == 1 || r == 1) return 1;
         if (l == 0 && r == 0) return 0;
@@ -1519,6 +1583,10 @@ static int arith_op(int kind)
     case N_MOD: return R_MOD;
     case N_LT:  return R_LT;
     case N_GT:  return R_GT;
+    case N_EQ:  return R_EQ;
+    case N_NE:  return R_NE;
+    case N_LE:  return R_LE;
+    case N_GE:  return R_GE;
     default:    return R_EQ;
     }
 }
@@ -1815,8 +1883,49 @@ static int gen_expr_into(Node *n, int dst)
     case N_PRINTF:
     case N_PUTS:
         die_node(n, "printf/puts not allowed in expression");
+    case N_AND: {
+        int j1, j2, jend;
+        a = gen_value(n->lhs);
+        if (last_type == 2)
+            die_node(n, "string in logical expression");
+        j1 = emit(R_JZ, a, 0, 0, 0);
+        b = gen_value(n->rhs);
+        if (last_type == 2)
+            die_node(n, "string in logical expression");
+        j2 = emit(R_JZ, b, 0, 0, 0);
+        emit(R_CONST, 1, 0, 0, dst);
+        jend = emit(R_JMP, 0, 0, 0, 0);
+        ir[j1].b = nir;
+        ir[j2].b = nir;
+        emit(R_CONST, 0, 0, 0, dst);
+        ir[jend].a = nir;
+        last_type = 0;
+        return dst;
+    }
+    case N_OR: {
+        int j1, jend1, j2, jend2;
+        a = gen_value(n->lhs);
+        if (last_type == 2)
+            die_node(n, "string in logical expression");
+        j1 = emit(R_JZ, a, 0, 0, 0);
+        emit(R_CONST, 1, 0, 0, dst);
+        jend1 = emit(R_JMP, 0, 0, 0, 0);
+        ir[j1].b = nir;
+        b = gen_value(n->rhs);
+        if (last_type == 2)
+            die_node(n, "string in logical expression");
+        j2 = emit(R_JZ, b, 0, 0, 0);
+        emit(R_CONST, 1, 0, 0, dst);
+        jend2 = emit(R_JMP, 0, 0, 0, 0);
+        ir[j2].b = nir;
+        emit(R_CONST, 0, 0, 0, dst);
+        ir[jend1].a = nir;
+        ir[jend2].a = nir;
+        last_type = 0;
+        return dst;
+    }
     case N_ADD: case N_SUB: case N_MUL: case N_DIV: case N_MOD:
-    case N_LT: case N_GT: case N_EQ:
+    case N_LT: case N_GT: case N_EQ: case N_NE: case N_LE: case N_GE:
         /* Destination hint removes the temporary + MOV around assignments.
          * Immediate forms are kept for definitely-int operands. */
         if (node_float_hint(n->lhs) == 0 && node_float_hint(n->rhs) == 0 &&
@@ -1888,11 +1997,16 @@ static int gen_cond_false(Node *c)
 {
     int a, b;
 
-    if (c->kind == N_LT || c->kind == N_GT || c->kind == N_EQ) {
+    if (c->kind == N_LT || c->kind == N_GT || c->kind == N_EQ ||
+        c->kind == N_NE || c->kind == N_LE || c->kind == N_GE) {
         if (c->rhs->kind == N_NUM && !c->rhs->ftype &&
             node_float_hint(c->lhs) == 0) {
             a = gen_value(c->lhs);
-            return emit(c->kind == N_LT ? R_JGE_I : c->kind == N_GT ? R_JLE_I : R_JNE_I,
+            return emit(c->kind == N_LT ? R_JGE_I :
+                        c->kind == N_GT ? R_JLE_I :
+                        c->kind == N_EQ ? R_JNE_I :
+                        c->kind == N_NE ? R_JEQ_I :
+                        c->kind == N_LE ? R_JGT_I : R_JLT_I,
                         a, c->rhs->val, 0, 0);
         }
         a = gen_value(c->lhs);
@@ -1904,7 +2018,11 @@ static int gen_cond_false(Node *c)
                 b = coerce_to(b, last_type, 1);
             }
         }
-        return emit(c->kind == N_LT ? R_JGE : c->kind == N_GT ? R_JLE : R_JNE,
+        return emit(c->kind == N_LT ? R_JGE :
+                    c->kind == N_GT ? R_JLE :
+                    c->kind == N_EQ ? R_JNE :
+                    c->kind == N_NE ? R_JEQ :
+                    c->kind == N_LE ? R_JGT : R_JLT,
                     a, b, 0, 0);
     }
     a = gen_expr(c);
@@ -2283,7 +2401,7 @@ static int rir_uses(const RIR *q, int *f)
     case R_MOV: case R_JZ: case R_RET: case R_PRINT: case R_PRINTV:
         f[0] = 0; return 1;
     case R_ADD: case R_SUB: case R_MUL: case R_DIV: case R_MOD:
-    case R_LT: case R_GT: case R_EQ:
+    case R_LT: case R_GT: case R_EQ: case R_NE: case R_LE: case R_GE:
         f[0] = 0; f[1] = 1; return 2;
     case R_STOREG: case R_LOADA: case R_ARG: f[0] = 1; return 1;
     case R_STOREA: f[0] = 1; f[1] = 2; return 2;
@@ -2322,7 +2440,7 @@ static int rir_dest_field(const RIR *q)
 {
     switch (q->op) {
     case R_CONST: case R_MOV: case R_ADD: case R_SUB: case R_MUL: case R_DIV: case R_MOD:
-    case R_LT: case R_GT: case R_EQ: case R_LOADG: case R_LOADA: case R_LOADL:
+    case R_LT: case R_GT: case R_EQ: case R_NE: case R_LE: case R_GE: case R_LOADG: case R_LOADA: case R_LOADL:
     case R_INC: case R_DEC:
     case R_ADDI: case R_SUBI: case R_MULI:
         return 3;   /* d */
@@ -2393,7 +2511,7 @@ static int rir_pure(int op)
     switch (op) {
     case R_CONST: case R_MOV:
     case R_ADD: case R_SUB: case R_MUL: case R_MOD:
-    case R_LT: case R_GT: case R_EQ:
+    case R_LT: case R_GT: case R_EQ: case R_NE: case R_LE: case R_GE:
     case R_ADDI: case R_SUBI: case R_MULI:
     case R_INC: case R_DEC:
     case R_SHLI: case R_SHRI:

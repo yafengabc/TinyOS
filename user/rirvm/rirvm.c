@@ -16,7 +16,8 @@ enum {
     R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
     R_BOUNDS, R_PRINTFIXN, R_MOD,
     R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
-    R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR
+    R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR,
+    R_NE, R_LE, R_GE
 };
 
 enum {
@@ -364,6 +365,9 @@ int main(int argc, char **argv)
             case R_LT: r[q.d] = r[q.a] < r[q.b]; break;
             case R_GT: r[q.d] = r[q.a] > r[q.b]; break;
             case R_EQ: r[q.d] = r[q.a] == r[q.b]; break;
+            case R_NE: r[q.d] = r[q.a] != r[q.b]; break;
+            case R_LE: r[q.d] = r[q.a] <= r[q.b]; break;
+            case R_GE: r[q.d] = r[q.a] >= r[q.b]; break;
             case R_JZ: if (r[q.a] == 0) pc = q.b; break;
             case R_JMP: pc = q.a; break;
             case R_RET:
