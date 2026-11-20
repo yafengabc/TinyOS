@@ -351,7 +351,7 @@ PSRAM 本身还在 §7 的"先不做"里，但**形态和升级门槛先记下�
 ## 12. rcc / RV32 原生路径的能力边界（2026-11-20）
 
 RV32 原生链路 `csc -> rvm -> rcc -> ELF` 已在 QEMU rv32 和 C3 上跑通 37 个用例
-（`docs/acceptance/2026-11-20-rv32-native-suite.md`）。下面几条是**已知边界**，
+（`docs/acceptance/2026-11-20-rv32-native-suite-rv32-0ae04d7.md`）。下面几条是**已知边界**，
 不是回归；写下来免得下次当成 bug 重新查。
 
 1. **板上 `csc` 的 AST 预算很小。** `src/csc.c` 在 `__riscv`/`__arm__` 下把

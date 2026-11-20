@@ -137,3 +137,4 @@
 | 2026-11-20 | irc 流式输出（72 KiB window） | `6d54b5a` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；去掉 out/fixup 缓冲，window 156→72 KiB，/bin irc 40.8→18.1 KiB；T4 `NOT RUN` | [irc stream](2026-11-20-irc-stream-esp32c3-6d54b5a.md) |
 | 2026-11-20 | 工具改名 csc/rvm/rcc；csa/pvm 暂留对照 | `66dc83d` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板上 csa/pvm 与 csc/rvm/rcc 两条链路均通过；avm 移至 tinyos-script/legacy；T4 `NOT RUN` | [rename](2026-11-20-tool-rename-66dc83d.md) |
 | 2026-11-20 | rcc 拆分共享层 + RV32 后端 | `3e2bac2` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；RV32 输出不变，window 72 KiB；为 thumb1/thumb2 后端留出 `rcc_arch_*` 接口；T4 `NOT RUN` | [rcc split](2026-11-20-rcc-split-3e2bac2.md) |
+| 2026-11-20 | RV32 原生用例扩到 37 个 + `files.local` 暂存 | `0ae04d7` | QEMU rv32 + ESP32-C3 COM4 + 18 目标 | T0–T3 PASS；37/37 原生输出与 rvm 一致；bigcode 535 IR / 10 KiB text；RP2350 `NOT RUN`；T4 `NOT RUN` | [rv32 native suite](2026-11-20-rv32-native-suite-rv32-0ae04d7.md) |
