@@ -18,7 +18,7 @@ TOS_STACK(16 * 1024);
 #undef IR_MAX
 #undef VREG_MAX
 #define SRC_MAX 4096
-#define NODE_MAX 128
+#define NODE_MAX 256
 #define IR_MAX 256
 #define VREG_MAX 24
 #endif

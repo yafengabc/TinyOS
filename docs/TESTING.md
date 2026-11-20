@@ -148,9 +148,10 @@ go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 2
   200 KiB 装不下；一次 10–15 个，分批重建并冒烟。
 - 原生镜像只打印程序自己的输出；`rvm` 末尾的 `result=... ir=...` 不会出现，
   比对时先去掉这一行。
-- 板上 `csc` 的函数表是 256（`FUNC_MAX`），单函数仍只有 128 个 AST 节点、
-  256 条 IR；几十条语句的 `main` 会报 `AST full`。这类用例由宿主 `csc` 生成
-  RIR2，板上只跑 `rcc`。见 `OPEN-ITEMS.md` §12。
+- 板上 `csc`：函数表 256（`FUNC_MAX`）、单函数 256 个 AST 节点（`NODE_MAX`）、
+  256 条 IR。`many25`/`many32`/`bigcode`/`bigir` 现在都能在板上编译；
+  90 条语句的 `bigbody`（约 450 节点）仍需宿主 `csc`。窗口 140 KiB。
+  见 `OPEN-ITEMS.md` §12。
 - 板上 `rcc`：RIR2 ≤ 40 KiB（约 2000 IR）、4096 个标签、text ≤ 48 KiB；
   C3/rv32 的窗口是 120 KiB。`tests/bigir.c`（1436 IR / 2062 标签）是这套
   上限的回归用例，`tests/hugeir.c`（2948 IR）只在宿主跑。
