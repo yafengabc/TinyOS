@@ -36,7 +36,12 @@ import serial
 import serial.tools.list_ports as list_ports
 
 PROMPT = "tos>"
-FAULT = ("fault", "panic", "TRAP", "trap", "[STALL]", "assert", "KERNEL")
+# Markers that mean the boot went wrong.  These are matched case-insensitively
+# against the whole log, so a bare "KERNEL" is too broad: every boot prints
+# "kernel heap: 32 KiB arena", which turned every UART cycle into
+# "uart: KERNEL" the moment the adapter started working again.  Spell out the
+# panic banner instead.
+FAULT = ("fault", "panic", "TRAP", "trap", "[STALL]", "assert", "KERNEL PANIC")
 
 
 def cdc_ports():
@@ -192,10 +197,15 @@ def run_cycle(uart, cdc_port, cpus, timeout, uart_wanted):
         rec["note"] = "no channel answered; cannot reset"
         return rec
 
-    # The chip is resetting: give the console a moment to go quiet so the next
-    # prompt we see is the new boot's, not the tail of the old shell.
-    time.sleep(0.4)
-    uart.drain(0.2)
+    # The chip is resetting.  Do *not* sleep-then-drain here: measured on the
+    # Pico 2 with a working adapter, a reboot over UART0 answers its prompt at
+    # 0.50 s, so a 0.4 s sleep plus a 0.2 s drain swallows the new boot's
+    # prompt and the cycle then waits out the whole window for a prompt it had
+    # already thrown away.  That is exactly how "UART0 silent" survived in this
+    # script after the lead was fixed: uart_boot=False, uptime=12.4 s from CDC.
+    # sync() above already consumed the old shell's prompt, and the reboot echo
+    # contains no prompt, so the next one seen really is the new boot's.
+    time.sleep(0.05)
 
     # UART0 first, but only if it was answering before the reset: on this board
     # the adapter's lead can leave GP0 held low (OPEN-ITEMS item 5), and waiting
@@ -207,6 +217,10 @@ def run_cycle(uart, cdc_port, cpus, timeout, uart_wanted):
         ok, text, dt = uart.wait_prompt(min(timeout, 12.0))
         rec["uart_boot"] = ok
         rec["uart_s"] = round(dt, 2) if ok else None
+        # Keep what the wire actually said when it said nothing useful: "UART0
+        # silent" and "UART0 sent half a boot log" are different bugs, and the
+        # second one only shows up in the tail.
+        rec["uart_seen"] = " ".join(text.split())[-120:]
         if any(m.lower() in text.lower() for m in FAULT):
             rec["fault"] = "uart: " + ",".join(
                 m for m in FAULT if m.lower() in text.lower())
@@ -317,6 +331,8 @@ def main():
         if good and not fresh:
             rec["note"] = (rec["note"] + "; shell not fresh (no reset?)").strip("; ")
         verdict = "PASS" if (good and cpus_ok and fresh and not rec["fault"]) else "FAIL"
+        if verdict == "FAIL" and rec.get("uart_seen"):
+            rec["note"] = (rec["note"] + "; uart said: " + rec["uart_seen"]).strip("; ")
         print(f"[{i:2d}/{args.cycles}] {verdict} "
               f"uart={'ok' if rec['uart_boot'] else 'silent':6s} "
               f"({rec['uart_s']}) "

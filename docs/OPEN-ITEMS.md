@@ -172,6 +172,25 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    控制器还活着，只有 shell 不响应；1200-baud touch 对 TinyOS 无效（那是 pico-sdk 的
    复位接口）。
 
+6. **RV32 SMP：`reboot` 之后约一半的启动要 34 秒才出声**（2026-11-20 新发现，未修）。
+   现成成果：UART0 的 GP0 线修好后，第一次能用双通道量重启延迟。
+   `scripts/rp2350/reboot_latency.py`：ARM 镜像 10/10 在 0.38 s；**RV32 SMP 10 次里
+   4 次要 34.01 s**，中间 33.6 s 线上一个字节都没有（CDC 设备也不在），随后突然出现
+   完整启动日志。33.56 s = **2 × 16.78 s**（`WATCHDOG_RELOAD = 0x00ffffff` µs），
+   所以形状是“两次启动都卡住、都被看门狗清掉，第三次才成”。
+   `WATCHDOG_SCRATCH(3)` 的阶段标记显示卡点在 `usb_cdc_console_init()` **之后**
+   （`prev_phase=14`，且当时 `clk_peri=0x10000800`、`UART_CR=0x00000301` 都正确，
+   所以不是 UART 没配好）。**仪表会移动 bug**：加 7 个阶段标记后命中率从 1/4 变成 8/8，
+   因此标记已全部收进 `#if TOS_DIAG`。
+   顺带发现：**ROM 自己在用 `WATCHDOG_SCRATCH(4..7)`**（写进去的 `"RBOO"` 读回 `00000004`），
+   自记只能用 scratch 0..3。
+   下一步（有序，见卡片 `docs/acceptance/2026-11-20-rv32-reboot-stall.md`）：
+   在 `usb_cdc_console_init()` 内部再分段 → 把 `usb_cdc_boot_pump()` 预算临时设 0 做
+   对照（嫌疑最大：它按 `plat_cpu_hz()` 换算次数，而 RV32 单次 `usb_cdc_poll()` 2.66 µs
+   与 ARM 差一个量级，见第 4 条）→ 若确认，改成按时间片而不是按次数，顺带收掉 #29。
+   影响：`reboot` 在 RV32 上看起来像“偶发死机 30 秒”，闸门/压力测试的 20 s 窗口会把
+   这些轮次记成 FAIL（2026-11-20 的 3/5、5/8 就是这个）。
+
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在

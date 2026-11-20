@@ -1889,9 +1889,31 @@ int plat_start_cpu(int id)
 
 /* ---- boot -------------------------------------------------------------- */
 
+/* How far the *previous* boot got before it stopped.  Scratch 3 survives a
+ * watchdog reset, and it has to be read at entry and kept in RAM: every step
+ * below overwrites the same scratch, so by the time the console is up the
+ * marker would describe this boot instead of the one that died.
+ * Found with it: roughly one reboot in five stalls before the first byte, and
+ * the board came back 33.6 s later - 2 x the 16.78 s watchdog period, i.e. two
+ * consecutive wedges. */
+static uint32_t g_prev_boot_phase;
+#if TOS_DIAG
+/* Diag-only on purpose: these writes are harmless but they perturb the very
+ * boot they measure (the stall below moved from ~1 boot in 4 to 8 of 8 when
+ * six of them were added), so a release image keeps the old timing. */
+#define BOOT_PHASE(n) mmio_write32(WATCHDOG_SCRATCH(3), (n))
+#else
+#define BOOT_PHASE(n) do { } while (0)
+#endif
+
 void plat_board_early(void)
 {
     uint32_t khz;
+
+#if TOS_DIAG
+    g_prev_boot_phase = mmio_read32(WATCHDOG_SCRATCH(3));
+#endif
+    BOOT_PHASE(1u);                 /* entered, before clocks_init          */
 
     /* clk_peri is OFF after reset, and UART0, IO_BANK0 and PADS_BANK0 all
      * sit behind it.  Touching one of those with the clock gated stalls the
@@ -1904,6 +1926,7 @@ void plat_board_early(void)
     g_clk_hz = 12000000u;
 
     clocks_init();
+    BOOT_PHASE(2u);
 
     /* The [A] line is divided for the clock the core is actually on now: if
      * the crystal did not start, clk_ref is still the ROM's ROSC (~6.5 MHz)
@@ -1911,6 +1934,7 @@ void plat_board_early(void)
     g_clk_hz = (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
                ? 12000000u : 6500000u;
     wdt_enable();               /* a wedge later resets the board by itself */
+    BOOT_PHASE(3u);
 
     /* TIMER0 is the 64-bit microsecond counter behind TIMERAWL *and* behind
      * the RV32 mtime/mtimecmp pair, and it comes out of reset held in reset.
@@ -1920,13 +1944,17 @@ void plat_board_early(void)
      * console ring is never drained - the boot then hangs after the banner. */
     unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0 |
             RESET_TIMER0 | RESET_TIMER1);
+    BOOT_PHASE(4u);
 
     /* Only now is the tick generator writable and its clock final. */
     ticks_init();
+    BOOT_PHASE(5u);
 
     led_init();
+    BOOT_PHASE(6u);
 
     uart_init();
+    BOOT_PHASE(7u);
     early_puts("\r\n[A] pre-pll ok sys=0x");
     early_put_hex(g_boot_sys_sel);
     early_puts(" ref=0x");
@@ -1934,14 +1962,18 @@ void plat_board_early(void)
     early_puts(" xosc=0x");
     early_put_hex(g_boot_xosc);
     early_puts("\r\n");
+    BOOT_PHASE(8u);                 /* first console line is out            */
     /* Let the shift register finish before clk_peri changes: the last bytes
      * of that line would otherwise be clocked out at 150 MHz with the
      * 12 MHz divisor and arrive as garbage. */
     plat_console_flush();
+    BOOT_PHASE(9u);
 
     pll_sys_init();
+    BOOT_PHASE(10u);
 
     khz = measure_clk_khz();
+    BOOT_PHASE(11u);
     if (khz >= 1000u && khz <= 250000u)
         g_clk_hz = khz * 1000u;
     uart_init();                    /* re-divide for the real clk_sys */
@@ -1949,6 +1981,15 @@ void plat_board_early(void)
     early_puts("[B] clk=0x");
     early_put_hex(g_clk_hz);
     early_puts(" Hz\r\n");
+    BOOT_PHASE(12u);
+    /* Snapshot the two registers that decide whether this boot can print at
+     * all, in the same surviving scratch: a boot that reaches here but puts
+     * nothing on the wire is either unclocked (CLK_PERI_CTRL) or has its UART
+     * switched off (CR). */
+#if TOS_DIAG
+    mmio_write32(WATCHDOG_SCRATCH(4), mmio_read32(CLOCKS_BASE + CLK_PERI_CTRL_OFFSET));
+    mmio_write32(WATCHDOG_SCRATCH(5), mmio_read32(RP_UART_CR));
+#endif
 #if TOS_DIAG
     diag_prev_report();             /* what the last boot died doing */
     {
@@ -1957,6 +1998,15 @@ void plat_board_early(void)
             early_put_hex(mmio_read32(WATCHDOG_SCRATCH(i)));
             early_puts(" ");
         }
+        early_puts(" prev_phase=");
+        early_put_hex(g_prev_boot_phase);
+        early_puts("\r\n");
+        early_puts("[SCR2] peri=");
+        early_put_hex(mmio_read32(WATCHDOG_SCRATCH(4)));
+        early_puts(" uart_cr=");
+        early_put_hex(mmio_read32(WATCHDOG_SCRATCH(5)));
+        early_puts(" reboot=");
+        early_put_hex(mmio_read32(WATCHDOG_SCRATCH(7)));
         early_puts("\r\n");
     }
 #endif
@@ -1966,6 +2016,7 @@ void plat_board_early(void)
      * still boots on UART; a cable gets a native COM port as well. */
     usb_cdc_console_init(g_clk_hz);
     g_usb_ready = usb_cdc_hw_ready() ? 1 : 0;
+    BOOT_PHASE(14u);
 
     /* Open the external-interrupt gate (XH3IRQ line 14) now that the
      * controller is up.  Empty when built for polling.  mstatus.MIE is still
@@ -2064,7 +2115,14 @@ void plat_reboot(void)
 {
     console_shutdown();
     rv_stop_other_hart();
+    mmio_write32(WATCHDOG_SCRATCH(7), 0x52424f4fu);   /* "RBOO": asked the ROM */
     rom_reboot_normal();
+    /* Reached only when the ROM call returned instead of taking the chip
+     * down.  Recorded because it is otherwise invisible: console_shutdown()
+     * has already stopped all output, so a failed reboot looks exactly like a
+     * board that wedged on its own.  Scratch survives the watchdog reset that
+     * eventually rescues this. */
+    mmio_write32(WATCHDOG_SCRATCH(7), 0x4641494cu);   /* "FAIL" */
     plat_panic_halt();
 }
 
