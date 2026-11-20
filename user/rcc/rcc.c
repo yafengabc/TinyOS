@@ -395,8 +395,11 @@ static void generate(void)
     rcc_arch_emit_body();
     text_final = text_len;
 
-    data_va = align16(text_final);
-    data_off = align16(TEXT_OFF + text_final);
+    {
+        int da = rcc_arch_data_align();
+        data_va = (text_final + da - 1) & ~(da - 1);
+        data_off = (TEXT_OFF + text_final + da - 1) & ~(da - 1);
+    }
     arena_bytes = (dsize + 3) & ~3;
     data_filesz = arena_bytes;
     g_bytes = gsize * 4;

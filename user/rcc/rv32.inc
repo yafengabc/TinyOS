@@ -1297,6 +1297,7 @@ void rcc_arch_init_labels(void)
     rodata_empty = new_label();
 }
 
+int rcc_arch_data_align(void) { return 16; }
 int rcc_arch_machine(void) { return 243; }   /* EM_RISCV */
 uint32_t rcc_arch_flags(void) { return 0; }
 int rcc_arch_labels(void) { return label_next; }

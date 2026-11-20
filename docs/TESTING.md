@@ -159,10 +159,10 @@ go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 2
 
 ### 4.5 ARM Thumb-2 后端（实验，改 `thumb2.inc` 时）
 
-`rcc` 的 ARM 后端是 stage 1：整数运算、比较/跳转、调用、全局/数组、`print`
-整数、越界检查。字符串、float 和 native 系统调用尚未实现，遇到会输出
-`rcc: thumb2: NN not implemented yet` 并退出。流程与 §4.4 相同，只是目标换成
-mps2：
+`rcc` 的 ARM 后端已完成 stage 2：整数/比较/跳转/调用、全局/数组、字符串
+（strlen/strcmp/strlcpy/strlcat/atoi/print）、Q16.16 float（fmul/fdiv 与
+`print`/`printf` 格式化）、GPIO/ADC/PWM/sleep/uptime 的 native 系统调用。
+流程与 §4.4 相同，只是目标换成 mps2：
 
 ```sh
 # 宿主生成 RIR2 与 .tos（tools/test.py 已产出 build/<name>.tos 的是 RV32）
@@ -172,9 +172,11 @@ go run ./cmd/tostest smoke -target arm \
   -commands "csc /fold.c /f.rir,rcc /f.rir /bin/nf,nf" -commandwait-ms 15000
 ```
 
-已验证的整数用例：`fold mod flow flow2 switch switch2 arith cmp2 loops2
-funcs spill deep many25 many32 bigswitch bigbody arrays2 copy nest sret
-native many20 bloop3 sieve3 fib24 struct3 ops`，输出与 `rvm` 一致。
+已验证 28 个用例，输出与 `rvm` 逐行一致：`fold mod flow flow2 switch
+switch2 arith cmp2 loops2 funcs spill deep many25 many32 bigswitch bigbody
+arrays2 copy nest sret native many20 bloop3 sieve3 fib24 struct3 ops
+strings2 str globals2 mixed float3 fmt sa3 floatfold`，以及 native-only 的
+`bigcode 12829 / bigir 1325 / many100 20009`。
 
 ## 5. T3：真机
 
