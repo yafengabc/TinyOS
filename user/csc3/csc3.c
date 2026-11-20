@@ -40,7 +40,8 @@ struct Node {
 enum {
     N_NUM, N_VAR, N_ADD, N_SUB, N_MUL, N_DIV,
     N_LT, N_GT, N_EQ, N_ASSIGN, N_DECL, N_RETURN,
-    N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR,
+    N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR, N_DO,
+    N_BREAK, N_CONTINUE,
     N_INDEX, N_ASSIGN_INDEX, N_PRINT, N_CALL,
     N_STR, N_PRINTF, N_PUTS,
     N_MEMBER, N_ASSIGN_MEMBER,
@@ -260,8 +261,15 @@ static void next(void)
     } else {
         char a = (char)src_get();
         char b = (char)src_peek(0);
-        if ((a == '=' || a == '!' || a == '<' || a == '>') && b == '=') {
-            tok[0] = a; tok[1] = '='; tok[2] = 0; src_get();
+        int two = 0;
+        if ((a == '=' || a == '!' || a == '<' || a == '>') && b == '=')
+            two = 1;
+        else if ((a == '+' || a == '-' || a == '*' || a == '/' || a == '%') && b == '=')
+            two = 1;
+        else if ((a == '+' || a == '-') && b == a)
+            two = 1;
+        if (two) {
+            tok[0] = a; tok[1] = b; tok[2] = 0; src_get();
         } else { tok[0] = a; tok[1] = 0; }
         tok_kind = 3;
     }
@@ -518,6 +526,25 @@ static Node *parse_expr(void) { return parse_rel(); }
  * Used by normal statements and by for(init; cond; step). */
 static Node *parse_simple(int semi)
 {
+    if (tok_kind == 3 && (!strcmp(tok, "++") || !strcmp(tok, "--"))) {
+        int inc = tok[0] == '+';
+        Node *n, *v, *x, *one;
+        next();
+        if (tok_kind != 1) die("variable expected");
+        n = node(N_ASSIGN);
+        v = node(N_VAR);
+        strncpy(n->name, tok, sizeof(n->name) - 1);
+        strncpy(v->name, tok, sizeof(v->name) - 1);
+        next();
+        x = node(inc ? N_ADD : N_SUB);
+        one = node(N_NUM);
+        one->val = 1;
+        x->lhs = v;
+        x->rhs = one;
+        n->lhs = x;
+        if (semi) expect(";");
+        return n;
+    }
     if (is_kw("struct")) {
         int sid;
         Node *n;
@@ -548,6 +575,8 @@ static Node *parse_simple(int semi)
         n->ftype = 1;
         strncpy(n->name, tok, sizeof(n->name) - 1);
         next();
+        if (accept("="))
+            n->lhs = parse_expr();
         if (semi) expect(";");
         return n;
     }
@@ -563,6 +592,10 @@ static Node *parse_simple(int semi)
             n->alen = tok_num;
             next();
             expect("]");
+        }
+        if (accept("=")) {
+            if (n->alen) die("array initializer unsupported");
+            n->lhs = parse_expr();
         }
         if (semi) expect(";");
         return n;
@@ -652,9 +685,42 @@ static Node *parse_simple(int semi)
         }
         {
             Node *n = node(N_ASSIGN);
+            Node *v = node(N_VAR);
             strncpy(n->name, name, sizeof(n->name) - 1);
-            expect("=");
-            n->lhs = parse_expr();
+            strncpy(v->name, name, sizeof(v->name) - 1);
+            if (tok_kind == 3 &&
+                (!strcmp(tok, "+=") || !strcmp(tok, "-=") ||
+                 !strcmp(tok, "*=") || !strcmp(tok, "/="))) {
+                char op = tok[0];
+                Node *x;
+                next();
+                if (op == '+') x = node(N_ADD);
+                else if (op == '-') x = node(N_SUB);
+                else if (op == '*') x = node(N_MUL);
+                else x = node(N_DIV);
+                x->lhs = v;
+                x->rhs = parse_expr();
+                n->lhs = x;
+            } else if (accept("%=")) {
+                die("%= unsupported");
+            } else if (accept("++")) {
+                Node *x = node(N_ADD);
+                Node *one = node(N_NUM);
+                one->val = 1;
+                x->lhs = v;
+                x->rhs = one;
+                n->lhs = x;
+            } else if (accept("--")) {
+                Node *x = node(N_SUB);
+                Node *one = node(N_NUM);
+                one->val = 1;
+                x->lhs = v;
+                x->rhs = one;
+                n->lhs = x;
+            } else {
+                expect("=");
+                n->lhs = parse_expr();
+            }
             if (semi) expect(";");
             return n;
         }
@@ -727,6 +793,25 @@ static Node *parse_stmt(void)
         Node *n = node(N_WHILE);
         n->cond = parse_expr(); expect(")");
         n->body = parse_stmt();
+        return n;
+    }
+    if (is_kw("break")) {
+        next(); expect(";");
+        return node(N_BREAK);
+    }
+    if (is_kw("continue")) {
+        next(); expect(";");
+        return node(N_CONTINUE);
+    }
+    if (is_kw("do")) {
+        Node *n = node(N_DO);
+        next();
+        n->body = parse_stmt();
+        if (!is_kw("while")) die("while expected after do");
+        next(); expect("(");
+        n->cond = parse_expr();
+        expect(")");
+        expect(";");
         return n;
     }
     if (is_kw("for")) {
@@ -811,6 +896,9 @@ static void declare_locals(Node *n)
             declare_locals(n->els);
             break;
         case N_WHILE:
+            declare_locals(n->body);
+            break;
+        case N_DO:
             declare_locals(n->body);
             break;
         case N_FOR:
@@ -1195,6 +1283,53 @@ static void set_branch_target(int idx, int target)
     else ir[idx].b = target;
 }
 
+#define LOOP_MAX 16
+
+typedef struct {
+    int brk[32], nbrk;
+    int cont[32], ncont;
+    int cont_target;
+} LoopCtx;
+
+static LoopCtx loops[LOOP_MAX];
+static int nloop;
+
+static void loop_push(int cont_target)
+{
+    if (nloop >= LOOP_MAX) die("loops nested too deeply");
+    loops[nloop].nbrk = 0;
+    loops[nloop].ncont = 0;
+    loops[nloop].cont_target = cont_target;
+    nloop++;
+}
+
+static int loop_jump(int *list, int *n)
+{
+    int j = emit(R_JMP, 0, 0, 0, 0);
+    if (*n >= 32) die("too many break/continue in one loop");
+    list[(*n)++] = j;
+    return j;
+}
+
+static void loop_set_cont(int target)
+{
+    LoopCtx *c = &loops[nloop - 1];
+    for (int i = 0; i < c->ncont; i++)
+        ir[c->cont[i]].a = target;
+    c->ncont = 0;
+    c->cont_target = target;
+}
+
+static void loop_end(int break_target)
+{
+    LoopCtx *c = &loops[nloop - 1];
+    for (int i = 0; i < c->nbrk; i++)
+        ir[c->brk[i]].a = break_target;
+    for (int i = 0; i < c->ncont; i++)
+        ir[c->cont[i]].a = (c->cont_target >= 0) ? c->cont_target : break_target;
+    nloop--;
+}
+
 static void gen_stmt(Node *n)
 {
     if (!n) return;
@@ -1211,6 +1346,24 @@ static void gen_stmt(Node *n)
         if (!s) die("declaration lost");
         if (!s->is_array && !s->is_struct)
             emit(R_CONST, 0, 0, 0, s->reg);
+        if (n->lhs) {
+            Node tmp;
+            memset(&tmp, 0, sizeof tmp);
+            tmp.kind = N_ASSIGN;
+            strncpy(tmp.name, n->name, sizeof(tmp.name) - 1);
+            tmp.lhs = n->lhs;
+            gen_expr(&tmp);
+        }
+        break;
+    }
+    case N_BREAK: {
+        if (nloop == 0) die("break outside loop");
+        loop_jump(loops[nloop - 1].brk, &loops[nloop - 1].nbrk);
+        break;
+    }
+    case N_CONTINUE: {
+        if (nloop == 0) die("continue outside loop");
+        loop_jump(loops[nloop - 1].cont, &loops[nloop - 1].ncont);
         break;
     }
     case N_RETURN: {
@@ -1283,11 +1436,15 @@ static void gen_stmt(Node *n)
         break;
     }
     case N_WHILE: {
-        int start = nir;
-        int br = gen_cond_false(n->cond);
+        int start;
+        int br;
+        loop_push(nir);
+        start = nir;
+        br = gen_cond_false(n->cond);
         gen_stmt(n->body);
         emit(R_JMP, start, 0, 0, 0);
         set_branch_target(br, nir);
+        loop_end(nir);
         break;
     }
     case N_FOR: {
@@ -1298,10 +1455,12 @@ static void gen_stmt(Node *n)
             gen_stmt(n->lhs);
             vreg = s2;
         }
+        loop_push(-1);
         start = nir;
         if (n->cond)
             br = gen_cond_false(n->cond);
         gen_stmt(n->body);
+        loop_set_cont(nir);
         if (n->rhs) {
             int s3 = vreg;
             gen_stmt(n->rhs);
@@ -1310,6 +1469,22 @@ static void gen_stmt(Node *n)
         emit(R_JMP, start, 0, 0, 0);
         if (br >= 0)
             set_branch_target(br, nir);
+        loop_end(nir);
+        vreg = save;
+        break;
+    }
+    case N_DO: {
+        int save = vreg;
+        int start;
+        int br;
+        loop_push(-1);
+        start = nir;
+        gen_stmt(n->body);
+        loop_set_cont(nir);
+        br = gen_cond_false(n->cond);
+        emit(R_JMP, start, 0, 0, 0);
+        set_branch_target(br, nir);
+        loop_end(nir);
         vreg = save;
         break;
     }
