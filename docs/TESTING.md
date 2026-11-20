@@ -241,6 +241,9 @@ python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-smp --rounds 100
 python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-rv32-smp --rounds 100
 
 # 双核扩展性：在 shell 里 smpbench 1250000，期望 >= 1.8x
+
+# 重启稳定性（每次都要 < 2 s，且新 shell 自己的 uptime 必须归零）
+python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
 ```
 
 单核镜像和 `accept33.py` 的 24 项表仍可用于排查，但**不是关闭依据**（那张表是 ATK
@@ -262,6 +265,10 @@ python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-rv32-smp --rounds
   只适用于 ATK 四个镜像。
 - GP25 上的 1 Hz 心跳目前**不会亮**（`led_set()` 仍硬编码 GP3，issue #27）；
   判断“内核活着”请看串口或 `uptime`。
+- **重启要单独测**：`reboot_soak.py` 的两个判据缺一不可——提示符要在 2 s 内出现，
+  并且之后 `uptime` 必须很小。只看“提示符来了”分不出“真的复位了”和“根本没复位、
+  看到的是上一个 shell 的提示符”，第一版 `gate_boot.py` 就是这样假通过 15/15 的。
+  2026-11-20 的 33 s 静默（`HISTORY` §85）就是被这个判据抓出来的。
 
 ## 6. T4：压力
 

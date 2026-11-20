@@ -121,6 +121,28 @@ gate_boot.py -n 10 --cpus 2：10/10 PASS
   uart0 boot 10/10, cdc boot 10/10, cdc never opened 0/10, uptime 0.31 s
 ```
 
+## 回归判据
+
+修完就把测量做成了脚本，因为这个 bug 能活下来，本质上是**重启路径没有判据**：
+
+```sh
+python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
+```
+
+两条判据缺一不可：提示符要在 `--max`（默认 2 s）内出现，**并且**之后 `uptime`
+必须很小。只看“提示符来了”分不出“真的复位了”和“根本没复位、看到的是上一个 shell
+的提示符”——第一版 `gate_boot.py` 就是这样假通过 15/15 的。
+
+实测（最终镜像，刷机后连跑）：
+
+```text
+12/12 cycles clean
+  prompt: min 0.50 s, max 0.56 s, mean 0.52 s
+  uptime 每轮都是 0.08 s   <- 真的复位了
+```
+
+负向验证：`--max 0.2` 时 2/2 FAIL、退出码 1，说明判据本身能报错。
+
 ## 留下什么
 
 - `.noinit` 环形启动日志（`boot_step_t` / `boot_log_dump()`），只在**上一轮没走到
@@ -129,6 +151,8 @@ gate_boot.py -n 10 --cpus 2：10/10 PASS
   端口有环形日志就记、没有就什么都不做。
 - `scripts/rp2350/stall_probe.py`：双通道观察重启（UART0 输出 + CDC 节点 + CDC 应答），
   下次再遇到“看不见的 30 秒”先用它。
+- `scripts/rp2350/reboot_soak.py`：带判据的重启回归（时间 + uptime 归零），
+  见上一节；已写进 `docs/TESTING.md` 的 Pico 2 关闭流程。
 - 教训：**单槽标记会被下一次启动覆盖**；“两个看门狗周期”这种整倍数很容易把人骗到
   “启动被清了两次”上，而真正的事实可能是“一次都没复位”。
 
