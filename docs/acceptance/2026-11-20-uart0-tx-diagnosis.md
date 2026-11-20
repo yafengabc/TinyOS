@@ -14,8 +14,11 @@ T2:                /proc/uart0：UART 编程全部正确
 T3:                /proc/uart0tx：GP0 空闲为低，发送时只有微弱毛刺
 T4:                /proc/gp0drive：改由 SIO 驱动 GP0 拉高，仍读回低
 T5:                对照组 gp1（适配器 TX）与 gp25（LED）读回高，证明回读链路本身正常
-logs:              not kept（原始串口输出摘录在下方）
-notes:             结论是"板侧寄存器正确、引脚拉不高"，故障在 GP0 网络上，不是固件
+T6:                拔掉接在 GP0 的适配器线束 → SIO 驱动也读回高（2048/2048）
+T7:                插回同一根线 → 立即回到 2048/2048 读低
+logs:              build/gp0_watch.log（三行跳变，见下）
+notes:             结论是"板侧寄存器正确、pad 能驱动"，故障在 GP0 网络的对端（线束/适配器），
+                   不是固件、也不是这颗 pad
 ```
 
 ## 起因
@@ -75,6 +78,20 @@ gp0drive: pad driven from SIO (uart line briefly off)
   controls     gp1(adapter tx) high=65536  gp25(led) high=65536
 ```
 
+## 拔线对照（T6/T7，2026-11-20 11:35–11:36 实测）
+
+`scripts/rp2350/gp0_watch.py` 每秒采一次 `/proc/gp0drive`，只在判定变化时记一行；
+人工只做"拔掉 GP0 那根线 → 停 3 秒 → 插回"，日志 `build/gp0_watch.log`：
+
+```text
+11:35:40 driving 1  high=0    low=2048 | verdict  the line stays low even when the pad drives 1
+11:36:17 driving 1  high=2048 low=0    | verdict  the pad pulls the line high - the board can drive it
+11:36:31 driving 1  high=0    low=2048 | verdict  the line stays low even when the pad drives 1
+```
+
+一拔就高、一插就低，**同一个 pad、同一份固件、同一毫秒级的采样**——把"pad 坏了"
+和"固件没驱动"两种解释一起排除。剩下的只有对端：线束或适配器的 RX 输入把 GP0 拉到低。
+
 ## 结论
 
 1. **不是固件问题。** UART 的 `CR/IBRD/FBRD/LCR_H` 与正常启动逐项一致（UARTEN|TXE|RXE，
@@ -85,18 +102,20 @@ gp0drive: pad driven from SIO (uart line briefly off)
 3. **GP0 这根线拉不高。** 换由 SIO 直接驱动（`pin_mux=5`、`sio_oe` bit0 都确认写进去了）
    仍然 2048/2048 采到低电平；而同一时刻 gp1（适配器 TX）、gp25（LED）都稳定读到高，
    说明回读链路和整个 bank 是好的。
-4. 所以故障在 **GP0 网络上**：要么线被短到地/被重负载拉低（跳线错位、接到 GND、
-   适配器 RX 端有强下拉），要么这颗 pad 的输出级损坏。前者概率高得多——这也解释了
-   「20/20 → 0/20」为什么和刷机同步发生：刷机时插拔线束碰到了这根线。
+4. 所以故障在 **GP0 网络的对端**：拔掉线束后 pad 立刻能拉高（T6），插回立刻被压回低
+   （T7）——**pad 与固件都没问题**，是线束/适配器（跳线错位、接到 GND、或适配器 RX 端
+   有强下拉/分压）把线压在低电平。这也解释了「20/20 → 0/20」为什么和刷机同步发生：
+   刷机时插拔线束碰到了这根线。
 5. **原记录的根因假设（ROM 改了 pad/时钟）验伪**：把 `plat_init` 的 UART 初始化重做一遍
    不会改变任何东西，寄存器本来就已经是对的。
 
-## 需要人工做的两件事（2 分钟）
+## 下一步（人工）
 
-- 拔掉 CH343 的 GP0 那根线，再 `cat /proc/gp0drive`：
-  若这时 `driving 1` 读到高 → 负载在适配器侧（换线/换适配器）；
-  若仍全低 → GP0 这颗 pad 输出级坏（换板）。
-- 断电后用万用表量 GP0 对 GND 的电阻：正常应远大于 10 kΩ。
+- **已确认**负载在适配器/线束侧 → 换一根线或换一个 USB-TTL 适配器，接对引脚
+  （适配器 RX ← 板子 GP0，适配器 TX → 板子 GP1，GND 共地）。
+- 接对之后自检口径：`cat /proc/uart0tx` 的 `idle gp0` 应为 `high=2048 low=0`，
+  并且 `tx gp0` 的高低大致各半；真正的判据是**在 UART0 上敲 `uptime`、回复也从 UART0 回来**。
+- 顺手做一次：断电用万用表量那根线对 GND 的电阻，如果是几十欧到几百欧，就是它。
 
 ## 没跑的
 
