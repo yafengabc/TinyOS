@@ -16,6 +16,8 @@ T4:                /proc/gp0drive：改由 SIO 驱动 GP0 拉高，仍读回低
 T5:                对照组 gp1（适配器 TX）与 gp25（LED）读回高，证明回读链路本身正常
 T6:                拔掉接在 GP0 的适配器线束 → SIO 驱动也读回高（2048/2048）
 T7:                插回同一根线 → 立即回到 2048/2048 读低
+T8:                换掉那根线后：UART0 双向跑通（命令走 UART0、回复也从 UART0 回来），
+                   /proc/uart0tx 的 idle gp0 = high=2048 low=0
 logs:              build/gp0_watch.log（三行跳变，见下）
 notes:             结论是"板侧寄存器正确、pad 能驱动"，故障在 GP0 网络的对端（线束/适配器），
                    不是固件、也不是这颗 pad
@@ -108,6 +110,26 @@ gp0drive: pad driven from SIO (uart line briefly off)
    刷机时插拔线束碰到了这根线。
 5. **原记录的根因假设（ROM 改了 pad/时钟）验伪**：把 `plat_init` 的 UART 初始化重做一遍
    不会改变任何东西，寄存器本来就已经是对的。
+
+## 结案（T8，2026-11-20 11:45 实测）
+
+线一换，UART0 立刻双向可用：
+
+```text
+$ uptime            # 这条命令是打在 UART0 上，回复也是 UART0 收到的
+uptime: 189.550 s (189550 ms)  tick=1000 Hz  cpus=2  cpu=0  pid=4
+tos>
+$ cat /proc/uart0tx
+  idle gp0     low=0 high=2048        <- 空闲为高，正常
+  tx   gp0     low=10070 high=55466 transitions=319
+  verdict      gp0 swings at both levels - the pin is driven
+```
+
+所以整件事的因果链完整了：**接在 GP0 的那根线把线压在低电平 → 适配器收不到任何
+跳变 → 板子看起来"只丢发送"**。板子、固件、pad 全部无辜，`OPEN-ITEMS` 第 5 条关闭。
+
+紧接着用它当见证通道第一次跑双通道闸门，反而抓出了闸门自己的两个 bug 和一个
+RV32 独有的重启停顿，见 `docs/acceptance/2026-11-20-rv32-reboot-stall.md`。
 
 ## 下一步（人工）
 
