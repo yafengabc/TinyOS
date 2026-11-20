@@ -1,31 +1,58 @@
 # TinyOS 多平台架构设计（x86 / RV32 / ARM）
 
-状态：草案 v2
+> **过期声明（2026-11-20 补）**：本文正文写于 2026-11-01～11-06（草案 v2），
+> 此后架构已演进，以下章节的状态断言已经失效：**当前权威设计是
+> [`ARCHITECTURE-NEXT.md`](ARCHITECTURE-NEXT.md)（C1–C7 契约与 Phase A/B）、
+> [`TESTING.md`](TESTING.md)（T0–T4 验收）、
+> [`OPEN-ITEMS.md`](OPEN-ITEMS.md) / [`HISTORY.md`](HISTORY.md)（状态与结论）**。
+> 本文保留的是**仍有效的机制说明**（平坦内存模型、PMP/MPU 分段、ELF 重定位、
+> 启动链、调度语义、设备文件），不是当前状态。几处失效最狠的地方已就地插
+> 「**【2026-11-20 更正】**」块；遇到状态问题先看更正块或上面的权威文档。
+
+状态：草案 v2（历史文档，机制描述有效、状态描述已过期）
 目标读者：内核与移植开发者
 
 ## 1. 定位
 
 TinyOS 面向 **无 MMU 的 MCU 级平台**：ESP32-C3（RV32IMC）、RP2040（Cortex-M0+）、
-以及后续的 ARM 芯片。
+RP2350（Cortex-M33 / Hazard3 RV32）、以及 x86/QEMU 开发与仿真目标。
 
 设计原则：
 
 - **有 MMU 的平台不折腾** —— 那类需求用 Linux 更合适。
 - x86 端口仅作为**开发与仿真目标**，行为与 MCU 对齐：**不启用分页**。
-- 统一模型是 **特权级隔离 + 单一平坦地址空间 + 无内存保护**。
+- 统一模型是 **特权级隔离 + 单一平坦地址空间**；**内存保护按平台能力分级**，
+  不是一律没有（见下面的更正）。
 
-这意味着一个明确的取舍：
+**【2026-11-20 更正】原论断"用户程序可以读写内核内存，这是 MCU 级 OS 常态"只对
+无保护单元的平台成立，不能作为全局结论：**
 
-> 用户程序不能执行特权指令，但**可以读写内核内存**。
-> 一个越界写会破坏整个系统，这是 MCU 级 OS 的常态，不是缺陷。
+- **RV32（QEMU virt / ESP32-C3）**：`arch/rv32/platform.c` 的 `pmp_deny_user()`
+  在 `plat_init()` 把 `pmpcfg0..3` 清零——U-mode 默认什么都碰不到；
+  `plat_task_protect()` 只用 TOR 条目把**当前任务的段**开成 R+W / R+X，
+  段间洞故意留空（`prot heap` / `prot stack` 探针据此验内核内存不可写）。
+  唯一例外是 trap 向量表开 256 B 的 RX 窗口（ESP32-C3 硬件要求）。
+- **ARM Cortex-M33（RP2350）**：PMSAv8 MPU 在第一次 `plat_task_protect()` 时按核开启，
+  段属性带 AP 权限；`prot rodata/heap/stack/null` 四项真机通过。
+- **仍成立的平台**：x86（`plat_task_protect()` 空实现）、**RP2040 Cortex-M0+（无 MPU，
+  用户任务非特权但不受保护）**——`arch/arm/platform.c` 的 `#else` 分支明说这一点。
+
+也就是说：平坦地址空间指的是**没有虚拟地址转换**，不等于用户态能访问内核内存。
+有 PMP/MPU 的平台上，越界写会被 trap 拦下（外部数据路径返回错误，不是 halt）。
 
 ## 2. 分层
 
+**【2026-11-20 更正】下面的目录图是 11-06 草案，`kernel/core/` 和
+`kernel/include/` 两个目录**现在都不存在**。当前结构是
+`kernel/*.c`（main/process/syscall/heap/... 平铺）+ `kernel/*.h` +
+`include/tos_abi.h`（ABI 单一头）+ `abi/syscalls.csv`，板级分层按 `ARCHITECTURE-NEXT.md`
+的 C1（chip / board / image 三层事实）执行。目录图保留作历史意图参考。**
+
 ```
-user/            用户程序（架构无关 C，只依赖 syscall ABI）
+user/            用户程序（架构无关 C，只依赖 syscall ABI）   ← 仍在
 ────────────────────────────────────────────────────────
-kernel/core/     架构无关：main、task、syscall、elf、ramdisk、heap、string、printf
-kernel/include/  公共头：types.h、platform.h、tos.h
+kernel/core/     [已不存在] 架构无关：main、task、syscall、elf、...
+kernel/include/  [已不存在] 公共头：types.h、platform.h、tos.h
 ────────────────────────────────────────────────────────
 arch/x86/        i386：GDT/IDT/TSS、PIT、UART、PS/2、ATA、VGA（不分页）
 arch/rv32/       RV32：trap 入口、定时器、UART、块设备
@@ -37,15 +64,25 @@ board/esp32c3-generic/   ESP32-C3：ESP 镜像、SPI flash、UART0
 board/rpi-pico/    RP2040：boot2、UF2、XIP、UART0
 ```
 
-规则：
+规则（精神仍有效，目录名已过时）：
 
-- `kernel/core` 不得出现 `inb/outb`、`cr3`、`mstatus`、`CONTROL` 等架构细节。
+- 架构无关的内核代码不得出现 `inb/outb`、`cr3`、`mstatus`、`CONTROL` 等细节；
+  当前约束是"内核不得出现板级 `#ifdef`"（C1）。
 - `arch/*` 只能通过 `platform.h` 暴露能力。
-- `board/*` 只提供地址、初始化顺序和驱动实例。
+- `board/*` 只提供地址、初始化顺序和驱动实例；chip 事实归 chip 层（C1）。
 
-### 各端口的验证程度（2026-11-06 更新）
+### 各端口的验证程度
 
-**"能构建"和"跑起来过"是两件事，这张表就是分界线。**
+**【2026-11-20 更正】下表是 2026-11-06 的历史快照，保留作演进记录，不作当前状态。**
+当前上板状态看 `docs/acceptance/README.md` 与 `OPEN-ITEMS.md`；关键变化：
+**rp2040 早已上板**——#12 专项验收（heartbeat、1000 轮 `dd`+`rm`、重启持久、
+goc32 V0 `.tos`）已关闭，`rpi-pico-smp` 双核也已真机验证；2026-11-20 又在同一天
+做了冷启动 pump 验收（#31，PC 口 16 次 + hub 5 次 + 充电头 5 次，0 trap）和
+**两块 Pico 的唯一 USB 序列号**（flash 4Bh UID，`E6609CB2D34AB733` /
+`464A383332112312`，重启稳定）。rp2350 的 ATK 与 Pico 2、ARM 与 RV32 双端
+均有大量 T3/T4 记录；下方 rp2040 那行"从未烧进过一块 Pico"是错的。
+
+<details><summary>历史快照（2026-11-06，已过期）</summary>
 
 | 目标 | 载体 | 验证到哪一步 |
 |---|---|---|
@@ -54,10 +91,9 @@ board/rpi-pico/    RP2040：boot2、UF2、XIP、UART0
 | arm | QEMU mps2（Cortex-M3） | smoke / compat 全绿；MPU 受 7 块预算限制会退化，见 §5.2 |
 | esp32c3 | **真机**（COM13） | 上板验收 24 项：内核 XIP、flash 读写 800 KiB 校验、ADC、WS2812、`reboot` 断言 `RTC_SW_SYS_RST` |
 | rp2350 | **真机**（ATK-DNRP2350AM） | 上板：USB CDC + UART0 双控制台、PMSAv8 四条保护、ST7789 DMA、`/dev/fb0`、ADC、littlefs 3.5 MiB、`reboot`、`dd` 128 KiB 校验 |
-| **rp2040** | **没有任何硬件** | **只有"编译通过"**：从未烧进过一块 Pico。boot2 的 256 B stage-2、UF2 family、XIP 映射、12 MHz 时钟、手写 USB CDC、ARMv6-M 的无除法/非对齐限制——全都没在硅片上验过一行。唯一能离线验的镜像首部已经查过并修了一个致命 bug：向量表曾经被 ELF 头挤到 `0x10000200`（详见 `OPEN-ITEMS.md` §13），现在 `0x10000000` 是 boot2、`0x10000100` 是 MSP/reset |
+| **rp2040** | **没有任何硬件** | **只有"编译通过"**：从未烧进过一块 Pico。boot2 的 256 B stage-2、UF2 family、XIP 映射、12 MHz 时钟、手写 USB CDC、ARMv6-M 的无除法/非对齐限制——全都没在硅片上验过一行。唯一能离线验的镜像首部已经查过并修了一个致命 bug：向量表曾经被 ELF 头挤到 `0x10000200`（详见 `OPEN-ITEMS.md` §13，该条已迁进 `HISTORY.md`），现在 `0x10000000` 是 boot2、`0x10000100` 是 MSP/reset |
 
-所以文档里 rp2040 的所有数字（窗口大小、镜像预算、`prot` 预期结果）都是
-**按 ARMv6-M 推算的**，不是实测。第一次上板前不要引用成结论。
+</details>
 
 ## 3. 平台接口（platform.h）
 
@@ -138,6 +174,10 @@ void     plat_frame_set_ret(trapframe_t *tf, uint32_t val);
 | QEMU mps2-an385 (Cortex-M3) | 4 MiB @0x20000000 | `0x20080000` | 内核留 512 KiB；窗口 256 KiB × 14，`kernel.ld` 用 ASSERT 卡住不越界 |
 | ESP32-C3 | 400 KiB @0x40380000 | `0x40390000` | 应用窗口 ≤ ~200 KiB；**必须用指令总线别名**，见 §8.1 |
 | RP2040 | 264 KiB @0x20000000 | `0x20010000` | 应用窗口 ≤ ~120 KiB |
+
+**【2026-11-20 注】这是 11-06 的建议值，不是当前配置的权威值**：实际窗口几何
+由 `board/*/layout.c` + `board.conf` 决定，构建期由 `board_check.c` 交叉校验
+（C1/B-1b），并且已经过 `geometry_test` 三方一致检查。不要拿这张表当实测结论。
 
 **关键后果：用户程序以 PIE（ET_DYN）+ 运行时重定位加载，跨板分发同一份二进制。**
 加载器把镜像放到各板的 `APP_BASE`，重定位表（`.rel/.rela`）修正内部绝对地址，
@@ -1769,17 +1809,26 @@ readdir 快照全都是全局的。所以互斥的粒度不是块，是**一次 
 （“out of task windows” 但明明有空位，或者两个任务共用一块窗口）。`next_pid++`
 同理——重号会让 `wait(pid)` 收到别人的退出码。两者都挪进了 `proc_lock`。
 
-### 13.9 还没做的
+### 13.9 还没做的（2026-11-20 更正：第一、三条已过时）
 
-- **RP2350 / RP2040 的 core1**：`board/rpi-pico` 还是 `PLAT_MAX_CPUS = 1`。
-  需要的是 SIO 自旋锁（`SIO_SPINLOCK0`）+ 把 core1 从 bootrom 的 `wfe` 循环里
-  拉起来（写 `SIO_FIFO` 或走 PSM）。`plat_spin_acquire()` 换成 SIO 版本即可，
-  其余层不用动。
-- **任务亲和性**：现在是一条队列、谁有空谁拿，任务会在核之间迁移（`smp` 程序会
-  报 `cpu 1 then 0`）。真要绑核，`proc_t` 加一个 `affinity` 字段、`sched_pick()`
-  过滤一下就行，但那是策略，先不做。
-- **TLB / 缓存一致性**：没有 MMU 也没有 D-cache，所以这一层暂时不存在问题。
-  RP2350 有缓存，到时候 `pipe`/`console` 的缓冲要过 `fence`。
+**【2026-11-20 更正】**
+
+- **RP2350 / RP2040 的 core1 —— 已完成，原条目作废**。三块 SMP 镜像均已真机验证：
+  RP2350 ATK 的 ARM (`atk-dnr2350am-smp`) 与 RV32 (`atk-dnr2350am-rv32-smp`)、
+  RP2040 (`rpi-pico-smp`)。`board/rpi-pico/layout.c` 现在是
+  `#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1` 才 `PLAT_MAX_CPUS = TOS_MAX_CPUS`，
+  否则 1；start.S 把 core1 从 ROM 的 FIFO 等待里拉起来。RP2350 用
+  `rom_stop_other_core()` / flash-park 握手在 `reboot` 前停从核（否则第二次重启会
+  留一个 CDC 枚举正常但永不答话的板子）。park 语义见 `rp_park.h` 与 #4/#17。
+- **TLB / 缓存一致性 —— 部分已落地**。"没有 D-cache"只对 RP2040 成立；
+  RP2350 有 cache，已有 `plat_icache_sync()` / `plat_dcache_*` 钩子（C3），
+  LCD DMA 有 `lcd_dma_sync()`、flash 擦写走 park + cache flush。剩下的是
+  P4/PSRAM 的一致性（B-7 条件项）。
+
+以下仍有效：
+
+- **任务亲和性**：一条队列、谁有空谁拿，任务会在核之间迁移。真要绑核，
+  `proc_t` 加 `affinity` 字段、`sched_pick()` 过滤即可，但那是策略，先不做。
 
 
 ## 14. 设备文件（/dev 与 /proc）
