@@ -82,6 +82,10 @@ shell: ANSWERED
 LCD/SPI 共用，但本次没有数据支持任何一个。要定位需要在两块板上控制主机侧条件
 做同固件对照，别再靠单板证据下结论。
 
-## 遗留
+## 两块板已一致
 
-Pico 2 当时未接台，板上仍刷着无等待镜像；重新接上后要重刷带等待的同名 target。
+Pico 2 随后重新接台并重刷了带等待的 `rpi-pico2-rv32-smp`（17:55）：
+`cat /proc/usbpoll` 只有稳态 `usbpoll: 2586 ns/poll`，shell 正常；
+`reboot_soak.py -n 20` **20/20 PASS**（prompt 0.50–0.57 s、uptime 归零，
+csv `build/final-pico2-wait-reboot.csv`）。ATK 同口径 20/20（0.90–1.04 s）。
+两块 RV32 板现在跑的都是恢复等待后的代码。
