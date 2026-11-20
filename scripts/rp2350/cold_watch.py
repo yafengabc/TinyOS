@@ -22,9 +22,10 @@ import time
 import serial
 import serial.tools.list_ports
 
-BANNER = re.compile(rb"\[A\] pre-pll")
+BANNER = re.compile(rb"\[A\] pre-pll|\[rp2040\] boot clk=")
 TRAP = re.compile(rb"mcause=|ebreak|load/store access fault|InstFetch")
 SHELL = re.compile(rb"TinyOS shell")
+USB_DONE = re.compile(rb"\[usb\] init done")
 PROMPT = re.compile(rb"tos> ")
 
 
@@ -89,6 +90,8 @@ def main():
                         boots += 1
                         in_boot = True
                         emit(f"BOOT #{boots}: banner".encode())
+                    if USB_DONE.search(line):
+                        emit(f"BOOT #{boots}: usb init done".encode())
                     if TRAP.search(line):
                         traps += 1
                         emit(b"BOOT #%d: TRAP %s" % (boots, line.strip()))

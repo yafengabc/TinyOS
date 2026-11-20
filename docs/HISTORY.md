@@ -5295,3 +5295,26 @@ CDC 在 0.50 s 内出现、shell 正常、`[U] cfg=1`；`usb_cdc_wait()` 回到�
 重刷。为什么 ATK 触发而 Pico 2 不触发仍未定位（枚举时序 / USB 走线 / flash 容量
 都只是候选），别再靠单板证据下结论。卡片：
 `docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md`。
+
+## 91. 2026-11-20 RP2040 启动期 pump 验收（#31 关闭）
+
+#31 的代码在 `670a712` 就落地了（与 M33 同形：按主频折算的 40 000 次、
+`clamp(4000, 200000)`、`tud_mounted()` 即退），缺的是四项真机数据。用户把 RP2040
+接上台并人工按住 BOOTSEL 刷入 `rpi-pico-smp`，本次补齐：
+
+- 普通 PC 口：两轮共 16 次冷启动，其中 8 次精确打点
+  `[rp2040] boot clk=` → `[usb] init done` / CDC 出现 = **0.52–0.58 s**；
+- USB hub：**5/5**，0.36–0.47 s；
+- 充电头供电（无主机）：**5/5**，banner→`tos> ` = 0.35–0.45 s，pump 跑满窗口也没拖慢；
+- `flash.py --smoke` 走 UART **7/7**（含 `reboot`），GP25 `gpio blink 25 6`
+  用户目视确认 6/6。走 CDC 的 smoke 在 `reboot` 那步撞 Windows 端口重枚举的
+  `PermissionError(13)`，是脚本还在读已消失的端口，不是固件失败。
+
+计时口径要写清：从固件 banner 起算，ROM/上电到 banner 的几毫秒无法从 UART 侧打点。
+26 次冷启动 0 trap、0 退避；老的 5.5/11.3 s 枚举退避没有再出现。
+
+#31 关闭。pump 在 ARM 两端口可用、在 Hazard3 上不可用（#29 的负结果），
+这个 ISA 差异现在两边都有真机证据。RP2040 唯一 USB 序列号仍是 `0001`，
+不在 #31 范围。新工具 `scripts/rp2350/cold_watch.py` 本轮补上了 RP2040 的
+`[rp2040] boot clk=` banner 识别（此前只认 RP2350 的 `[A] pre-pll`）。
+卡片：`docs/acceptance/2026-11-20-rp2040-boot-pump-31.md`。
