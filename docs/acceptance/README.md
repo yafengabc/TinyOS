@@ -123,3 +123,4 @@
 | 2026-11-20 | csc3 struct 数组、struct 赋值、`%.Nf` | `b8b009c` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 `q=6 p3=16 gs=15 f=3.14`；T4 `NOT RUN` | [csc3 struct](2026-11-20-csc3-struct-arrays-esp32c3-b8b009c.md) |
 | 2026-11-20 | csc3 流式编译 + RIR2 函数表（无扩展名，magic 识别） | `461ad4e` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 12.8 KB 源码/21 函数/185 RIR；csc3 92 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 streaming](2026-11-20-csc3-streaming-esp32c3-461ad4e.md) |
 | 2026-11-20 | csc3 `break`/`continue`、`do-while`、`for` 声明、`+=`/`++` | `1528681` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 flow 26/3/4；csc3 100 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 flow](2026-11-20-csc3-flow-esp32c3-1528681.md) |
+| 2026-11-20 | csc3 成员/数组元素的 `+=` 与 `++/--` | `52969da` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 flow2 5/30/9，ret 44；csc3 100 KiB / rirvm 32 KiB；T4 `NOT RUN` | [csc3 lvalue](2026-11-20-csc3-lvalue-compound-esp32c3-52969da.md) |
