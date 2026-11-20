@@ -156,6 +156,14 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    要删等待需先补两块板各 20 次冷启动。卡片：
    `docs/acceptance/2026-11-20-rv32-tight-pump-no-repro.md`。
 
+   **2026-11-20 补 20 次人工冷启动**：无等待镜像 + `cold_watch.py`（UART0 常开，
+   CDC 节点与 shell 双见证），用户拔插板子供电 20 次 → 30 个 `[A] pre-pll`、
+   28 次走到 `tos> `、**0 个 `mcause=`**。两段无 shell 的分别是监视器启动时
+   正好赶上刷机首启、以及插拔瞬间 0.25 s 后的第二次复位，都不是 trap。
+   至此「当前代码可删等待」的证据只差 ATK 板（未接台）；正式镜像已刷回，
+   产品代码未动，等用户决定是否删等待。卡片：
+   `docs/acceptance/2026-11-20-rv32-nowait-cold-start-20.md`。
+
    **2026-11-20 那个 trap 解释清楚了**：`mcause=0x3` 是 **breakpoint = `ebreak`**，
    与访存错误无关。全镜像一共 47 条 `ebreak`，**全部**在 TinyUSB 的
    `TU_ASSERT/TU_VERIFY`（`tusb_verify.h:87` 的 `__asm("ebreak\n")`）里，
