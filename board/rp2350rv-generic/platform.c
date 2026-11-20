@@ -112,7 +112,6 @@ static void wdt_feed(void);        /* defined with the RAM helpers below */
 static void wdt_enable(void);
 static void early_puts(const char *s);
 static void early_put_hex(uint32_t v);
-static void early_put_dec(uint32_t v);
 static uint32_t measure_clk_src_khz(uint32_t src);
 
 /* measure_clk_khz() is the common case: clk_sys itself. */
@@ -719,34 +718,6 @@ uint32_t plat_usb_poll_ns(void)
     return (uint32_t)(((t1 - t0) / n) * 1000000000ull / (uint64_t)g_clk_hz);
 }
 
-/* The same question asked where it matters: inside the boot wait, one core,
- * interrupts masked, no tick yet.  usb_cdc_wait() records itself (it is the
- * only code that can time its own loop), so this only translates. */
-int plat_usb_boot_pump(uint32_t *out)
-{
-    const struct usb_boot_pump *p = usb_cdc_boot_pump();
-
-    if (!p || !p->polls)
-        return 0;
-    out[0] = p->ns_per_poll;
-    out[1] = p->polls;
-    out[2] = p->bound;
-    out[3] = p->mounted;
-    out[4] = p->us;
-    return 1;
-}
-
-/* TIMER0's 1 MHz count, which is what the RV32 mtime is fed from and what the
- * panel driver already uses for its delays.  It is the only counter that is
- * alive before plat_timer_init() runs: ticks_init() (plat_board_early, phase
- * 5) starts it, while SIO_MTIME is stopped and re-zeroed by the kernel's own
- * timer setup much later.  Low word only - 71 minutes of headroom is plenty
- * for something that measures a wait inside one boot. */
-uint32_t plat_boot_us(void)
-{
-    return mmio_read32(TIMER0_BASE + TIMERAWL_OFFSET);
-}
-
 int plat_console_tx_room(void)
 {
     return (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF) ? 0 : 16;
@@ -813,25 +784,6 @@ static void early_put_hex(uint32_t v)
 
     for (i = 28; i >= 0; i -= 4)
         plat_console_putc(hex[(v >> i) & 0xfu]);
-}
-
-/* Decimal, no padding: the boot lines are read by a person comparing two
- * runs, and 0x1a6c18 against 0x1a6c18 is not a comparison anyone can make. */
-static void early_put_dec(uint32_t v)
-{
-    char buf[11];
-    int i = 0;
-
-    if (v == 0) {
-        plat_console_putc('0');
-        return;
-    }
-    while (v && i < (int)sizeof(buf)) {
-        buf[i++] = (char)('0' + (v % 10u));
-        v /= 10u;
-    }
-    while (i)
-        plat_console_putc(buf[--i]);
 }
 
 /* ---- clock tree -------------------------------------------------------- */
@@ -2261,10 +2213,10 @@ void plat_board_early(void)
     boot_log_dump();
 #endif
 
-    /* USB CDC shares the console with UART0.  The wait inside is bounded by
-     * a clock-derived iteration count (1 730 780 iterations - measured 8.3 s
-     * with no host), so a board with no USB cable still boots on UART; a
-     * cable gets a native COM port as well and ends it in ~0.35 s. */
+    /* USB CDC shares the console with UART0.  No boot-time enumeration wait:
+     * IRQ 14, the 1 ms tick and the idle loop pump the controller.  A board
+     * with no USB cable boots on UART at full speed; a cable adds a native
+     * COM port.  The old wait cost 8.3 s with no host (#29). */
     usb_cdc_console_init(g_clk_hz);
     g_usb_ready = usb_cdc_hw_ready() ? 1 : 0;
     BOOT_PHASE(14u);
@@ -2282,26 +2234,6 @@ void plat_board_early(void)
     early_puts(" stage=");
     plat_console_putc((char)('0' + usb_cdc_init_stage()));
     early_puts("\r\n");
-
-    /* What the enumeration wait cost (issue #29).  Printed here rather than
-     * left to /proc/usbpoll because the interesting run is the one with no
-     * host attached, where the CDC node never appears - and because the
-     * number has to be readable when the shell is the thing that broke. */
-    {
-        uint32_t p[5];
-
-        if (plat_usb_boot_pump(p)) {
-            early_puts("[C] usbwait polls=");
-            early_put_dec(p[1]);
-            early_puts("/");
-            early_put_dec(p[2]);
-            early_puts(" ns=");
-            early_put_dec(p[0]);
-            early_puts(" us=");
-            early_put_dec(p[4]);
-            early_puts(p[3] ? " mounted\r\n" : " bound\r\n");
-        }
-    }
 
     early_puts("TinyOS/RP2350  rv32  uart0=115200  usb-cdc=");
     early_puts(g_usb_ready ? "up" : "down");

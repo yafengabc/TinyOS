@@ -262,32 +262,17 @@ static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
 /* What the port could detect about the primary flash, what the board
  * configured as its build-time figure (the fallback when the port cannot
  * measure), and the filesystem size the two produce. */
-/* One USB poll's cost, for sizing a bounded pump (issue #29).  Zero on ports
- * whose controller is interrupt-driven.
- *
- * Two numbers, deliberately: the first is steady state (a running shell, both
- * cores, the tick draining the ring), the second is what the boot wait itself
- * measured with one core, interrupts masked and no tick.  A boot-time bound
- * has to be sized against the second; using the first is what made "40 000
- * polls is ~250 ms" look safe on a port where the same count did not return. */
+/* Steady-state cost of one USB poll, for the tick/idle pacing and for
+ * comparing ports.  Zero where the controller is interrupt-driven and there
+ * is no poll loop to measure. */
 static uint32_t fmt_usbpoll(char *b, uint32_t cap)
 {
     uint32_t ns = plat_usb_poll_ns();
-    uint32_t p[5];
-    uint32_t off;
 
     if (!ns)
-        off = put(b, cap, 0, "usbpoll: not measured\n");
-    else
-        off = put(b, cap, 0, "usbpoll: %u ns/poll (%u polls per 250 ms)\n",
-                  ns, (uint32_t)(250000000u / ns));
-
-    if (!plat_usb_boot_pump(p))
-        return put(b, cap, off, "bootpump: not measured\n");
-    return put(b, cap, off,
-               "bootpump: %u ns/poll, %u of %u polls in %u us (%s)\n",
-               p[0], p[1], p[2], p[4],
-               p[3] ? "mounted" : "bound reached");
+        return put(b, cap, 0, "usbpoll: not measured\n");
+    return put(b, cap, 0, "usbpoll: %u ns/poll (%u polls per 250 ms)\n",
+               ns, (uint32_t)(250000000u / ns));
 }
 
 /* The console UART exactly as the hardware has it programmed right now.

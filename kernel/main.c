@@ -52,13 +52,6 @@ void board_config_check(void);
  * machine reached; the default does nothing.  See kernel/platform.h. */
 __attribute__((weak)) void plat_boot_stage(uint32_t n) { (void)n; }
 
-/* Boot-time USB pump accounting; only the RV32 RP2350 port measures one. */
-__attribute__((weak)) int plat_usb_boot_pump(uint32_t *out) { (void)out; return 0; }
-
-/* Pre-tick microsecond clock; ports that have one before the timer subsystem
- * is up override this.  Zero means "no time base", not "no time passed". */
-__attribute__((weak)) uint32_t plat_boot_us(void) { return 0; }
-
 void kmain(void)
 {
     plat_early_init();

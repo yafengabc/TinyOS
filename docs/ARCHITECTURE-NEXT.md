@@ -271,6 +271,8 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
   `plat_boot_us()`（TIMER0 `TIMERAWL`，1 MHz），**不能用 `plat_now_ns()`**——
   RV32 mtime 由 `plat_timer_init()` 在 `plat_early_init()` 之后才清零重开，
   在 boot console 阶段读它是常数（第一次就量出“72 588 次 / 0 ms”）。
+  **结局（同日）**：#29 关闭，等待和这套 boot 期仪表都删了；`usbpoll:` 稳态节点保留。
+  留下的规则仍然是 A-6 的原意：折算系数必须在它要用的 regime 里量过。
 - `wd_start(cb, ticks)` 移到 B-8，触发条件：网络/companion 的请求级超时。
 
 **不做**：全量替换 `sleep` 列表；把早期初始化改成读 tick。

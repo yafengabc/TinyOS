@@ -5249,3 +5249,18 @@ A-6 要求折算，却没要求折算系数本身有出处，这次把它补上�
 产品代码未动，#29 保持打开，把两个选择交给用户——接受 Pico 2 证据则删等待关
 issue（省 0.11 s 启动、无主机时省 8.3 s），保守则等 ATK 板补 20 次冷启动。
 卡片：`docs/acceptance/2026-11-20-rv32-nowait-cold-start-20.md`。
+
+## 89. 2026-11-20 删掉 RV32 枚举等待，#29 关闭
+
+用户在两个方案里选了第一个：接受 Pico 2 的证据（28 次完整冷启动 + 20 次暖重启
++ 刷机首启，零 trap），删等待、关 #29；ATK 板未验写进关闭说明，若复现再开新 issue。
+
+代码侧：`drivers/usb/rp2350rv/usb_cdc.c` 删掉 `usb_cdc_wait()` 和调用；同时撤掉
+只为 #29 加的整套仪表——`struct usb_boot_pump` / `plat_usb_boot_pump()` /
+`plat_boot_us()` 两个弱钩子、`/proc/usbpoll` 的 `bootpump:` 第二行、
+`[C] usbwait` 启动行、`early_put_dec()`。稳态 `usbpoll:` 节点保留。
+新代码只在注释里留一句为什么可以不等，和证据卡的指针。
+
+收益：有主机时启动少 0.11 s，无主机时少 8.3 s（原先那 1 730 780 次的界）。
+历史数据留在三张卡里，不随代码删除而改写；`OPEN-ITEMS.md` 第 4 条顶部改成
+“已结案”，`ARCHITECTURE-NEXT.md` A-6 保留“折算系数必须在同一 regime 量过”的规则。

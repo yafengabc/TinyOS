@@ -47,16 +47,21 @@
   这块板没有冷启动数据。
 - 因为没出 trap，没有 `mepc` 可用带符号 ELF 反查。
 
-## 当前状态与待决
+## 结论（17:28 用户选了方案 1，已执行）
 
-实验代码已全部撤回，板子已刷回正式镜像并验证：`/proc/usbpoll` =
-`usbpoll: 2686 ns/poll`、`bootpump: 4805 ns/poll, 72836 of 1730769 polls in 349978 us`，
-shell 正常。
+用户决定接受 Pico 2 的证据：**删除 `usb_cdc_wait()` 并关闭 #29**。省下启动期
+0.11 s（有主机）和无主机时的 8.3 s；ATK 板未验这一点写进 issue 的关闭说明，
+以后若在 ATK 复现就开新 issue。
 
-证据现在支持「当前代码里等待可以去掉」，但覆盖只有 Pico 2。两个选择：
+执行结果：等待函数及调用已删；仅为 #29 加的 `bootpump:` 仪表、`plat_boot_us()`/
+`plat_usb_boot_pump()` 钩子、`[C] usbwait` 启动行一并撤掉（保留稳态 `usbpoll:`）。
+`/proc/usbpoll` 现在只有 `usbpoll: ...` 一行。全目标构建与真机回归见关闭提交。
 
-1. 接受 Pico 2 的证据：删除 `usb_cdc_wait()` 并关 #29（启动省 0.11 s，
-   无主机时省 8.3 s）；ATK 板以后若复现再开新 issue。
-2. 保守：等 ATK 板接上后补 20 次冷启动，再决定；在此之前等待保留。
+本卡里的 `bootpump: 4805 ns/poll, 72836/...` 是**删除之前**那版固件读到的数，
+作为历史证据保留。
 
-在用户确认前**不改产品代码**，issue #29 保持打开。
+**删除后的最终回归**：`go build/vet/test ./...` 全绿、`tos build all` 18/18；
+Pico 2 刷入最终镜像后 `cat /proc/usbpoll` 只剩稳态一行
+（`usbpoll: 2606 ns/poll`），`uptime`、`echo` 正常；
+`reboot_soak.py -n 20` **20/20 PASS**（prompt 0.18–0.19 s、uptime 0.08 s，
+csv `build/final-nowait-reboot.csv`）。

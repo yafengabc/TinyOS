@@ -529,83 +529,21 @@ void usb_cdc_irq_enable(void)
 #endif
 }
 
-/* Wait (bounded) for the host to finish SET_CONFIGURATION.
+/* No boot-time enumeration wait on this port any more.
  *
- * The ARM ports dropped this: it kept the whole boot on the host's
- * enumeration (8-10 s on the RP2040).  Kept here because the RV32 port has no
- * USB interrupt - usb_cdc_poll() *is* the controller's event pump - and a
- * first boot with it removed trapped right after the shell prompt on
- * ATK-DNRP2350AM Hazard3 (mcause=0x3 at 0x10013d0a, 2026-11-19).  Until that
- * is understood, this port keeps the old sequence.
- *
- * pre-tick, in the C6/A-6 sense: interrupts are still masked here, so
- * plat_ticks() would never advance and a deadline built from it would be a
- * deadline that never expires.  The bound is therefore an iteration count
- * folded from clk_hz (3/260 of it), not a literal - see
- * docs/ARCHITECTURE-NEXT.md A-6.
- *
- * 3/260 was chosen to be "roughly 1.5 s" at ~0.87 us per iteration.  That was
- * a guess, and a bad one: measured on this core the loop costs 4.79 us per
- * poll, so the bound the board has been using all along is **8.3 s**, not
- * 1.5 s.  The 2.66 us printed by /proc/usbpoll is steady state from a live
- * shell (SMP, interrupts on, the 1 ms tick draining the ring) - a different
- * regime, and 1.8x cheaper.  g_boot_pump below times this loop where it runs;
- * /proc/usbpoll prints both numbers so the two regimes cannot be confused
- * again.  A host that enumerates normally ends the wait after ~0.35 s /
- * 72 000 polls; only a board with no host pays the full 8.3 s. */
-static struct usb_boot_pump g_boot_pump;
-
-const struct usb_boot_pump *usb_cdc_boot_pump(void)
-{
-    return &g_boot_pump;
-}
-
-static void usb_cdc_wait(uint32_t clk_hz)
-{
-    uint64_t spins;
-    uint32_t bound, i, t0, t1;
-
-    if (!g_hw_ready)
-        return;
-    spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
-    bound = spins > 0xffffffffull ? 0xffffffffu : (uint32_t)spins;
-
-    /* 32-bit loop counter on purpose: a 64-bit compare per iteration would be
-     * part of what is being measured.
-     *
-     * The clock is plat_boot_us(), not plat_now_ns(): the latter reads the
-     * RV32 mtime, which plat_timer_init() has not enabled yet at this point
-     * (the kernel's timer setup runs after plat_early_init), so it returns a
-     * constant here and the first version of this probe reported "0 ms for
-     * 72 588 polls".  TIMER0's 1 MHz count is already running - ticks_init()
-     * starts it two phases earlier - and it is what the panel driver's delays
-     * use.  Zero from it means "no time base", not "no time passed". */
-    t0 = plat_boot_us();
-    for (i = 0; i < bound && !tud_mounted(); i++) {
-        usb_cdc_poll();
-        for (volatile int j = 0; j < 40; j++)
-            ;
-    }
-    t1 = plat_boot_us();
-
-    g_boot_pump.polls   = i;
-    g_boot_pump.bound   = bound;
-    g_boot_pump.mounted = tud_mounted() ? 1u : 0u;
-    if (t0 && t1 && t1 != t0) {
-        uint32_t us = t1 - t0;          /* wrap-safe: both are low 32 bits */
-
-        g_boot_pump.us = us;
-        if (i)
-            g_boot_pump.ns_per_poll = (uint32_t)((uint64_t)us * 1000ull / i);
-    }
-}
-
+ * The old sequence pumped usb_cdc_poll() up to 1 730 780 times - measured
+ * 8.3 s with no host - because a 2026-11-19 ATK-DNRP2350AM first boot trapped
+ * just after the shell prompt (mcause=0x3).  On the current tree that trap
+ * never reproduced: a symbol-bearing no-wait image survived 28 complete cold
+ * boots on the Pico 2, 20 warm reboots and the post-flash boot with zero
+ * mcause/ebreak.  The controller is still pumped from IRQ 14, the 1 ms tick
+ * and the idle loop, so dropping this only removes the pre-tick delay.
+ * Evidence: docs/acceptance/2026-11-20-rv32-nowait-cold-start-20.md. */
 void usb_cdc_console_init(uint32_t clk_hz)
 {
+    (void)clk_hz;                  /* no clock-derived wait left on this port */
     usb_cdc_init();
     plat_boot_stage(0x3au);
-    usb_cdc_wait(clk_hz);
-    plat_boot_stage(0x3bu);
 }
 
 /* ---- event pump --------------------------------------------------------- */
