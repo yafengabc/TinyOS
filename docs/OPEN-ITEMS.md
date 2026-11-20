@@ -181,8 +181,10 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
      互等死锁。命中率约一半，正好对应“tick 那一刻在不在 drain 里”。
    - 判据来自两处：`.noinit` 环形日志显示 `reboot` 进入后 431 ms 走到
      `usb_critical_enter()` 返回、**没有** `usb_tx_drain()` 的标记；`stall_probe.py`
-     显示那 33 秒里 **CDC 设备节点一直在**（芯片没复位），而 33.56 s ≈ 2 × 16.78 s
-     的“两个看门狗周期”只是巧合，不是“被清了两次”。
+     显示那 33 秒里 **CDC 设备节点一直在**（芯片没复位）。33.56 s ≈ 2 × 16.78 s 的
+     “两个看门狗周期”是巧合：2026-11-20 用一句 `for (;;) ;`（看门狗已 armed、无人
+     `wdt_feed()`）直接量过，**一次挂死的清场时间就是 ~33.5 s**，不是 16.78 s。
+     结论：这块板子上任何挂死都要等 33 秒才回来，所以“它最后回来了”不是通过判据。
    - 修复：`usb_cdc_flush()` 改成先 `usb_tx_drain()`（自己按正确顺序加锁）、再单独取
      USB 锁做 FIFO flush；另外 `plat_reboot()` 置 `g_rebooting`，`plat_console_flush()`
      在该标志下不走 USB（要复位的机器不该等主机或等一把即将被复位的核握着的锁）。
@@ -190,7 +192,7 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
      `gate_boot.py -n 10 --cpus 2` **10/10 PASS**（uart0 10/10、cdc 10/10、
      uptime 0.31 s）。卡片：`docs/acceptance/2026-11-20-rv32-reboot-stall.md`。
    - 顺带留下：`.noinit` 环形启动日志（只在上一轮没走到 shell 时打印）、
-     `plat_boot_mark()`（`kmain()` 各阶段之间打点，端口可选的弱钩子）、
+     `plat_boot_stage()`（`kmain()` 各阶段之间打点，端口可选的弱钩子）、
      `scripts/rp2350/stall_probe.py`。
    - 仍然成立的两条经验：**单槽标记会被下一次启动覆盖**（`WATCHDOG_SCRATCH(3)` 的
      `prev_phase` 往往是恢复启动留下的）；**ROM 自己在用 `WATCHDOG_SCRATCH(4..7)`**，

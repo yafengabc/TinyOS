@@ -1,5 +1,12 @@
 # RV32 SMP：`reboot` 之后约一半的启动要 34 秒才出声（2026-11-20）
 
+> **更正（2026-11-20 晚）**：这张卡是**排查过程**记录，不是验收证据。两点要说明：
+> ① 文中 `ph=0x83` / `ph=0x84` 是当时临时插在 `usb_cdc_flush()` 里的标记编号，那些
+> 标记在收尾时已删除，所以这棵树**产生不出**这段输出；
+> ② 当时的 `boot_log_dump()` 会在“上一轮进过 shell”时静默返回，于是 reboot 标记根本
+> 不会被打印——这是 issue #33 的 P1。
+> 按项目规矩旧卡不改写，最终验收见同一目录下 `2026-11-20-reboot-deadlock-*.md`。
+
 ```text
 commit:            （见本轮提交）
 change:            usb_cdc_flush() 的加锁顺序与 usb_tx_drain() 相反，两核互等死锁；
@@ -154,7 +161,7 @@ python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
 
 - `.noinit` 环形启动日志（`boot_step_t` / `boot_log_dump()`），只在**上一轮没走到
   shell** 时打印，正常启动一个字节都不多说。
-- `plat_boot_mark(n)`：`kernel/main.c` 的弱钩子，在 `kmain()` 各阶段之间打点，
+- `plat_boot_stage(n)`：`kernel/main.c` 的弱钩子，在 `kmain()` 各阶段之间打点，
   端口有环形日志就记、没有就什么都不做。
 - `scripts/rp2350/stall_probe.py`：双通道观察重启（UART0 输出 + CDC 节点 + CDC 应答），
   下次再遇到“看不见的 30 秒”先用它。

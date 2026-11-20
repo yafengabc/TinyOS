@@ -47,12 +47,26 @@ def read_until_prompt(port, window):
     return None, buf
 
 
-def command(port, text, window):
-    """Send a line, return (answered, text received)."""
-    port.reset_input_buffer()
-    port.write((text + "\r").encode())
-    dt, buf = read_until_prompt(port, window)
-    return dt is not None, buf.decode("utf-8", "replace")
+def command(port, text, window, tries=2):
+    """Send a line, return (answered, text received).
+
+    Retried once on no answer.  The first command written immediately after a
+    boot's prompt is occasionally swallowed - the prompt is printed by msh
+    before its first getline(), so a byte that lands in between is echoed by
+    the tty layer and then discarded.  That is a race in the harness, not a
+    board fault, and one retry separates the two: a machine that is really
+    wedged fails both attempts.
+    """
+    text_seen = ""
+    for _ in range(tries):
+        port.reset_input_buffer()
+        port.write((text + "\r").encode())
+        dt, buf = read_until_prompt(port, window)
+        text_seen = buf.decode("utf-8", "replace")
+        if dt is not None:
+            return True, text_seen
+        time.sleep(0.2)
+    return False, text_seen
 
 
 def main():
@@ -90,8 +104,13 @@ def main():
         if dt is not None:
             ok, text = command(uart, "uptime", 6.0)
             m = UPTIME_RE.search(text.encode("utf-8", "replace"))
-            if ok and m:
+            if m:
                 uptime = float(m.group(1))
+            elif not ok:
+                # No answer at all: say so in the row instead of silently
+                # leaving it blank, so a real hang and a lost byte look
+                # different in the CSV.
+                uptime = None
 
         fresh = uptime is not None and uptime <= args.max
         verdict = "PASS" if (not slow and fresh) else "FAIL"

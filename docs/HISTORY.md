@@ -5129,11 +5129,18 @@ PC 落在 USB 栈区间。具体是哪条断言对不上——11-19 的镜像是
 `CLK_SYS_SELECTED` 和 mtime）之后，事实是：`reboot` 进入后 **431 ms** 走到
 `usb_critical_enter()` 返回，然后就再没有下一条——`usb_tx_drain()` 没返回。
 
-**“两个看门狗周期”是巧合。** `stall_probe.py` 同时盯 UART0 输出、Windows 里的 CDC
-设备节点、以及往那个节点发 `uptime` 有没有回应。慢轮次里 **CDC 节点整整 33 秒都在**：
-芯片若真复位了，D+ 上拉会掉、Windows 毫秒级就会看到断开。所以那 33 秒是
-“芯片还活着但控制台已经关了”（`console_shutdown()` 在 `plat_reboot()` 第一句），
+**“两个看门狗周期”是巧合，而且是第二次误导。** `stall_probe.py` 同时盯 UART0 输出、
+Windows 里的 CDC 设备节点、以及往那个节点发 `uptime` 有没有回应。慢轮次里 **CDC 节点
+整整 33 秒都在**：芯片若真复位了，D+ 上拉会掉、Windows 毫秒级就会看到断开。所以那
+33 秒是“芯片还活着但控制台已经关了”（`console_shutdown()` 在 `plat_reboot()` 第一句），
 不是“启动被清掉两次”。
+
+这一条后来是直接量出来的：在 `plat_reboot()` 里插一句 `for (;;) ;`（看门狗已 armed、
+没有任何 `wdt_feed()`）再跑两次，两次都是 **33.8 s 后被复位**。也就是说这块板子
+**一次挂死的清场时间就是 ~33.5 s**，不是 16.78 s——`0x00ffffff` µs 这个算术恰好凑成
+两倍，把两次排查都引到“两次启动”上。至于为什么是两倍（有效 tick 不是 1 MHz，还是有
+一步重新装了计时器），没有继续追；重要的是**任何挂死在这块板子上都要等 33 秒才回来**，
+所以判据不能只看“最后它回来了”。
 
 **根因。** `drivers/usb/rp2350rv/usb_cdc.c`：
 
@@ -5160,7 +5167,7 @@ FIFO flush；另外 `plat_reboot()` 置 `g_rebooting`，`plat_console_flush()` �
 uptime 0.31 s。卡片 `docs/acceptance/2026-11-20-rv32-reboot-stall.md`。
 
 **留下的仪表**（都是 diag-only，release 时间线不变）：`.noinit` 环形启动日志，只在
-**上一轮没走到 shell** 时打印，正常启动一个字节都不多说；`plat_boot_mark(n)` 是
+**上一轮没走到 shell** 时打印，正常启动一个字节都不多说；`plat_boot_stage(n)` 是
 `kernel/main.c` 的弱钩子，在 `kmain()` 各阶段之间打点，端口有环形日志就记、没有就
 什么都不做；`scripts/rp2350/stall_probe.py` 是双通道观察重启的工具。
 

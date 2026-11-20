@@ -1943,7 +1943,7 @@ int plat_start_cpu(int id)
  * never drains and a peripheral clock that stopped, and both are visible in
  * those registers.
  *
- * Diag-only: four stores and three reads per phase perturb the very boot they
+ * Diag-only: seven stores and six reads per phase perturb the very boot they
  * measure (the stall went from about 1 boot in 4 to 8 of 8 when six stores
  * were added), so a release image keeps the original timing. */
 typedef struct {
@@ -1952,11 +1952,21 @@ typedef struct {
     uint32_t clk_hz;        /* g_clk_hz - the clock the divisor came from  */
     uint32_t baud_div;      /* IBRD/FBRD packed: what was actually written */
     uint32_t sys_sel;       /* CLOCKS.CLK_SYS_SELECTED                     */
+    uint32_t peri_sel;      /* CLOCKS.CLK_PERI_SELECTED - the one that     */
+                            /* matters when nothing reaches the wire       */
     uint32_t tim;           /* mtime in ms - turns the ring into a timeline */
 } boot_step_t;
 
 #define BOOT_LOG_N               128u
 #define CLK_PERI_SELECTED_OFFSET  0x50u
+
+/* The two phase codes that mean "this boot ended where it was supposed to".
+ * BOOT_PHASE_SHELL is plat_boot_stage(11): the shell is up and the tick has
+ * been verified.  BOOT_PHASE_REBOOT_ROM is written by plat_reboot() after the
+ * other hart is parked and immediately before asking the ROM for a reset.
+ * See boot_log_dump() for why the dump keys off these. */
+#define BOOT_PHASE_SHELL          0x2bu
+#define BOOT_PHASE_REBOOT_ROM     0x63u
 
 TOS_NOINIT static boot_step_t g_boot_log[BOOT_LOG_N];
 TOS_NOINIT static uint32_t g_boot_log_wr;
@@ -1982,33 +1992,66 @@ static void boot_step(uint32_t phase)
     if (phase == 1u)
         g_boot_seq++;
     e = &g_boot_log[g_boot_log_wr & (BOOT_LOG_N - 1u)];
-    e->phase    = (phase & 0xffu) | (g_boot_seq << 8);
-    e->fr       = mmio_read32(RP_UART_FR);
-    e->clk_hz   = g_clk_hz;
-    e->baud_div = ((mmio_read32(RP_UART_IBRD) & 0xffffu) << 16) |
-                  (mmio_read32(RP_UART_FBRD) & 0x3fu);
-    e->sys_sel  = mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET);
-    e->tim      = (uint32_t)(mtime_read() / 1000ull);
+    e->phase = (phase & 0xffu) | (g_boot_seq << 8);
+    if (phase < 2u) {
+        /* Phase 1 is entered before clocks_init(), and clk_peri is gated at
+         * that point: this file's own note at the top of plat_board_early()
+         * says touching UART0/IO_BANK0/PADS with that clock off stalls the
+         * bus.  Recording the phase is a plain SRAM store and is safe; the
+         * register reads are not, so phases before the clock tree is up
+         * record zeros and nothing else. */
+        e->fr = e->clk_hz = e->baud_div = 0u;
+        e->sys_sel = e->peri_sel = 0u;
+    } else {
+        e->fr       = mmio_read32(RP_UART_FR);
+        e->clk_hz   = g_clk_hz;
+        e->baud_div = ((mmio_read32(RP_UART_IBRD) & 0xffffu) << 16) |
+                      (mmio_read32(RP_UART_FBRD) & 0x3fu);
+        e->sys_sel  = mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET);
+        e->peri_sel = mmio_read32(CLOCKS_BASE + CLK_PERI_SELECTED_OFFSET);
+    }
+    e->tim = (uint32_t)(mtime_read() / 1000ull);
     g_boot_log_wr++;
 }
 
 /* Print where the *previous* boot stopped, one line per step.
  *
  * Only the previous boot: anything older has been reported already, and
- * repeating it on every boot would cost a second at 115200 baud.  When that
- * boot reached the shell there is nothing to say, so the normal case prints
- * nothing at all - this only speaks when a boot died. */
+ * repeating it on every boot would cost a second at 115200 baud.
+ *
+ * When to stay quiet is the whole design question.  An earlier version
+ * skipped the dump whenever the previous boot had reached process_start_shell(),
+ * which quietly threw away the one case the dump exists for: `reboot` is
+ * issued *from* a running shell, so every reboot cycle "reached the shell" and
+ * the reboot markers themselves were never printed.  The rule is now about how
+ * the boot *ended*:
+ *
+ *   last phase == 0x63   asked the ROM for a reset - the documented exit after
+ *                        a successful `reboot`, nothing to report
+ *   last phase == 0x2b   still sitting at the prompt when the machine stopped
+ *                        (power pulled, or a reset from outside) - also nothing
+ *                        to report
+ *   anything else        it stopped somewhere it was not meant to stop
+ *
+ * A wedge inside plat_reboot() lands here too: it writes 0x60 (entered) and
+ * then dies before 0x63, so the next boot prints the trail and the last line
+ * says where.  That is exactly the 2026-11-20 deadlock.
+ *
+ * The gap that remains: a boot that launched the shell and whose shell never
+ * managed to print its prompt looks identical to one sitting happily at it,
+ * because the prompt is printed from user space and no kernel-side marker can
+ * see it.  Closing that would need a syscall from msh; the tick self-check
+ * line that runs before process_start_shell() covers most of it. */
 static void boot_log_dump(void)
 {
-    uint32_t prev;
+    uint32_t prev, last = 0;
+    int shown = 0;
 
     if (g_boot_log_magic != BOOT_LOG_MAGIC || g_boot_seq == 0u)
         return;
     prev = g_boot_seq - 1u;
     uint32_t n = g_boot_log_wr < BOOT_LOG_N ? g_boot_log_wr : BOOT_LOG_N;
     uint32_t first = g_boot_log_wr - n;
-    uint32_t shown = 0;
-    int reached_shell = 0;
 
     for (uint32_t i = first; i < g_boot_log_wr; i++) {
         const boot_step_t *e = &g_boot_log[i & (BOOT_LOG_N - 1u)];
@@ -2016,15 +2059,18 @@ static void boot_log_dump(void)
         if ((e->phase >> 8) != prev)
             continue;
         shown++;
-        if ((e->phase & 0x7fu) == 0x2bu)
-            reached_shell = 1;
+        last = e->phase & 0xffu;
     }
-    if (!shown || reached_shell)
+    if (!shown)
+        return;
+    if (last == BOOT_PHASE_REBOOT_ROM || last == BOOT_PHASE_SHELL)
         return;
 
     early_puts("[L] previous boot b");
     early_put_hex(prev);
-    early_puts(" stopped:/r/n");
+    early_puts(" stopped after ph=");
+    early_put_hex(last);
+    early_puts("\r\n");
     for (uint32_t i = first; i < g_boot_log_wr; i++) {
         const boot_step_t *e = &g_boot_log[i & (BOOT_LOG_N - 1u)];
 
@@ -2042,6 +2088,8 @@ static void boot_log_dump(void)
         early_put_hex(e->baud_div & 0x3fu);
         early_puts(" sys=");
         early_put_hex(e->sys_sel);
+        early_puts(" peri=");
+        early_put_hex(e->peri_sel);
         early_puts(" t=");
         early_put_hex(e->tim);
         early_puts("\r\n");
@@ -2051,9 +2099,9 @@ static void boot_log_dump(void)
 
 /* Called from kmain() (kernel/main.c) between its stages.  The ring above
  * covers this port's own early boot; these extend it across the rest of the
- * boot, which is where the `reboot` stall was finally pinned down (the last
- * mark written before the machine went silent was the ring's 0x84, i.e. the
- * return from usb_critical_enter() inside usb_cdc_flush()). */
+ * boot, which is where the `reboot` stall was pinned down: the last mark
+ * before the machine went silent came from inside usb_cdc_flush(), and the
+ * next call in that function was the one that took the second lock. */
 void plat_boot_stage(uint32_t n)
 {
     boot_step(0x20u + n);
@@ -2252,11 +2300,12 @@ static void rv_stop_other_hart(void)
 
 void plat_reboot(void)
 {
-    /* 0x60..0x62: which step of the reset eats the time.  `reboot` sometimes
-     * leaves the board silent for 33.5 s before the chip actually drops, and
-     * console_shutdown() has already stopped every other channel by then, so
-     * these three marks are the only witness.  They land in the .noinit ring
-     * and are printed by the next boot's dump. */
+    /* 0x60..0x64: which step of the reset eats the time.  `reboot` once left
+     * the board silent for 33.5 s before the chip actually dropped (a
+     * lock-order deadlock, HISTORY 85), and console_shutdown() has already
+     * stopped every other channel by then, so these marks are the only
+     * witness.  They land in the .noinit ring, and the next boot's dump prints
+     * them precisely because the run stops short of 0x63. */
     BOOT_PHASE(0x60u);              /* entered                                */
     g_rebooting = 1;
     console_shutdown();
