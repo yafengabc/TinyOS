@@ -145,6 +145,17 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    ③ 预 tick 比稳态慢 1.8×（4.8 vs 2.7 µs）。11-19 那次挂死**仍未解释**，不得以
    “预算太大”结案。卡片：`docs/acceptance/2026-11-20-pre-tick-usb-pump-cost.md`。
 
+   **2026-11-20 复现尝试（#29 仍不关）**：带符号镜像（`TOS_KEEP_SYMS=1`）、UART0
+   刷机前开抓、CDC 节点 + shell 应答双通道看（新工具
+   `scripts/rp2350/pump_repro.py`）。① 40 000 次紧泵：`[C] polls=40000/40000,
+   us=108677`，CDC/shell 正常，20/20 重启（0.28–0.29 s）；② 完全去掉等待：
+   **没有 trap**，UART0 上没有 `mcause=0x3`，CDC/shell 正常，20/20 重启
+   （0.18–0.19 s）。差异必须记住：本次板子是 Pico 2 而非 11-19 的 ATK 板，
+   11-19 镜像未提交且锁序 bug 今天才修（`695db5b`），GP0 线当时是坏的，
+   且本次没做拔电冷启动。按 #29 边界**保留等待**，风险继续挂这里；
+   要删等待需先补两块板各 20 次冷启动。卡片：
+   `docs/acceptance/2026-11-20-rv32-tight-pump-no-repro.md`。
+
    **2026-11-20 那个 trap 解释清楚了**：`mcause=0x3` 是 **breakpoint = `ebreak`**，
    与访存错误无关。全镜像一共 47 条 `ebreak`，**全部**在 TinyUSB 的
    `TU_ASSERT/TU_VERIFY`（`tusb_verify.h:87` 的 `__asm("ebreak\n")`）里，
