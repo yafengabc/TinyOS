@@ -1,5 +1,7 @@
 # 2026-11-20 预 tick USB 泵单价（issue #29）
 
+> **再更正（约 17:45）**：ATK-DNRP2350AM 接台后第一次无等待启动就复现了 `mcause=0x3`（`usbd_control_xfer_cb` 的 `TU_ASSERT`），等待已恢复、#29 已重开。本卡描述的是当时的结论，已被 `docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md` 推翻。
+
 > 后续（同日 17:28）：用户决定按 Pico 2 证据删除等待并关闭 #29。本文测到的
 > `bootpump:`/`[C] usbwait` 仪表随等待一起撤掉，数据作为历史证据保留。
 

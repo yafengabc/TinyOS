@@ -529,21 +529,39 @@ void usb_cdc_irq_enable(void)
 #endif
 }
 
-/* No boot-time enumeration wait on this port any more.
+/* Boot-time enumeration wait.
  *
- * The old sequence pumped usb_cdc_poll() up to 1 730 780 times - measured
- * 8.3 s with no host - because a 2026-11-19 ATK-DNRP2350AM first boot trapped
- * just after the shell prompt (mcause=0x3).  On the current tree that trap
- * never reproduced: a symbol-bearing no-wait image survived 28 complete cold
- * boots on the Pico 2, 20 warm reboots and the post-flash boot with zero
- * mcause/ebreak.  The controller is still pumped from IRQ 14, the 1 ms tick
- * and the idle loop, so dropping this only removes the pre-tick delay.
- * Evidence: docs/acceptance/2026-11-20-rv32-nowait-cold-start-20.md. */
+ * Restored on 2026-11-20 after the ATK-DNRP2350AM reproduced the 2026-11-19
+ * trap with the wait removed: mcause=0x3 (ebreak), mepc=0x10016362 in
+ * TinyUSB's usbd_control_xfer_cb, at TU_ASSERT(0 == xferred_bytes), with
+ * ra=0x10015820 in tud_task_ext.  A Pico 2 survived 28 complete cold boots
+ * without the wait, so that evidence was not portable across boards.
+ *
+ * The loop is a bound, not a delay: it exits as soon as tud_mounted().  Its
+ * clock-derived upper bound was measured at 1 730 780 iterations = 8.3 s with
+ * no host and ~0.35 s / ~72 000 polls with one.  Do not remove it without a
+ * trap-free run on BOTH RP2350 RV32 boards; see
+ * docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md. */
+static void usb_cdc_wait(uint32_t clk_hz)
+{
+    uint64_t spins;
+
+    if (!g_hw_ready)
+        return;
+    spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
+    for (uint64_t i = 0; i < spins && !tud_mounted(); i++) {
+        usb_cdc_poll();
+        for (volatile int j = 0; j < 40; j++)
+            ;
+    }
+}
+
 void usb_cdc_console_init(uint32_t clk_hz)
 {
-    (void)clk_hz;                  /* no clock-derived wait left on this port */
     usb_cdc_init();
     plat_boot_stage(0x3au);
+    usb_cdc_wait(clk_hz);
+    plat_boot_stage(0x3bu);
 }
 
 /* ---- event pump --------------------------------------------------------- */

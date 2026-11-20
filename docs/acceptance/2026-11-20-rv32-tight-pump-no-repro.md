@@ -1,5 +1,7 @@
 # 2026-11-20 #29 复现尝试：紧泵与去等待都没有复现（WONTFIX 证据链）
 
+> **再更正（约 17:45）**：ATK-DNRP2350AM 接台后第一次无等待启动就复现了 `mcause=0x3`（`usbd_control_xfer_cb` 的 `TU_ASSERT`），等待已恢复、#29 已重开。本卡描述的是当时的结论，已被 `docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md` 推翻。
+
 > 后续（同日 17:28）：用户选择接受 Pico 2 证据，`usb_cdc_wait()` 已删除、#29 已关。
 > ATK 板未验的点写进关闭说明；若以后在 ATK 复现请开新 issue。
 

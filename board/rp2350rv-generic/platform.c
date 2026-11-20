@@ -2213,10 +2213,11 @@ void plat_board_early(void)
     boot_log_dump();
 #endif
 
-    /* USB CDC shares the console with UART0.  No boot-time enumeration wait:
-     * IRQ 14, the 1 ms tick and the idle loop pump the controller.  A board
-     * with no USB cable boots on UART at full speed; a cable adds a native
-     * COM port.  The old wait cost 8.3 s with no host (#29). */
+    /* USB CDC shares the console with UART0.  The wait inside is bounded by
+     * a clock-derived iteration count (1 730 780 iterations - measured 8.3 s
+     * with no host); a host that enumerates ends it in ~0.35 s.  It was
+     * removed once on Pico 2 evidence and restored after the ATK board
+     * reproduced the TinyUSB assertion (#29). */
     usb_cdc_console_init(g_clk_hz);
     g_usb_ready = usb_cdc_hw_ready() ? 1 : 0;
     BOOT_PHASE(14u);

@@ -5264,3 +5264,34 @@ issue（省 0.11 s 启动、无主机时省 8.3 s），保守则等 ATK 板补 2
 收益：有主机时启动少 0.11 s，无主机时少 8.3 s（原先那 1 730 780 次的界）。
 历史数据留在三张卡里，不随代码删除而改写；`OPEN-ITEMS.md` 第 4 条顶部改成
 “已结案”，`ARCHITECTURE-NEXT.md` A-6 保留“折算系数必须在同一 regime 量过”的规则。
+
+## 90. 2026-11-20 ATK 板复现 `mcause=0x3`：Pico 2 的证据不具可移植性
+
+上一节 §89 按 Pico 2 的 28 次冷启动删了等待、关了 #29，并在关闭说明里写明
+「ATK 板未验」。用户随即把 ATK-DNRP2350AM 接上台（UART0=COM14、CDC=COM26），
+刷入同样删掉等待的带符号镜像，**第一次启动就复现 11-19 的症状**：CDC 不枚举、
+UART0 在 `tos> ` 之后 0 字节；但 UART0 上的 Ctrl-D 仍能踢回 BOOTSEL（tick 活着）。
+
+刷机前打开 UART0 抓到一次性现场：
+
+```text
+*** RV32 TRAP ***
+breakpoint: mcause=0x3 mepc=0x10016362 mtval=0x0
+ra=0x10015820 sp=0x200169f0 s0=0 a1=0x80000000
+```
+
+`addr2line` → `usbd_control_xfer_cb`（mepc）/ `tud_task_ext`（ra）；`objdump` 显示
+`0x10016362` 是 `li a0,0; ebreak`，对应 TinyUSB `usbd_control.c:157` 的
+`TU_ASSERT(0 == xferred_bytes)`。`a1=0x80000000` 就是状态阶段报上来的非 0 长度。
+11-19 的推断这次拿到了当前代码上的完整现场。
+
+**恢复**：Ctrl-D 回 BOOTSEL，重刷带等待的 `atk-dnr2350am-rv32-smp`，
+CDC 在 0.50 s 内出现、shell 正常、`[U] cfg=1`；`usb_cdc_wait()` 回到代码里，
+`3/260` 的界没加长。#29 重开，以「跨板差异无法定位」结案：留等待并把风险记进
+`OPEN-ITEMS.md` 第 4 条。三张旧卡的结论已在卡首标记被推翻。
+
+**方法论**：单板 20+ 次冷启动通过不等于另一块同 ISA 板也通过；跨板结论要么两块都测，
+要么在关闭说明里明确「未验」并保留原有保护。这次因为明写了未验，回退只花了一次
+重刷。为什么 ATK 触发而 Pico 2 不触发仍未定位（枚举时序 / USB 走线 / flash 容量
+都只是候选），别再靠单板证据下结论。卡片：
+`docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md`。

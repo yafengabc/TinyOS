@@ -118,10 +118,13 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
      `bootsel_poke` 那条 CDC Ctrl-D 通路在"枚举成功但 shell 不答"时仍然有效
      （2026-11-20 实测有效）。
 
-4. **Hazard3 不能照搬 ARM 的有界 pump —— 已结案（2026-11-20，#29 关闭）**：
-   **结论先读**：用户决定接受 Pico 2 证据，`usb_cdc_wait()` 已从 RV32 端口删除，
-   只为 #29 加的 `bootpump:` 仪表也一并撤掉；#29 已关。下面保留 11-19 至 11-20
-   的完整取证过程作为历史。ATK 板未验，若在那块板上复现请开新 issue。
+4. **Hazard3 不能照搬 ARM 的有界 pump —— 重开并保留等待（2026-11-20）**：
+   **结论先读**：曾按 Pico 2 的 28 次冷启动删掉等待并关 #29；ATK-DNRP2350AM
+   接台后第一次无等待启动就复现 `mcause=0x3 mepc=0x10016362`
+   （`usbd_control_xfer_cb` 的 `TU_ASSERT(0 == xferred_bytes)`），
+   等待已恢复、#29 已重开并以「跨板差异无法定位」结案。
+   卡片：`docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md`。
+   下面保留 11-19 至 11-20 的取证过程作为历史。
    原问题：把 RV32 的
    `usb_cdc_wait()` 换成 ARM 的 `USB_BOOT_PUMP`（40 000 次 `usb_cdc_poll()`）后，
    刷入即**启动挂死**——CDC 不枚举、UART 也是 0 字节，只能按 BOOTSEL 刷回。RV32 的
