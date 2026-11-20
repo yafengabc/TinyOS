@@ -14,7 +14,9 @@ enum {
     R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
     R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
     R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
-    R_BOUNDS, R_PRINTFIXN, R_MOD
+    R_BOUNDS, R_PRINTFIXN, R_MOD,
+    R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
+    R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR
 };
 
 enum {
@@ -35,6 +37,96 @@ typedef struct { int op, a, b, c, d; } RIR;
 static RIR ir[IRMAX];
 static int g[GMAX];
 static char strpool[SMAX];
+
+#define AMAX 512
+static uint8_t arena[AMAX];
+static uint8_t arena_init[AMAX];
+static int arena_size;
+
+/* Bounded string helpers: q<0 is a null string, and reads stop at the arena
+ * end even when a char array was never NUL-terminated. */
+static int arena_len(int off)
+{
+    int n = 0;
+
+    if (off < 0 || off >= arena_size)
+        return 0;
+    while (off + n < arena_size && arena[off + n])
+        n++;
+    return n;
+}
+
+static void arena_print(int off)
+{
+    int n = arena_len(off);
+    int i;
+
+    for (i = 0; i < n; i++)
+        putchar(arena[off + i]);
+}
+
+static int arena_cmp(int a, int b)
+{
+    int la = arena_len(a), lb = arena_len(b);
+    int n = la < lb ? la : lb;
+
+    for (int i = 0; i < n; i++) {
+        unsigned char ca = arena[a + i], cb = arena[b + i];
+        if (ca != cb)
+            return ca < cb ? -1 : 1;
+    }
+    return la == lb ? 0 : (la < lb ? -1 : 1);
+}
+
+static int arena_atoi(int off)
+{
+    int n = arena_len(off), i = 0, sign = 1, v = 0;
+
+    while (i < n && (arena[off + i] == ' ' || arena[off + i] == '\t'))
+        i++;
+    if (i < n && (arena[off + i] == '-' || arena[off + i] == '+')) {
+        if (arena[off + i] == '-')
+            sign = -1;
+        i++;
+    }
+    while (i < n && arena[off + i] >= '0' && arena[off + i] <= '9') {
+        v = v * 10 + (arena[off + i] - '0');
+        i++;
+    }
+    return sign * v;
+}
+
+/* strlcpy/strlcat semantics on arena offsets.  cap counts bytes. */
+static int arena_copy(int dst, int src, int cap)
+{
+    int sl = arena_len(src);
+    int n, i;
+
+    if (cap > 0 && dst >= 0 && dst < arena_size) {
+        n = sl < cap - 1 ? sl : cap - 1;
+        for (i = 0; i < n && dst + i < arena_size; i++)
+            arena[dst + i] = arena[src + i];
+        if (dst + i < arena_size)
+            arena[dst + i] = 0;
+    }
+    return sl;
+}
+
+static int arena_cat(int dst, int src, int cap)
+{
+    int dl = arena_len(dst), sl = arena_len(src);
+    int space, copy, i;
+
+    if (cap > dl + 1 && dst >= 0 && dst < arena_size) {
+        space = cap - 1 - dl;
+        copy = sl < space ? sl : space;
+        for (i = 0; i < copy && dst + dl + i < arena_size; i++)
+            arena[dst + dl + i] = arena[src + i];
+        if (dst + dl + i < arena_size)
+            arena[dst + dl + i] = 0;
+    }
+    return dl + sl;
+}
 
 static int fmul16(int a, int b)
 {
@@ -141,6 +233,7 @@ static int load_rir(const char *path)
     int fd = open(path);
     uint32_t hdr[7];
     int m, gs, ss, i, got = 0;
+    int as;
 
     if (fd < 0)
         return -1;
@@ -153,8 +246,10 @@ static int load_rir(const char *path)
     entry_pc = (int)hdr[3];
     nfunc = (int)hdr[4];
     ss = (int)hdr[5];
+    as = (int)hdr[6];
     if (m <= 0 || m > IRMAX || gs < 0 || gs > GMAX ||
-        nfunc <= 0 || nfunc > FUNCMAX || ss < 0 || ss > SMAX) {
+        nfunc <= 0 || nfunc > FUNCMAX || ss < 0 || ss > SMAX ||
+        as < 0 || as > AMAX) {
         close(fd);
         return -1;
     }
@@ -182,6 +277,17 @@ static int load_rir(const char *path)
         }
         if (rgot != ss) { close(fd); return -1; }
     }
+    arena_size = as;
+    if (as > 0) {
+        int agot = 0;
+        while (agot < as) {
+            int n = read(fd, arena_init + agot, as - agot);
+            if (n <= 0)
+                break;
+            agot += n;
+        }
+        if (agot != as) { close(fd); return -1; }
+    }
     close(fd);
     for (i = 0; i < gs; i++)
         g[i] = 0;
@@ -207,6 +313,9 @@ int main(int argc, char **argv)
     for (rep = 0; rep < reps; rep++) {
         memset(frames, 0, sizeof frames);
         memset(g, 0, sizeof g);
+        memset(arena, 0, sizeof arena);
+        if (arena_size > 0)
+            memcpy(arena, arena_init, (size_t)arena_size);
         nframe = 0;
         regs = frames[0].r;
         spillp = frames[0].spill;
@@ -226,6 +335,32 @@ int main(int argc, char **argv)
                 r[q.d] = b ? (r[q.a] % b) : 0;
                 break;
             }
+            case R_LOADB: {
+                int ix = r[q.b];
+                if (q.a < 0 || q.a >= arena_size || ix < 0 ||
+                    q.a + ix >= arena_size) {
+                    puts("arena bounds\n");
+                    return 1;
+                }
+                r[q.d] = (unsigned char)arena[q.a + ix];
+                break;
+            }
+            case R_STOREB: {
+                int ix = r[q.b];
+                if (q.a < 0 || q.a >= arena_size || ix < 0 ||
+                    q.a + ix >= arena_size) {
+                    puts("arena bounds\n");
+                    return 1;
+                }
+                arena[q.a + ix] = (unsigned char)r[q.c];
+                break;
+            }
+            case R_STRCPY: r[q.d] = arena_copy(r[q.a], r[q.b], r[q.c]); break;
+            case R_STRCAT: r[q.d] = arena_cat(r[q.a], r[q.b], r[q.c]); break;
+            case R_STRLEN: r[q.d] = arena_len(r[q.a]); break;
+            case R_STRCMP: r[q.d] = arena_cmp(r[q.a], r[q.b]); break;
+            case R_ATOI: r[q.d] = arena_atoi(r[q.a]); break;
+            case R_PRINTSTR: if (verbose) arena_print(r[q.a]); break;
             case R_LT: r[q.d] = r[q.a] < r[q.b]; break;
             case R_GT: r[q.d] = r[q.a] > r[q.b]; break;
             case R_EQ: r[q.d] = r[q.a] == r[q.b]; break;

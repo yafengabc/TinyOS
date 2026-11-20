@@ -30,6 +30,7 @@ struct Node {
     int alen;
     int stype;
     int ftype;      /* 1 = Q16.16 float literal/value */
+    int ctype;      /* 1 = char, 2 = char array, 3 = string */
     int line;
     char name[32];
     char field[32];
@@ -60,6 +61,9 @@ typedef struct {
     int is_struct;
     int is_param;   /* struct parameter: reg holds the base offset */
     int is_float;
+    int is_char;        /* char scalar, still stored in one word */
+    int is_char_array;  /* byte array in the string arena */
+    int is_string;      /* word holding a string-arena offset */
 } Sym;
 
 typedef struct {
@@ -92,15 +96,17 @@ enum {
     R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
     R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
     R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
-    R_BOUNDS, R_PRINTFIXN, R_MOD
+    R_BOUNDS, R_PRINTFIXN, R_MOD,
+    R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
+    R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR
 };
 
 typedef struct {
     char name[32];
     int nparams;
     char params[8][32];
-    int ptype[8];       /* 0 = int, -1 = float, >0 = struct type id */
-    int rtype;          /* 0 = int, 1 = float */
+    int ptype[8];       /* 0 = int, -1 = float, -2 = string, >0 = struct type id */
+    int rtype;          /* 0 = int, 1 = float, 2 = string */
     Node *body;
     int entry_pc;
 } Func;
@@ -119,6 +125,13 @@ static int tok_kind; /* 0 eof, 1 ident, 2 num, 3 punct, 4 string, 5 float */
 static int tok_num;
 static char strpool[1024];
 static int strsize;
+
+/* Mutable byte arena for char arrays and expression string literals.  Its
+ * initial contents are written after the string pool; the VM keeps both the
+ * initial image and a working copy so benchmark repetitions start clean. */
+#define ARENA_MAX 512
+static uint8_t arena[ARENA_MAX];
+static int arena_next;
 
 static Node nodes[NODE_MAX];
 static int nnode;
@@ -283,6 +296,22 @@ static void next(void)
             strpool[strsize++] = 0;
         tok_num = start;
         tok_kind = 4;
+    } else if (c == '\'') {
+        int v;
+        src_get();
+        if (src_peek(0) < 0) die("unterminated character literal");
+        v = (unsigned char)src_get();
+        if (v == '\\') {
+            int e = src_get();
+            if (e == 'n') v = '\n';
+            else if (e == 't') v = '\t';
+            else if (e == 'r') v = '\r';
+            else if (e == '0') v = 0;
+            else if (e >= 0) v = e;
+        }
+        if (src_peek(0) == '\'') src_get();
+        tok_num = v;
+        tok_kind = 2;
     } else {
         char a = (char)src_get();
         char b = (char)src_peek(0);
@@ -404,6 +433,69 @@ static Sym *sym_add_float(const char *name, int global)
     if (global)
         s->offset = gdata_next++;
     return s;
+}
+
+static int arena_reserve(int len)
+{
+    int off = arena_next;
+
+    if (len < 0 || arena_next + len > ARENA_MAX)
+        die("string data too large");
+    memset(arena + arena_next, 0, (size_t)len);
+    arena_next += len;
+    return off;
+}
+
+static Sym *sym_add_char(const char *name, int global)
+{
+    Sym *s = sym_add(name, global);
+    s->is_char = 1;
+    if (global)
+        s->offset = gdata_next++;
+    return s;
+}
+
+static Sym *sym_add_string(const char *name, int global)
+{
+    Sym *s = sym_add(name, global);
+    s->is_string = 1;
+    if (global)
+        s->offset = gdata_next++;
+    return s;
+}
+
+static Sym *sym_add_char_array(const char *name, int len, int global)
+{
+    Sym *s = sym_add(name, global);
+    s->is_char_array = 1;
+    s->alen = len;
+    s->offset = arena_reserve(len);
+    if (!global) {
+        s->reg = -1;      /* no word slot; the arena holds the bytes */
+        nlocals--;
+    }
+    return s;
+}
+
+/* Copy a literal into a reserved arena region, always NUL-terminated. */
+static void arena_set_literal(int off, int cap, int spoff)
+{
+    int len = (int)strlen(strpool + spoff);
+    int n = len < cap - 1 ? len : cap - 1;
+
+    if (cap <= 0)
+        return;
+    memcpy(arena + off, strpool + spoff, (size_t)n);
+    arena[off + n] = 0;
+}
+
+static int arena_literal(int spoff)
+{
+    int len = (int)strlen(strpool + spoff) + 1;
+    int off = arena_reserve(len);
+
+    memcpy(arena + off, strpool + spoff, (size_t)len);
+    return off;
 }
 
 static int const_lookup(const char *name, int *out)
@@ -758,6 +850,51 @@ static Node *parse_simple(int semi)
         as = assign_from_load(load, val);
         if (semi) expect(";");
         return as;
+    }
+    if (is_kw("char")) {
+        Node *n;
+        next();
+        if (tok_kind != 1) die("name expected");
+        n = node(N_DECL);
+        n->ctype = 1;
+        strncpy(n->name, tok, sizeof(n->name) - 1);
+        next();
+        if (accept("[")) {
+            if (tok_kind != 2) die("array length expected");
+            n->alen = tok_num;
+            n->ctype = 2;
+            next();
+            expect("]");
+        }
+        if (accept("=")) {
+            if (n->ctype == 2) {
+                if (tok_kind != 4) die("string initializer expected");
+                {
+                    Node *lit = node(N_STR);
+                    lit->val = tok_num;
+                    lit->alen = (int)strlen(strpool + tok_num);
+                    next();
+                    n->lhs = lit;
+                }
+            } else {
+                n->lhs = parse_expr();
+            }
+        }
+        if (semi) expect(";");
+        return n;
+    }
+    if (is_kw("string")) {
+        Node *n;
+        next();
+        if (tok_kind != 1) die("name expected");
+        n = node(N_DECL);
+        n->ctype = 3;
+        strncpy(n->name, tok, sizeof(n->name) - 1);
+        next();
+        if (accept("="))
+            n->lhs = parse_expr();
+        if (semi) expect(";");
+        return n;
     }
     if (is_kw("struct")) {
         int sid;
@@ -1169,7 +1306,10 @@ static void declare_locals(Node *n)
             declare_locals(n->body);
             break;
         case N_DECL:
-            if (n->stype > 0) {
+            if (n->ctype == 2) sym_add_char_array(n->name, n->alen, 0);
+            else if (n->ctype == 3) sym_add_string(n->name, 0);
+            else if (n->ctype == 1) sym_add_char(n->name, 0);
+            else if (n->stype > 0) {
                 if (n->alen > 0) sym_add_struct_array(n->name, n->stype, n->alen, 0);
                 else sym_add_struct(n->name, n->stype, 0);
             }
@@ -1210,8 +1350,10 @@ static int node_float_hint(Node *n)
 {
     if (!n) return 0;
     if (n->kind == N_NUM) return n->ftype ? 1 : 0;
+    if (n->kind == N_STR) return -1;
     if (n->kind == N_VAR) {
         Sym *s = sym_find(n->name);
+        if (s && (s->is_string || s->is_char_array)) return -1;
         return (s && s->is_float) ? 1 : 0;
     }
     if (n->kind == N_INDEX || n->kind == N_MEMBER) return 0;
@@ -1228,6 +1370,8 @@ static int node_float_hint(Node *n)
 static int coerce_to(int v, int from, int to)
 {
     int d;
+    if (from == 2 || to == 2)
+        die("string used as a number");
     if (from == to) return v;
     d = new_temp();
     emit(to ? R_SHLI : R_SHRI, v, 16, 0, d);
@@ -1247,6 +1391,34 @@ static int gen_value(Node *n)
                 return d;
             }
             die_node(n, "unknown variable");
+        }
+        if (s->is_char_array) {
+            int d = new_temp();
+            emit(R_CONST, s->offset, 0, 0, d);
+            last_type = 2;
+            return d;
+        }
+        if (s->is_string) {
+            int d;
+            if (!s->global) {
+                last_type = 2;
+                return s->reg;
+            }
+            d = new_temp();
+            emit(R_LOADG, s->offset, 0, 0, d);
+            last_type = 2;
+            return d;
+        }
+        if (s->is_char) {
+            int d;
+            if (!s->global) {
+                last_type = 0;
+                return s->reg;
+            }
+            d = new_temp();
+            emit(R_LOADG, s->offset, 0, 0, d);
+            last_type = 0;
+            return d;
         }
         if (s->is_array) die_node(n, "array used as value");
         if (s->is_struct) {
@@ -1282,6 +1454,59 @@ static int struct_base(Sym *s, int idx)
         emit(R_ADDI, t, s->offset, 0, t);
         return t;
     }
+}
+
+static Node *arg_at(Node *a, int i)
+{
+    while (a && i-- > 0)
+        a = a->next;
+    return a;
+}
+
+static int arg_count(Node *a)
+{
+    int n = 0;
+    for (; a; a = a->next)
+        n++;
+    return n;
+}
+
+/* Emit a value that denotes an arena offset: a literal, a char array, a
+ * string variable, or a call that returns a string. */
+static int gen_string_value(Node *n)
+{
+    Sym *s;
+    int v;
+
+    if (n->kind == N_STR) {
+        v = new_temp();
+        emit(R_CONST, arena_literal(n->val), 0, 0, v);
+        last_type = 2;
+        return v;
+    }
+    if (n->kind == N_VAR) {
+        s = sym_find(n->name);
+        if (s && s->is_char_array) {
+            v = new_temp();
+            emit(R_CONST, s->offset, 0, 0, v);
+            last_type = 2;
+            return v;
+        }
+        if (s && s->is_string) {
+            if (!s->global) {
+                last_type = 2;
+                return s->reg;
+            }
+            v = new_temp();
+            emit(R_LOADG, s->offset, 0, 0, v);
+            last_type = 2;
+            return v;
+        }
+    }
+    v = gen_value(n);
+    if (last_type != 2)
+        die_node(n, "string expression expected");
+    return v;
 }
 
 static int arith_op(int kind)
@@ -1324,6 +1549,27 @@ static int gen_expr_into(Node *n, int dst)
             }
             die_node(n, "unknown variable");
         }
+        if (s->is_char_array) {
+            emit(R_CONST, s->offset, 0, 0, dst);
+            last_type = 2;
+            return dst;
+        }
+        if (s->is_string) {
+            if (s->global)
+                emit(R_LOADG, s->offset, 0, 0, dst);
+            else if (s->reg != dst)
+                emit(R_MOV, s->reg, 0, 0, dst);
+            last_type = 2;
+            return dst;
+        }
+        if (s->is_char) {
+            if (s->global)
+                emit(R_LOADG, s->offset, 0, 0, dst);
+            else if (s->reg != dst)
+                emit(R_MOV, s->reg, 0, 0, dst);
+            last_type = 0;
+            return dst;
+        }
         if (s->is_array) die_node(n, "array used as value");
         if (s->is_struct) die_node(n, "struct used as scalar");
         if (s->global) {
@@ -1335,7 +1581,16 @@ static int gen_expr_into(Node *n, int dst)
         return dst;
     case N_INDEX:
         s = sym_find(n->name);
-        if (!s || !s->is_array) die_node(n, "array expected");
+        if (!s) die_node(n, "unknown array");
+        if (s->is_char_array) {
+            a = gen_value(n->lhs);
+            a = coerce_to(a, last_type, 0);
+            emit(R_BOUNDS, a, s->alen, 0, 0);
+            emit(R_LOADB, s->offset, a, 0, dst);
+            last_type = 0;
+            return dst;
+        }
+        if (!s->is_array) die_node(n, "array expected");
         if (s->is_struct) die_node(n, "struct array element needs a field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
@@ -1417,6 +1672,19 @@ static int gen_expr_into(Node *n, int dst)
             last_type = 0;
             return 0;
         }
+        if (s->is_char_array)
+            die_node(n, "char array assignment; use strlcpy");
+        if (s->is_string) {
+            a = gen_value(n->lhs);
+            if (last_type != 2)
+                die_node(n, "string value expected");
+            if (s->global)
+                emit(R_STOREG, s->offset, a, 0, 0);
+            else if (a != s->reg)
+                emit(R_MOV, a, 0, 0, s->reg);
+            last_type = 2;
+            return a;
+        }
         if (s->is_array) die_node(n, "scalar assignment expected");
         if (s->global) {
             a = gen_value(n->lhs);
@@ -1437,7 +1705,18 @@ static int gen_expr_into(Node *n, int dst)
         return s->reg;
     case N_ASSIGN_INDEX:
         s = sym_find(n->name);
-        if (!s || !s->is_array) die_node(n, "array assignment expected");
+        if (!s) die_node(n, "unknown array");
+        if (s->is_char_array) {
+            a = gen_value(n->lhs);
+            a = coerce_to(a, last_type, 0);
+            emit(R_BOUNDS, a, s->alen, 0, 0);
+            b = gen_value(n->rhs);
+            b = coerce_to(b, last_type, 0);
+            emit(R_STOREB, s->offset, a, b, 0);
+            last_type = 0;
+            return b;
+        }
+        if (!s->is_array) die_node(n, "array assignment expected");
         if (s->is_struct) die_node(n, "struct array element needs a field");
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
@@ -1452,10 +1731,43 @@ static int gen_expr_into(Node *n, int dst)
         return a;
     case N_PRINT:
         a = gen_value(n->lhs);
-        emit(last_type ? R_PRINTFIX : R_PRINT, a, 0, 0, 0);
+        if (last_type == 2)
+            emit(R_PRINTSTR, a, 0, 0, 0);
+        else
+            emit(last_type ? R_PRINTFIX : R_PRINT, a, 0, 0, 0);
         return a;
     case N_CALL: {
         int argc = 0, fid, nid, nargs, hasret;
+
+        if (!strcmp(n->name, "strlen") || !strcmp(n->name, "atoi") ||
+            !strcmp(n->name, "strcmp") || !strcmp(n->name, "strlcpy") ||
+            !strcmp(n->name, "strlcat")) {
+            int want = !strcmp(n->name, "strcmp") ? 2 :
+                       (!strcmp(n->name, "strlcpy") || !strcmp(n->name, "strlcat")) ? 3 : 1;
+            if (arg_count(n->args) != want)
+                die_node(n, "wrong string builtin argument count");
+            if (!strcmp(n->name, "strlen")) {
+                int s = gen_string_value(arg_at(n->args, 0));
+                emit(R_STRLEN, s, 0, 0, dst);
+            } else if (!strcmp(n->name, "atoi")) {
+                int s = gen_string_value(arg_at(n->args, 0));
+                emit(R_ATOI, s, 0, 0, dst);
+            } else if (!strcmp(n->name, "strcmp")) {
+                int s0 = gen_string_value(arg_at(n->args, 0));
+                int s1 = gen_string_value(arg_at(n->args, 1));
+                emit(R_STRCMP, s0, s1, 0, dst);
+            } else {
+                int d = gen_string_value(arg_at(n->args, 0));
+                int s = gen_string_value(arg_at(n->args, 1));
+                int cap = gen_value(arg_at(n->args, 2));
+                cap = coerce_to(cap, last_type, 0);
+                emit(!strcmp(n->name, "strlcpy") ? R_STRCPY : R_STRCAT,
+                     d, s, cap, dst);
+            }
+            last_type = 0;
+            return dst;
+        }
+
         nid = native_lookup(n->name, &nargs, &hasret);
         if (nid >= 0) {
             int a0 = -1, a1 = -1, a2 = -1;
@@ -1476,12 +1788,17 @@ static int gen_expr_into(Node *n, int dst)
         fid = func_lookup(n->name);
         if (fid < 0) die_node(n, "unknown function");
         for (Node *p = n->args; p; p = p->next) {
-            int v, to;
+            int v, to, pt;
             if (argc >= funcs[fid].nparams) die_node(n, "too many arguments");
-            to = funcs[fid].ptype[argc] < 0 ? 1 :
-                 funcs[fid].ptype[argc] > 0 ? -1 : 0;
+            pt = funcs[fid].ptype[argc];
             v = gen_value(p);
-            if (to >= 0) v = coerce_to(v, last_type, to);
+            if (pt == -2) {
+                if (last_type != 2)
+                    die_node(p, "string argument expected");
+            } else {
+                to = pt < 0 ? 1 : pt > 0 ? -1 : 0;
+                if (to >= 0) v = coerce_to(v, last_type, to);
+            }
             emit(R_ARG, argc++, v, 0, 0);
         }
         if (argc != funcs[fid].nparams) die_node(n, "wrong argument count");
@@ -1489,10 +1806,15 @@ static int gen_expr_into(Node *n, int dst)
         last_type = funcs[fid].rtype;
         return dst;
     }
-    case N_STR:
+    case N_STR: {
+        int off = arena_literal(n->val);
+        emit(R_CONST, off, 0, 0, dst);
+        last_type = 2;
+        return dst;
+    }
     case N_PRINTF:
     case N_PUTS:
-        die_node(n, "string/printf not allowed in expression");
+        die_node(n, "printf/puts not allowed in expression");
     case N_ADD: case N_SUB: case N_MUL: case N_DIV: case N_MOD:
     case N_LT: case N_GT: case N_EQ:
         /* Destination hint removes the temporary + MOV around assignments.
@@ -1525,6 +1847,8 @@ static int gen_expr_into(Node *n, int dst)
             b = gen_value(n->rhs);
             {
                 int bt = last_type;
+                if (at == 2 || bt == 2)
+                    die_node(n, "string in arithmetic");
                 if (at || bt) {
                     if (n->kind == N_MOD)
                         die_node(n, "% needs integer operands");
@@ -1702,7 +2026,21 @@ static void gen_stmt(Node *n)
     case N_DECL: {
         Sym *s = sym_find(n->name);
         if (!s) die("declaration lost");
-        if (!s->is_array && !s->is_struct)
+        if (n->ctype == 2) {
+            if (n->lhs) {
+                int d = new_temp();
+                int src = gen_string_value(n->lhs);
+                int cap = new_temp();
+                int tmp = new_temp();
+                emit(R_CONST, s->offset, 0, 0, d);
+                emit(R_CONST, n->alen, 0, 0, cap);
+                emit(R_STRCPY, d, src, cap, tmp);
+            }
+            break;
+        }
+        if (n->ctype == 3)
+            emit(R_CONST, -1, 0, 0, s->reg);   /* null string */
+        else if (!s->is_array && !s->is_struct)
             emit(R_CONST, 0, 0, 0, s->reg);
         if (n->lhs) {
             Node tmp;
@@ -1731,7 +2069,12 @@ static void gen_stmt(Node *n)
     }
     case N_RETURN: {
         int v = gen_value(n->lhs);
-        v = coerce_to(v, last_type, cur_rtype);
+        if (cur_rtype == 2) {
+            if (last_type != 2)
+                die_node(n, "string return value expected");
+        } else {
+            v = coerce_to(v, last_type, cur_rtype);
+        }
         emit(R_RET, v, 0, 0, 0);
         break;
     }
@@ -1778,6 +2121,10 @@ static void gen_stmt(Node *n)
             } else if (conv == 'd' || conv == 'i' || conv == 'u') {
                 v = coerce_to(v, last_type, 0);
                 emit(R_PRINTV, v, 0, 0, 0);
+            } else if (conv == 's') {
+                if (last_type != 2)
+                    die_node(n->args, "printf %s needs a string");
+                emit(R_PRINTSTR, v, 0, 0, 0);
             } else {
                 die("printf: unsupported conversion");
             }
@@ -1957,6 +2304,15 @@ static int rir_uses(const RIR *q, int *f)
     case R_FMUL: case R_FDIV: f[0] = 0; f[1] = 1; return 2;
     case R_PRINTFIX: case R_PRINTFIXV: f[0] = 0; return 1;
     case R_BOUNDS: case R_PRINTFIXN: f[0] = 0; return 1;
+    case R_STRLEN: case R_ATOI: case R_PRINTSTR:
+        f[0] = 0; return 1;
+    case R_LOADB:
+        f[0] = 1; return 1;
+    case R_STOREB: f[0] = 1; f[1] = 2; return 2;
+    case R_STRCMP:
+        f[0] = 0; f[1] = 1; return 2;
+    case R_STRCPY: case R_STRCAT:
+        f[0] = 0; f[1] = 1; f[2] = 2; return 3;
     default: return 0;
     }
 }
@@ -1977,6 +2333,8 @@ static int rir_dest_field(const RIR *q)
     case R_LOADD:
         return 3;   /* d */
     case R_SHLI: case R_SHRI: case R_FMUL: case R_FDIV:
+    case R_LOADB: case R_STRCPY: case R_STRCAT:
+    case R_STRLEN: case R_STRCMP: case R_ATOI:
         return 3;   /* d */
     default:
         return -1;
@@ -1985,6 +2343,8 @@ static int rir_dest_field(const RIR *q)
 
 /* Straight-line dead-store elimination.  Keeps indexes stable by replacing
  * the instruction with NOP instead of removing it. */
+static int rir_pure(int op);
+
 static void peephole(void)
 {
     char target[IR_MAX];
@@ -2004,6 +2364,7 @@ static void peephole(void)
         int v, f[3], n;
 
         if (d < 0) continue;
+        if (!rir_pure(ir[i].op)) continue;   /* never drop stores/calls/prints */
         v = rir_get(&ir[i], d);
         if (v < 0 || v >= VREG_MAX || target[i]) continue;
 
@@ -2038,6 +2399,8 @@ static int rir_pure(int op)
     case R_SHLI: case R_SHRI:
     case R_LOADG: case R_LOADL:
     case R_FMUL: case R_FDIV:
+    case R_LOADA: case R_LOADD: case R_LOADB:
+    case R_STRLEN: case R_STRCMP: case R_ATOI:
         return 1;
     default:
         return 0;
@@ -2268,6 +2631,8 @@ static int out_finish(int mainid)
         write_u32(out_fd, funcs[i].entry_pc);
     if (strsize > 0)
         write_all(out_fd, strpool, strsize);
+    if (arena_next > 0)
+        write_all(out_fd, arena, arena_next);
 
     memset(h, 0, sizeof h);
     h[0] = 'R'; h[1] = 'I'; h[2] = 'R'; h[3] = '2';
@@ -2276,7 +2641,7 @@ static int out_finish(int mainid)
     put32(h + 12, funcs[mainid].entry_pc);
     put32(h + 16, nfuncs);
     put32(h + 20, strsize);
-    put32(h + 24, 0);
+    put32(h + 24, arena_next);
 
     if (lseek(out_fd, 0, 0) < 0)
         return -1;
@@ -2319,6 +2684,119 @@ static void skip_balanced(void)
         }
     }
     next();
+}
+
+/* Parse and emit one function.  The return type and name are already
+ * consumed; the current token is '('.  In pass 1 the body is skipped. */
+static void parse_function(int pass, int rtype, const char *name, int *fi)
+{
+    Func *f;
+    Node *body;
+
+    expect("(");
+    if (pass == 1) {
+        if (nfuncs >= FUNC_MAX) die("too many functions");
+        f = &funcs[nfuncs++];
+        memset(f, 0, sizeof *f);
+        f->rtype = rtype;
+        strncpy(f->name, name, sizeof(f->name) - 1);
+    } else {
+        if (*fi >= nfuncs) die("function table mismatch");
+        f = &funcs[*fi];
+        if (strcmp(f->name, name)) die("function order mismatch");
+        f->nparams = 0;
+    }
+
+    if (!accept(")")) {
+        for (;;) {
+            int ptype = 0, pi, char_param = 0, char_ptr = 0;
+            if (is_kw("string")) {
+                next();
+                ptype = -2;
+            } else if (is_kw("char")) {
+                next();
+                char_param = 1;
+                if (accept("*")) {
+                    char_ptr = 1;
+                    ptype = -2;
+                }
+            } else if (is_kw("struct")) {
+                next();
+                if (tok_kind != 1) die("struct type expected");
+                ptype = struct_lookup(tok);
+                if (ptype <= 0) die("unknown struct type");
+                next();
+            } else if (is_kw("float")) {
+                next();
+                ptype = -1;
+            } else {
+                if (!is_kw("int")) die("int parameter expected");
+                next();
+            }
+            if (tok_kind != 1) die("parameter name expected");
+            if (f->nparams >= 8) die("too many parameters");
+            pi = f->nparams++;
+            strncpy(f->params[pi], tok, 32 - 1);
+            f->ptype[pi] = ptype;
+            next();
+            if (char_param && !char_ptr && accept("[")) {
+                expect("]");
+                f->ptype[pi] = -2;
+            }
+            if (accept(")")) break;
+            expect(",");
+        }
+    }
+
+    if (pass == 1) {
+        skip_balanced();
+        return;
+    }
+
+    nnode = 0;
+    body = parse_stmt();
+
+    nsyms = nglobals;
+    nlocals = 0;
+    nir = 0;
+    for (int p = 0; p < f->nparams; p++) {
+        Sym *ps = sym_add(f->params[p], 0);
+        if (f->ptype[p] > 0) {
+            ps->is_struct = 1;
+            ps->stype = f->ptype[p];
+            ps->is_param = 1;
+        } else if (f->ptype[p] == -2) {
+            ps->is_string = 1;
+        } else if (f->ptype[p] < 0) {
+            ps->is_float = 1;
+        }
+    }
+    declare_locals(body);
+    vreg = nlocals;
+    cur_rtype = f->rtype;
+    gen_stmt(body);
+    {
+        int z = new_temp();
+        emit(R_CONST, 0, 0, 0, z);
+        emit(R_RET, z, 0, 0, 0);
+    }
+    peephole();
+    dce();
+    regalloc_one(*fi);
+    f->entry_pc = out_nir;
+
+    for (int pc = 0; pc < nir; pc++) {
+        RIR q = ir[pc];
+        if (q.op == R_JMP)
+            q.a += out_nir;
+        else if (q.op == R_JZ)
+            q.b += out_nir;
+        else if (branch_is_fused(q.op))
+            q.c += out_nir;
+        write_ir(&q);
+    }
+    out_nir += nir;
+    (*fi)++;
 }
 
 /* pass 1: struct/global layout + function signatures, bodies skipped.
@@ -2414,13 +2892,57 @@ static void parse_program(int pass)
             continue;
         }
 
-        {
-            int is_f = 0;
+        if (is_kw("char") || is_kw("string")) {
+            int is_str = is_kw("string");
             char name[32];
-            Func *f;
-            Node *body;
+            int len = 0, has_init = 0, lit = 0;
 
-            if (is_kw("float")) { is_f = 1; next(); }
+            next();
+            if (tok_kind != 1) die("variable name expected");
+            strncpy(name, tok, sizeof(name) - 1);
+            name[sizeof(name) - 1] = 0;
+            next();
+            if (!is_str && accept("[")) {
+                if (tok_kind != 2) die("char array length expected");
+                len = tok_num;
+                next();
+                expect("]");
+            }
+            if (tok_kind == 3 && !strcmp(tok, "(")) {
+                if (!is_str)
+                    die("char return type is not supported");
+                parse_function(pass, 2, name, &fi);
+                continue;
+            }
+            if (accept("=")) {
+                if (tok_kind != 4) die("string initializer expected");
+                lit = tok_num;
+                has_init = 1;
+                next();
+            }
+            expect(";");
+            if (pass == 1) {
+                if (is_str) {
+                    if (has_init) die("global string initializer unsupported");
+                    sym_add_string(name, 1);
+                } else if (len) {
+                    Sym *s = sym_add_char_array(name, len, 1);
+                    if (has_init)
+                        arena_set_literal(s->offset, len, lit);
+                } else {
+                    if (has_init) die("global char initializer unsupported");
+                    sym_add_char(name, 1);
+                }
+            }
+            continue;
+        }
+
+        {
+            int rtype = 0;
+            char name[32];
+
+            if (is_kw("float")) { rtype = 1; next(); }
+            else if (is_kw("string")) { rtype = 2; next(); }
             else {
                 if (!is_kw("int")) die("int expected");
                 next();
@@ -2430,102 +2952,15 @@ static void parse_program(int pass)
             name[sizeof(name) - 1] = 0;
             next();
 
-            if (accept("(")) {
-                if (pass == 1) {
-                    if (nfuncs >= FUNC_MAX) die("too many functions");
-                    f = &funcs[nfuncs++];
-                    memset(f, 0, sizeof *f);
-                    f->rtype = is_f;
-                    strncpy(f->name, name, sizeof(f->name) - 1);
-                } else {
-                    if (fi >= nfuncs) die("function table mismatch");
-                    f = &funcs[fi];
-                    if (strcmp(f->name, name)) die("function order mismatch");
-                    f->nparams = 0;
-                }
-
-                if (!accept(")")) {
-                    for (;;) {
-                        int ptype = 0, pi;
-                        if (is_kw("struct")) {
-                            next();
-                            if (tok_kind != 1) die("struct type expected");
-                            ptype = struct_lookup(tok);
-                            if (ptype <= 0) die("unknown struct type");
-                            next();
-                        } else if (is_kw("float")) {
-                            next();
-                            ptype = -1;
-                        } else {
-                            if (!is_kw("int")) die("int parameter expected");
-                            next();
-                        }
-                        if (tok_kind != 1) die("parameter name expected");
-                        if (f->nparams >= 8) die("too many parameters");
-                        pi = f->nparams++;
-                        strncpy(f->params[pi], tok, 32 - 1);
-                        f->ptype[pi] = ptype;
-                        next();
-                        if (accept(")")) break;
-                        expect(",");
-                    }
-                }
-
-                if (pass == 1) {
-                    skip_balanced();
-                    continue;
-                }
-
-                nnode = 0;
-                body = parse_stmt();
-
-                nsyms = nglobals;
-                nlocals = 0;
-                nir = 0;
-                for (int p = 0; p < f->nparams; p++) {
-                    Sym *ps = sym_add(f->params[p], 0);
-                    if (f->ptype[p] > 0) {
-                        ps->is_struct = 1;
-                        ps->stype = f->ptype[p];
-                        ps->is_param = 1;
-                    } else if (f->ptype[p] < 0) {
-                        ps->is_float = 1;
-                    }
-                }
-                declare_locals(body);
-                vreg = nlocals;
-                cur_rtype = f->rtype;
-                gen_stmt(body);
-                {
-                    int z = new_temp();
-                    emit(R_CONST, 0, 0, 0, z);
-                    emit(R_RET, z, 0, 0, 0);
-                }
-                peephole();
-                dce();
-                regalloc_one(fi);
-                f->entry_pc = out_nir;
-
-                for (int pc = 0; pc < nir; pc++) {
-                    RIR q = ir[pc];
-                    if (q.op == R_JMP)
-                        q.a += out_nir;
-                    else if (q.op == R_JZ)
-                        q.b += out_nir;
-                    else if (branch_is_fused(q.op))
-                        q.c += out_nir;
-                    write_ir(&q);
-                }
-                out_nir += nir;
-                fi++;
-                if (tok_kind == 0) break;
+            if (tok_kind == 3 && !strcmp(tok, "(")) {
+                parse_function(pass, rtype, name, &fi);
                 continue;
             }
 
             /* global int/float variable */
             if (accept("[")) {
                 int len;
-                if (is_f) die("float arrays not supported");
+                if (rtype) die("float arrays not supported");
                 if (tok_kind != 2) die("global array length expected");
                 len = tok_num;
                 next();
@@ -2533,7 +2968,7 @@ static void parse_program(int pass)
                 if (pass == 1)
                     sym_add_array(name, len, 1);
             } else if (pass == 1) {
-                if (is_f) sym_add_float(name, 1);
+                if (rtype) sym_add_float(name, 1);
                 else sym_add_global(name);
             }
             expect(";");
