@@ -536,7 +536,13 @@ void usb_cdc_irq_enable(void)
  * USB interrupt - usb_cdc_poll() *is* the controller's event pump - and a
  * first boot with it removed trapped right after the shell prompt on
  * ATK-DNRP2350AM Hazard3 (mcause=0x3 at 0x10013d0a, 2026-11-19).  Until that
- * is understood, this port keeps the old sequence. */
+ * is understood, this port keeps the old sequence.
+ *
+ * pre-tick, in the C6/A-6 sense: interrupts are still masked here, so
+ * plat_ticks() would never advance and a deadline built from it would be a
+ * deadline that never expires.  The bound is therefore an iteration count
+ * folded from clk_hz (3/260 of it, i.e. roughly 1.5 s at the measured
+ * 2.66 us per poll), not a literal - see docs/ARCHITECTURE-NEXT.md A-6. */
 static void usb_cdc_wait(uint32_t clk_hz)
 {
     uint64_t spins;

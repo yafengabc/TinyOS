@@ -236,16 +236,34 @@ static void *rp_rom_func(uint32_t code)
  * A JEDEC part answering 0xff/0x00 reads as a missing or floating bus and
  * returns 0 (mirrors the ESP32-C3 port's flash_detect_from_rom()). */
 
-/* Bound for the two QMI FIFO waits below.  A real exchange needs a handful of
- * cycles; this is roughly 20 ms at 150 MHz - far beyond any legitimate
- * transfer, short enough to be a timeout instead of a hang. */
-#define QMI_SPIN_LIMIT  1000000u
+/* Bound for the two QMI FIFO waits below: about 20 ms, folded from the clock
+ * the core is actually running at rather than written as a literal.
+ *
+ * Both halves of that matter.  C6/A-6 in docs/ARCHITECTURE-NEXT.md says early
+ * (pre-tick) waits keep an iteration cap but must scale it, and names a bare
+ * 1e6 as the thing not to do - this is that case.  And the scaling has to be
+ * done from a RAM global: this function runs inside the XIP-off window, so
+ * plat_cpu_hz() is a *flash* call and using it here would hang exactly where
+ * the bound is supposed to help.  g_clk_hz is .data, copied to SRAM by _start,
+ * so reading it is safe. */
+/* Tentative definition: the real one, with its initialiser, is further down
+ * with the clock code.  This is the same object, declared early because the
+ * QMI helper sits above it and must not reach into flash for a frequency. */
+static uint32_t g_clk_hz;
+
+static RAMFUNC uint32_t qmi_spin_limit(void)
+{
+    uint32_t hz = g_clk_hz ? g_clk_hz : 12000000u;
+
+    return (hz / 3000u) * 20u;      /* ~3 cycles per poll, ~20 ms of them */
+}
 
 static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
 {
     uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
     uint32_t id, spins = 0;
+    const uint32_t bound = qmi_spin_limit();
 
     flash_init_boot2_copyout();
     g_rom_connect();
@@ -268,16 +286,16 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
          * happen is the watchdog resetting the chip 16.78 s later, which
          * reads exactly like "the boot wedged for no reason".  Give up,
          * restore XIP, and report the capacity as unknown. */
-        for (spins = 0; spins < QMI_SPIN_LIMIT; spins++)
+        for (spins = 0; spins < bound; spins++)
             if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_TXFULL))
                 break;
-        if (spins == QMI_SPIN_LIMIT)
+        if (spins == bound)
             break;
         mmio_write32(QMI_DIRECT_TX, tx[i]);
-        for (spins = 0; spins < QMI_SPIN_LIMIT; spins++)
+        for (spins = 0; spins < bound; spins++)
             if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY))
                 break;
-        if (spins == QMI_SPIN_LIMIT)
+        if (spins == bound)
             break;
         rx[i] = (uint8_t)mmio_read32(QMI_DIRECT_RX);
     }
@@ -288,7 +306,7 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
     /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID.
      * A timed-out exchange leaves id at 0, i.e. "unknown", which the caller
      * already treats as "fall back to board.conf". */
-    id = (spins == QMI_SPIN_LIMIT)
+    id = (spins == bound)
          ? 0u
          : (((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3]);
     if (id == 0u || id == 0xffffffu)

@@ -47,7 +47,7 @@ def read_until_prompt(port, window):
     return None, buf
 
 
-def command(port, text, window, tries=2):
+def command(port, text, window, tries=2, want=None):
     """Send a line, return (answered, text received).
 
     Retried once on no answer.  The first command written immediately after a
@@ -63,7 +63,9 @@ def command(port, text, window, tries=2):
         port.write((text + "\r").encode())
         dt, buf = read_until_prompt(port, window)
         text_seen = buf.decode("utf-8", "replace")
-        if dt is not None:
+        ok = dt is not None and (want is None or want.search(text_seen.encode(
+            "utf-8", "replace")) is not None)
+        if ok:
             return True, text_seen
         time.sleep(0.2)
     return False, text_seen
@@ -102,15 +104,14 @@ def main():
 
         uptime = None
         if dt is not None:
-            ok, text = command(uart, "uptime", 6.0)
+            # `want` makes the retry cover a half-delivered answer too, not
+            # just silence: the prompt can arrive while the line above it is
+            # still in flight, and a run that retries only on "no prompt at
+            # all" still loses a cycle to that.  A wedged shell fails all three.
+            ok, text = command(uart, "uptime", 6.0, tries=3, want=UPTIME_RE)
             m = UPTIME_RE.search(text.encode("utf-8", "replace"))
             if m:
                 uptime = float(m.group(1))
-            elif not ok:
-                # No answer at all: say so in the row instead of silently
-                # leaving it blank, so a real hang and a lost byte look
-                # different in the CSV.
-                uptime = None
 
         fresh = uptime is not None and uptime <= args.max
         verdict = "PASS" if (not slow and fresh) else "FAIL"
