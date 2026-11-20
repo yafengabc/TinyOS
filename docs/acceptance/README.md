@@ -132,4 +132,4 @@
 | 2026-11-20 | csc3 比较/逻辑/一元运算符 | `12c6314` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 ops 覆盖 `!=`/`<=`/`>=`/`&&`/`||`/`!`/一元 `-` 与短路，`result=3 ir=183`；T4 `NOT RUN` | [csc3 ops](2026-11-20-csc3-ops-esp32c3-12c6314.md) |
 | 2026-11-20 | csc3 Q16.16 折叠 + 复制传播 + NOP 压缩 | `d54fa8d` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 floatfold 3.0/1.5/1.75、copy 10/10/7；IR 34→22、14→9、185→165；T4 `NOT RUN` | [csc3 opt](2026-11-20-csc3-opt-esp32c3-d54fa8d.md) |
 | 2026-11-20 | csc3 嵌套 struct + struct 返回 | `5e5edd8` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；板载 nest result=21 ir=147，sret result=17 ir=118；T4 `NOT RUN` | [csc3 structs](2026-11-20-csc3-structs-esp32c3-5e5edd8.md) |
-| 2026-11-20 | goc32 `irc` RIR2→RV32 原生 ELF | `e0d53b0` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；17 个测试全部原生编译，板载 fold/str/sa3/nest/sret/fmt/hw 等与 rirvm 一致；T4 `NOT RUN` | [irc native](2026-11-20-irc-native-rv32-e0d53b0.md) |
+| 2026-11-20 | goc32 `irc` RIR2→RV32 原生 ELF | `04e67e2` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；17 个测试全部原生编译，板载 fold/str/sa3/nest/sret/fmt/hw 等与 rirvm 一致；T4 `NOT RUN` | [irc native](2026-11-20-irc-native-rv32-04e67e2.md) |
