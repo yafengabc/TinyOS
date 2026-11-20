@@ -41,7 +41,7 @@ enum {
     N_NUM, N_VAR, N_ADD, N_SUB, N_MUL, N_DIV,
     N_LT, N_GT, N_EQ, N_ASSIGN, N_DECL, N_RETURN,
     N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR, N_DO,
-    N_BREAK, N_CONTINUE,
+    N_BREAK, N_CONTINUE, N_SWITCH, N_CASE,
     N_INDEX, N_ASSIGN_INDEX, N_PRINT, N_CALL,
     N_STR, N_PRINTF, N_PUTS,
     N_MEMBER, N_ASSIGN_MEMBER,
@@ -122,6 +122,13 @@ static Node nodes[NODE_MAX];
 static int nnode;
 static Sym syms[SYM_MAX];
 static int nsyms;
+#define CONST_MAX 64
+typedef struct {
+    char name[32];
+    int val;
+} Const;
+static Const consts[CONST_MAX];
+static int nconsts;
 static int nlocals;
 static int nglobals;
 static int gdata_next;
@@ -380,6 +387,25 @@ static Sym *sym_add_float(const char *name, int global)
     return s;
 }
 
+static int const_lookup(const char *name, int *out)
+{
+    for (int i = nconsts - 1; i >= 0; i--)
+        if (!strcmp(consts[i].name, name)) {
+            *out = consts[i].val;
+            return 1;
+        }
+    return 0;
+}
+
+static void const_add(const char *name, int val)
+{
+    if (nconsts >= CONST_MAX) die("too many enum constants");
+    memset(&consts[nconsts], 0, sizeof consts[nconsts]);
+    strncpy(consts[nconsts].name, name, sizeof(consts[nconsts].name) - 1);
+    consts[nconsts].val = val;
+    nconsts++;
+}
+
 static int new_temp(void)
 {
     if (vreg >= VREG_MAX) die("out of virtual registers (spill not implemented)");
@@ -521,6 +547,26 @@ static Node *parse_rel(void)
 }
 
 static Node *parse_expr(void) { return parse_rel(); }
+
+static int parse_const_expr(void)
+{
+    int sign = 1;
+    int v = 0;
+
+    if (accept("-"))
+        sign = -1;
+    if (tok_kind == 2) {
+        v = tok_num;
+        next();
+    } else if (tok_kind == 1) {
+        if (!const_lookup(tok, &v))
+            die("constant expected");
+        next();
+    } else {
+        die("constant expected");
+    }
+    return sign * v;
+}
 
 /* ---- lvalue helpers for compound assignment and ++/-- ------------------ */
 
@@ -948,6 +994,44 @@ static Node *parse_stmt(void)
         next(); expect(";");
         return node(N_CONTINUE);
     }
+    if (is_kw("switch")) {
+        Node *n = node(N_SWITCH);
+        Node **tail;
+        next(); expect("(");
+        n->lhs = parse_expr();
+        expect(")");
+        expect("{");
+        tail = &n->body;
+        while (!accept("}")) {
+            Node *c;
+            int isdef = 0, cval = 0;
+            Node **st;
+            if (is_kw("case")) {
+                next();
+                cval = parse_const_expr();
+                expect(":");
+            } else if (is_kw("default")) {
+                next();
+                expect(":");
+                isdef = 1;
+            } else {
+                die("case/default expected");
+            }
+            c = node(N_CASE);
+            c->val = cval;
+            c->stype = isdef;
+            st = &c->body;
+            while (!is_kw("case") && !is_kw("default") &&
+                   !(tok_kind == 3 && !strcmp(tok, "}"))) {
+                if (tok_kind == 0) die("unterminated switch");
+                *st = parse_stmt();
+                st = &(*st)->next;
+            }
+            *tail = c;
+            tail = &c->next;
+        }
+        return n;
+    }
     if (is_kw("do")) {
         Node *n = node(N_DO);
         next();
@@ -1046,6 +1130,10 @@ static void declare_locals(Node *n)
         case N_DO:
             declare_locals(n->body);
             break;
+        case N_SWITCH:
+            for (Node *c = n->body; c; c = c->next)
+                declare_locals(c->body);
+            break;
         case N_FOR:
             declare_locals(n->lhs);
             declare_locals(n->rhs);
@@ -1093,7 +1181,16 @@ static int gen_value(Node *n)
 {
     if (n->kind == N_VAR) {
         Sym *s = sym_find(n->name);
-        if (!s) die("unknown variable");
+        if (!s) {
+            int v;
+            if (const_lookup(n->name, &v)) {
+                int d = new_temp();
+                emit(R_CONST, v, 0, 0, d);
+                last_type = 0;
+                return d;
+            }
+            die("unknown variable");
+        }
         if (s->is_array) die("array used as value");
         if (s->is_struct) {
             int d;
@@ -1160,7 +1257,15 @@ static int gen_expr_into(Node *n, int dst)
         return dst;
     case N_VAR:
         s = sym_find(n->name);
-        if (!s) die("unknown variable");
+        if (!s) {
+            int v;
+            if (const_lookup(n->name, &v)) {
+                emit(R_CONST, v, 0, 0, dst);
+                last_type = 0;
+                return dst;
+            }
+            die("unknown variable");
+        }
         if (s->is_array) die("array used as value");
         if (s->is_struct) die("struct used as scalar");
         if (s->global) {
@@ -1436,8 +1541,54 @@ typedef struct {
     int cont_target;
 } LoopCtx;
 
+typedef struct {
+    int brk[32], nbrk;
+} SwitchCtx;
+
+typedef struct {
+    int is_switch;
+    int idx;
+} BreakRef;
+
 static LoopCtx loops[LOOP_MAX];
 static int nloop;
+static SwitchCtx switches[8];
+static int nswitch;
+static BreakRef brk_stack[LOOP_MAX + 8];
+static int nbrk_stack;
+
+static void brk_push(int is_switch, int idx)
+{
+    if (nbrk_stack >= (int)(sizeof brk_stack / sizeof brk_stack[0]))
+        die("break contexts too deep");
+    brk_stack[nbrk_stack].is_switch = is_switch;
+    brk_stack[nbrk_stack].idx = idx;
+    nbrk_stack++;
+}
+
+static void brk_pop(void)
+{
+    if (nbrk_stack > 0)
+        nbrk_stack--;
+}
+
+static void switch_push(void)
+{
+    if (nswitch >= (int)(sizeof switches / sizeof switches[0]))
+        die("switch nested too deeply");
+    switches[nswitch].nbrk = 0;
+    brk_push(1, nswitch);
+    nswitch++;
+}
+
+static void switch_end(int break_target)
+{
+    SwitchCtx *s = &switches[nswitch - 1];
+    for (int i = 0; i < s->nbrk; i++)
+        ir[s->brk[i]].a = break_target;
+    nswitch--;
+    brk_pop();
+}
 
 static void loop_push(int cont_target)
 {
@@ -1445,6 +1596,7 @@ static void loop_push(int cont_target)
     loops[nloop].nbrk = 0;
     loops[nloop].ncont = 0;
     loops[nloop].cont_target = cont_target;
+    brk_push(0, nloop);
     nloop++;
 }
 
@@ -1473,6 +1625,7 @@ static void loop_end(int break_target)
     for (int i = 0; i < c->ncont; i++)
         ir[c->cont[i]].a = (c->cont_target >= 0) ? c->cont_target : break_target;
     nloop--;
+    brk_pop();
 }
 
 static void gen_stmt(Node *n)
@@ -1502,8 +1655,13 @@ static void gen_stmt(Node *n)
         break;
     }
     case N_BREAK: {
-        if (nloop == 0) die("break outside loop");
-        loop_jump(loops[nloop - 1].brk, &loops[nloop - 1].nbrk);
+        BreakRef *r;
+        if (nbrk_stack == 0) die("break outside loop/switch");
+        r = &brk_stack[nbrk_stack - 1];
+        if (r->is_switch)
+            loop_jump(switches[r->idx].brk, &switches[r->idx].nbrk);
+        else
+            loop_jump(loops[r->idx].brk, &loops[r->idx].nbrk);
         break;
     }
     case N_CONTINUE: {
@@ -1631,6 +1789,47 @@ static void gen_stmt(Node *n)
         set_branch_target(br, nir);
         loop_end(nir);
         vreg = save;
+        break;
+    }
+    case N_SWITCH: {
+        Node *cases[64];
+        int labels[64], jumps[64];
+        int ncase = 0, defidx = -1, defjump = -1, nomatch, exit;
+        int v = gen_value(n->lhs);
+        v = coerce_to(v, last_type, 0);
+
+        for (Node *c = n->body; c; c = c->next) {
+            if (ncase >= 64) die("too many switch cases");
+            cases[ncase] = c;
+            if (c->stype) defidx = ncase;
+            ncase++;
+        }
+        for (int i = 0; i < ncase; i++) {
+            if (cases[i]->stype)
+                jumps[i] = -1;
+            else
+                jumps[i] = emit(R_JEQ_I, v, cases[i]->val, 0, 0);
+        }
+        if (defidx >= 0)
+            defjump = emit(R_JMP, 0, 0, 0, 0);
+        nomatch = emit(R_JMP, 0, 0, 0, 0);
+
+        switch_push();
+        for (int i = 0; i < ncase; i++) {
+            labels[i] = nir;
+            if (cases[i]->stype)
+                ir[defjump].a = labels[i];
+            else
+                ir[jumps[i]].c = labels[i];
+            for (Node *s = cases[i]->body; s; s = s->next) {
+                int sv = vreg;
+                gen_stmt(s);
+                vreg = sv;
+            }
+        }
+        exit = nir;
+        ir[nomatch].a = exit;
+        switch_end(exit);
         break;
     }
     default:
@@ -2027,6 +2226,32 @@ static void parse_program(int pass)
     for (;;) {
         if (tok_kind == 0)
             break;
+
+        if (is_kw("enum")) {
+            int val = 0;
+            next();
+            if (tok_kind == 1) next();       /* optional tag */
+            expect("{");
+            for (;;) {
+                char cname[32];
+                if (accept("}")) break;
+                if (tok_kind != 1) die("enum name expected");
+                strncpy(cname, tok, sizeof(cname) - 1);
+                cname[sizeof(cname) - 1] = 0;
+                next();
+                if (accept("="))
+                    val = parse_const_expr();
+                if (pass == 1)
+                    const_add(cname, val);
+                val++;
+                if (accept(","))
+                    continue;
+                expect("}");
+                break;
+            }
+            expect(";");
+            continue;
+        }
 
         if (is_kw("struct")) {
             char sname[32], vname[32];
