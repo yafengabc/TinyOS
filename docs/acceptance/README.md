@@ -117,3 +117,4 @@
 | 2026-11-20 | csc + pvm 脚本栈（改名；py/avm/rvm 排除） | `9b0ae91` | host + 18 目标 + QEMU 3 | T0/T1/T2 PASS；Pico2/Pico/ATK 真机 `NOT RUN` | [host/QEMU](2026-11-20-scripting-host-qemu-9b0ae91.md) |
 | 2026-11-20 | csc + pvm 脚本栈（C3 8K） | `9b0ae91` | ESP32-C3 COM4 + 8K profile | T3 PASS；csc 100 KiB 窗口；`/bin` 无 py | [C3](2026-11-20-scripting-c3-9b0ae91.md) |
 | 2026-11-20 | RV32 SMP `reboot` 34 s 静默：锁序反转死锁 | 见 OPEN-ITEMS 6 | Pico 2 RV32 SMP（COM27/COM19） | T1–T7 PASS：46/46 次 0.50–0.58 s；闸门 10/10；ARM `NOT RUN`（不涉及，端口无此代码） | [reboot stall](2026-11-20-rv32-reboot-stall.md) |
+| 2026-11-20 | csc3 + rirvm 寄存器 IR 实验对（`[features] csc3`） | `ade9db4` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；csc3 100 KiB / rirvm 28 KiB；默认 8K 仍只有 csc+pvm；T4 `NOT RUN` | [csc3](2026-11-20-csc3-rirvm-integration-esp32c3-ade9db4.md) |
