@@ -114,17 +114,20 @@ static int pc_label_for(int pc)
     int l;
     if (pc < 0 || pc >= PC_MAX)
         die("pc out of range");
-    if (pc_label[pc] >= 0) {
-        if (emit_pass == 2 && !label_seen[pc_label[pc]]) {
+    if (pc_label[pc] != PC_LABEL_NONE) {
+        int lbl = (int)pc_label[pc];
+        if (emit_pass == 2 && !label_seen[lbl]) {
             l = alloc_label();
-            label_seen[pc_label[pc]] = 1;
-            if (l != pc_label[pc])
+            label_seen[lbl] = 1;
+            if (l != lbl)
                 die("label order mismatch");
         }
-        return pc_label[pc];
+        return lbl;
     }
     l = alloc_label();
-    pc_label[pc] = l;
+    if (l >= (int)PC_LABEL_NONE)
+        die("too many labels");
+    pc_label[pc] = (uint16_t)l;
     return l;
 }
 
@@ -1296,7 +1299,9 @@ void rcc_arch_init_labels(void)
 
 int rcc_arch_machine(void) { return 243; }   /* EM_RISCV */
 uint32_t rcc_arch_flags(void) { return 0; }
+int rcc_arch_labels(void) { return label_next; }
 
 #else
 typedef int rcc_rv32_backend_not_selected;
+int rcc_arch_labels(void) { return 0; }
 #endif

@@ -11,16 +11,19 @@
 TOS_STACK(16 * 1024);
 
 #ifdef __riscv
-#define RIR_MAX   16384
-#define TEXT_MAX  24576
-#define LABEL_MAX 768
+#define RIR_MAX   40960
+#define TEXT_MAX  49152
+#define LABEL_MAX 4096
+#define PC_MAX    2048
+#define FUNC_MAX  256
 #else
-#define RIR_MAX   65536
-#define TEXT_MAX  65536
-#define LABEL_MAX 2048
+#define RIR_MAX   262144
+#define TEXT_MAX  262144
+#define LABEL_MAX 16384
+#define PC_MAX    16384
+#define FUNC_MAX  1024
 #endif
-#define PC_MAX    1024
-#define FUNC_MAX  32
+#define PC_LABEL_NONE 0xFFFFu
 #define TEXT_OFF  0x100
 
 enum {
@@ -64,7 +67,7 @@ static uint8_t label_seen[LABEL_MAX];
 static int label_next;
 static int label_total;
 static int label_base;
-static int pc_label[PC_MAX];
+static uint16_t pc_label[PC_MAX];
 static int func_label[FUNC_MAX];
 
 static void die(const char *s)
@@ -205,7 +208,7 @@ static void analyze(void)
         }
     }
     for (i = 0; i < PC_MAX; i++)
-        pc_label[i] = -1;
+        pc_label[i] = PC_LABEL_NONE;
     for (i = 0; i < FUNC_MAX; i++)
         func_label[i] = -1;
 }
@@ -447,7 +450,9 @@ static void generate(void)
     putint(out_len);
     puts(" elf, ");
     putint(blen + 28);
-    puts(" tos\n");
+    puts(" tos, ");
+    putint(rcc_arch_labels());
+    puts(" labels\n");
 }
 
 int main(int argc, char **argv)

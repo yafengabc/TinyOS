@@ -127,7 +127,7 @@ x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
 只能在原生路径验证。流程分两个仓库：
 
 ```sh
-# 1. tinyos-script：生成 RIR2 和 build/<name>.tos（当前 37 个用例）
+# 1. tinyos-script：生成 RIR2 和 build/<name>.tos（40 个程序用例）
 python tools/test.py
 
 # 2. TinyOS：把要跑的 .tos 放进 files.local/bin/。files/ 是受版本控制的静态
@@ -144,13 +144,16 @@ go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 2
 
 注意：
 
-- qemu-virt 的 ramdisk 是 512 KiB（`ramdisk_sectors = 1024`），37 个 `.tos` 约
-  141 KiB 装不下；一次 10–15 个，分批重建并冒烟。
+- qemu-virt 的 ramdisk 是 512 KiB（`ramdisk_sectors = 1024`），40 个 `.tos` 约
+  200 KiB 装不下；一次 10–15 个，分批重建并冒烟。
 - 原生镜像只打印程序自己的输出；`rvm` 末尾的 `result=... ir=...` 不会出现，
   比对时先去掉这一行。
-- 板上 `csc` 每函数只有 128 个 AST 节点（`NODE_MAX`），整个程序 256 条 IR；
-  几十条语句的 `main` 会报 `AST full`。这类用例由宿主 `csc` 生成 RIR2，
-  板上只跑 `rcc`。见 `OPEN-ITEMS.md` §12。
+- 板上 `csc` 的函数表是 256（`FUNC_MAX`），单函数仍只有 128 个 AST 节点、
+  256 条 IR；几十条语句的 `main` 会报 `AST full`。这类用例由宿主 `csc` 生成
+  RIR2，板上只跑 `rcc`。见 `OPEN-ITEMS.md` §12。
+- 板上 `rcc`：RIR2 ≤ 40 KiB（约 2000 IR）、4096 个标签、text ≤ 48 KiB；
+  C3/rv32 的窗口是 120 KiB。`tests/bigir.c`（1436 IR / 2062 标签）是这套
+  上限的回归用例，`tests/hugeir.c`（2948 IR）只在宿主跑。
 - `bloop3` / `sieve3` / `deep 3` 在 TCG 下超过 10 s，`-commandwait-ms` 要给够。
 
 ## 5. T3：真机

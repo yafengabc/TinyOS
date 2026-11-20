@@ -348,29 +348,36 @@ PSRAM 本身还在 §7 的"先不做"里，但**形态和升级门槛先记下�
 关闭条件：三项各一条实机记录（命令 + 输出或波形），写进 `docs/acceptance/`。
 跟踪：issue #26（已按三步清单写好，谁在板边 5 分钟能关）。
 
-## 12. rcc / RV32 原生路径的能力边界（2026-11-20）
+## 12. rcc / RV32 原生路径的能力边界（2026-11-21）
 
-RV32 原生链路 `csc -> rvm -> rcc -> ELF` 已在 QEMU rv32 和 C3 上跑通 37 个用例
-（`docs/acceptance/2026-11-20-rv32-native-suite-rv32-0ae04d7.md`）。下面几条是**已知边界**，
-不是回归；写下来免得下次当成 bug 重新查。
+RV32 原生链路 `csc -> rvm -> rcc -> ELF` 已在 QEMU rv32 和 C3 上跑通 40 个程序
+用例（`docs/acceptance/2026-11-21-func-table-rv32-*.md`，前一轮见
+`2026-11-20-rv32-native-suite-rv32-0ae04d7.md`）。下面几条是**已知边界**，不是
+回归；写下来免得下次当成 bug 重新查。
 
-1. **板上 `csc` 的 AST 预算很小。** `src/csc.c` 在 `__riscv`/`__arm__` 下把
-   `NODE_MAX` 降到 128、`IR_MAX` 降到 256。节点计数按**单个函数**重置，但一个
-   几十条语句的 `main`（每次调用约 5 个节点）就会 `AST full`。用板级宏在宿主
-   实测：`bigswitch` 通过，`many25`/`many32`/`bigbody`/`bigcode` 全部
-   `AST full`。大程序现在的做法是宿主 `csc` 生成 RIR2，板上只跑 `rcc`。
-   要改就得同时看窗口大小（C3 400 KiB SRAM）和 `NODE_MAX` 的静态占用，
-   目前没有需求驱动，先记录。
+1. **`csc` 的函数表现在是 256 个，但单函数 AST 预算没变。** `src/csc.c` 用紧凑
+   签名表（`Sig` 20 B + 名字池）取代了 340 B 的 `Func`，板上 256 个函数约 11 KiB，
+   和以前 32 个函数一样大，所以 C3 的 `csc` 窗口仍是 127 KiB。限制转移到
+   **单个函数**：`NODE_MAX` 128、`IR_MAX` 256（按函数重置）。用板级宏在宿主实测：
+   `many100`（111 个函数、分 4 个组调用）通过，`many25`/`many32`/`bigbody`/
+   `bigcode`/`bigir` 仍报 `AST full`。这些用例由宿主 `csc` 生成 RIR2，板上只跑
+   `rcc`；要把它们搬上板，得把 `NODE_MAX` 提到 256~512（+15~46 KiB 窗口），
+   目前没有需求驱动。
 
-2. **`rvm` 只有 256 条 IR。** 超过它的程序（`tests/bigcode.c`，535 IR，
-   10 KiB text）在宿主无法用解释器验证，只能在 QEMU/真机跑原生镜像；期望值
-   来自宿主 C 编译。宿主测试把它单列为 native-only，并断言 IR 真的超过 256，
+2. **`rcc` 的板上上限是约 2000 IR。** C3/rv32 现在是 RIR2 ≤ 40 KiB、`PC_MAX`
+   2048、4096 个标签（实测约 1.45 标签/IR）、text ≤ 48 KiB、256 个函数；窗口从
+   72 KiB 涨到 120 KiB。宿主放宽到 RIR2 256 KiB、16384 PC/标签、1024 个函数，
+   `hugeir`（2948 IR）只在这里跑。再往上（8000+ IR）需要把 RIR2 改成按需读取、
+   标签改稀疏，属于 Stage 2，先不做。
+
+3. **`rvm` 只有 256 条 IR。** 超过它的程序（`bigcode` 535 IR、`many100` 898 IR、
+   `bigir` 1436 IR）在宿主无法用解释器验证，只能在 QEMU/真机跑原生镜像；期望值
+   来自宿主 C 编译。宿主测试把它们单列为 native-only，并断言 IR 真的超过 256，
    防止以后悄悄挪回普通表。
 
-3. **qemu-virt ramdisk 只有 512 KiB。** 37 个 `.tos` 约 141 KiB，整套一次装不下，
+4. **qemu-virt ramdisk 只有 512 KiB。** 40 个 `.tos` 约 200 KiB，整套一次装不下，
    冒烟要分批；`files.local/` 只用于本地暂存，不提交。
 
-4. **RP2350 Hazard3 的 T3 仍是 NOT RUN。** C3 已跑 `bigcode`/`many32`/`mixbig`/
-   `bigswitch`，RP2350 上同一批 RV32IM 镜像尚未上板；按 2026-11-19 的硬件策略，
-   它属于关闭条件的一部分，等板子排期。
-
+5. **RP2350 Hazard3 的 T3 仍是 NOT RUN。** C3 已跑 `many100`（板上 `csc` 111 个
+   函数 + `rcc` 1208 标签）和 `bigir`（`rcc` 2062 标签）；RP2350 上同一批 RV32IM
+   镜像尚未上板。按 2026-11-19 的硬件策略，它属于关闭条件的一部分，等板子排期。

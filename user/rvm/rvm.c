@@ -225,7 +225,7 @@ typedef struct {
 static Frame frames[NFRAME];
 static int argbuf[16];
 static int entry_pc;
-#define FUNCMAX 64
+#define FUNCMAX 256
 static int func_pc[FUNCMAX];
 static int nfunc;
 

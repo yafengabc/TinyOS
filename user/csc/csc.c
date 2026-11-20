@@ -7,7 +7,7 @@
 TOS_STACK(16 * 1024);
 
 #define SRC_MAX 8192
-#define NODE_MAX 512
+#define NODE_MAX 4096
 #define SYM_MAX 64
 #define IR_MAX 1024
 #define VREG_MAX 256
@@ -108,19 +108,37 @@ enum {
 };
 
 typedef struct {
-    char name[32];
-    int nparams;
-    char params[8][32];
-    int ptype[8];       /* 0 = int, -1 = float, -2 = string, >0 = struct type id */
-    int rtype;          /* 0 = int, 1 = float, 2 = string */
-    int rtype_struct;   /* >0 when the function returns a struct type */
-    Node *body;
+    int name_off;           /* offset into name_pool */
     int entry_pc;
-} Func;
+    signed char nparams;
+    signed char rtype;      /* 0 = int, 1 = float, 2 = string */
+    signed char rtype_struct; /* >0 when the function returns a struct type */
+    signed char ptype[8];   /* 0 = int, -1 = float, -2 = string, >0 = struct */
+} Sig;                      /* 20 bytes: 256 functions cost 5 KiB, not 85 */
 
-#define FUNC_MAX 32
-static Func funcs[FUNC_MAX];
+/* The function table is per file, not per function body: pass 2 re-reads the
+ * parameter names from the source, so only the type summary has to survive
+ * pass 1.  Storing the whole Func (340 B, 75% of it params[8][32]) capped the
+ * toolchain at 32 functions, which UFCS-style code reaches immediately. */
+#if defined(__riscv) || defined(__arm__)
+#define FUNC_MAX 256
+#define NAME_POOL 6144
+#else
+#define FUNC_MAX 1024
+#define NAME_POOL 24576
+#endif
+static Sig sigs[FUNC_MAX];
+static char name_pool[NAME_POOL];
+static int name_used;
 static int nfuncs;
+
+/* Parameter names of the function being generated (pass 2 only). */
+static char cur_params[8][32];
+
+static const char *sig_name(int i)
+{
+    return name_pool + sigs[i].name_off;
+}
 
 #define SBUF 256
 static char sbuf[SBUF];
@@ -1433,7 +1451,7 @@ static int emit(int op, int a, int b, int c, int d)
 static int func_lookup(const char *name)
 {
     for (int i = 0; i < nfuncs; i++)
-        if (!strcmp(funcs[i].name, name)) return i;
+        if (!strcmp(sig_name(i), name)) return i;
     return -1;
 }
 
@@ -1644,7 +1662,7 @@ static int node_struct_type(Node *n)
     }
     if (n->kind == N_CALL) {
         int fid = func_lookup(n->name);
-        return fid >= 0 ? funcs[fid].rtype_struct : 0;
+        return fid >= 0 ? sigs[fid].rtype_struct : 0;
     }
     return 0;
 }
@@ -1733,9 +1751,9 @@ static void emit_struct_call(int fid, Node *args, int dstbase)
 
     for (Node *p = args; p; p = p->next) {
         int v, pt;
-        if (argc >= funcs[fid].nparams)
+        if (argc >= sigs[fid].nparams)
             die_node(p, "too many arguments");
-        pt = funcs[fid].ptype[argc];
+        pt = sigs[fid].ptype[argc];
         if (pt > 0) {
             v = gen_struct_ref(p);
         } else {
@@ -1749,7 +1767,7 @@ static void emit_struct_call(int fid, Node *args, int dstbase)
         }
         emit(R_ARG, argc++, v, 0, 0);
     }
-    if (argc != funcs[fid].nparams)
+    if (argc != sigs[fid].nparams)
         die_node(args, "wrong argument count");
     emit(R_ARG, argc++, dstbase, 0, 0);
     emit(R_CALL, fid, new_temp(), argc, 0);
@@ -1921,7 +1939,7 @@ static int gen_expr_into(Node *n, int dst)
             int base = member_base(s, poff), fid, src;
             if (n->lhs->kind == N_CALL) {
                 fid = func_lookup(n->lhs->name);
-                if (fid < 0 || funcs[fid].rtype_struct != ptype)
+                if (fid < 0 || sigs[fid].rtype_struct != ptype)
                     die_node(n, "struct-returning function expected");
                 emit_struct_call(fid, n->lhs->args, base);
             } else {
@@ -1973,7 +1991,7 @@ static int gen_expr_into(Node *n, int dst)
             int fid, src;
             if (n->rhs->kind == N_CALL) {
                 fid = func_lookup(n->rhs->name);
-                if (fid < 0 || funcs[fid].rtype_struct != ptype)
+                if (fid < 0 || sigs[fid].rtype_struct != ptype)
                     die_node(n, "struct-returning function expected");
                 emit_struct_call(fid, n->rhs->args, base);
             } else {
@@ -1999,7 +2017,7 @@ static int gen_expr_into(Node *n, int dst)
             if (s->is_array) die_node(n, "struct assignment target");
             if (n->lhs->kind == N_CALL) {
                 fid = func_lookup(n->lhs->name);
-                if (fid < 0 || funcs[fid].rtype_struct != s->stype)
+                if (fid < 0 || sigs[fid].rtype_struct != s->stype)
                     die_node(n, "struct-returning function expected");
                 srcbase = s->is_param ? s->reg : new_temp();
                 if (!s->is_param)
@@ -2137,12 +2155,12 @@ static int gen_expr_into(Node *n, int dst)
         }
         fid = func_lookup(n->name);
         if (fid < 0) die_node(n, "unknown function");
-        if (funcs[fid].rtype_struct > 0)
+        if (sigs[fid].rtype_struct > 0)
             die_node(n, "struct-returning call needs an assignment target");
         for (Node *p = n->args; p; p = p->next) {
             int v, to, pt;
-            if (argc >= funcs[fid].nparams) die_node(n, "too many arguments");
-            pt = funcs[fid].ptype[argc];
+            if (argc >= sigs[fid].nparams) die_node(n, "too many arguments");
+            pt = sigs[fid].ptype[argc];
             if (pt > 0) {
                 v = gen_struct_ref(p);
             } else {
@@ -2157,9 +2175,9 @@ static int gen_expr_into(Node *n, int dst)
             }
             emit(R_ARG, argc++, v, 0, 0);
         }
-        if (argc != funcs[fid].nparams) die_node(n, "wrong argument count");
+        if (argc != sigs[fid].nparams) die_node(n, "wrong argument count");
         emit(R_CALL, fid, dst, argc, 0);
-        last_type = funcs[fid].rtype;
+        last_type = sigs[fid].rtype;
         return dst;
     }
     case N_STR: {
@@ -2478,7 +2496,7 @@ static void gen_stmt(Node *n)
         if (cur_rstruct > 0) {
             if (n->lhs->kind == N_CALL) {
                 int fid = func_lookup(n->lhs->name);
-                if (fid < 0 || funcs[fid].rtype_struct != cur_rstruct)
+                if (fid < 0 || sigs[fid].rtype_struct != cur_rstruct)
                     die_node(n, "struct-returning function expected");
                 emit_struct_call(fid, n->lhs->args, cur_ret_base);
             } else {
@@ -2953,7 +2971,7 @@ static void allocate_func(int fi, int lo, int hi)
     int order[VREG_MAX], m = 0;
     int reg_end[NPHYS];
     int *phys = func_phys, *slot = func_slot;
-    int nparams = funcs[fi].nparams + (funcs[fi].rtype_struct > 0 ? 1 : 0);
+    int nparams = sigs[fi].nparams + (sigs[fi].rtype_struct > 0 ? 1 : 0);
 
     for (int v = 0; v < VREG_MAX; v++) {
         first[v] = -1; last[v] = -1; phys[v] = -1; slot[v] = -1;
@@ -3139,7 +3157,7 @@ static int out_finish(int mainid)
     uint8_t h[OUT_HDR];
 
     for (int i = 0; i < nfuncs; i++)
-        write_u32(out_fd, funcs[i].entry_pc);
+        write_u32(out_fd, sigs[i].entry_pc);
     if (strsize > 0)
         write_all(out_fd, strpool, strsize);
     if (arena_next > 0)
@@ -3149,7 +3167,7 @@ static int out_finish(int mainid)
     h[0] = 'R'; h[1] = 'I'; h[2] = 'R'; h[3] = '2';
     put32(h + 4, out_nir);
     put32(h + 8, gdata_next);
-    put32(h + 12, funcs[mainid].entry_pc);
+    put32(h + 12, sigs[mainid].entry_pc);
     put32(h + 16, nfuncs);
     put32(h + 20, strsize);
     put32(h + 24, arena_next);
@@ -3201,21 +3219,27 @@ static void skip_balanced(void)
  * consumed; the current token is '('.  In pass 1 the body is skipped. */
 static void parse_function(int pass, int rtype, int rstruct, const char *name, int *fi)
 {
-    Func *f;
+    Sig *f;
     Node *body;
 
     expect("(");
     if (pass == 1) {
         if (nfuncs >= FUNC_MAX) die("too many functions");
-        f = &funcs[nfuncs++];
+        f = &sigs[nfuncs++];
         memset(f, 0, sizeof *f);
         f->rtype = rtype;
         f->rtype_struct = rstruct;
-        strncpy(f->name, name, sizeof(f->name) - 1);
+        {
+            int n = (int)strlen(name) + 1;
+            if (name_used + n > NAME_POOL) die("too many function names");
+            f->name_off = name_used;
+            memcpy(name_pool + name_used, name, (size_t)n);
+            name_used += n;
+        }
     } else {
         if (*fi >= nfuncs) die("function table mismatch");
-        f = &funcs[*fi];
-        if (strcmp(f->name, name)) die("function order mismatch");
+        f = &sigs[*fi];
+        if (strcmp(sig_name(*fi), name)) die("function order mismatch");
         if (f->rtype_struct != rstruct) die("function return type mismatch");
         f->nparams = 0;
     }
@@ -3249,7 +3273,7 @@ static void parse_function(int pass, int rtype, int rstruct, const char *name, i
             if (tok_kind != 1) die("parameter name expected");
             if (f->nparams >= 8) die("too many parameters");
             pi = f->nparams++;
-            strncpy(f->params[pi], tok, 32 - 1);
+            strncpy(cur_params[pi], tok, 32 - 1);
             f->ptype[pi] = ptype;
             next();
             if (char_param && !char_ptr && accept("[")) {
@@ -3273,7 +3297,7 @@ static void parse_function(int pass, int rtype, int rstruct, const char *name, i
     nlocals = 0;
     nir = 0;
     for (int p = 0; p < f->nparams; p++) {
-        Sym *ps = sym_add(f->params[p], 0);
+        Sym *ps = sym_add(cur_params[p], 0);
         if (f->ptype[p] > 0) {
             ps->is_struct = 1;
             ps->stype = f->ptype[p];
