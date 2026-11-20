@@ -1,0 +1,1645 @@
+/* csc3 prototype: AST -> RIR -> backend interface.
+ * Host prototype, not part of the TinyOS tree yet. */
+#include "lib.h"
+#include <string.h>
+#include <stdint.h>
+
+TOS_STACK(16 * 1024);
+
+#define SRC_MAX 8192
+#define NODE_MAX 512
+#define SYM_MAX 64
+#define IR_MAX 1024
+#define VREG_MAX 256
+
+#if defined(__riscv) || defined(__arm__)
+#undef SRC_MAX
+#undef NODE_MAX
+#undef IR_MAX
+#undef VREG_MAX
+#define SRC_MAX 4096
+#define NODE_MAX 128
+#define IR_MAX 256
+#define VREG_MAX 24
+#endif
+
+typedef struct Node Node;
+struct Node {
+    int kind;
+    int val;
+    int alen;
+    int stype;
+    int ftype;      /* 1 = Q16.16 float literal/value */
+    char name[32];
+    char field[32];
+    Node *lhs, *rhs;
+    Node *cond, *then, *els, *body, *next;
+    Node *args;
+};
+
+enum {
+    N_NUM, N_VAR, N_ADD, N_SUB, N_MUL, N_DIV,
+    N_LT, N_GT, N_EQ, N_ASSIGN, N_DECL, N_RETURN,
+    N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR,
+    N_INDEX, N_ASSIGN_INDEX, N_PRINT, N_CALL,
+    N_STR, N_PRINTF, N_PUTS,
+    N_MEMBER, N_ASSIGN_MEMBER
+};
+
+typedef struct {
+    char name[32];
+    int reg;
+    int global;
+    int offset;
+    int is_array;
+    int alen;
+    int stype;      /* >0 for a struct variable */
+    int is_struct;
+    int is_param;   /* struct parameter: reg holds the base offset */
+    int is_float;
+} Sym;
+
+typedef struct {
+    char name[32];
+    int nfields;
+    char fields[8][32];
+} StructType;
+
+#if defined(__riscv) || defined(__arm__)
+#define STRUCT_MAX 8
+#else
+#define STRUCT_MAX 16
+#endif
+static StructType structs[STRUCT_MAX];
+static int nstructs;
+
+typedef struct {
+    int op;
+    int a, b, c, d;
+} RIR;
+
+enum {
+    R_CONST, R_MOV, R_ADD, R_SUB, R_MUL, R_DIV,
+    R_LT, R_GT, R_EQ, R_JZ, R_JMP, R_RET, R_HALT,
+    R_LOADG, R_STOREG, R_LOADA, R_STOREA, R_PRINT,
+    R_ARG, R_CALL, R_LOADL, R_STOREL,
+    R_INC, R_DEC, R_ADDI, R_SUBI, R_MULI,
+    R_JLT, R_JGE, R_JGT, R_JLE, R_JEQ, R_JNE,
+    R_JLT_I, R_JGE_I, R_JGT_I, R_JLE_I, R_JEQ_I, R_JNE_I,
+    R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
+    R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
+    R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV
+};
+
+typedef struct {
+    char name[32];
+    int nparams;
+    char params[8][32];
+    int ptype[8];       /* 0 = int, -1 = float, >0 = struct type id */
+    int rtype;          /* 0 = int, 1 = float */
+    Node *body;
+    int entry_pc;
+} Func;
+
+#if defined(__riscv) || defined(__arm__)
+#define FUNC_MAX 16
+#else
+#define FUNC_MAX 32
+#endif
+static Func funcs[FUNC_MAX];
+static int nfuncs;
+
+static char src[SRC_MAX];
+static int src_len, pos;
+static char tok[64];
+static int tok_kind; /* 0 eof, 1 ident, 2 num, 3 punct, 4 string */
+static int tok_num;
+static char strpool[1024];
+static int strsize;
+
+static Node nodes[NODE_MAX];
+static int nnode;
+static Sym syms[SYM_MAX];
+static int nsyms;
+static int nlocals;
+static int nglobals;
+static int gdata_next;
+
+static RIR ir[IR_MAX];
+static int nir;
+static int vreg;
+static int entry_pc;
+static int last_type;
+static int cur_rtype;
+
+static void die(const char *s)
+{
+    puts("csc3: ");
+    puts(s);
+    puts("\n");
+    exit(1);
+}
+
+static void next(void)
+{
+    while (pos < src_len) {
+        char c = src[pos];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') pos++;
+        else if (c == '/' && pos + 1 < src_len && src[pos + 1] == '/') {
+            while (pos < src_len && src[pos] != '\n') pos++;
+        } else break;
+    }
+    if (pos >= src_len) { tok_kind = 0; tok[0] = 0; return; }
+    char c = src[pos];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+        int n = 0;
+        while (pos < src_len) {
+            c = src[pos];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_')) break;
+            if (n < (int)sizeof(tok) - 1) tok[n++] = c;
+            pos++;
+        }
+        tok[n] = 0; tok_kind = 1;
+    } else if (c >= '0' && c <= '9') {
+        int v = 0;
+        while (pos < src_len && src[pos] >= '0' && src[pos] <= '9')
+            v = v * 10 + (src[pos++] - '0');
+        if (pos + 1 < src_len && src[pos] == '.' &&
+            src[pos + 1] >= '0' && src[pos + 1] <= '9') {
+            int frac = 0, scale = 1, fd = 0;
+            pos++;
+            while (pos < src_len && src[pos] >= '0' && src[pos] <= '9') {
+                if (fd < 4) {
+                    frac = frac * 10 + (src[pos] - '0');
+                    scale *= 10;
+                    fd++;
+                }
+                pos++;
+            }
+            tok_num = v * 65536 + (frac * 65536 + scale / 2) / scale;
+            tok_kind = 5;
+        } else {
+            tok_num = v;
+            tok_kind = 2;
+        }
+    } else if (c == '"') {
+        int start = strsize;
+        pos++;
+        while (pos < src_len && src[pos] != '"') {
+            char ch = src[pos++];
+            if (ch == '\\' && pos < src_len) {
+                ch = src[pos++];
+                if (ch == 'n') ch = '\n';
+                else if (ch == 't') ch = '\t';
+                else if (ch == 'r') ch = '\r';
+            }
+            if (strsize < (int)sizeof(strpool) - 1)
+                strpool[strsize++] = ch;
+        }
+        if (pos < src_len) pos++;
+        if (strsize < (int)sizeof(strpool))
+            strpool[strsize++] = 0;
+        tok_num = start;
+        tok_kind = 4;
+    } else {
+        char a = src[pos++];
+        char b = pos < src_len ? src[pos] : 0;
+        if ((a == '=' || a == '!' || a == '<' || a == '>') && b == '=') {
+            tok[0] = a; tok[1] = '='; tok[2] = 0; pos++;
+        } else { tok[0] = a; tok[1] = 0; }
+        tok_kind = 3;
+    }
+}
+
+static int accept(const char *s)
+{
+    if (tok_kind == 3 && !strcmp(tok, s)) { next(); return 1; }
+    return 0;
+}
+
+static void expect(const char *s)
+{
+    if (!accept(s)) { puts("csc3: expected "); puts(s); puts("\n"); exit(1); }
+}
+
+static int is_kw(const char *s) { return tok_kind == 1 && !strcmp(tok, s); }
+
+static Node *node(int kind)
+{
+    if (nnode >= NODE_MAX) die("AST full");
+    Node *n = &nodes[nnode++];
+    memset(n, 0, sizeof *n);
+    n->kind = kind;
+    return n;
+}
+
+static Sym *sym_find(const char *name)
+{
+    /* Search newest first so locals shadow globals. */
+    for (int i = nsyms - 1; i >= 0; i--)
+        if (!strcmp(syms[i].name, name)) return &syms[i];
+    return NULL;
+}
+
+static Sym *sym_add(const char *name, int global)
+{
+    if (nsyms >= SYM_MAX) die("symbol table full");
+    Sym *s = &syms[nsyms++];
+    memset(s, 0, sizeof *s);
+    strncpy(s->name, name, sizeof(s->name) - 1);
+    s->global = global;
+    s->reg = global ? -1 : nlocals++;
+    return s;
+}
+
+static Sym *sym_add_global(const char *name)
+{
+    Sym *s = sym_add(name, 1);
+    s->offset = gdata_next++;
+    return s;
+}
+
+static Sym *sym_add_array(const char *name, int len, int is_global)
+{
+    Sym *s = sym_add(name, is_global);
+    s->is_array = 1;
+    s->alen = len;
+    s->offset = gdata_next;
+    gdata_next += len;
+    return s;
+}
+
+static int struct_lookup(const char *name)
+{
+    for (int i = 0; i < nstructs; i++)
+        if (!strcmp(structs[i].name, name)) return i + 1;
+    return 0;
+}
+
+static int struct_field(int stype, const char *name)
+{
+    if (stype <= 0 || stype > nstructs) return -1;
+    stype--;
+    for (int i = 0; i < structs[stype].nfields; i++)
+        if (!strcmp(structs[stype].fields[i], name)) return i;
+    return -1;
+}
+
+static Sym *sym_add_struct(const char *name, int stype, int global)
+{
+    Sym *s = sym_add(name, global);
+    s->is_struct = 1;
+    s->stype = stype;
+    s->offset = gdata_next;
+    gdata_next += structs[stype - 1].nfields;
+    return s;
+}
+
+static Sym *sym_add_float(const char *name, int global)
+{
+    Sym *s = sym_add(name, global);
+    s->is_float = 1;
+    if (global)
+        s->offset = gdata_next++;
+    return s;
+}
+
+static int new_temp(void)
+{
+    if (vreg >= VREG_MAX) die("out of virtual registers (spill not implemented)");
+    return vreg++;
+}
+
+static Node *parse_expr(void);
+
+static Node *parse_primary(void)
+{
+    if (tok_kind == 2) {
+        Node *n = node(N_NUM); n->val = tok_num; next(); return n;
+    }
+    if (tok_kind == 5) {
+        Node *n = node(N_NUM); n->val = tok_num; n->ftype = 1; next(); return n;
+    }
+    if (tok_kind == 4) {
+        Node *n = node(N_STR);
+        n->val = tok_num;
+        n->alen = (int)strlen(strpool + tok_num);
+        next();
+        return n;
+    }
+    if (tok_kind == 1) {
+        char name[32];
+        strncpy(name, tok, sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        next();
+        if (accept("(")) {
+            Node *n = node(N_CALL);
+            strncpy(n->name, name, sizeof(n->name) - 1);
+            if (!accept(")")) {
+                Node **p = &n->args;
+                for (;;) {
+                    *p = parse_expr();
+                    p = &(*p)->next;
+                    if (accept(")")) break;
+                    expect(",");
+                }
+            }
+            return n;
+        }
+        if (accept("[")) {
+            Node *n = node(N_INDEX);
+            strncpy(n->name, name, sizeof(n->name) - 1);
+            n->lhs = parse_expr();
+            expect("]");
+            return n;
+        }
+        if (accept(".")) {
+            char member[32];
+            if (tok_kind != 1) die("field or method name expected");
+            strncpy(member, tok, sizeof(member) - 1);
+            member[sizeof(member) - 1] = 0;
+            next();
+            if (accept("(")) {
+                Node *call = node(N_CALL);
+                Node *base = node(N_VAR);
+                Node **p = &base->next;
+                strncpy(call->name, member, sizeof(call->name) - 1);
+                strncpy(base->name, name, sizeof(base->name) - 1);
+                call->args = base;
+                if (!accept(")")) {
+                    for (;;) {
+                        *p = parse_expr();
+                        p = &(*p)->next;
+                        if (accept(")")) break;
+                        expect(",");
+                    }
+                }
+                return call;
+            }
+            Node *n = node(N_MEMBER);
+            strncpy(n->name, name, sizeof(n->name) - 1);
+            strncpy(n->field, member, sizeof(n->field) - 1);
+            return n;
+        }
+        Node *n = node(N_VAR);
+        strncpy(n->name, name, sizeof(n->name) - 1);
+        return n;
+    }
+    if (accept("(")) {
+        Node *n = parse_expr();
+        expect(")");
+        return n;
+    }
+    die("expression expected");
+    return NULL;
+}
+
+static Node *parse_mul(void)
+{
+    Node *n = parse_primary();
+    for (;;) {
+        if (accept("*")) { Node *x = node(N_MUL); x->lhs = n; x->rhs = parse_primary(); n = x; }
+        else if (accept("/")) { Node *x = node(N_DIV); x->lhs = n; x->rhs = parse_primary(); n = x; }
+        else break;
+    }
+    return n;
+}
+
+static Node *parse_add(void)
+{
+    Node *n = parse_mul();
+    for (;;) {
+        if (accept("+")) { Node *x = node(N_ADD); x->lhs = n; x->rhs = parse_mul(); n = x; }
+        else if (accept("-")) { Node *x = node(N_SUB); x->lhs = n; x->rhs = parse_mul(); n = x; }
+        else break;
+    }
+    return n;
+}
+
+static Node *parse_rel(void)
+{
+    Node *n = parse_add();
+    for (;;) {
+        if (accept("<")) { Node *x = node(N_LT); x->lhs = n; x->rhs = parse_add(); n = x; }
+        else if (accept(">")) { Node *x = node(N_GT); x->lhs = n; x->rhs = parse_add(); n = x; }
+        else if (accept("==")) { Node *x = node(N_EQ); x->lhs = n; x->rhs = parse_add(); n = x; }
+        else break;
+    }
+    return n;
+}
+
+static Node *parse_expr(void) { return parse_rel(); }
+
+/* Declaration or assignment, optionally consuming the trailing semicolon.
+ * Used by normal statements and by for(init; cond; step). */
+static Node *parse_simple(int semi)
+{
+    if (is_kw("struct")) {
+        int sid;
+        Node *n;
+        next();
+        if (tok_kind != 1) die("struct type expected");
+        sid = struct_lookup(tok);
+        if (sid <= 0) die("unknown struct type");
+        next();
+        if (tok_kind != 1) die("variable name expected");
+        n = node(N_DECL);
+        n->stype = sid;
+        strncpy(n->name, tok, sizeof(n->name) - 1);
+        next();
+        if (semi) expect(";");
+        return n;
+    }
+    if (is_kw("float")) {
+        Node *n;
+        next();
+        if (tok_kind != 1) die("name expected");
+        n = node(N_DECL);
+        n->ftype = 1;
+        strncpy(n->name, tok, sizeof(n->name) - 1);
+        next();
+        if (semi) expect(";");
+        return n;
+    }
+    if (is_kw("int")) {
+        Node *n;
+        next();
+        if (tok_kind != 1) die("name expected");
+        n = node(N_DECL);
+        strncpy(n->name, tok, sizeof(n->name) - 1);
+        next();
+        if (accept("[")) {
+            if (tok_kind != 2) die("array length expected");
+            n->alen = tok_num;
+            next();
+            expect("]");
+        }
+        if (semi) expect(";");
+        return n;
+    }
+    if (tok_kind == 1) {
+        char name[32];
+        strncpy(name, tok, sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        next();
+        if (accept(".")) {
+            char member[32];
+            if (tok_kind != 1) die("field or method name expected");
+            strncpy(member, tok, sizeof(member) - 1);
+            member[sizeof(member) - 1] = 0;
+            next();
+            if (accept("(")) {
+                Node *call = node(N_CALL);
+                Node *base = node(N_VAR);
+                Node **p = &base->next;
+                strncpy(call->name, member, sizeof(call->name) - 1);
+                strncpy(base->name, name, sizeof(base->name) - 1);
+                call->args = base;
+                if (!accept(")")) {
+                    for (;;) {
+                        *p = parse_expr();
+                        p = &(*p)->next;
+                        if (accept(")")) break;
+                        expect(",");
+                    }
+                }
+                if (semi) expect(";");
+                return call;
+            }
+            expect("=");
+            {
+                Node *n = node(N_ASSIGN_MEMBER);
+                strncpy(n->name, name, sizeof(n->name) - 1);
+                strncpy(n->field, member, sizeof(n->field) - 1);
+                n->lhs = parse_expr();
+                if (semi) expect(";");
+                return n;
+            }
+        }
+        if (accept("(")) {
+            Node *n = node(N_CALL);
+            strncpy(n->name, name, sizeof(n->name) - 1);
+            if (!accept(")")) {
+                Node **p = &n->args;
+                for (;;) {
+                    *p = parse_expr();
+                    p = &(*p)->next;
+                    if (accept(")")) break;
+                    expect(",");
+                }
+            }
+            if (semi) expect(";");
+            return n;
+        }
+        if (accept("[")) {
+            Node *n = node(N_ASSIGN_INDEX);
+            strncpy(n->name, name, sizeof(n->name) - 1);
+            n->lhs = parse_expr();
+            expect("]");
+            expect("=");
+            n->rhs = parse_expr();
+            if (semi) expect(";");
+            return n;
+        }
+        {
+            Node *n = node(N_ASSIGN);
+            strncpy(n->name, name, sizeof(n->name) - 1);
+            expect("=");
+            n->lhs = parse_expr();
+            if (semi) expect(";");
+            return n;
+        }
+    }
+    die("statement expected");
+    return NULL;
+}
+
+static Node *parse_stmt(void)
+{
+    if (accept("{")) {
+        Node *b = node(N_BLOCK);
+        Node **p = &b->body;
+        while (!accept("}")) {
+            if (tok_kind == 0) die("unterminated block");
+            *p = parse_stmt();
+            p = &(*p)->next;
+        }
+        return b;
+    }
+    if (is_kw("print")) {
+        next(); expect("(");
+        Node *n = node(N_PRINT);
+        n->lhs = parse_expr();
+        expect(")");
+        expect(";");
+        return n;
+    }
+    if (is_kw("printf")) {
+        next(); expect("(");
+        if (tok_kind != 4) die("printf format string expected");
+        Node *n = node(N_PRINTF);
+        n->val = tok_num;
+        n->alen = (int)strlen(strpool + tok_num);
+        next();
+        if (accept(","))
+            n->args = parse_expr();
+        expect(")");
+        expect(";");
+        return n;
+    }
+    if (is_kw("puts")) {
+        next(); expect("(");
+        if (tok_kind != 4) die("string expected");
+        Node *n = node(N_PUTS);
+        n->val = tok_num;
+        n->alen = (int)strlen(strpool + tok_num);
+        next();
+        expect(")");
+        expect(";");
+        return n;
+    }
+    if (is_kw("return")) {
+        next();
+        Node *n = node(N_RETURN);
+        n->lhs = parse_expr();
+        expect(";");
+        return n;
+    }
+    if (is_kw("if")) {
+        next(); expect("(");
+        Node *n = node(N_IF);
+        n->cond = parse_expr(); expect(")");
+        n->then = parse_stmt();
+        if (is_kw("else")) { next(); n->els = parse_stmt(); }
+        return n;
+    }
+    if (is_kw("while")) {
+        next(); expect("(");
+        Node *n = node(N_WHILE);
+        n->cond = parse_expr(); expect(")");
+        n->body = parse_stmt();
+        return n;
+    }
+    if (is_kw("for")) {
+        Node *n = node(N_FOR);
+        next(); expect("(");
+        if (accept(";")) n->lhs = NULL;
+        else { n->lhs = parse_simple(0); expect(";"); }
+        if (accept(";")) n->cond = NULL;
+        else { n->cond = parse_expr(); expect(";"); }
+        if (accept(")")) n->rhs = NULL;
+        else { n->rhs = parse_simple(0); expect(")"); }
+        n->body = parse_stmt();
+        return n;
+    }
+    return parse_simple(1);
+}
+
+static int emit(int op, int a, int b, int c, int d)
+{
+    if (nir >= IR_MAX) die("RIR full");
+    ir[nir] = (RIR){ op, a, b, c, d };
+    return nir++;
+}
+
+static int func_lookup(const char *name)
+{
+    for (int i = 0; i < nfuncs; i++)
+        if (!strcmp(funcs[i].name, name)) return i;
+    return -1;
+}
+
+/* Native ids shared with rirvm. */
+enum {
+    NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
+    NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
+    NAT_SLEEP, NAT_UPTIME
+};
+
+static int native_lookup(const char *name, int *nargs, int *hasret)
+{
+    static const struct { const char *name; int id, nargs, hasret; } tab[] = {
+        { "gpio_count", NAT_GPIO_COUNT, 0, 1 },
+        { "gpio_mode",  NAT_GPIO_MODE,  2, 0 },
+        { "gpio_write", NAT_GPIO_WRITE, 2, 0 },
+        { "gpio_read",  NAT_GPIO_READ,  1, 1 },
+        { "adc_count",  NAT_ADC_COUNT,  0, 1 },
+        { "adc_read",   NAT_ADC_READ,   1, 1 },
+        { "pwm_count",  NAT_PWM_COUNT,  0, 1 },
+        { "pwm_set",    NAT_PWM_SET,    3, 0 },
+        { "pwm_off",    NAT_PWM_OFF,    1, 0 },
+        { "sleep",      NAT_SLEEP,      1, 0 },
+        { "uptime",     NAT_UPTIME,     0, 1 },
+    };
+    for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
+        if (!strcmp(name, tab[i].name)) {
+            *nargs = tab[i].nargs;
+            *hasret = tab[i].hasret;
+            return tab[i].id;
+        }
+    return -1;
+}
+
+/* Reserve registers for every local declaration in the function body. */
+static void declare_locals(Node *n)
+{
+    for (; n; n = n->next) {
+        switch (n->kind) {
+        case N_BLOCK:
+            declare_locals(n->body);
+            break;
+        case N_DECL:
+            if (n->stype > 0) sym_add_struct(n->name, n->stype, 0);
+            else if (n->ftype) sym_add_float(n->name, 0);
+            else if (n->alen > 0) sym_add_array(n->name, n->alen, 0);
+            else sym_add(n->name, 0);
+            break;
+        case N_IF:
+            declare_locals(n->then);
+            declare_locals(n->els);
+            break;
+        case N_WHILE:
+            declare_locals(n->body);
+            break;
+        case N_FOR:
+            declare_locals(n->lhs);
+            declare_locals(n->rhs);
+            declare_locals(n->body);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static int gen_expr_into(Node *n, int dst);
+static int gen_expr(Node *n);
+
+/* A value that can be used in place, without copying a plain local. */
+static int node_float_hint(Node *n)
+{
+    if (!n) return 0;
+    if (n->kind == N_NUM) return n->ftype ? 1 : 0;
+    if (n->kind == N_VAR) {
+        Sym *s = sym_find(n->name);
+        return (s && s->is_float) ? 1 : 0;
+    }
+    if (n->kind == N_INDEX || n->kind == N_MEMBER) return 0;
+    if (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
+        n->kind == N_DIV || n->kind == N_LT || n->kind == N_GT ||
+        n->kind == N_EQ) {
+        int l = node_float_hint(n->lhs), r = node_float_hint(n->rhs);
+        if (l == 1 || r == 1) return 1;
+        if (l == 0 && r == 0) return 0;
+    }
+    return -1;   /* composite: the result type is known after codegen */
+}
+
+static int coerce_to(int v, int from, int to)
+{
+    int d;
+    if (from == to) return v;
+    d = new_temp();
+    emit(to ? R_SHLI : R_SHRI, v, 16, 0, d);
+    return d;
+}
+
+static int gen_value(Node *n)
+{
+    if (n->kind == N_VAR) {
+        Sym *s = sym_find(n->name);
+        if (!s) die("unknown variable");
+        if (s->is_array) die("array used as value");
+        if (s->is_struct) {
+            int d;
+            last_type = 0;
+            if (s->is_param) return s->reg;
+            d = new_temp();
+            emit(R_CONST, s->offset, 0, 0, d);
+            return d;
+        }
+        if (!s->global) {
+            last_type = s->is_float;
+            return s->reg;
+        }
+    }
+    return gen_expr(n);
+}
+
+static int arith_op(int kind)
+{
+    switch (kind) {
+    case N_ADD: return R_ADD;
+    case N_SUB: return R_SUB;
+    case N_MUL: return R_MUL;
+    case N_DIV: return R_DIV;
+    case N_LT:  return R_LT;
+    case N_GT:  return R_GT;
+    default:    return R_EQ;
+    }
+}
+
+static int gen_expr(Node *n)
+{
+    return gen_expr_into(n, new_temp());
+}
+
+static int gen_expr_into(Node *n, int dst)
+{
+    int a, b;
+    Sym *s;
+
+    switch (n->kind) {
+    case N_NUM:
+        emit(R_CONST, n->val, 0, 0, dst);
+        last_type = n->ftype;
+        return dst;
+    case N_VAR:
+        s = sym_find(n->name);
+        if (!s) die("unknown variable");
+        if (s->is_array) die("array used as value");
+        if (s->is_struct) die("struct used as scalar");
+        if (s->global) {
+            emit(R_LOADG, s->offset, 0, 0, dst);
+        } else if (s->reg != dst) {
+            emit(R_MOV, s->reg, 0, 0, dst);
+        }
+        last_type = s->is_float;
+        return dst;
+    case N_INDEX:
+        s = sym_find(n->name);
+        if (!s || !s->is_array) die("array expected");
+        a = gen_value(n->lhs);
+        a = coerce_to(a, last_type, 0);
+        emit(R_LOADA, s->offset, a, s->alen, dst);
+        last_type = 0;
+        return dst;
+    case N_MEMBER: {
+        int fi;
+        s = sym_find(n->name);
+        if (!s || !s->is_struct) die("struct variable expected");
+        fi = struct_field(s->stype, n->field);
+        if (fi < 0) die("unknown struct field");
+        if (s->is_param) emit(R_LOADD, s->reg, fi, 0, dst);
+        else emit(R_LOADG, s->offset + fi, 0, 0, dst);
+        last_type = 0;
+        return dst;
+    }
+    case N_ASSIGN_MEMBER: {
+        int fi;
+        s = sym_find(n->name);
+        if (!s || !s->is_struct) die("struct variable expected");
+        fi = struct_field(s->stype, n->field);
+        if (fi < 0) die("unknown struct field");
+        a = gen_value(n->lhs);
+        a = coerce_to(a, last_type, 0);
+        if (s->is_param) emit(R_STORED, s->reg, fi, a, 0);
+        else emit(R_STOREG, s->offset + fi, a, 0, 0);
+        last_type = 0;
+        return a;
+    }
+    case N_ASSIGN:
+        s = sym_find(n->name);
+        if (!s || s->is_array || s->is_struct) die("scalar assignment expected");
+        if (s->global) {
+            a = gen_value(n->lhs);
+            a = coerce_to(a, last_type, s->is_float);
+            emit(R_STOREG, s->offset, a, 0, 0);
+            last_type = s->is_float;
+            return a;
+        }
+        if (!s->is_float && node_float_hint(n->lhs) == 0) {
+            a = gen_expr_into(n->lhs, s->reg);
+            last_type = 0;
+            return s->reg;
+        }
+        a = gen_value(n->lhs);
+        a = coerce_to(a, last_type, s->is_float);
+        if (a != s->reg) emit(R_MOV, a, 0, 0, s->reg);
+        last_type = s->is_float;
+        return s->reg;
+    case N_ASSIGN_INDEX:
+        s = sym_find(n->name);
+        if (!s || !s->is_array) die("array assignment expected");
+        a = gen_value(n->lhs);
+        a = coerce_to(a, last_type, 0);
+        if (n->rhs->kind == N_NUM && !n->rhs->ftype) {
+            emit(R_STOREA_I, s->offset, a, n->rhs->val, s->alen);
+        } else {
+            b = gen_value(n->rhs);
+            b = coerce_to(b, last_type, 0);
+            emit(R_STOREA, s->offset, a, b, s->alen);
+        }
+        last_type = 0;
+        return a;
+    case N_PRINT:
+        a = gen_value(n->lhs);
+        emit(last_type ? R_PRINTFIX : R_PRINT, a, 0, 0, 0);
+        return a;
+    case N_CALL: {
+        int argc = 0, fid, nid, nargs, hasret;
+        nid = native_lookup(n->name, &nargs, &hasret);
+        if (nid >= 0) {
+            int a0 = -1, a1 = -1, a2 = -1;
+            for (Node *p = n->args; p; p = p->next) {
+                int v = gen_value(p);
+                v = coerce_to(v, last_type, 0);
+                if (argc == 0) a0 = v;
+                else if (argc == 1) a1 = v;
+                else if (argc == 2) a2 = v;
+                argc++;
+            }
+            if (argc != nargs) die("native argument count");
+            if (hasret) emit(R_NATIVER, nid, a0, a1, dst);
+            else emit(R_NATIVE, nid, a0, a1, a2);
+            last_type = 0;
+            return dst;
+        }
+        fid = func_lookup(n->name);
+        if (fid < 0) die("unknown function");
+        for (Node *p = n->args; p; p = p->next) {
+            int v, to;
+            if (argc >= funcs[fid].nparams) die("too many arguments");
+            to = funcs[fid].ptype[argc] < 0 ? 1 :
+                 funcs[fid].ptype[argc] > 0 ? -1 : 0;
+            v = gen_value(p);
+            if (to >= 0) v = coerce_to(v, last_type, to);
+            emit(R_ARG, argc++, v, 0, 0);
+        }
+        if (argc != funcs[fid].nparams) die("wrong argument count");
+        emit(R_CALL, fid, dst, argc, 0);
+        last_type = funcs[fid].rtype;
+        return dst;
+    }
+    case N_STR:
+    case N_PRINTF:
+    case N_PUTS:
+        die("string/printf not allowed in expression");
+    case N_ADD: case N_SUB: case N_MUL: case N_DIV:
+    case N_LT: case N_GT: case N_EQ:
+        /* Destination hint removes the temporary + MOV around assignments.
+         * Immediate forms are kept for definitely-int operands. */
+        if (node_float_hint(n->lhs) == 0 && node_float_hint(n->rhs) == 0 &&
+            n->rhs->kind == N_NUM && !n->rhs->ftype &&
+            (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL)) {
+            a = gen_value(n->lhs);
+            if (n->kind == N_ADD && n->rhs->val == 1)
+                emit(R_INC, a, 0, 0, dst);
+            else if (n->kind == N_SUB && n->rhs->val == 1)
+                emit(R_DEC, a, 0, 0, dst);
+            else
+                emit(n->kind == N_ADD ? R_ADDI : n->kind == N_SUB ? R_SUBI : R_MULI,
+                     a, n->rhs->val, 0, dst);
+            last_type = 0;
+            return dst;
+        }
+        if (node_float_hint(n->lhs) == 0 && node_float_hint(n->rhs) == 0 &&
+            n->lhs->kind == N_NUM && !n->lhs->ftype &&
+            (n->kind == N_ADD || n->kind == N_MUL)) {
+            b = gen_value(n->rhs);
+            emit(n->kind == N_ADD ? R_ADDI : R_MULI, b, n->lhs->val, 0, dst);
+            last_type = 0;
+            return dst;
+        }
+        a = gen_value(n->lhs);
+        {
+            int at = last_type;
+            b = gen_value(n->rhs);
+            {
+                int bt = last_type;
+                if (at || bt) {
+                    a = coerce_to(a, at, 1);
+                    b = coerce_to(b, bt, 1);
+                    if (n->kind == N_ADD) emit(R_ADD, a, b, 0, dst);
+                    else if (n->kind == N_SUB) emit(R_SUB, a, b, 0, dst);
+                    else if (n->kind == N_MUL) emit(R_FMUL, a, b, 0, dst);
+                    else if (n->kind == N_DIV) emit(R_FDIV, a, b, 0, dst);
+                    else {
+                        emit(arith_op(n->kind), a, b, 0, dst);
+                        last_type = 0;
+                        return dst;
+                    }
+                    last_type = 1;
+                    return dst;
+                }
+            }
+        }
+        emit(arith_op(n->kind), a, b, 0, dst);
+        last_type = 0;
+        return dst;
+    default:
+        a = gen_expr(n);
+        if (a != dst) emit(R_MOV, a, 0, 0, dst);
+        return dst;
+    }
+}
+
+static int branch_is_fused(int op)
+{
+    return op >= R_JLT && op <= R_JNE_I;
+}
+
+/* Branch to target when the condition is false. */
+static int gen_cond_false(Node *c)
+{
+    int a, b;
+
+    if (c->kind == N_LT || c->kind == N_GT || c->kind == N_EQ) {
+        if (c->rhs->kind == N_NUM && !c->rhs->ftype &&
+            node_float_hint(c->lhs) == 0) {
+            a = gen_value(c->lhs);
+            return emit(c->kind == N_LT ? R_JGE_I : c->kind == N_GT ? R_JLE_I : R_JNE_I,
+                        a, c->rhs->val, 0, 0);
+        }
+        a = gen_value(c->lhs);
+        {
+            int at = last_type;
+            b = gen_value(c->rhs);
+            if (at || last_type) {
+                a = coerce_to(a, at, 1);
+                b = coerce_to(b, last_type, 1);
+            }
+        }
+        return emit(c->kind == N_LT ? R_JGE : c->kind == N_GT ? R_JLE : R_JNE,
+                    a, b, 0, 0);
+    }
+    a = gen_expr(c);
+    return emit(R_JZ, a, 0, 0, 0);
+}
+
+static void set_branch_target(int idx, int target)
+{
+    if (branch_is_fused(ir[idx].op)) ir[idx].c = target;
+    else ir[idx].b = target;
+}
+
+static void gen_stmt(Node *n)
+{
+    if (!n) return;
+    switch (n->kind) {
+    case N_BLOCK:
+        for (Node *s = n->body; s; s = s->next) {
+            int save = vreg;
+            gen_stmt(s);
+            vreg = save;   /* temps are dead at statement boundaries */
+        }
+        break;
+    case N_DECL: {
+        Sym *s = sym_find(n->name);
+        if (!s) die("declaration lost");
+        if (!s->is_array && !s->is_struct)
+            emit(R_CONST, 0, 0, 0, s->reg);
+        break;
+    }
+    case N_RETURN: {
+        int v = gen_value(n->lhs);
+        v = coerce_to(v, last_type, cur_rtype);
+        emit(R_RET, v, 0, 0, 0);
+        break;
+    }
+    case N_ASSIGN:
+    case N_ASSIGN_INDEX:
+    case N_ASSIGN_MEMBER:
+    case N_PRINT:
+    case N_CALL:
+        gen_expr(n);
+        break;
+    case N_PUTS:
+        emit(R_PRINTS, n->val, 0, 0, 0);
+        break;
+    case N_PRINTF: {
+        int off = n->val, len = n->alen, p = -1;
+        char conv = 0;
+        for (int i = 0; i + 1 < len; i++)
+            if (strpool[off + i] == '%') {
+                conv = strpool[off + i + 1];
+                p = i;
+                break;
+            }
+        if (p < 0) {
+            emit(R_PRINTN, off, len, 0, 0);
+        } else {
+            int v;
+            if (p > 0) emit(R_PRINTN, off, p, 0, 0);
+            v = gen_value(n->args);
+            if (conv == 'f') {
+                v = coerce_to(v, last_type, 1);
+                emit(R_PRINTFIXV, v, 0, 0, 0);
+            } else if (conv == 'd' || conv == 'i' || conv == 'u') {
+                v = coerce_to(v, last_type, 0);
+                emit(R_PRINTV, v, 0, 0, 0);
+            } else {
+                die("printf: unsupported conversion");
+            }
+            if (p + 2 < len) emit(R_PRINTN, off + p + 2, len - (p + 2), 0, 0);
+        }
+        break;
+    }
+    case N_IF: {
+        int br = gen_cond_false(n->cond);
+        gen_stmt(n->then);
+        if (n->els) {
+            int jmp = emit(R_JMP, 0, 0, 0, 0);
+            set_branch_target(br, nir);
+            gen_stmt(n->els);
+            ir[jmp].a = nir;
+        } else {
+            set_branch_target(br, nir);
+        }
+        break;
+    }
+    case N_WHILE: {
+        int start = nir;
+        int br = gen_cond_false(n->cond);
+        gen_stmt(n->body);
+        emit(R_JMP, start, 0, 0, 0);
+        set_branch_target(br, nir);
+        break;
+    }
+    case N_FOR: {
+        int save = vreg;
+        int start, br = -1;
+        if (n->lhs) {
+            int s2 = vreg;
+            gen_stmt(n->lhs);
+            vreg = s2;
+        }
+        start = nir;
+        if (n->cond)
+            br = gen_cond_false(n->cond);
+        gen_stmt(n->body);
+        if (n->rhs) {
+            int s3 = vreg;
+            gen_stmt(n->rhs);
+            vreg = s3;
+        }
+        emit(R_JMP, start, 0, 0, 0);
+        if (br >= 0)
+            set_branch_target(br, nir);
+        vreg = save;
+        break;
+    }
+    default:
+        die("bad statement");
+    }
+}
+
+/* ---- Register allocation: liveness intervals + linear scan + spill ---- */
+
+#define NPHYS 16
+#define NSCRATCH 3          /* physical 13,14,15 reserved for spill reloads/stores */
+
+static int func_phys[FUNC_MAX][VREG_MAX];
+static int func_slot[FUNC_MAX][VREG_MAX];
+static int func_remat[FUNC_MAX][VREG_MAX];
+static int func_cval[FUNC_MAX][VREG_MAX];
+static int func_nspill[FUNC_MAX];
+static RIR newir[IR_MAX];
+static int rewrite_map[IR_MAX];
+
+static int rir_get(const RIR *q, int f)
+{
+    switch (f) {
+    case 0: return q->a;
+    case 1: return q->b;
+    case 2: return q->c;
+    case 3: return q->d;
+    default: return 0;
+    }
+}
+
+static void rir_put(RIR *q, int f, int v)
+{
+    switch (f) {
+    case 0: q->a = v; break;
+    case 1: q->b = v; break;
+    case 2: q->c = v; break;
+    case 3: q->d = v; break;
+    }
+}
+
+/* Field indices of vreg operands used by the instruction. */
+static int rir_uses(const RIR *q, int *f)
+{
+    switch (q->op) {
+    case R_MOV: case R_JZ: case R_RET: case R_PRINT: case R_PRINTV:
+        f[0] = 0; return 1;
+    case R_ADD: case R_SUB: case R_MUL: case R_DIV:
+    case R_LT: case R_GT: case R_EQ:
+        f[0] = 0; f[1] = 1; return 2;
+    case R_STOREG: case R_LOADA: case R_ARG: f[0] = 1; return 1;
+    case R_STOREA: f[0] = 1; f[1] = 2; return 2;
+    case R_STOREL: f[0] = 0; return 1;
+    case R_INC: case R_DEC:
+    case R_ADDI: case R_SUBI: case R_MULI:
+        f[0] = 0; return 1;
+    case R_JLT: case R_JGE: case R_JGT: case R_JLE: case R_JEQ: case R_JNE:
+        f[0] = 0; f[1] = 1; return 2;
+    case R_JLT_I: case R_JGE_I: case R_JGT_I: case R_JLE_I: case R_JEQ_I: case R_JNE_I:
+        f[0] = 0; return 1;
+    case R_STOREA_I: f[0] = 1; return 1;
+    case R_NATIVE: f[0] = 1; f[1] = 2; f[2] = 3; return 3;
+    case R_NATIVER: f[0] = 1; f[1] = 2; return 2;
+    case R_LOADD: f[0] = 0; return 1;
+    case R_STORED: f[0] = 0; f[1] = 2; return 2;
+    case R_SHLI: case R_SHRI: f[0] = 0; return 1;
+    case R_FMUL: case R_FDIV: f[0] = 0; f[1] = 1; return 2;
+    case R_PRINTFIX: case R_PRINTFIXV: f[0] = 0; return 1;
+    default: return 0;
+    }
+}
+
+/* Field index of the vreg destination, or -1. */
+static int rir_dest_field(const RIR *q)
+{
+    switch (q->op) {
+    case R_CONST: case R_MOV: case R_ADD: case R_SUB: case R_MUL: case R_DIV:
+    case R_LT: case R_GT: case R_EQ: case R_LOADG: case R_LOADA: case R_LOADL:
+    case R_INC: case R_DEC:
+    case R_ADDI: case R_SUBI: case R_MULI:
+        return 3;   /* d */
+    case R_CALL:
+        return 1;   /* return value goes to b */
+    case R_NATIVER:
+        return 3;   /* d */
+    case R_LOADD:
+        return 3;   /* d */
+    case R_SHLI: case R_SHRI: case R_FMUL: case R_FDIV:
+        return 3;   /* d */
+    default:
+        return -1;
+    }
+}
+
+/* Straight-line dead-store elimination.  Keeps indexes stable by replacing
+ * the instruction with NOP instead of removing it. */
+static void peephole(void)
+{
+    char target[IR_MAX];
+    int i, j;
+
+    memset(target, 0, sizeof target);
+    for (i = 0; i < nir; i++) {
+        int op = ir[i].op;
+        if (op == R_JMP) target[ir[i].a] = 1;
+        else if (op == R_JZ) target[ir[i].b] = 1;
+        else if (op == R_CALL) target[ir[i].a] = 1;
+        else if (branch_is_fused(op)) target[ir[i].c] = 1;
+    }
+
+    for (i = 0; i < nir; i++) {
+        int d = rir_dest_field(&ir[i]);
+        int v, f[3], n;
+
+        if (d < 0) continue;
+        v = rir_get(&ir[i], d);
+        if (v < 0 || v >= VREG_MAX || target[i]) continue;
+
+        for (j = i + 1; j < nir; j++) {
+            int dj, read = 0;
+
+            if (target[j]) break;
+            n = rir_uses(&ir[j], f);
+            for (int k = 0; k < n; k++)
+                if (rir_get(&ir[j], f[k]) == v) read = 1;
+            if (read) break;
+            dj = rir_dest_field(&ir[j]);
+            if (dj >= 0 && rir_get(&ir[j], dj) == v) {
+                ir[i].op = R_NOP;
+                break;
+            }
+            if (ir[j].op == R_JMP || ir[j].op == R_RET ||
+                ir[j].op == R_HALT || branch_is_fused(ir[j].op))
+                break;
+        }
+    }
+}
+
+static void allocate_func(int fi, int lo, int hi)
+{
+    int first[VREG_MAX], last[VREG_MAX];
+    int defcnt[VREG_MAX], isconst[VREG_MAX], cval[VREG_MAX];
+    int order[VREG_MAX], m = 0;
+    int reg_end[NPHYS];
+    int *phys = func_phys[fi], *slot = func_slot[fi];
+    int nparams = funcs[fi].nparams;
+
+    for (int v = 0; v < VREG_MAX; v++) {
+        first[v] = -1; last[v] = -1; phys[v] = -1; slot[v] = -1;
+        defcnt[v] = 0; isconst[v] = 1; cval[v] = 0;
+        func_remat[fi][v] = 0;
+    }
+    for (int pc = lo; pc < hi; pc++) {
+        int f[3], n = rir_uses(&ir[pc], f);
+        for (int k = 0; k < n; k++) {
+            int v = rir_get(&ir[pc], f[k]);
+            if (v < 0 || v >= VREG_MAX) continue;
+            if (first[v] < 0) first[v] = pc;
+            last[v] = pc;
+        }
+        int d = rir_dest_field(&ir[pc]);
+        if (d >= 0) {
+            int v = rir_get(&ir[pc], d);
+            if (v >= 0 && v < VREG_MAX) {
+                if (first[v] < 0) first[v] = pc;
+                last[v] = pc;
+                defcnt[v]++;
+                if (ir[pc].op == R_CONST) cval[v] = ir[pc].a;
+                else isconst[v] = 0;
+            }
+        }
+    }
+    for (int v = 0; v < VREG_MAX; v++) if (first[v] >= 0) order[m++] = v;
+    /* sort by interval start (insertion sort, small n) */
+    for (int i = 1; i < m; i++) {
+        int x = order[i], j = i - 1;
+        while (j >= 0 && first[order[j]] > first[x]) { order[j + 1] = order[j]; j--; }
+        order[j + 1] = x;
+    }
+    for (int r = 0; r < NPHYS; r++) reg_end[r] = -1;
+    /* parameters are precolored to r0..r(nparams-1) and reserved */
+    for (int p = 0; p < nparams; p++) {
+        phys[p] = p;
+        reg_end[p] = hi;    /* stay reserved for the whole function */
+    }
+    int nspill = 0;
+    for (int i = 0; i < m; i++) {
+        int v = order[i];
+        if (v < nparams) continue;
+        int r;
+        for (r = nparams; r < NPHYS - NSCRATCH; r++)
+            if (reg_end[r] < first[v]) reg_end[r] = -1;   /* expired */
+        for (r = nparams; r < NPHYS - NSCRATCH; r++)
+            if (reg_end[r] == -1) break;
+        if (r < NPHYS - NSCRATCH) {
+            phys[v] = r;
+            reg_end[r] = last[v];
+        } else {
+            phys[v] = -1;
+            slot[v] = nspill++;
+        }
+    }
+    func_nspill[fi] = nspill;
+    for (int v = 0; v < VREG_MAX; v++)
+        if (phys[v] == -1 && defcnt[v] == 1 && isconst[v] && v >= nparams) {
+            func_remat[fi][v] = 1;
+            func_cval[fi][v] = cval[v];
+        }
+}
+
+static int func_at(int pc)
+{
+    for (int i = 0; i < nfuncs; i++) {
+        int lo = funcs[i].entry_pc;
+        int hi = (i + 1 < nfuncs) ? funcs[i + 1].entry_pc : nir;
+        if (pc >= lo && pc < hi) return i;
+    }
+    return -1;
+}
+
+static void rewrite(void)
+{
+    int map[IR_MAX];
+    int out = 0;
+
+    for (int pc = 0; pc < nir; pc++) {
+        int fi = func_at(pc), extra = 0;
+        map[pc] = out;
+        if (fi >= 0) {
+            int f[3], n = rir_uses(&ir[pc], f);
+            for (int k = 0; k < n; k++) {
+                int v = rir_get(&ir[pc], f[k]);
+                if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) extra++;
+            }
+            int d = rir_dest_field(&ir[pc]);
+            if (d >= 0) {
+                int v = rir_get(&ir[pc], d);
+                if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) extra++;
+            }
+        }
+        out += 1 + extra;
+    }
+    if (out > IR_MAX) die("RIR overflow after spill");
+
+    out = 0;
+    for (int pc = 0; pc < nir; pc++) {
+        int fi = func_at(pc);
+        RIR q = ir[pc];
+        int d, df, f[3], n;
+
+        if (fi < 0) { newir[out++] = q; continue; }
+        n = rir_uses(&q, f);
+        for (int k = 0; k < n; k++) {
+            int v = rir_get(&q, f[k]);
+            if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) {
+                int sc = NPHYS - NSCRATCH + k;   /* 13 for first, 14 for second */
+                if (func_remat[fi][v])
+                    newir[out++] = (RIR){ R_CONST, func_cval[fi][v], 0, 0, sc };
+                else
+                    newir[out++] = (RIR){ R_LOADL, func_slot[fi][v], 0, 0, sc };
+                rir_put(&q, f[k], sc);
+            } else if (v >= 0 && v < VREG_MAX) {
+                rir_put(&q, f[k], func_phys[fi][v]);
+            }
+        }
+        d = rir_dest_field(&q);
+        df = -1;
+        if (d >= 0) {
+            int v = rir_get(&q, d);
+            if (v >= 0 && v < VREG_MAX && func_phys[fi][v] == -1) {
+                if (!func_remat[fi][v])
+                    df = func_slot[fi][v];
+                rir_put(&q, d, NPHYS - 1);       /* 15 */
+            } else if (v >= 0 && v < VREG_MAX) {
+                rir_put(&q, d, func_phys[fi][v]);
+            }
+        }
+        newir[out++] = q;
+        if (df >= 0)
+            newir[out++] = (RIR){ R_STOREL, NPHYS - 1, df, 0, 0 };
+    }
+
+    for (int i = 0; i < out; i++) {
+        if (newir[i].op == R_JMP) newir[i].a = map[newir[i].a];
+        else if (newir[i].op == R_JZ) newir[i].b = map[newir[i].b];
+        else if (newir[i].op == R_CALL) newir[i].a = map[newir[i].a];
+        else if (branch_is_fused(newir[i].op)) newir[i].c = map[newir[i].c];
+    }
+    memcpy(rewrite_map, map, (size_t)nir * sizeof(int));
+    memcpy(ir, newir, (size_t)out * sizeof(RIR));
+    nir = out;
+}
+
+static void regalloc(void)
+{
+    for (int i = 0; i < nfuncs; i++) {
+        int hi = (i + 1 < nfuncs) ? funcs[i + 1].entry_pc : nir;
+        allocate_func(i, funcs[i].entry_pc, hi);
+    }
+    rewrite();
+}
+
+static int backend_ir(const char *path)
+{
+    /* Header: "RIR1", instruction count, global words, entry pc, string bytes. */
+    static uint8_t out[IR_MAX * 20 + 20 + sizeof(strpool)];
+    int n = 0;
+    out[n++] = 'R'; out[n++] = 'I'; out[n++] = 'R'; out[n++] = '1';
+    out[n++] = (uint8_t)nir; out[n++] = (uint8_t)(nir >> 8);
+    out[n++] = (uint8_t)(nir >> 16); out[n++] = (uint8_t)(nir >> 24);
+    out[n++] = (uint8_t)gdata_next; out[n++] = (uint8_t)(gdata_next >> 8);
+    out[n++] = (uint8_t)(gdata_next >> 16); out[n++] = (uint8_t)(gdata_next >> 24);
+    out[n++] = (uint8_t)entry_pc; out[n++] = (uint8_t)(entry_pc >> 8);
+    out[n++] = (uint8_t)(entry_pc >> 16); out[n++] = (uint8_t)(entry_pc >> 24);
+    out[n++] = (uint8_t)strsize; out[n++] = (uint8_t)(strsize >> 8);
+    out[n++] = (uint8_t)(strsize >> 16); out[n++] = (uint8_t)(strsize >> 24);
+    for (int i = 0; i < nir; i++) {
+        RIR *q = &ir[i];
+        int v[5] = { q->op, q->a, q->b, q->c, q->d };
+        for (int k = 0; k < 5; k++) {
+            out[n++] = (uint8_t)v[k];
+            out[n++] = (uint8_t)(v[k] >> 8);
+            out[n++] = (uint8_t)(v[k] >> 16);
+            out[n++] = (uint8_t)(v[k] >> 24);
+        }
+    }
+    for (int i = 0; i < strsize; i++)
+        out[n++] = (uint8_t)strpool[i];
+    int fd = create(path);
+    if (fd < 0) return -1;
+    int w = write_all(fd, out, n);
+    close(fd);
+    return w == n ? 0 : -1;
+}
+
+static int backend_mc(const char *path)
+{
+    (void)path;
+    puts("csc3: machine-code backend not implemented yet\n");
+    return -1;
+}
+
+typedef int (*BackendFn)(const char *path);
+
+int main(int argc, char **argv)
+{
+    const char *in, *out, *be = "ir";
+    int fd, n;
+
+    if (argc < 3) { puts("usage: csc3 [-b ir|mc] in.c out.rir\n"); return 2; }
+    int ai = 1;
+    if (!strcmp(argv[ai], "-b")) { be = argv[ai + 1]; ai += 2; }
+    in = argv[ai]; out = argv[ai + 1];
+
+    fd = open(in);
+    if (fd < 0) die("cannot open input");
+    src_len = 0;
+    while (src_len < SRC_MAX && (n = read(fd, src + src_len, SRC_MAX - src_len)) > 0)
+        src_len += n;
+    close(fd);
+
+    next();
+    /* Top level: globals (int g; / int a[N];) and functions. */
+    for (;;) {
+        if (is_kw("struct")) {
+            char sname[32], vname[32];
+            int sid;
+            next();
+            if (tok_kind != 1) die("struct name expected");
+            strncpy(sname, tok, sizeof(sname) - 1);
+            sname[sizeof(sname) - 1] = 0;
+            next();
+            if (accept("{")) {
+                StructType *st;
+                if (nstructs >= STRUCT_MAX) die("too many struct types");
+                st = &structs[nstructs];
+                memset(st, 0, sizeof *st);
+                strncpy(st->name, sname, sizeof(st->name) - 1);
+                while (!accept("}")) {
+                    if (!is_kw("int")) die("int field expected");
+                    next();
+                    if (tok_kind != 1) die("field name expected");
+                    if (st->nfields >= 8) die("too many fields");
+                    strncpy(st->fields[st->nfields++], tok, 32 - 1);
+                    next();
+                    expect(";");
+                }
+                expect(";");
+                nstructs++;
+                if (tok_kind == 0) die("main required");
+                continue;
+            }
+            sid = struct_lookup(sname);
+            if (sid <= 0) die("unknown struct type");
+            if (tok_kind != 1) die("variable name expected");
+            strncpy(vname, tok, sizeof(vname) - 1);
+            vname[sizeof(vname) - 1] = 0;
+            next();
+            sym_add_struct(vname, sid, 1);
+            expect(";");
+            if (tok_kind == 0) die("main required");
+            continue;
+        }
+        int is_f = 0;
+        if (is_kw("float")) { is_f = 1; next(); }
+        else {
+            if (!is_kw("int")) die("int expected");
+            next();
+        }
+        if (tok_kind != 1) die("name expected");
+
+        char name[32];
+        strncpy(name, tok, sizeof(name) - 1);
+        name[sizeof(name) - 1] = 0;
+        next();
+
+        if (accept("(")) {
+            Func *f;
+            if (nfuncs >= FUNC_MAX) die("too many functions");
+            f = &funcs[nfuncs++];
+            memset(f, 0, sizeof *f);
+            f->rtype = is_f;
+            strncpy(f->name, name, sizeof(f->name) - 1);
+            if (!accept(")")) {
+                for (;;) {
+                    int ptype = 0, pi;
+                    if (is_kw("struct")) {
+                        next();
+                        if (tok_kind != 1) die("struct type expected");
+                        ptype = struct_lookup(tok);
+                        if (ptype <= 0) die("unknown struct type");
+                        next();
+                    } else if (is_kw("float")) {
+                        next();
+                        ptype = -1;
+                    } else {
+                        if (!is_kw("int")) die("int parameter expected");
+                        next();
+                    }
+                    if (tok_kind != 1) die("parameter name expected");
+                    if (f->nparams >= 8) die("too many parameters");
+                    pi = f->nparams++;
+                    strncpy(f->params[pi], tok, 32 - 1);
+                    f->ptype[pi] = ptype;
+                    next();
+                    if (accept(")")) break;
+                    expect(",");
+                }
+            }
+            f->body = parse_stmt();
+            if (tok_kind == 0) break;
+            continue;
+        }
+
+        if (accept("[")) {
+            if (is_f) die("float arrays not supported");
+            if (tok_kind != 2) die("global array length expected");
+            int len = tok_num;
+            next();
+            expect("]");
+            sym_add_array(name, len, 1);
+        } else if (is_f) {
+            sym_add_float(name, 1);
+        } else {
+            sym_add_global(name);
+        }
+        expect(";");
+        if (tok_kind == 0) die("main required");
+    }
+
+    nglobals = nsyms;
+
+    /* Generate one function at a time (function-level streaming). */
+    for (int i = 0; i < nfuncs; i++) {
+        Func *f = &funcs[i];
+        nsyms = nglobals;
+        nlocals = 0;
+        f->entry_pc = nir;
+        for (int p = 0; p < f->nparams; p++) {
+            Sym *ps = sym_add(f->params[p], 0);
+            if (f->ptype[p] > 0) {
+                ps->is_struct = 1;
+                ps->stype = f->ptype[p];
+                ps->is_param = 1;
+            } else if (f->ptype[p] < 0) {
+                ps->is_float = 1;
+            }
+        }
+        declare_locals(f->body);
+        vreg = nlocals;
+        cur_rtype = f->rtype;
+        gen_stmt(f->body);
+        int z = new_temp();
+        emit(R_CONST, 0, 0, 0, z);
+        emit(R_RET, z, 0, 0, 0);
+    }
+
+    for (int i = 0; i < nir; i++)
+        if (ir[i].op == R_CALL) {
+            int fid = ir[i].a;
+            if (fid < 0 || fid >= nfuncs) die("bad call target");
+            ir[i].a = funcs[fid].entry_pc;
+        }
+
+    peephole();
+    regalloc();
+
+    for (int i = 0; i < nfuncs; i++)
+        funcs[i].entry_pc = rewrite_map[funcs[i].entry_pc];
+
+    int mainid = func_lookup("main");
+    if (mainid < 0) die("main required");
+    entry_pc = funcs[mainid].entry_pc;
+
+    BackendFn fn = !strcmp(be, "ir") ? backend_ir :
+                   !strcmp(be, "mc") ? backend_mc : NULL;
+    if (!fn) die("unknown backend");
+    if (fn(out) != 0) die("backend failed");
+    puts("csc3: ");
+    puts(in);
+    puts(" -> ");
+    puts(out);
+    puts("\n");
+    return 0;
+}
