@@ -118,4 +118,5 @@
 | 2026-11-20 | csc + pvm 脚本栈（C3 8K） | `9b0ae91` | ESP32-C3 COM4 + 8K profile | T3 PASS；csc 100 KiB 窗口；`/bin` 无 py | [C3](2026-11-20-scripting-c3-9b0ae91.md) |
 | 2026-11-20 | RV32 SMP `reboot` 34 s 静默：锁序反转死锁（排查过程） | `695db5b` | Pico 2 RV32 SMP（COM27/COM19） | 过程记录，**非验收证据**（见卡首更正，issue #33） | [reboot stall](2026-11-20-rv32-reboot-stall.md) |
 | 2026-11-20 | `reboot` 死锁修复 + 启动环 dump 判据（最终验收） | `b90df38` | Pico 2 RV32 SMP（COM27/COM19）+ ARM 对照 | T0/T1/T3/T4 PASS，T2 `NOT RUN`（范围外）；RV32 20/20、ARM 12/12、闸门 10/10 | [reboot deadlock](2026-11-20-reboot-deadlock-rpi-pico2-rv32-smp-b90df38.md) |
+| 2026-11-20 | QMI 等待上限按 `clk_hz` 折算（C6/A-6） | `6c9ea04` | Pico 2 RV32 SMP（COM27/COM19） | T0/T1/T3/T4 PASS，T2 `NOT RUN`（范围外）；detected 8388608、20/20 重启 | [qmi bound](2026-11-20-qmi-wait-bound-rpi-pico2-rv32-smp-6c9ea04.md) |
 | 2026-11-20 | csc3 + rirvm 寄存器 IR 实验对（`[features] csc3`） | `ade9db4` | ESP32-C3 COM4 + 18 目标 + QEMU 3 | T0–T3 PASS；csc3 100 KiB / rirvm 28 KiB；默认 8K 仍只有 csc+pvm；T4 `NOT RUN` | [csc3](2026-11-20-csc3-rirvm-integration-esp32c3-ade9db4.md) |
