@@ -25,18 +25,18 @@ TOS_STACK(16 * 1024);
 
 typedef struct Node Node;
 struct Node {
-    int kind;
-    int val;
-    int alen;
-    int stype;
-    int ftype;      /* 1 = Q16.16 float literal/value */
-    int ctype;      /* 1 = char, 2 = char array, 3 = string */
-    int line;
-    char name[32];
-    char field[32];
+    uint64_t hash;      /* identifier hash; N_DECL keeps a text-pool offset */
     Node *lhs, *rhs;
     Node *cond, *then, *els, *body, *next;
     Node *args;
+    int val;
+    uint32_t field_off; /* text-pool offset of a (possibly dotted) field path */
+    uint16_t alen;
+    uint16_t line;
+    uint8_t kind;
+    uint8_t stype;
+    uint8_t ftype;      /* 1 = Q16.16 float literal/value */
+    uint8_t ctype;      /* 1 = char, 2 = char array, 3 = string */
 };
 
 enum {
@@ -54,6 +54,7 @@ enum {
 
 typedef struct {
     char name[32];
+    uint64_t hash;
     int reg;
     int global;
     int offset;
@@ -371,6 +372,51 @@ static void expect(const char *s)
 
 static int is_kw(const char *s) { return tok_kind == 1 && !strcmp(tok, s); }
 
+/* 64-bit FNV-1a.  Nodes carry only this hash; the symbol, function, struct and
+ * constant tables keep the real names, so a collision between two names is
+ * detected where they are inserted rather than silently merging two symbols.
+ * With the tables bounded by FUNC_MAX/SYM_MAX/STRUCT_MAX the chance is ~1e-14
+ * for a whole program, and it is a compile error, never wrong code. */
+static uint64_t str_hash(const char *s)
+{
+    uint64_t h = 1469598103934665603ULL;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static int hash_is(uint64_t h, const char *s)
+{
+    return h == str_hash(s);
+}
+
+/* Per-function scratch text.  Identifier *references* are hashes, but two
+ * things still need the bytes: N_DECL (declare_locals and gen_stmt bind the
+ * symbol by name) and struct field paths ("in.y" cannot be split from a hash).
+ * Both are parsed into this pool and dropped when the function is done. */
+#define TEXT_POOL 3072
+static char text_pool[TEXT_POOL];
+static int text_used;
+
+static uint32_t text_add(const char *name)
+{
+    int n = (int)strlen(name) + 1;
+    uint32_t off;
+    if (text_used + n > TEXT_POOL)
+        die("function text pool full");
+    off = (uint32_t)text_used;
+    memcpy(text_pool + text_used, name, (size_t)n);
+    text_used += n;
+    return off;
+}
+
+static const char *text_at(uint32_t off)
+{
+    return text_pool + off;
+}
+
 static Node *node(int kind)
 {
     if (nnode >= NODE_MAX) die("AST full");
@@ -389,12 +435,26 @@ static Sym *sym_find(const char *name)
     return NULL;
 }
 
+static Sym *sym_find_hash(uint64_t h)
+{
+    for (int i = nsyms - 1; i >= 0; i--)
+        if (syms[i].hash == h) return &syms[i];
+    return NULL;
+}
+
 static Sym *sym_add(const char *name, int global)
 {
+    uint64_t h;
+    int i;
     if (nsyms >= SYM_MAX) die("symbol table full");
+    h = str_hash(name);
+    for (i = 0; i < nsyms; i++)
+        if (syms[i].hash == h && strcmp(syms[i].name, name))
+            die("identifier hash collision");
     Sym *s = &syms[nsyms++];
     memset(s, 0, sizeof *s);
     strncpy(s->name, name, sizeof(s->name) - 1);
+    s->hash = h;
     s->global = global;
     s->reg = global ? -1 : nlocals++;
     return s;
@@ -578,6 +638,16 @@ static int const_lookup(const char *name, int *out)
     return 0;
 }
 
+static int const_lookup_hash(uint64_t h, int *out)
+{
+    for (int i = nconsts - 1; i >= 0; i--)
+        if (str_hash(consts[i].name) == h) {
+            *out = consts[i].val;
+            return 1;
+        }
+    return 0;
+}
+
 static void const_add(const char *name, int val)
 {
     if (nconsts >= CONST_MAX) die("too many enum constants");
@@ -637,7 +707,7 @@ static Node *parse_primary(void)
         next();
         if (accept("(")) {
             Node *n = node(N_CALL);
-            strncpy(n->name, name, sizeof(n->name) - 1);
+            n->hash = str_hash(name);
             if (!accept(")")) {
                 Node **p = &n->args;
                 for (;;) {
@@ -657,14 +727,14 @@ static Node *parse_primary(void)
                 Node *n;
                 read_field_path(member, sizeof member);
                 n = node(N_MEMBER_INDEX);
-                strncpy(n->name, name, sizeof(n->name) - 1);
-                strncpy(n->field, member, sizeof(n->field) - 1);
+                n->hash = str_hash(name);
+                n->field_off = text_add(member);
                 n->lhs = idx;
                 return n;
             }
             {
                 Node *n = node(N_INDEX);
-                strncpy(n->name, name, sizeof(n->name) - 1);
+                n->hash = str_hash(name);
                 n->lhs = idx;
                 return n;
             }
@@ -678,8 +748,8 @@ static Node *parse_primary(void)
                 Node *call = node(N_CALL);
                 Node *base = node(N_VAR);
                 Node **p = &base->next;
-                strncpy(call->name, member, sizeof(call->name) - 1);
-                strncpy(base->name, name, sizeof(base->name) - 1);
+                call->hash = str_hash(member);
+                base->hash = str_hash(name);
                 call->args = base;
                 if (!accept(")")) {
                     for (;;) {
@@ -692,12 +762,12 @@ static Node *parse_primary(void)
                 return call;
             }
             Node *n = node(N_MEMBER);
-            strncpy(n->name, name, sizeof(n->name) - 1);
-            strncpy(n->field, member, sizeof(n->field) - 1);
+            n->hash = str_hash(name);
+            n->field_off = text_add(member);
             return n;
         }
         Node *n = node(N_VAR);
-        strncpy(n->name, name, sizeof(n->name) - 1);
+        n->hash = str_hash(name);
         return n;
     }
     if (accept("(")) {
@@ -942,25 +1012,25 @@ static Node *assign_from_load(Node *load, Node *value)
     switch (load->kind) {
     case N_VAR:
         n = node(N_ASSIGN);
-        strncpy(n->name, load->name, sizeof(n->name) - 1);
+        n->hash = load->hash;
         n->lhs = value;
         break;
     case N_MEMBER:
         n = node(N_ASSIGN_MEMBER);
-        strncpy(n->name, load->name, sizeof(n->name) - 1);
-        strncpy(n->field, load->field, sizeof(n->field) - 1);
+        n->hash = load->hash;
+        n->field_off = load->field_off;
         n->lhs = value;
         break;
     case N_INDEX:
         n = node(N_ASSIGN_INDEX);
-        strncpy(n->name, load->name, sizeof(n->name) - 1);
+        n->hash = load->hash;
         n->lhs = load->lhs;
         n->rhs = value;
         break;
     case N_MEMBER_INDEX:
         n = node(N_ASSIGN_MEMBER_INDEX);
-        strncpy(n->name, load->name, sizeof(n->name) - 1);
-        strncpy(n->field, load->field, sizeof(n->field) - 1);
+        n->hash = load->hash;
+        n->field_off = load->field_off;
         n->lhs = load->lhs;
         n->rhs = value;
         break;
@@ -1018,8 +1088,8 @@ static Node *parse_simple(int semi)
             char member[32];
             read_field_path(member, sizeof member);
             load = node(N_MEMBER);
-            strncpy(load->name, name, sizeof(load->name) - 1);
-            strncpy(load->field, member, sizeof(load->field) - 1);
+            load->hash = str_hash(name);
+            load->field_off = text_add(member);
         } else if (accept("[")) {
             Node *idx = parse_expr();
             expect("]");
@@ -1027,17 +1097,17 @@ static Node *parse_simple(int semi)
                 char member[32];
                 read_field_path(member, sizeof member);
                 load = node(N_MEMBER_INDEX);
-                strncpy(load->name, name, sizeof(load->name) - 1);
-                strncpy(load->field, member, sizeof(load->field) - 1);
+                load->hash = str_hash(name);
+                load->field_off = text_add(member);
                 load->lhs = idx;
             } else {
                 load = node(N_INDEX);
-                strncpy(load->name, name, sizeof(load->name) - 1);
+                load->hash = str_hash(name);
                 load->lhs = idx;
             }
         } else {
             load = node(N_VAR);
-            strncpy(load->name, name, sizeof(load->name) - 1);
+            load->hash = str_hash(name);
         }
         val = mk_bin(inc ? N_ADD : N_SUB, load, mk_one());
         as = assign_from_load(load, val);
@@ -1050,7 +1120,7 @@ static Node *parse_simple(int semi)
         if (tok_kind != 1) die("name expected");
         n = node(N_DECL);
         n->ctype = 1;
-        strncpy(n->name, tok, sizeof(n->name) - 1);
+        n->hash = text_add(tok);
         next();
         if (accept("[")) {
             if (tok_kind != 2) die("array length expected");
@@ -1082,7 +1152,7 @@ static Node *parse_simple(int semi)
         if (tok_kind != 1) die("name expected");
         n = node(N_DECL);
         n->ctype = 3;
-        strncpy(n->name, tok, sizeof(n->name) - 1);
+        n->hash = text_add(tok);
         next();
         if (accept("="))
             n->lhs = parse_expr();
@@ -1100,7 +1170,7 @@ static Node *parse_simple(int semi)
         if (tok_kind != 1) die("variable name expected");
         n = node(N_DECL);
         n->stype = sid;
-        strncpy(n->name, tok, sizeof(n->name) - 1);
+        n->hash = text_add(tok);
         next();
         if (accept("[")) {
             if (tok_kind != 2) die("struct array length expected");
@@ -1117,7 +1187,7 @@ static Node *parse_simple(int semi)
         if (tok_kind != 1) die("name expected");
         n = node(N_DECL);
         n->ftype = 1;
-        strncpy(n->name, tok, sizeof(n->name) - 1);
+        n->hash = text_add(tok);
         next();
         if (accept("="))
             n->lhs = parse_expr();
@@ -1129,7 +1199,7 @@ static Node *parse_simple(int semi)
         next();
         if (tok_kind != 1) die("name expected");
         n = node(N_DECL);
-        strncpy(n->name, tok, sizeof(n->name) - 1);
+        n->hash = text_add(tok);
         next();
         if (accept("[")) {
             if (tok_kind != 2) die("array length expected");
@@ -1158,8 +1228,8 @@ static Node *parse_simple(int semi)
                 Node *call = node(N_CALL);
                 Node *base = node(N_VAR);
                 Node **p = &base->next;
-                strncpy(call->name, member, sizeof(call->name) - 1);
-                strncpy(base->name, name, sizeof(base->name) - 1);
+                call->hash = str_hash(member);
+                base->hash = str_hash(name);
                 call->args = base;
                 if (!accept(")")) {
                     for (;;) {
@@ -1175,8 +1245,8 @@ static Node *parse_simple(int semi)
             {
                 Node *load = node(N_MEMBER);
                 Node *tail;
-                strncpy(load->name, name, sizeof(load->name) - 1);
-                strncpy(load->field, member, sizeof(load->field) - 1);
+                load->hash = str_hash(name);
+                load->field_off = text_add(member);
                 tail = parse_place_tail(load, semi);
                 if (tail) {
                     if (semi) expect(";");
@@ -1186,8 +1256,8 @@ static Node *parse_simple(int semi)
             expect("=");
             {
                 Node *n = node(N_ASSIGN_MEMBER);
-                strncpy(n->name, name, sizeof(n->name) - 1);
-                strncpy(n->field, member, sizeof(n->field) - 1);
+                n->hash = str_hash(name);
+                n->field_off = text_add(member);
                 n->lhs = parse_expr();
                 if (semi) expect(";");
                 return n;
@@ -1195,7 +1265,7 @@ static Node *parse_simple(int semi)
         }
         if (accept("(")) {
             Node *n = node(N_CALL);
-            strncpy(n->name, name, sizeof(n->name) - 1);
+            n->hash = str_hash(name);
             if (!accept(")")) {
                 Node **p = &n->args;
                 for (;;) {
@@ -1218,8 +1288,8 @@ static Node *parse_simple(int semi)
                 {
                     Node *load = node(N_MEMBER_INDEX);
                     Node *tail;
-                    strncpy(load->name, name, sizeof(load->name) - 1);
-                    strncpy(load->field, member, sizeof(load->field) - 1);
+                    load->hash = str_hash(name);
+                    load->field_off = text_add(member);
                     load->lhs = idx;
                     tail = parse_place_tail(load, semi);
                     if (tail) {
@@ -1229,8 +1299,8 @@ static Node *parse_simple(int semi)
                 }
                 expect("=");
                 n = node(N_ASSIGN_MEMBER_INDEX);
-                strncpy(n->name, name, sizeof(n->name) - 1);
-                strncpy(n->field, member, sizeof(n->field) - 1);
+                n->hash = str_hash(name);
+                n->field_off = text_add(member);
                 n->lhs = idx;
                 n->rhs = parse_expr();
                 if (semi) expect(";");
@@ -1239,7 +1309,7 @@ static Node *parse_simple(int semi)
             {
                 Node *load = node(N_INDEX);
                 Node *tail;
-                strncpy(load->name, name, sizeof(load->name) - 1);
+                load->hash = str_hash(name);
                 load->lhs = idx;
                 tail = parse_place_tail(load, semi);
                 if (tail) {
@@ -1249,7 +1319,7 @@ static Node *parse_simple(int semi)
             }
             {
                 Node *n = node(N_ASSIGN_INDEX);
-                strncpy(n->name, name, sizeof(n->name) - 1);
+                n->hash = str_hash(name);
                 n->lhs = idx;
                 expect("=");
                 n->rhs = parse_expr();
@@ -1260,8 +1330,8 @@ static Node *parse_simple(int semi)
         {
             Node *n = node(N_ASSIGN);
             Node *v = node(N_VAR);
-            strncpy(n->name, name, sizeof(n->name) - 1);
-            strncpy(v->name, name, sizeof(v->name) - 1);
+            n->hash = str_hash(name);
+            v->hash = str_hash(name);
             if (tok_kind == 3 &&
                 (!strcmp(tok, "+=") || !strcmp(tok, "-=") ||
                  !strcmp(tok, "*=") || !strcmp(tok, "/=") ||
@@ -1455,6 +1525,13 @@ static int func_lookup(const char *name)
     return -1;
 }
 
+static int func_lookup_hash(uint64_t h)
+{
+    for (int i = 0; i < nfuncs; i++)
+        if (str_hash(sig_name(i)) == h) return i;
+    return -1;
+}
+
 /* Native ids shared with rvm. */
 enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
@@ -1486,6 +1563,30 @@ static int native_lookup(const char *name, int *nargs, int *hasret)
     return -1;
 }
 
+static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
+{
+    static const struct { const char *name; int id, nargs, hasret; } tab[] = {
+        { "gpio_count", NAT_GPIO_COUNT, 0, 1 },
+        { "gpio_mode",  NAT_GPIO_MODE,  2, 0 },
+        { "gpio_write", NAT_GPIO_WRITE, 2, 0 },
+        { "gpio_read",  NAT_GPIO_READ,  1, 1 },
+        { "adc_count",  NAT_ADC_COUNT,  0, 1 },
+        { "adc_read",   NAT_ADC_READ,   1, 1 },
+        { "pwm_count",  NAT_PWM_COUNT,  0, 1 },
+        { "pwm_set",    NAT_PWM_SET,    3, 0 },
+        { "pwm_off",    NAT_PWM_OFF,    1, 0 },
+        { "sleep",      NAT_SLEEP,      1, 0 },
+        { "uptime",     NAT_UPTIME,     0, 1 },
+    };
+    for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
+        if (str_hash(tab[i].name) == h) {
+            *nargs = tab[i].nargs;
+            *hasret = tab[i].hasret;
+            return tab[i].id;
+        }
+    return -1;
+}
+
 /* Reserve registers for every local declaration in the function body. */
 static void declare_locals(Node *n)
 {
@@ -1495,16 +1596,16 @@ static void declare_locals(Node *n)
             declare_locals(n->body);
             break;
         case N_DECL:
-            if (n->ctype == 2) sym_add_char_array(n->name, n->alen, 0);
-            else if (n->ctype == 3) sym_add_string(n->name, 0);
-            else if (n->ctype == 1) sym_add_char(n->name, 0);
+            if (n->ctype == 2) sym_add_char_array(text_at((uint32_t)n->hash), n->alen, 0);
+            else if (n->ctype == 3) sym_add_string(text_at((uint32_t)n->hash), 0);
+            else if (n->ctype == 1) sym_add_char(text_at((uint32_t)n->hash), 0);
             else if (n->stype > 0) {
-                if (n->alen > 0) sym_add_struct_array(n->name, n->stype, n->alen, 0);
-                else sym_add_struct(n->name, n->stype, 0);
+                if (n->alen > 0) sym_add_struct_array(text_at((uint32_t)n->hash), n->stype, n->alen, 0);
+                else sym_add_struct(text_at((uint32_t)n->hash), n->stype, 0);
             }
-            else if (n->ftype) sym_add_float(n->name, 0);
-            else if (n->alen > 0) sym_add_array(n->name, n->alen, 0);
-            else sym_add(n->name, 0);
+            else if (n->ftype) sym_add_float(text_at((uint32_t)n->hash), 0);
+            else if (n->alen > 0) sym_add_array(text_at((uint32_t)n->hash), n->alen, 0);
+            else sym_add(text_at((uint32_t)n->hash), 0);
             break;
         case N_IF:
             declare_locals(n->then);
@@ -1541,7 +1642,7 @@ static int node_float_hint(Node *n)
     if (n->kind == N_NUM) return n->ftype ? 1 : 0;
     if (n->kind == N_STR) return -1;
     if (n->kind == N_VAR) {
-        Sym *s = sym_find(n->name);
+        Sym *s = sym_find_hash(n->hash);
         if (s && (s->is_string || s->is_char_array)) return -1;
         return (s && s->is_float) ? 1 : 0;
     }
@@ -1572,10 +1673,10 @@ static int coerce_to(int v, int from, int to)
 static int gen_value(Node *n)
 {
     if (n->kind == N_VAR) {
-        Sym *s = sym_find(n->name);
+        Sym *s = sym_find_hash(n->hash);
         if (!s) {
             int v;
-            if (const_lookup(n->name, &v)) {
+            if (const_lookup_hash(n->hash, &v)) {
                 int d = new_temp();
                 emit(R_CONST, v, 0, 0, d);
                 last_type = 0;
@@ -1651,17 +1752,17 @@ static int node_struct_type(Node *n)
 {
     if (!n) return 0;
     if (n->kind == N_VAR) {
-        Sym *s = sym_find(n->name);
+        Sym *s = sym_find_hash(n->hash);
         return (s && s->is_struct) ? s->stype : 0;
     }
     if (n->kind == N_MEMBER || n->kind == N_MEMBER_INDEX) {
-        Sym *s = sym_find(n->name);
+        Sym *s = sym_find_hash(n->hash);
         int off;
         if (!s || !s->is_struct) return 0;
-        return struct_path(s->stype, n->field, &off);
+        return struct_path(s->stype, text_at(n->field_off), &off);
     }
     if (n->kind == N_CALL) {
-        int fid = func_lookup(n->name);
+        int fid = func_lookup_hash(n->hash);
         return fid >= 0 ? sigs[fid].rtype_struct : 0;
     }
     return 0;
@@ -1674,7 +1775,7 @@ static int gen_struct_ref(Node *n)
     int poff, ptype;
 
     if (n->kind == N_VAR) {
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct) die_node(n, "struct value expected");
         if (s->is_param) return s->reg;
         {
@@ -1684,9 +1785,9 @@ static int gen_struct_ref(Node *n)
         }
     }
     if (n->kind == N_MEMBER) {
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct) die_node(n, "struct value expected");
-        ptype = struct_path(s->stype, n->field, &poff);
+        ptype = struct_path(s->stype, text_at(n->field_off), &poff);
         if (ptype <= 0) die_node(n, "field is not a struct");
         {
             int base = s->is_param ? s->reg : new_temp();
@@ -1701,9 +1802,9 @@ static int gen_struct_ref(Node *n)
     }
     if (n->kind == N_MEMBER_INDEX) {
         int idx, base;
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct || !s->is_array) die_node(n, "struct array expected");
-        ptype = struct_path(s->stype, n->field, &poff);
+        ptype = struct_path(s->stype, text_at(n->field_off), &poff);
         if (ptype <= 0) die_node(n, "field is not a struct");
         idx = gen_value(n->lhs);
         idx = coerce_to(idx, last_type, 0);
@@ -1802,7 +1903,7 @@ static int gen_string_value(Node *n)
         return v;
     }
     if (n->kind == N_VAR) {
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (s && s->is_char_array) {
             v = new_temp();
             emit(R_CONST, s->offset, 0, 0, v);
@@ -1860,10 +1961,10 @@ static int gen_expr_into(Node *n, int dst)
         last_type = n->ftype;
         return dst;
     case N_VAR:
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s) {
             int v;
-            if (const_lookup(n->name, &v)) {
+            if (const_lookup_hash(n->hash, &v)) {
                 emit(R_CONST, v, 0, 0, dst);
                 last_type = 0;
                 return dst;
@@ -1901,7 +2002,7 @@ static int gen_expr_into(Node *n, int dst)
         last_type = s->is_float;
         return dst;
     case N_INDEX:
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s) die_node(n, "unknown array");
         if (s->is_char_array) {
             a = gen_value(n->lhs);
@@ -1920,9 +2021,9 @@ static int gen_expr_into(Node *n, int dst)
         return dst;
     case N_MEMBER: {
         int poff, ptype;
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct) die_node(n, "struct variable expected");
-        ptype = struct_path(s->stype, n->field, &poff);
+        ptype = struct_path(s->stype, text_at(n->field_off), &poff);
         if (ptype != 0)
             die_node(n, "struct field used as scalar");
         if (s->is_param) emit(R_LOADD, s->reg, poff, 0, dst);
@@ -1932,13 +2033,13 @@ static int gen_expr_into(Node *n, int dst)
     }
     case N_ASSIGN_MEMBER: {
         int poff, ptype;
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct) die_node(n, "struct variable expected");
-        ptype = struct_path(s->stype, n->field, &poff);
+        ptype = struct_path(s->stype, text_at(n->field_off), &poff);
         if (ptype > 0) {
             int base = member_base(s, poff), fid, src;
             if (n->lhs->kind == N_CALL) {
-                fid = func_lookup(n->lhs->name);
+                fid = func_lookup_hash(n->lhs->hash);
                 if (fid < 0 || sigs[fid].rtype_struct != ptype)
                     die_node(n, "struct-returning function expected");
                 emit_struct_call(fid, n->lhs->args, base);
@@ -1960,9 +2061,9 @@ static int gen_expr_into(Node *n, int dst)
     }
     case N_MEMBER_INDEX: {
         int poff, ptype, base;
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct || !s->is_array) die_node(n, "struct array expected");
-        ptype = struct_path(s->stype, n->field, &poff);
+        ptype = struct_path(s->stype, text_at(n->field_off), &poff);
         if (ptype != 0)
             die_node(n, "struct field used as scalar");
         a = gen_value(n->lhs);
@@ -1975,9 +2076,9 @@ static int gen_expr_into(Node *n, int dst)
     }
     case N_ASSIGN_MEMBER_INDEX: {
         int poff, ptype, base;
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s || !s->is_struct || !s->is_array) die_node(n, "struct array expected");
-        ptype = struct_path(s->stype, n->field, &poff);
+        ptype = struct_path(s->stype, text_at(n->field_off), &poff);
         a = gen_value(n->lhs);
         a = coerce_to(a, last_type, 0);
         emit(R_BOUNDS, a, s->alen, 0, 0);
@@ -1990,7 +2091,7 @@ static int gen_expr_into(Node *n, int dst)
         if (ptype > 0) {
             int fid, src;
             if (n->rhs->kind == N_CALL) {
-                fid = func_lookup(n->rhs->name);
+                fid = func_lookup_hash(n->rhs->hash);
                 if (fid < 0 || sigs[fid].rtype_struct != ptype)
                     die_node(n, "struct-returning function expected");
                 emit_struct_call(fid, n->rhs->args, base);
@@ -2010,13 +2111,13 @@ static int gen_expr_into(Node *n, int dst)
         return b;
     }
     case N_ASSIGN:
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s) die_node(n, "unknown variable");
         if (s->is_struct) {
             int nf, i, srcbase, stype, fid;
             if (s->is_array) die_node(n, "struct assignment target");
             if (n->lhs->kind == N_CALL) {
-                fid = func_lookup(n->lhs->name);
+                fid = func_lookup_hash(n->lhs->hash);
                 if (fid < 0 || sigs[fid].rtype_struct != s->stype)
                     die_node(n, "struct-returning function expected");
                 srcbase = s->is_param ? s->reg : new_temp();
@@ -2072,7 +2173,7 @@ static int gen_expr_into(Node *n, int dst)
         last_type = s->is_float;
         return s->reg;
     case N_ASSIGN_INDEX:
-        s = sym_find(n->name);
+        s = sym_find_hash(n->hash);
         if (!s) die_node(n, "unknown array");
         if (s->is_char_array) {
             a = gen_value(n->lhs);
@@ -2106,21 +2207,22 @@ static int gen_expr_into(Node *n, int dst)
         return a;
     case N_CALL: {
         int argc = 0, fid, nid, nargs, hasret;
+        uint64_t h = n->hash;
 
-        if (!strcmp(n->name, "strlen") || !strcmp(n->name, "atoi") ||
-            !strcmp(n->name, "strcmp") || !strcmp(n->name, "strlcpy") ||
-            !strcmp(n->name, "strlcat")) {
-            int want = !strcmp(n->name, "strcmp") ? 2 :
-                       (!strcmp(n->name, "strlcpy") || !strcmp(n->name, "strlcat")) ? 3 : 1;
+        if (hash_is(h, "strlen") || hash_is(h, "atoi") ||
+            hash_is(h, "strcmp") || hash_is(h, "strlcpy") ||
+            hash_is(h, "strlcat")) {
+            int want = hash_is(h, "strcmp") ? 2 :
+                       (hash_is(h, "strlcpy") || hash_is(h, "strlcat")) ? 3 : 1;
             if (arg_count(n->args) != want)
                 die_node(n, "wrong string builtin argument count");
-            if (!strcmp(n->name, "strlen")) {
+            if (hash_is(h, "strlen")) {
                 int s = gen_string_value(arg_at(n->args, 0));
                 emit(R_STRLEN, s, 0, 0, dst);
-            } else if (!strcmp(n->name, "atoi")) {
+            } else if (hash_is(h, "atoi")) {
                 int s = gen_string_value(arg_at(n->args, 0));
                 emit(R_ATOI, s, 0, 0, dst);
-            } else if (!strcmp(n->name, "strcmp")) {
+            } else if (hash_is(h, "strcmp")) {
                 int s0 = gen_string_value(arg_at(n->args, 0));
                 int s1 = gen_string_value(arg_at(n->args, 1));
                 emit(R_STRCMP, s0, s1, 0, dst);
@@ -2129,14 +2231,14 @@ static int gen_expr_into(Node *n, int dst)
                 int s = gen_string_value(arg_at(n->args, 1));
                 int cap = gen_value(arg_at(n->args, 2));
                 cap = coerce_to(cap, last_type, 0);
-                emit(!strcmp(n->name, "strlcpy") ? R_STRCPY : R_STRCAT,
+                emit(hash_is(h, "strlcpy") ? R_STRCPY : R_STRCAT,
                      d, s, cap, dst);
             }
             last_type = 0;
             return dst;
         }
 
-        nid = native_lookup(n->name, &nargs, &hasret);
+        nid = native_lookup_hash(n->hash, &nargs, &hasret);
         if (nid >= 0) {
             int a0 = -1, a1 = -1, a2 = -1;
             for (Node *p = n->args; p; p = p->next) {
@@ -2153,7 +2255,7 @@ static int gen_expr_into(Node *n, int dst)
             last_type = 0;
             return dst;
         }
-        fid = func_lookup(n->name);
+        fid = func_lookup_hash(n->hash);
         if (fid < 0) die_node(n, "unknown function");
         if (sigs[fid].rtype_struct > 0)
             die_node(n, "struct-returning call needs an assignment target");
@@ -2448,7 +2550,7 @@ static void gen_stmt(Node *n)
         }
         break;
     case N_DECL: {
-        Sym *s = sym_find(n->name);
+        Sym *s = sym_find(text_at((uint32_t)n->hash));
         if (!s) die("declaration lost");
         if (n->ctype == 2) {
             if (n->lhs) {
@@ -2470,7 +2572,7 @@ static void gen_stmt(Node *n)
             Node tmp;
             memset(&tmp, 0, sizeof tmp);
             tmp.kind = N_ASSIGN;
-            strncpy(tmp.name, n->name, sizeof(tmp.name) - 1);
+            tmp.hash = str_hash(text_at((uint32_t)n->hash));
             tmp.lhs = n->lhs;
             gen_expr(&tmp);
         }
@@ -2495,7 +2597,7 @@ static void gen_stmt(Node *n)
         int v;
         if (cur_rstruct > 0) {
             if (n->lhs->kind == N_CALL) {
-                int fid = func_lookup(n->lhs->name);
+                int fid = func_lookup_hash(n->lhs->hash);
                 if (fid < 0 || sigs[fid].rtype_struct != cur_rstruct)
                     die_node(n, "struct-returning function expected");
                 emit_struct_call(fid, n->lhs->args, cur_ret_base);
@@ -3291,6 +3393,7 @@ static void parse_function(int pass, int rtype, int rstruct, const char *name, i
     }
 
     nnode = 0;
+    text_used = 0;
     body = parse_stmt();
 
     nsyms = nglobals;

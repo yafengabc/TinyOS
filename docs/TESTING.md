@@ -150,7 +150,7 @@ go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 2
   比对时先去掉这一行。
 - 板上 `csc`：函数表 256（`FUNC_MAX`）、单函数 256 个 AST 节点（`NODE_MAX`）、
   256 条 IR。`many25`/`many32`/`bigcode`/`bigir` 现在都能在板上编译；
-  90 条语句的 `bigbody`（约 450 节点）仍需宿主 `csc`。窗口 140 KiB。
+  90 条语句的 `bigbody`（约 450 节点）仍需宿主 `csc`。窗口 128 KiB。
   见 `OPEN-ITEMS.md` §12。
 - 板上 `rcc`：RIR2 ≤ 40 KiB（约 2000 IR）、4096 个标签、text ≤ 48 KiB；
   C3/rv32 的窗口是 120 KiB。`tests/bigir.c`（1436 IR / 2062 标签）是这套
