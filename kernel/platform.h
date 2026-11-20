@@ -284,6 +284,30 @@ uint32_t plat_lfs_blocks(void);
 void plat_flash_probe_debug(uint32_t *out);
 uint32_t plat_usb_poll_ns(void);
 
+/* What the pre-tick USB pump cost, for /proc/usbpoll (issue #29).  out[0] =
+ * nanoseconds per poll, out[1] = polls actually run, out[2] = the iteration
+ * bound it was given, out[3] = 1 when the host finished enumerating before
+ * the bound, out[4] = wall time in milliseconds.
+ *
+ * This is not the same quantity as plat_usb_poll_ns(): that one is steady
+ * state, from a running shell with the tick draining the ring and both cores
+ * live.  This one is measured inside the boot wait, where there is one core,
+ * interrupts are masked and no tick exists - the regime a boot-time bound
+ * actually has to be sized against.  Returns 0 when the port has no such
+ * phase (weak default in kernel/main.c), so a port that boots straight into
+ * an interrupt-driven controller says nothing rather than zero. */
+int plat_usb_boot_pump(uint32_t *out);
+
+/* A microsecond counter that is already running before the timer subsystem
+ * exists, for measuring short intervals inside early boot.  plat_now_ns() is
+ * not usable there: on the RP2350 the RV32 mtime is *reset and re-enabled* by
+ * plat_timer_init(), which runs after plat_early_init(), so during the boot
+ * console's enumeration wait it reads a constant - a measurement built on it
+ * silently comes back as "0 ms for 72 588 polls".  Wraps after ~71 min;
+ * intervals only.  Weak default in kernel/main.c returns 0, which callers
+ * must treat as "no time base" rather than as a zero-length interval. */
+uint32_t plat_boot_us(void);
+
 /* Console UART in twelve words, for /proc/uart0.  A port that can lose its
  * TX side without losing its RX side (the RP2350 after a BOOTSEL flash does
  * exactly that) needs its programming - CR, the divider, the pad and the pin

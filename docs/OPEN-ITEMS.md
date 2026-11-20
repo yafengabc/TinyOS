@@ -131,6 +131,20 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    量级，所以那次挂死不是“预算太大”，更可能是 RV32 现有循环里那个 **40 周期间隔**
    被去掉导致的（ARM 的 pump 是紧循环）。
 
+   **2026-11-20 补上预 tick 那一档（上面那条只是稳态，不是同一 regime）**：新增
+   `plat_boot_us()`（读 TIMER0 `TIMERAWL`，1 MHz；**不能用 `plat_now_ns()`**——RV32
+   mtime 由 `plat_timer_init()` 在 `plat_early_init()` 之后才清零重开，boot console
+   阶段读到常数，第一版探针因此报出「72 588 次 / 0 ms」），`usb_cdc_wait()` 自计时，
+   `/proc/usbpoll` 第二行 `bootpump:`，启动行 `[C] usbwait`。Pico 2 RV32 SMP：
+   - 有主机：72 183 / 1 730 780 次、346 822 µs、**4 804 ns/poll**、mounted；
+     暖重启 71 869 次 / 345 340 µs / 4 805 ns/poll，稳定。
+   - 跑满界（临时 `usb_cdc_replug(0)` 强制无主机，实验代码已撤）：**1 730 780 /
+     1 730 780 次、8 295 302 µs、4 792 ns/poll、bound reached**。
+   结论：① 40 000 次按这里单价是 **192 ms**，“预算太大”彻底否掉；② 现有等待其实
+   是 **8.3 s**，注释写的“约 1.5 s”错了 5.5 倍（3/260 这个系数假设 0.87 µs/次）；
+   ③ 预 tick 比稳态慢 1.8×（4.8 vs 2.7 µs）。11-19 那次挂死**仍未解释**，不得以
+   “预算太大”结案。卡片：`docs/acceptance/2026-11-20-pre-tick-usb-pump-cost.md`。
+
    **2026-11-20 那个 trap 解释清楚了**：`mcause=0x3` 是 **breakpoint = `ebreak`**，
    与访存错误无关。全镜像一共 47 条 `ebreak`，**全部**在 TinyUSB 的
    `TU_ASSERT/TU_VERIFY`（`tusb_verify.h:87` 的 `__asm("ebreak\n")`）里，

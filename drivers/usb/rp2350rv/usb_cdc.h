@@ -9,6 +9,20 @@
 /* clk_hz is the measured clk_sys; the enumeration wait is scaled by it. */
 void usb_cdc_console_init(uint32_t clk_hz);
 
+/* What that wait actually cost (issue #29).  This port keeps the wait instead
+ * of the ARM ports' bounded pump because the pump's 40 000 iterations did not
+ * come back on a Hazard3 first boot; a bound can only be honest if the price
+ * of one iteration is known here, and the only place it can be measured with
+ * interrupts masked and no tick is inside the wait itself. */
+struct usb_boot_pump {
+    uint32_t ns_per_poll;   /* wall time per poll, 0 until measured          */
+    uint32_t polls;         /* usb_cdc_poll() calls the wait actually made   */
+    uint32_t bound;         /* the iteration bound it was given              */
+    uint32_t mounted;       /* 1: the host finished enumeration before bound */
+    uint32_t us;            /* wall time of the whole wait, microseconds     */
+};
+const struct usb_boot_pump *usb_cdc_boot_pump(void);
+
 /* Run TinyUSB's task loop.  Called every SysTick (1 ms) by the platform layer
  * and from the console API, because the host may enumerate at any time. */
 void usb_cdc_poll(void);

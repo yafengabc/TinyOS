@@ -541,19 +541,62 @@ void usb_cdc_irq_enable(void)
  * pre-tick, in the C6/A-6 sense: interrupts are still masked here, so
  * plat_ticks() would never advance and a deadline built from it would be a
  * deadline that never expires.  The bound is therefore an iteration count
- * folded from clk_hz (3/260 of it, i.e. roughly 1.5 s at the measured
- * 2.66 us per poll), not a literal - see docs/ARCHITECTURE-NEXT.md A-6. */
+ * folded from clk_hz (3/260 of it), not a literal - see
+ * docs/ARCHITECTURE-NEXT.md A-6.
+ *
+ * 3/260 was chosen to be "roughly 1.5 s" at ~0.87 us per iteration.  That was
+ * a guess, and a bad one: measured on this core the loop costs 4.79 us per
+ * poll, so the bound the board has been using all along is **8.3 s**, not
+ * 1.5 s.  The 2.66 us printed by /proc/usbpoll is steady state from a live
+ * shell (SMP, interrupts on, the 1 ms tick draining the ring) - a different
+ * regime, and 1.8x cheaper.  g_boot_pump below times this loop where it runs;
+ * /proc/usbpoll prints both numbers so the two regimes cannot be confused
+ * again.  A host that enumerates normally ends the wait after ~0.35 s /
+ * 72 000 polls; only a board with no host pays the full 8.3 s. */
+static struct usb_boot_pump g_boot_pump;
+
+const struct usb_boot_pump *usb_cdc_boot_pump(void)
+{
+    return &g_boot_pump;
+}
+
 static void usb_cdc_wait(uint32_t clk_hz)
 {
     uint64_t spins;
+    uint32_t bound, i, t0, t1;
 
     if (!g_hw_ready)
         return;
     spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
-    for (uint64_t i = 0; i < spins && !tud_mounted(); i++) {
+    bound = spins > 0xffffffffull ? 0xffffffffu : (uint32_t)spins;
+
+    /* 32-bit loop counter on purpose: a 64-bit compare per iteration would be
+     * part of what is being measured.
+     *
+     * The clock is plat_boot_us(), not plat_now_ns(): the latter reads the
+     * RV32 mtime, which plat_timer_init() has not enabled yet at this point
+     * (the kernel's timer setup runs after plat_early_init), so it returns a
+     * constant here and the first version of this probe reported "0 ms for
+     * 72 588 polls".  TIMER0's 1 MHz count is already running - ticks_init()
+     * starts it two phases earlier - and it is what the panel driver's delays
+     * use.  Zero from it means "no time base", not "no time passed". */
+    t0 = plat_boot_us();
+    for (i = 0; i < bound && !tud_mounted(); i++) {
         usb_cdc_poll();
         for (volatile int j = 0; j < 40; j++)
             ;
+    }
+    t1 = plat_boot_us();
+
+    g_boot_pump.polls   = i;
+    g_boot_pump.bound   = bound;
+    g_boot_pump.mounted = tud_mounted() ? 1u : 0u;
+    if (t0 && t1 && t1 != t0) {
+        uint32_t us = t1 - t0;          /* wrap-safe: both are low 32 bits */
+
+        g_boot_pump.us = us;
+        if (i)
+            g_boot_pump.ns_per_poll = (uint32_t)((uint64_t)us * 1000ull / i);
     }
 }
 

@@ -5175,3 +5175,33 @@ uptime 0.31 s。卡片 `docs/acceptance/2026-11-20-rv32-reboot-stall.md`。
 看门狗”当成“两次启动都被清掉”是过度解读，直接把“芯片到底复位没有”当问题问
 （看 CDC 节点在不在）只花了一次实验。
 
+
+## 86. 2026-11-20 预 tick 的单价：A-6 折算系数也要有出处（#29）
+
+上一轮为了 #29 量到了稳态 `usbpoll: 2660 ns/poll`，据此说“40 000 次只有 106 ms，
+不是预算太大”。这个结论对，但依据用错了 regime：那个数是**跑着的 shell**里量的
+（两核、中断开、tick 在排空 ring），而真正要算的等待跑在**单核、中断关、没有 tick**
+的 boot console 阶段。
+
+在等待内部加自计时，第一次拿到 `bootpump: 0 ns/poll, 72588 of 1730780 polls in 0 ms`
+——循环确实在跑，时钟是死的。原因很快定位：`plat_now_ns()` 读 RV32 mtime，而
+`plat_timer_init()`（kmain 阶段）才把 `SIO_MTIME_CTRL` 清零、mtime 归零、再按
+`EN|FULLSPEED` 重开；boot console 发生在更早的 `plat_early_init()` 里。换成
+TIMER0 `TIMERAWL`（1 MHz，早两个 phase 就由 `ticks_init()` 启动，面板驱动的
+延时一直在用它），并用弱钩子 `plat_boot_us()` 暴露给驱动。
+
+**数据**（Pico 2 RV32 SMP，`/proc/usbpoll` 第二行）：
+
+- 有主机：72 183 / 1 730 780 次、346 822 µs、**4 804 ns/poll**、mounted；
+  暖重启 71 869 次 / 345 340 µs / 4 805 ns/poll。
+- 无主机（临时 `usb_cdc_replug(0)` 强制跑满界，测完撤回）：
+  **1 730 780 / 1 730 780 次、8 295 302 µs、4 792 ns/poll**、bound reached。
+
+**结论三条**：① 预 tick 比稳态慢 1.8×（4.8 vs 2.7 µs），ARM 的数字确实不能照搬，
+但不是因为“次数太多”；② 40 000 次在这里是 **192 ms**，“预算太大”第二次被否；
+③ 现行 `clk_hz*3/260` 的界其实是 **8.3 s**，注释写“约 1.5 s”错了 5.5 倍——
+A-6 要求折算，却没要求折算系数本身有出处，这次把它补上：`/proc/usbpoll` 现在
+同时打印两个 regime，`usb_cdc_wait()` 注释改成实测值。
+
+11-19 那次“换紧循环就全哑”的原因**仍未解释**，本次没重做那个实验，也没删等待。
+卡片：`docs/acceptance/2026-11-20-pre-tick-usb-pump-cost.md`。

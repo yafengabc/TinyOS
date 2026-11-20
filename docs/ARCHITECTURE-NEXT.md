@@ -262,6 +262,15 @@ SMP 调度正确性）不变。已批准的例外，每项仍要附自己的回�
   不能调 `plat_cpu_hz()`）。剩下未折算的是 `plat_console_putc/flush` 里 `100000u`
   的 UART FIFO 上限——那是**每个字符**都要走的路径，展开成按频率折算会增加热路径成本，
   因此明确按“板级常量”处理；若要动它，先量代价。
+- **系数也要有出处**（2026-11-20，#29）：A-6 只要求“按频率折算”，但
+  `usb_cdc_wait()` 的 `clk_hz*3/260` 隐含 0.87 µs/次，从未量过；实测预 tick
+  **4.8 µs/次**，跑满界 **8.30 s** 而不是注释说的 1.5 s。折算用的单价必须是
+  **同一 regime** 的：`plat_usb_poll_ns()` 的 2.66 µs 是稳态（SMP + tick + 中断开），
+  比 boot 那一档便宜 1.8×。现在 `/proc/usbpoll` 同时打印稳态 `usbpoll:` 与
+  boot 期 `bootpump:`，后者由 `usb_cdc_wait()` 自己计时；预 tick 时钟是
+  `plat_boot_us()`（TIMER0 `TIMERAWL`，1 MHz），**不能用 `plat_now_ns()`**——
+  RV32 mtime 由 `plat_timer_init()` 在 `plat_early_init()` 之后才清零重开，
+  在 boot console 阶段读它是常数（第一次就量出“72 588 次 / 0 ms”）。
 - `wd_start(cb, ticks)` 移到 B-8，触发条件：网络/companion 的请求级超时。
 
 **不做**：全量替换 `sleep` 列表；把早期初始化改成读 tick。
