@@ -1,124 +1,142 @@
 # RV32 SMP：`reboot` 之后约一半的启动要 34 秒才出声（2026-11-20）
 
 ```text
-commit:            待填（本轮是测量，不是修复）
-change:            UART0 修好后用双通道测重启延迟，发现 RV32 SMP 独有的停顿
-baseline:          none
+commit:            （见本轮提交）
+change:            usb_cdc_flush() 的加锁顺序与 usb_tx_drain() 相反，两核互等死锁；
+                   修复后 46/46 次重启在 0.50–0.58 s 回来
+baseline:          fix 前 5/8 慢（`gate_boot.py` 同一判据）；fix 后 10/10 PASS
 target/config:     rpi-pico2-rv32-smp / defaults（对照：rpi-pico2-smp）
 board/port/image:  Raspberry Pi Pico 2，CDC=COM27，UART0=COM19（CH343）
 toolchain:         go 1.x, clang 23.1.4, python 3.13
 host:              Windows 11 / EKSOFT
-T0:                UART0 双向可用（命令走 UART0、回复也从 UART0 回来）
-T1:                ARM 镜像 10 次 `reboot`：10/10 在 0.38 s 回来
-T2:                RV32 SMP 镜像 10 次 `reboot`：6 次 0.50–0.57 s，4 次 **34.01 s**
-T3:                34.01 s ≈ 2 × 16.78 s（`WATCHDOG_RELOAD = 0x00ffffff` µs）
-T4:                暗窗口内 UART0 一个字节都没有，CDC 设备也不在总线上
-T5:                阶段标记：停顿前那次启动到了 `BOOT_PHASE(14)`（USB init 之后）
-T6:                那一刻 `clk_peri=0x10000800`、`UART_CR=0x00000301`，UART 编程是对的
-logs:              build/gp0_watch.log（另一件事）；本节数据为串口摘录，未入库
-notes:             未修复；仪表本身会改变命中率（TOS_DIAG 内），根因未定
+T1:                fix 前：RV32 SMP 10 次 `reboot`，4 次 34.01 s，其余 0.50–0.57 s
+T2:                fix 前：ARM 镜像 10 次，10/10 在 0.38 s（同一台、同一根线）
+T3:                停顿时 `usb_cdc_flush()` 已进入、`usb_critical_enter()` 已返回、
+                   `usb_tx_drain()` 没有返回 → 卡在 `plat_spin_acquire(&g_tx_lock)`
+T4:                `usb_cdc_flush()` 持 USB 锁再调 drain；drain 先取 g_tx_lock 再取
+                   USB 锁 → 两核锁序相反（死锁，不是慢）
+T5:                fix：先 `usb_tx_drain()`（自己加锁），再单独取 USB 锁做 FIFO flush
+T6:                fix 后 16/16 + 20/20 次 `reboot` 全部 0.50–0.58 s；闸门 10/10 PASS
+T7:                fix 后 `gate_boot.py`：uart0 10/10、cdc 10/10、cpus=2、uptime 0.31 s
+logs:              scripts/rp2350/stall_probe.py（双通道观察）、gate_boot.py 的 CSV
+notes:             根因是既有的锁序反转，与 UART/时钟/ROM 无关；ARM 端口无此问题，
+                   因为它的 `usb_cdc_flush()` 从不调用 drain
 ```
 
 ## 现象
 
-`scripts/rp2350/reboot_latency.py` 每秒读两个通道，重启后等 `tos> `：
+`reboot` 之后，约一半的轮次线上整整 33.6 s 没有任何字节，然后突然出现完整启动日志。
+33.56 s = **2 × 16.78 s**（`WATCHDOG_RELOAD = 0x00ffffff` µs），所以当时以为是
+“两次启动都卡住、各被看门狗清掉一次”。
 
 ```text
-[ 1/8] uart=  34.01 s  ...   691 uart bytes
-[ 2/8] uart=  34.00 s  ...   691 uart bytes
-[ 3/8] uart=  34.00 s  ...   691 uart bytes
-[ 4/8] uart=   0.50 s  ...   710 uart bytes
-[ 5/8] uart=   0.51 s  ...   710 uart bytes
-[ 6/8] uart=  34.03 s  ...   691 uart bytes
-[ 7/8] uart=   0.51 s  ...   710 uart bytes
-[ 8/8] uart=   0.51 s  ...   710 uart bytes
+[ 1/8] uart=  34.01 s      [ 5/8] uart=   0.51 s
+[ 2/8] uart=  34.00 s      [ 6/8] uart=  34.03 s
+[ 3/8] uart=  34.00 s      [ 7/8] uart=   0.51 s
+[ 4/8] uart=   0.50 s      [ 8/8] uart=   0.51 s
 ```
 
-慢的那几次不是“晚一点出声”，是**中间整整 33.6 秒线上什么都没有**：
-第一个字节就是完整的 `[A] pre-pll ok ...`，前面没有半句日志。CDC 侧同样在这段时间
-不可见（闸门里的 `cdc=-`）。慢轮次总字节数比快轮次少 19 字节（691 vs 710），对应的
-正是少打印的那几行之一，待确认。
+## 真正的形状：芯片根本没复位
 
-## 34 秒是什么
+`stall_probe.py` 同时盯三件事：UART0 的输出、Windows 里 CDC 设备节点是否在、
+以及往那个节点发 `uptime` 有没有回应。慢轮次的结论是：
 
-`board/rp2350rv-generic/platform.c` 的 `WATCHDOG_RELOAD = 0x00ffffff`
-= 16 777 215 µs = **16.78 s**；33.56 s 正好是**两个看门狗周期**。所以形状是：
+```text
+      0.01  cdc         COM27          <- 节点一直在
+     33.53  cdc-answer  <SerialException>
+     34.14  cdc         gone
+     34.49  UART0 出现 `tos>`
+```
 
-1. 第一次 reset 之后那次启动在某个点卡住（没有任何输出）；
-2. 16.78 s 时看门狗复位 → 第二次启动同样卡住；
-3. 33.56 s 时再复位 → 第三次启动正常，于是 33.6 s 处突然出现完整启动日志。
+**CDC 节点在这 33 秒里一直没有消失**。芯片若真的复位了，D+ 上拉会掉、Windows 会在
+毫秒级内看到断开。所以这段时间不是“启动慢”，而是 **`reboot` 自己没能把芯片带下去**。
+UART0 上敲 9 次 `uptime` 也全无回应——因为 `console_shutdown()` 已经把控制台关了。
 
-## 卡在哪一步
+## 卡在哪一句
 
-`WATCHDOG_SCRATCH(3)` 写阶段号（`BOOT_PHASE(n)`），在 `plat_board_early` 入口先把它
-读进 RAM（每个阶段会覆盖同一个 scratch，不先读走就只剩最后一次的信息）：
+之前的 `WATCHDOG_SCRATCH(3)` 单槽标记有个致命缺陷：**卡住那次之后，恢复成功的那次
+启动会把它覆盖掉**，所以 “prev_phase=17” 往往是恢复启动留下的，不是卡住那次的。
+换成 `.noinit` 里的环形日志（`boot_step_t`，每条记 phase + `RP_UART_FR` +
+`g_clk_hz` + IBRD/FBRD + `CLK_SYS_SELECTED` + mtime），追加而不是覆盖，才拿到真相：
 
-| 标记 | 位置 | 观察到 |
-| --- | --- | --- |
-| 1 | 进入 `plat_board_early` | |
-| 2 | `clocks_init()` 之后 | |
-| 3 | `wdt_enable()` 之后 | |
-| 4 | `unreset(IO_BANK0\|PADS\|UART0\|TIMER0\|TIMER1)` 之后 | |
-| 5 | `ticks_init()` 之后 | |
-| 6 | `led_init()` 之后 | |
-| 7 | `uart_init()` 之后 | **第一版仪表：慢轮次全是 7** |
-| 8/9 | `[A]` 打印 / `plat_console_flush()` 之后 | |
-| 10/11 | `pll_sys_init()` / 重新测频之后 | |
-| 12 | `[B]` 打印之后（同时存 `clk_peri`、`UART_CR`） | |
-| 14 | `usb_cdc_console_init()` 之后 | **细分后：慢轮次全是 14** |
+```text
+ph=0x60  fr=0000013f  clk=08f0d568  div=00000051/00000018  t=002e3336   <- 进入 plat_reboot()
+ph=0x83  fr=00000197  ...                                              <- usb_cdc_flush 进入
+ph=0x84  fr=00000197  ...                                              <- usb_critical_enter 返回
+（没有 0x85）
+```
 
-`prev_phase=14` 与 `clk_peri=0x10000800`、`UART_CR=0x00000301` 说明：那次启动
-**已经把 UART 配好、也走过了 USB 初始化**，然后才停止输出并最终被看门狗清掉。
-所以“UART 没配对”和“ROM 没交接”两个解释都不成立；停在 `usb_cdc_console_init()`
-之后到 shell 起来之间。
+0x60 → 0x84 只花了 **431 ms**，之后什么都没了。0x84 的下一句就是
+`usb_tx_drain()`，而 `usb_tx_drain()` 第一件事是 `plat_spin_acquire(&g_tx_lock)`。
 
-## 重要副作用：仪表会移动 bug
+顺带否掉了两个中间结论：
 
-- 加 7 个阶段标记前：约 **1/4** 的轮次慢；加完后：**8/8 全慢**；再补 `[SCR2]`、
-  再补 `reboot=` 标记，仍然 8/8。
-- 也就是这条路径对 **几微秒级的时序** 极其敏感。因此所有阶段标记都收进了
-  `#if TOS_DIAG`（release 镜像的时间线和以前一致），`BOOT_PHASE` 在非 diag 下是空宏。
-- 这条本身是线索：USB 初始化（PLL_USB、`tud_init`、枚举窗口）内部有多个“按次数
-  换算成时间”的等待，改动前后的差别足以决定它是否撞上某个窗口。
+- `[A]`/`[B]` 是**卡住那次自己打印的**（`clk=150 MHz`、`div=0x51/0x18` 全对），
+  所以“UART 没时钟 / 波特率不对”不成立；
+- 环形日志显示有一次启动**完整走到了 `process_start_shell`**，所以“启动卡在某处”
+  也不成立——是 `reboot` 卡住了，不是启动。
 
-## 已排除：JEDEC 探测的 XIP 关/开窗口
+## 根因：两个核以相反顺序抢同一对锁
 
-把 `plat_board_init()` 里的 `rp2350_flash_detect()` 直接短路（`g_flash_detected = 0`）
-再测 8 轮：**7/8 仍然 34.02 s**。所以不是"探测把 XIP 关掉又打开"留下的状态。
+```c
+/* 修前：usb_cdc_flush() */
+usbpm = usb_critical_enter();     /* 先拿 USB 锁（SIO 自旋锁 30） */
+usb_tx_drain();                   /* 里面：g_tx_lock -> USB 锁 */
+tud_cdc_write_flush();
+usb_critical_exit(usbpm);
+```
 
-## 关键矛盾（下一轮从这里接）
+`usb_tx_drain()` 的既有顺序是 **先 `g_tx_lock` 再 USB 锁**（文件里那段注释也这么写）。
+`usb_cdc_flush()` 把它倒过来用，于是：
 
-阶段标记说那次启动走到了 **17**（`plat_board_init()` 结束，说明 `[A]/[B]/[U]` 和
-TinyOS banner 都该打印过了），可是那 33.6 秒里线上 **一个字节都没有**。两者只能同时
-成立于一种情况：**CPU 在跑，但 UART 的发送端没有时钟**——`plat_console_putc` 把字节
-写进 DR，FIFO 却从不排空，于是全部丢弃，而代码继续往下走，最后卡在后面某处
-（`ramdisk_init()` 一带，`banner()` 之前）。
+- 核 0（正在 `reboot`）持有 USB 锁，等 `g_tx_lock`；
+- 核 1 的 1 ms tick 在 `usb_tx_drain()` 里持有 `g_tx_lock`，等 USB 锁。
 
-这与第 12 阶段快照并不矛盾：`CLK_PERI_CTRL=0x10000800` 只证明"写进去的是这个值"，
-不证明 clk_peri 真的在跑。下一轮要抓的是：
+两个核互等，谁都不动。核 1 是在 `plat_irq_save()` 之后卡住的，于是 tick 停了、看门狗
+没人喂，最后被清掉。命中率约一半，正好对应“tick 那一刻有没有在 drain 里”。
 
-- `CLK_PERI_SELECTED`（0x50）与 `CLK_SYS_SELECTED`（0x44）在阶段 12 的实际值；
-- 阶段 12/16 各读一次 `RP_UART_FR`（TXFE/BUSY），看 FIFO 有没有在排空；
-- 若确认 clk_peri 没跑：`CLOCKS_CLK_PERI_CTRL` 的 AUXSRC 字段在 RP2350 上是否真如
-  注释所说 0 = clk_sys（0x10000800 的 bit28 至今没解释）。
+## 修复
 
-## 试过但没结论的
+```c
+/* 修后 */
+usb_tx_drain();                   /* 自己按 g_tx_lock -> USB 锁 的顺序加锁 */
+usbpm = usb_critical_enter();
+tud_cdc_write_flush();
+usb_critical_exit(usbpm);
+```
 
-- `WATCHDOG_SCRATCH(7)` 想记录“ROM 重启返回了没有”（写 `"RBOO"`/`"FAIL"`），
-  结果每次启动读回 **`00000004`**：**ROM 自己在用 scratch 4..7**（它会在把镜像
-  交出去之前写），所以 6/7 不能用来自记。3 号没被覆盖，可以继续用。
-- 想用 CDC 当第二见证：`reboot_latency.py` 的 CDC 侧重开逻辑有 bug（全 `NEVER`），
-  尚未修；闸门自己的 CDC 腿是好的（同一轮里 `cdc=COM27` 能开）。
-- ARM 镜像 10/10 在 0.38 s 回来，所以这不是 ROM 的通用行为，是 RV32 端口特有
-  （或由 RV32 侧 `usb_cdc_init()` 的写法触发）。
+另外加了一道保险：`plat_reboot()` 先把 `g_rebooting` 置 1，`plat_console_flush()` 在
+这个标志下**不走 USB**。要复位的机器不该等主机把最后几个字节取走，也不该等一把
+即将被复位的核可能还握着的锁；UART 那条腿（串口抓包看到的那条）照常 flush。
 
-## 下一步（有序）
+ARM 的两个端口没有这个问题，因为它们的 `usb_cdc_flush()` 只做
+`tud_cdc_write_flush()`，从不调用 drain。
 
-1. 修 `reboot_latency.py` 的 CDC 重开（它现在把 `cdc` 置空后只在 `cdc_ports()` 里找，
-   而 Windows 重枚举有几秒空窗），拿到“两个通道都在 34 s 后回来”的双见证。
-2. 在 `usb_cdc_console_init()` 内部再分 4 段打标记（`usb_clock_init` / `pads` /
-   `tud_init` / `boot_pump` 前后），把范围从“USB init 之后”缩到具体一句。
-3. 对照实验：把 RV32 的 `usb_cdc_boot_pump()` 预算临时设为 0（不改别的），看停顿
-   是否消失——这是最可能的嫌疑（它按 `plat_cpu_hz()` 换算次数，而 RV32 上
-   `usb_cdc_poll()` 一次 2.66 µs，和 ARM 差一个量级，见 OPEN-ITEMS 第 4 条）。
-4. 若确认在 pump，把它改成“按时间片”而不是“按次数”，顺带解决 #29。
+## 验证
+
+```text
+16 次 reboot：16/16 在 1.05 s（fix 前同口径 ~50% 慢）
+20 次 reboot：0/20 慢，min 0.50 s，max 0.58 s，mean 0.52 s
+gate_boot.py -n 10 --cpus 2：10/10 PASS
+  uart0 boot 10/10, cdc boot 10/10, cdc never opened 0/10, uptime 0.31 s
+```
+
+## 留下什么
+
+- `.noinit` 环形启动日志（`boot_step_t` / `boot_log_dump()`），只在**上一轮没走到
+  shell** 时打印，正常启动一个字节都不多说。
+- `plat_boot_mark(n)`：`kernel/main.c` 的弱钩子，在 `kmain()` 各阶段之间打点，
+  端口有环形日志就记、没有就什么都不做。
+- `scripts/rp2350/stall_probe.py`：双通道观察重启（UART0 输出 + CDC 节点 + CDC 应答），
+  下次再遇到“看不见的 30 秒”先用它。
+- 教训：**单槽标记会被下一次启动覆盖**；“两个看门狗周期”这种整倍数很容易把人骗到
+  “启动被清了两次”上，而真正的事实可能是“一次都没复位”。
+
+## 试过但没结论的（保留，避免重走）
+
+- `WATCHDOG_SCRATCH(7)` 想记“ROM 重启返回了没有”（写 `"RBOO"`/`"FAIL"`），
+  读回 **`00000004`**：**ROM 自己在用 scratch 4..7**，所以自记只能用 0..3（现在
+  完全改用 `.noinit`）。
+- 加 7 个阶段标记后命中率从约 1/4 变成 8/8——当时以为是“仪表移动 bug”，实际是
+  死锁本来就对时序敏感（标记改写了 reboot 前那一刻的指令时序）。
+- 短路 `rp2350_flash_detect()`（JEDEC 探测的 XIP 关/开窗口）后仍 7/8 慢：与探测无关。

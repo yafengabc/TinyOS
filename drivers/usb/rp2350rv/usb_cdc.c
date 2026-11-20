@@ -407,6 +407,7 @@ extern volatile uint32_t g_usb_boot[8];
 
 void usb_cdc_init(void)
 {
+    plat_boot_stage(0x30u);
     g_hw_ready = 0;
     g_init_stage = 0;
 
@@ -417,13 +418,17 @@ void usb_cdc_init(void)
      * signal for skipping the 200 ms D+ drop on cold boots (OPEN-ITEMS 3). */
     g_usb_boot[0] = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
     g_usb_boot[1] = (g_usb_boot[0] & RESETS_USBCTRL) ? 0u : 1u;
+    plat_boot_stage(0x31u);
     serial_from_chip_id();
+    plat_boot_stage(0x32u);
     u_mark("[u0]\r\n");
+    plat_boot_stage(0x33u);
 
     /* A warm boot can land with the cross-core USB spinlock still held by
      * the previous run - the SIO block survives a hart reset.  This is the
      * first touch, before either hart can take the lock again. */
     USB_SIO_SPINLOCK = 0;
+    plat_boot_stage(0x34u);
 
     /* Order matters: PLL and clk_usb first (the controller's reset-done bit
      * depends on the clock), then the pads, then TinyUSB - whose dcd_init()
@@ -431,9 +436,11 @@ void usb_cdc_init(void)
      * done before it. */
     if (usb_clock_init() != 0)
         return;
+    plat_boot_stage(0x35u);
     u_mark("[u1] clk\r\n");
 
     usb_pads_setup();
+    plat_boot_stage(0x36u);
     u_mark("[u2] pads\r\n");
 
     /* Mark ready before TinyUSB can raise an interrupt: the handler bails
@@ -445,6 +452,7 @@ void usb_cdc_init(void)
         g_hw_ready = 0;
         return;
     }
+    plat_boot_stage(0x37u);
     u_mark("[u3] tud\r\n");
 
     /* And again, now that TinyUSB's dcd_init() has reset the controller and
@@ -454,6 +462,7 @@ void usb_cdc_init(void)
      * after it turns the bus into VBUS|J|CONNECTED.  The controller reset is
      * the only step in between, so the pad write has to follow it. */
     usb_pads_setup();
+    plat_boot_stage(0x38u);
     g_ss_pads = usb_hw->sie_status;
     g_usb_boot[2] = usb_hw->sie_status;
     g_usb_boot[3] = usb_hw->sie_ctrl;
@@ -474,6 +483,7 @@ void usb_cdc_init(void)
     g_ss_retrig = usb_hw->sie_status;
     g_usb_boot[4] = g_ss_pads;
     g_usb_boot[5] = g_ss_retrig;
+    plat_boot_stage(0x39u);
     u_mark("[u4] pullup\r\n");
 }
 
@@ -517,7 +527,9 @@ static void usb_cdc_wait(uint32_t clk_hz)
 void usb_cdc_console_init(uint32_t clk_hz)
 {
     usb_cdc_init();
+    plat_boot_stage(0x3au);
     usb_cdc_wait(clk_hz);
+    plat_boot_stage(0x3bu);
 }
 
 /* ---- event pump --------------------------------------------------------- */
@@ -738,8 +750,18 @@ void usb_cdc_flush(void)
      * the bytes for the next poll. */
     if (plat_cpu_id() != 0)
         return;
-    usbpm = usb_critical_enter();
+    /* Order matters here, and getting it wrong is a deadlock rather than a
+     * slow path: usb_tx_drain() takes g_tx_lock and *then* the cross-core USB
+     * lock, so taking the USB lock out here first establishes the opposite
+     * order.  The tick on the other hart then holds g_tx_lock while waiting
+     * for the USB lock this hart already has, and neither of them moves.
+     * Measured as `reboot` going silent for 33.5 s in about half of all
+     * attempts, with the boot ring stopping between "flush entered" and
+     * "usb_tx_drain returned".  Drain first - it does its own locking - then
+     * take the lock for the FIFO flush alone.  The ARM ports never hit this
+     * because their flush does not drain. */
     usb_tx_drain();
+    usbpm = usb_critical_enter();
     tud_cdc_write_flush();
     usb_critical_exit(usbpm);
 }

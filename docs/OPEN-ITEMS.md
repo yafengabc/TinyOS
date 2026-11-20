@@ -172,24 +172,29 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    控制器还活着，只有 shell 不响应；1200-baud touch 对 TinyOS 无效（那是 pico-sdk 的
    复位接口）。
 
-6. **RV32 SMP：`reboot` 之后约一半的启动要 34 秒才出声**（2026-11-20 新发现，未修）。
-   现成成果：UART0 的 GP0 线修好后，第一次能用双通道量重启延迟。
-   `scripts/rp2350/reboot_latency.py`：ARM 镜像 10/10 在 0.38 s；**RV32 SMP 10 次里
-   4 次要 34.01 s**，中间 33.6 s 线上一个字节都没有（CDC 设备也不在），随后突然出现
-   完整启动日志。33.56 s = **2 × 16.78 s**（`WATCHDOG_RELOAD = 0x00ffffff` µs），
-   所以形状是“两次启动都卡住、都被看门狗清掉，第三次才成”。
-   `WATCHDOG_SCRATCH(3)` 的阶段标记显示卡点在 `usb_cdc_console_init()` **之后**
-   （`prev_phase=14`，且当时 `clk_peri=0x10000800`、`UART_CR=0x00000301` 都正确，
-   所以不是 UART 没配好）。**仪表会移动 bug**：加 7 个阶段标记后命中率从 1/4 变成 8/8，
-   因此标记已全部收进 `#if TOS_DIAG`。
-   顺带发现：**ROM 自己在用 `WATCHDOG_SCRATCH(4..7)`**（写进去的 `"RBOO"` 读回 `00000004`），
-   自记只能用 scratch 0..3。
-   下一步（有序，见卡片 `docs/acceptance/2026-11-20-rv32-reboot-stall.md`）：
-   在 `usb_cdc_console_init()` 内部再分段 → 把 `usb_cdc_boot_pump()` 预算临时设 0 做
-   对照（嫌疑最大：它按 `plat_cpu_hz()` 换算次数，而 RV32 单次 `usb_cdc_poll()` 2.66 µs
-   与 ARM 差一个量级，见第 4 条）→ 若确认，改成按时间片而不是按次数，顺带收掉 #29。
-   影响：`reboot` 在 RV32 上看起来像“偶发死机 30 秒”，闸门/压力测试的 20 s 窗口会把
-   这些轮次记成 FAIL（2026-11-20 的 3/5、5/8 就是这个）。
+6. ~~**RV32 SMP：`reboot` 之后约一半的启动要 34 秒才出声**~~ —— **已修（2026-11-20）**。
+   根因不是启动慢，是 **`reboot` 自己没能把芯片带下去**：两核以相反顺序抢同一对锁。
+
+   - `usb_cdc_flush()`（RV32 端口）先取 USB 锁（SIO 自旋锁 30）再调 `usb_tx_drain()`，
+     而 `usb_tx_drain()` 的既有顺序是 **先 `g_tx_lock` 再 USB 锁**。核 0 在 reboot 路径
+     里持 USB 锁等 `g_tx_lock`，核 1 的 1 ms tick 在 drain 里持 `g_tx_lock` 等 USB 锁，
+     互等死锁。命中率约一半，正好对应“tick 那一刻在不在 drain 里”。
+   - 判据来自两处：`.noinit` 环形日志显示 `reboot` 进入后 431 ms 走到
+     `usb_critical_enter()` 返回、**没有** `usb_tx_drain()` 的标记；`stall_probe.py`
+     显示那 33 秒里 **CDC 设备节点一直在**（芯片没复位），而 33.56 s ≈ 2 × 16.78 s
+     的“两个看门狗周期”只是巧合，不是“被清了两次”。
+   - 修复：`usb_cdc_flush()` 改成先 `usb_tx_drain()`（自己按正确顺序加锁）、再单独取
+     USB 锁做 FIFO flush；另外 `plat_reboot()` 置 `g_rebooting`，`plat_console_flush()`
+     在该标志下不走 USB（要复位的机器不该等主机或等一把即将被复位的核握着的锁）。
+   - 验证：46 次连续 `reboot` 全部 0.50–0.58 s（修前同口径约一半 34 s）；
+     `gate_boot.py -n 10 --cpus 2` **10/10 PASS**（uart0 10/10、cdc 10/10、
+     uptime 0.31 s）。卡片：`docs/acceptance/2026-11-20-rv32-reboot-stall.md`。
+   - 顺带留下：`.noinit` 环形启动日志（只在上一轮没走到 shell 时打印）、
+     `plat_boot_mark()`（`kmain()` 各阶段之间打点，端口可选的弱钩子）、
+     `scripts/rp2350/stall_probe.py`。
+   - 仍然成立的两条经验：**单槽标记会被下一次启动覆盖**（`WATCHDOG_SCRATCH(3)` 的
+     `prev_phase` 往往是恢复启动留下的）；**ROM 自己在用 `WATCHDOG_SCRATCH(4..7)`**，
+     自记只能用 0..3 或干脆用 `.noinit`。
 
 ## 6. goc32：工具链已自包含，剩下前端缺口
 

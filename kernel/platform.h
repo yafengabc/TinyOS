@@ -312,6 +312,14 @@ int plat_uart_tx_probe(uint32_t *out);
  * when it ran, 0 when the port cannot do it. */
 int plat_gpio_drive_probe(uint32_t *out);
 
+/* Boot-progress stage, called from kmain() between its steps.  `n` is a small
+ * number chosen by the caller; a port with a surviving boot log records it,
+ * everything else ignores it (weak no-op in kernel/main.c).  It exists because
+ * a port's own markers stop at the end of its early boot, and the failures
+ * that matter ("the console works but the shell never speaks") happen after
+ * that. */
+void plat_boot_stage(uint32_t n);
+
 /* ---- physical memory ------------------------------------------------- */
 
 /* The flat model needs no frame allocator or page tables: every byte of RAM

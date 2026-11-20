@@ -624,6 +624,13 @@ void plat_console_putc(char c)
         usb_cdc_putc(c);
 }
 
+/* Set from plat_reboot() before the console is shut down.  A machine that is
+ * about to reset has nothing to say: waiting for the host to take the last
+ * bytes - or for a lock a hart that is about to be reset may still hold - is
+ * how `reboot` turned into a 33 s silence.  Output already queued for USB is
+ * dropped; the UART leg, which is what a serial capture sees, still flushes. */
+static int g_rebooting;
+
 void plat_console_flush(void)
 {
     uint32_t spins;
@@ -632,7 +639,7 @@ void plat_console_flush(void)
         if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_BUSY))
             break;
     }
-    if (g_usb_ready)
+    if (g_usb_ready && !g_rebooting)
         usb_cdc_flush();
 }
 
@@ -1896,12 +1903,121 @@ int plat_start_cpu(int id)
  * Found with it: roughly one reboot in five stalls before the first byte, and
  * the board came back 33.6 s later - 2 x the 16.78 s watchdog period, i.e. two
  * consecutive wedges. */
-static uint32_t g_prev_boot_phase;
 #if TOS_DIAG
-/* Diag-only on purpose: these writes are harmless but they perturb the very
- * boot they measure (the stall below moved from ~1 boot in 4 to 8 of 8 when
- * six of them were added), so a release image keeps the old timing. */
-#define BOOT_PHASE(n) mmio_write32(WATCHDOG_SCRATCH(3), (n))
+/* Where the boot got to, kept as a rolling log rather than a single slot.
+ *
+ * A single marker - which is what WATCHDOG_SCRATCH(3) was - cannot answer the
+ * question it was added for.  If a boot wedges, the watchdog resets the chip,
+ * the next boot succeeds, and that next boot overwrites the marker with its
+ * own final phase before anybody can read it.  So "prev_phase=17" was never
+ * evidence that the wedged boot reached 17: more often it was the *recovery*
+ * boot's last phase.  Appending to a ring preserves the dead boot's tail.
+ *
+ * .noinit for the same reason the scratch registers were used - it is not
+ * cleared by _start, and a watchdog reset does not clear SRAM.  Every entry
+ * also carries the UART flag register and clk_peri's state, because the two
+ * explanations for "code runs but nothing reaches the wire" are a FIFO that
+ * never drains and a peripheral clock that stopped, and both are visible in
+ * those registers.
+ *
+ * Diag-only: four stores and three reads per phase perturb the very boot they
+ * measure (the stall went from about 1 boot in 4 to 8 of 8 when six stores
+ * were added), so a release image keeps the original timing. */
+typedef struct {
+    uint32_t phase;         /* low 8 bits phase, remaining bits boot number */
+    uint32_t fr;            /* RP_UART_FR                                  */
+    uint32_t clk_hz;        /* g_clk_hz - the clock the divisor came from  */
+    uint32_t baud_div;      /* IBRD/FBRD packed: what was actually written */
+    uint32_t sys_sel;       /* CLOCKS.CLK_SYS_SELECTED                     */
+    uint32_t tim;           /* mtime in ms - turns the ring into a timeline */
+} boot_step_t;
+
+#define BOOT_LOG_N               128u
+#define CLK_PERI_SELECTED_OFFSET  0x50u
+
+TOS_NOINIT static boot_step_t g_boot_log[BOOT_LOG_N];
+TOS_NOINIT static uint32_t g_boot_log_wr;
+TOS_NOINIT static uint32_t g_boot_seq;
+
+static void boot_step(uint32_t phase)
+{
+    boot_step_t *e;
+
+    if (phase == 1u)
+        g_boot_seq++;
+    e = &g_boot_log[g_boot_log_wr & (BOOT_LOG_N - 1u)];
+    e->phase    = (phase & 0xffu) | (g_boot_seq << 8);
+    e->fr       = mmio_read32(RP_UART_FR);
+    e->clk_hz   = g_clk_hz;
+    e->baud_div = ((mmio_read32(RP_UART_IBRD) & 0xffffu) << 16) |
+                  (mmio_read32(RP_UART_FBRD) & 0x3fu);
+    e->sys_sel  = mmio_read32(CLOCKS_BASE + CLK_SYS_SELECTED_OFFSET);
+    e->tim      = (uint32_t)(mtime_read() / 1000ull);
+    g_boot_log_wr++;
+}
+
+/* Print where the *previous* boot stopped, one line per step.
+ *
+ * Only the previous boot: anything older has been reported already, and
+ * repeating it on every boot would cost a second at 115200 baud.  When that
+ * boot reached the shell there is nothing to say, so the normal case prints
+ * nothing at all - this only speaks when a boot died. */
+static void boot_log_dump(void)
+{
+    uint32_t prev = g_boot_seq - 1u;
+    uint32_t n = g_boot_log_wr < BOOT_LOG_N ? g_boot_log_wr : BOOT_LOG_N;
+    uint32_t first = g_boot_log_wr - n;
+    uint32_t shown = 0;
+    int reached_shell = 0;
+
+    for (uint32_t i = first; i < g_boot_log_wr; i++) {
+        const boot_step_t *e = &g_boot_log[i & (BOOT_LOG_N - 1u)];
+
+        if ((e->phase >> 8) != prev)
+            continue;
+        shown++;
+        if ((e->phase & 0x7fu) == 0x2bu)
+            reached_shell = 1;
+    }
+    if (!shown || reached_shell)
+        return;
+
+    early_puts("[L] previous boot b");
+    early_put_hex(prev);
+    early_puts(" stopped:/r/n");
+    for (uint32_t i = first; i < g_boot_log_wr; i++) {
+        const boot_step_t *e = &g_boot_log[i & (BOOT_LOG_N - 1u)];
+
+        if ((e->phase >> 8) != prev)
+            continue;
+        early_puts("  ph=");
+        early_put_hex(e->phase & 0xffu);
+        early_puts(" fr=");
+        early_put_hex(e->fr);
+        early_puts(" clk=");
+        early_put_hex(e->clk_hz);
+        early_puts(" div=");
+        early_put_hex(e->baud_div >> 16);
+        early_puts("/");
+        early_put_hex(e->baud_div & 0x3fu);
+        early_puts(" sys=");
+        early_put_hex(e->sys_sel);
+        early_puts(" t=");
+        early_put_hex(e->tim);
+        early_puts("\r\n");
+    }
+}
+#define BOOT_PHASE(n) boot_step(n)
+
+/* Called from kmain() (kernel/main.c) between its stages.  The ring above
+ * covers this port's own early boot; these extend it across the rest of the
+ * boot, which is where the `reboot` stall was finally pinned down (the last
+ * mark written before the machine went silent was the ring's 0x84, i.e. the
+ * return from usb_critical_enter() inside usb_cdc_flush()). */
+void plat_boot_stage(uint32_t n)
+{
+    boot_step(0x20u + n);
+}
 #else
 #define BOOT_PHASE(n) do { } while (0)
 #endif
@@ -1910,9 +2026,6 @@ void plat_board_early(void)
 {
     uint32_t khz;
 
-#if TOS_DIAG
-    g_prev_boot_phase = mmio_read32(WATCHDOG_SCRATCH(3));
-#endif
     BOOT_PHASE(1u);                 /* entered, before clocks_init          */
 
     /* clk_peri is OFF after reset, and UART0, IO_BANK0 and PADS_BANK0 all
@@ -1986,29 +2099,12 @@ void plat_board_early(void)
      * all, in the same surviving scratch: a boot that reaches here but puts
      * nothing on the wire is either unclocked (CLK_PERI_CTRL) or has its UART
      * switched off (CR). */
-#if TOS_DIAG
-    mmio_write32(WATCHDOG_SCRATCH(4), mmio_read32(CLOCKS_BASE + CLK_PERI_CTRL_OFFSET));
-    mmio_write32(WATCHDOG_SCRATCH(5), mmio_read32(RP_UART_CR));
-#endif
+/* Scratch 4..7 belong to the ROM: it uses them for its own boot decisions, so
+ * what is written there reads back as something else.  Everything this port
+ * keeps across a reset lives in the .noinit ring above instead. */
 #if TOS_DIAG
     diag_prev_report();             /* what the last boot died doing */
-    {
-        early_puts("[SCR] ");
-        for (uint32_t i = 0; i < 4u; i++) {
-            early_put_hex(mmio_read32(WATCHDOG_SCRATCH(i)));
-            early_puts(" ");
-        }
-        early_puts(" prev_phase=");
-        early_put_hex(g_prev_boot_phase);
-        early_puts("\r\n");
-        early_puts("[SCR2] peri=");
-        early_put_hex(mmio_read32(WATCHDOG_SCRATCH(4)));
-        early_puts(" uart_cr=");
-        early_put_hex(mmio_read32(WATCHDOG_SCRATCH(5)));
-        early_puts(" reboot=");
-        early_put_hex(mmio_read32(WATCHDOG_SCRATCH(7)));
-        early_puts("\r\n");
-    }
+    boot_log_dump();
 #endif
 
     /* USB CDC shares the console with UART0.  The wait inside is bounded
@@ -2116,16 +2212,24 @@ static void rv_stop_other_hart(void)
 
 void plat_reboot(void)
 {
+    /* 0x60..0x62: which step of the reset eats the time.  `reboot` sometimes
+     * leaves the board silent for 33.5 s before the chip actually drops, and
+     * console_shutdown() has already stopped every other channel by then, so
+     * these three marks are the only witness.  They land in the .noinit ring
+     * and are printed by the next boot's dump. */
+    BOOT_PHASE(0x60u);              /* entered                                */
+    g_rebooting = 1;
     console_shutdown();
+    BOOT_PHASE(0x61u);              /* console flushed and closed             */
     rv_stop_other_hart();
-    mmio_write32(WATCHDOG_SCRATCH(7), 0x52424f4fu);   /* "RBOO": asked the ROM */
+    BOOT_PHASE(0x62u);              /* other hart answered, or we gave up     */
+    BOOT_PHASE(0x63u);              /* about to ask the ROM for a reset      */
     rom_reboot_normal();
     /* Reached only when the ROM call returned instead of taking the chip
      * down.  Recorded because it is otherwise invisible: console_shutdown()
      * has already stopped all output, so a failed reboot looks exactly like a
-     * board that wedged on its own.  Scratch survives the watchdog reset that
-     * eventually rescues this. */
-    mmio_write32(WATCHDOG_SCRATCH(7), 0x4641494cu);   /* "FAIL" */
+     * board that wedged on its own. */
+    BOOT_PHASE(0x64u);
     plat_panic_halt();
 }
 

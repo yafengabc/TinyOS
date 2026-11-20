@@ -48,6 +48,10 @@ static void screen_banner(void)
 /* kernel/board_check.c: generated board.conf numbers vs layout.c constants. */
 void board_config_check(void);
 
+/* Boot-progress hook: ports with a surviving boot log record which stage the
+ * machine reached; the default does nothing.  See kernel/platform.h. */
+__attribute__((weak)) void plat_boot_stage(uint32_t n) { (void)n; }
+
 void kmain(void)
 {
     plat_early_init();
@@ -59,9 +63,12 @@ void kmain(void)
        that sleep(1) means 1 ms and a sampler can keep a millisecond
        cadence - see the QUANTUM note in process.c for what that costs. */
     plat_timer_init(1000);
+    plat_boot_stage(1u);
 
     heap_init();
+    plat_boot_stage(2u);
     ramdisk_init();
+    plat_boot_stage(3u);
 
     /* Device files exist before the first task does.  Registration is a boot
      * act and the table is read-only afterwards, which is what lets open()
@@ -71,6 +78,7 @@ void kmain(void)
     devfs_init();
     periph_init_devs();
     procfs_init();
+    plat_boot_stage(4u);
 
     /* Board devices: the table becomes /dev nodes here, and display 0
      * becomes a text screen the console can mirror onto.  A board with no
@@ -78,11 +86,15 @@ void kmain(void)
      * call below is a no-op. */
     hwdev_init();
     screen_init();
+    plat_boot_stage(5u);
 
     process_init();
+    plat_boot_stage(6u);
 
     board_config_check();
+    plat_boot_stage(7u);
     banner();
+    plat_boot_stage(8u);
     screen_banner();
 
     /* Everything a secondary CPU touches exists from here on: the process
@@ -91,6 +103,7 @@ void kmain(void)
      * other harts and waits for them to report in, so that "2 of 2 online"
      * either appears before the shell does or the boot says why not. */
     cpu_init();
+    plat_boot_stage(9u);
 
     /* Bring-up self-check: bounded wait for the first scheduler tick.  A
        dead timer otherwise boots fine here and fails confusingly later
@@ -101,6 +114,7 @@ void kmain(void)
        turn it on here and leave it on - the runtime state after this point
        is exactly this, and the process tables are live already. */
     plat_irq_enable();
+    plat_boot_stage(10u);
 #if TOS_BOOT_TRACE
     {
         uint32_t spins = plat_pre_tick_spins(20000000u);
@@ -122,6 +136,7 @@ void kmain(void)
 #if TOS_BOOT_TRACE
     kprintf("\nstarting /bin/msh ...\n\n");
 #endif
+    plat_boot_stage(11u);
     process_start_shell("bin/msh");
     panic("shell returned");
 }

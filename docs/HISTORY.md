@@ -31,6 +31,7 @@
 | 12 | Python 解释器改字节码 VM | **做**：AST 整体退役，单遍编译 + 栈式 VM | flash +3 KiB，RAM −27%，速度持平 | **已合并**（§13） |
 | 13 | 移植 MicroPython，只留 runtime | **不换**：core 76.8 / 54.0 KiB，是我们的 2.17× / 1.53× | 10 个 libc shim + 软浮点 + GC 改造 | 只评估（§13） |
 | 14 | boot 阶段实测 flash 容量（JEDEC RDID） | **做**：RP2350 走 QMI direct、RP2040 走 PL022 SSI；`board.conf` 从「硬上界」降级为「兜底假定」 | 双端各 ~120 行，无 RAM 代价 | **已完成**，四板六镜像实测（§82） |
+| 15 | RV32 SMP `reboot` 偶发 34 s 静默 | **不是启动慢，是没复位**：`usb_cdc_flush()` 持 USB 锁调 `usb_tx_drain()`，而 drain 先取 `g_tx_lock` 再取 USB 锁，两核锁序相反互等 | 改加锁顺序 + reboot 时不走 USB flush | **已修**，46/46 次 0.50–0.58 s，闸门 10/10（§85） |
 
 ---
 
@@ -5115,3 +5116,55 @@ PC 落在 USB 栈区间。具体是哪条断言对不上——11-19 的镜像是
 上，健康引脚也读成 `low=1533 high=3`，差点被当成"pad 没驱动"；另一版拿
 `IO_BANK0.GPIO0_STATUS` 的 bit17 当 `INFROMPAD`，读回 `0x2000/0x2200` 跟芯片布局对不上，
 换 `SIO_GPIO_IN` 后既不需要依赖 status 位布局，也顺手拿到了对照脚。
+
+## 85. 2026-11-20 RV32 SMP 的 34 秒静默：不是启动慢，是 `reboot` 根本没复位
+
+§83 收尾时留下的最后一个开口是“RV32 SMP `reboot` 之后约一半的启动要 34 秒才出声”。
+今天的结论是它跟启动、UART、时钟、ROM 全都无关：**两个核以相反顺序抢同一对锁**。
+
+**先纠正一个方法论错误。** 之前用 `WATCHDOG_SCRATCH(3)` 记“最后到达的阶段”，然后
+相信 `prev_phase=17` 说明卡住那次走到了 17。这不可靠：卡住那次被看门狗清掉之后，
+**恢复成功的那次启动会立刻把小节覆盖成自己的终值**。换成 `.noinit` 里的环形日志
+（`boot_step_t`，追加而不是覆盖，每条还带 `RP_UART_FR`、`g_clk_hz`、IBRD/FBRD、
+`CLK_SYS_SELECTED` 和 mtime）之后，事实是：`reboot` 进入后 **431 ms** 走到
+`usb_critical_enter()` 返回，然后就再没有下一条——`usb_tx_drain()` 没返回。
+
+**“两个看门狗周期”是巧合。** `stall_probe.py` 同时盯 UART0 输出、Windows 里的 CDC
+设备节点、以及往那个节点发 `uptime` 有没有回应。慢轮次里 **CDC 节点整整 33 秒都在**：
+芯片若真复位了，D+ 上拉会掉、Windows 毫秒级就会看到断开。所以那 33 秒是
+“芯片还活着但控制台已经关了”（`console_shutdown()` 在 `plat_reboot()` 第一句），
+不是“启动被清掉两次”。
+
+**根因。** `drivers/usb/rp2350rv/usb_cdc.c`：
+
+```c
+/* 修前 */
+usbpm = usb_critical_enter();     /* USB 锁（SIO 自旋锁 30）先拿到手 */
+usb_tx_drain();                   /* 里面：g_tx_lock -> USB 锁        */
+```
+
+`usb_tx_drain()` 的既有顺序是 **`g_tx_lock` 在前、USB 锁在后**（同一份文件里的注释
+写得很清楚）。核 0 在 reboot 路径里持 USB 锁等 `g_tx_lock`，核 1 的 1 ms tick 在
+drain 里持 `g_tx_lock` 等 USB 锁——互等，谁都不动。核 1 是在 `plat_irq_save()` 之后
+卡住的，于是 tick 停了、看门狗没人喂。命中率约一半，正好是“tick 那一刻在不在 drain
+里”。ARM 的两个端口没有这个问题，因为它们的 `usb_cdc_flush()` 只做
+`tud_cdc_write_flush()`，从不 drain。
+
+**修复**：flush 改成先 `usb_tx_drain()`（它自己按正确顺序加锁）、再单独取 USB 锁做
+FIFO flush；另外 `plat_reboot()` 置 `g_rebooting`，`plat_console_flush()` 在该标志下
+不走 USB——要复位的机器不该等主机把最后几个字节取走，也不该等一把即将被复位的核可能
+还握着的锁。UART 那条腿（串口抓包看到的那条）照常 flush。
+
+**验证**：46 次连续 `reboot` 全部 0.50–0.58 s（修前同口径约一半 34 s）；
+`scripts/rp2350/gate_boot.py -n 10 --cpus 2` **10/10 PASS**，uart0 10/10、cdc 10/10、
+uptime 0.31 s。卡片 `docs/acceptance/2026-11-20-rv32-reboot-stall.md`。
+
+**留下的仪表**（都是 diag-only，release 时间线不变）：`.noinit` 环形启动日志，只在
+**上一轮没走到 shell** 时打印，正常启动一个字节都不多说；`plat_boot_mark(n)` 是
+`kernel/main.c` 的弱钩子，在 `kmain()` 各阶段之间打点，端口有环形日志就记、没有就
+什么都不做；`scripts/rp2350/stall_probe.py` 是双通道观察重启的工具。
+
+**两条经验**：单槽标记会被下一次启动覆盖，跨复位的状态必须追加着记；把“34 s ≈ 2×
+看门狗”当成“两次启动都被清掉”是过度解读，直接把“芯片到底复位没有”当问题问
+（看 CDC 节点在不在）只花了一次实验。
+
