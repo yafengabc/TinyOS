@@ -14,7 +14,7 @@ enum {
     R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
     R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
     R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
-    R_BOUNDS, R_PRINTFIXN
+    R_BOUNDS, R_PRINTFIXN, R_MOD
 };
 
 enum {
@@ -221,6 +221,11 @@ int main(int argc, char **argv)
             case R_SUB: r[q.d] = r[q.a] - r[q.b]; break;
             case R_MUL: r[q.d] = r[q.a] * r[q.b]; break;
             case R_DIV: r[q.d] = r[q.a] / r[q.b]; break;
+            case R_MOD: {
+                int b = r[q.b];
+                r[q.d] = b ? (r[q.a] % b) : 0;
+                break;
+            }
             case R_LT: r[q.d] = r[q.a] < r[q.b]; break;
             case R_GT: r[q.d] = r[q.a] > r[q.b]; break;
             case R_EQ: r[q.d] = r[q.a] == r[q.b]; break;

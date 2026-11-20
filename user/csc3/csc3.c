@@ -39,7 +39,7 @@ struct Node {
 };
 
 enum {
-    N_NUM, N_VAR, N_ADD, N_SUB, N_MUL, N_DIV,
+    N_NUM, N_VAR, N_ADD, N_SUB, N_MUL, N_DIV, N_MOD,
     N_LT, N_GT, N_EQ, N_ASSIGN, N_DECL, N_RETURN,
     N_BLOCK, N_IF, N_WHILE, N_FUNC, N_FOR, N_DO,
     N_BREAK, N_CONTINUE, N_SWITCH, N_CASE,
@@ -92,7 +92,7 @@ enum {
     R_STOREA_I, R_NOP, R_PRINTS, R_PRINTN, R_PRINTV,
     R_NATIVE, R_NATIVER, R_LOADD, R_STORED,
     R_SHLI, R_SHRI, R_FMUL, R_FDIV, R_PRINTFIX, R_PRINTFIXV,
-    R_BOUNDS, R_PRINTFIXN
+    R_BOUNDS, R_PRINTFIXN, R_MOD
 };
 
 typedef struct {
@@ -537,6 +537,7 @@ static Node *parse_mul(void)
     for (;;) {
         if (accept("*")) { Node *x = node(N_MUL); x->lhs = n; x->rhs = parse_primary(); n = x; }
         else if (accept("/")) { Node *x = node(N_DIV); x->lhs = n; x->rhs = parse_primary(); n = x; }
+        else if (accept("%")) { Node *x = node(N_MOD); x->lhs = n; x->rhs = parse_primary(); n = x; }
         else break;
     }
     return n;
@@ -575,8 +576,8 @@ static Node *fold_const(Node *n)
         n->lhs->kind == N_NUM && n->rhs->kind == N_NUM &&
         !n->lhs->ftype && !n->rhs->ftype &&
         (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
-         n->kind == N_DIV || n->kind == N_LT || n->kind == N_GT ||
-         n->kind == N_EQ)) {
+         n->kind == N_DIV || n->kind == N_MOD ||
+         n->kind == N_LT || n->kind == N_GT || n->kind == N_EQ)) {
         int a = n->lhs->val, b = n->rhs->val, v = 0;
         if (n->kind == N_ADD) v = a + b;
         else if (n->kind == N_SUB) v = a - b;
@@ -585,6 +586,10 @@ static Node *fold_const(Node *n)
             if (b == 0)
                 return n;
             v = a / b;
+        } else if (n->kind == N_MOD) {
+            if (b == 0)
+                return n;
+            v = a % b;
         } else if (n->kind == N_LT) v = a < b;
         else if (n->kind == N_GT) v = a > b;
         else v = a == b;
@@ -682,6 +687,7 @@ static int compound_kind(void)
     if (!strcmp(tok, "-=")) return N_SUB;
     if (!strcmp(tok, "*=")) return N_MUL;
     if (!strcmp(tok, "/=")) return N_DIV;
+    if (!strcmp(tok, "%=")) return N_MOD;
     return 0;
 }
 
@@ -700,8 +706,6 @@ static Node *parse_place_tail(Node *load, int semi)
         return assign_from_load(load, mk_bin(N_ADD, load, mk_one()));
     if (accept("--"))
         return assign_from_load(load, mk_bin(N_SUB, load, mk_one()));
-    if (tok_kind == 3 && !strcmp(tok, "%="))
-        die("%= unsupported");
     (void)semi;
     return NULL;
 }
@@ -934,19 +938,19 @@ static Node *parse_simple(int semi)
             strncpy(v->name, name, sizeof(v->name) - 1);
             if (tok_kind == 3 &&
                 (!strcmp(tok, "+=") || !strcmp(tok, "-=") ||
-                 !strcmp(tok, "*=") || !strcmp(tok, "/="))) {
+                 !strcmp(tok, "*=") || !strcmp(tok, "/=") ||
+                 !strcmp(tok, "%="))) {
                 char op = tok[0];
                 Node *x;
                 next();
                 if (op == '+') x = node(N_ADD);
                 else if (op == '-') x = node(N_SUB);
                 else if (op == '*') x = node(N_MUL);
-                else x = node(N_DIV);
+                else if (op == '/') x = node(N_DIV);
+                else x = node(N_MOD);
                 x->lhs = v;
                 x->rhs = parse_expr();
                 n->lhs = x;
-            } else if (accept("%=")) {
-                die("%= unsupported");
             } else if (accept("++")) {
                 Node *x = node(N_ADD);
                 Node *one = node(N_NUM);
@@ -1212,8 +1216,8 @@ static int node_float_hint(Node *n)
     }
     if (n->kind == N_INDEX || n->kind == N_MEMBER) return 0;
     if (n->kind == N_ADD || n->kind == N_SUB || n->kind == N_MUL ||
-        n->kind == N_DIV || n->kind == N_LT || n->kind == N_GT ||
-        n->kind == N_EQ) {
+        n->kind == N_DIV || n->kind == N_MOD || n->kind == N_LT ||
+        n->kind == N_GT || n->kind == N_EQ) {
         int l = node_float_hint(n->lhs), r = node_float_hint(n->rhs);
         if (l == 1 || r == 1) return 1;
         if (l == 0 && r == 0) return 0;
@@ -1287,6 +1291,7 @@ static int arith_op(int kind)
     case N_SUB: return R_SUB;
     case N_MUL: return R_MUL;
     case N_DIV: return R_DIV;
+    case N_MOD: return R_MOD;
     case N_LT:  return R_LT;
     case N_GT:  return R_GT;
     default:    return R_EQ;
@@ -1488,7 +1493,7 @@ static int gen_expr_into(Node *n, int dst)
     case N_PRINTF:
     case N_PUTS:
         die_node(n, "string/printf not allowed in expression");
-    case N_ADD: case N_SUB: case N_MUL: case N_DIV:
+    case N_ADD: case N_SUB: case N_MUL: case N_DIV: case N_MOD:
     case N_LT: case N_GT: case N_EQ:
         /* Destination hint removes the temporary + MOV around assignments.
          * Immediate forms are kept for definitely-int operands. */
@@ -1521,6 +1526,8 @@ static int gen_expr_into(Node *n, int dst)
             {
                 int bt = last_type;
                 if (at || bt) {
+                    if (n->kind == N_MOD)
+                        die_node(n, "% needs integer operands");
                     a = coerce_to(a, at, 1);
                     b = coerce_to(b, bt, 1);
                     if (n->kind == N_ADD) emit(R_ADD, a, b, 0, dst);
@@ -1928,7 +1935,7 @@ static int rir_uses(const RIR *q, int *f)
     switch (q->op) {
     case R_MOV: case R_JZ: case R_RET: case R_PRINT: case R_PRINTV:
         f[0] = 0; return 1;
-    case R_ADD: case R_SUB: case R_MUL: case R_DIV:
+    case R_ADD: case R_SUB: case R_MUL: case R_DIV: case R_MOD:
     case R_LT: case R_GT: case R_EQ:
         f[0] = 0; f[1] = 1; return 2;
     case R_STOREG: case R_LOADA: case R_ARG: f[0] = 1; return 1;
@@ -1958,7 +1965,7 @@ static int rir_uses(const RIR *q, int *f)
 static int rir_dest_field(const RIR *q)
 {
     switch (q->op) {
-    case R_CONST: case R_MOV: case R_ADD: case R_SUB: case R_MUL: case R_DIV:
+    case R_CONST: case R_MOV: case R_ADD: case R_SUB: case R_MUL: case R_DIV: case R_MOD:
     case R_LT: case R_GT: case R_EQ: case R_LOADG: case R_LOADA: case R_LOADL:
     case R_INC: case R_DEC:
     case R_ADDI: case R_SUBI: case R_MULI:
@@ -2024,7 +2031,7 @@ static int rir_pure(int op)
 {
     switch (op) {
     case R_CONST: case R_MOV:
-    case R_ADD: case R_SUB: case R_MUL:
+    case R_ADD: case R_SUB: case R_MUL: case R_MOD:
     case R_LT: case R_GT: case R_EQ:
     case R_ADDI: case R_SUBI: case R_MULI:
     case R_INC: case R_DEC:
