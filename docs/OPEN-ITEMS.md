@@ -347,3 +347,30 @@ PSRAM 本身还在 §7 的"先不做"里，但**形态和升级门槛先记下�
 
 关闭条件：三项各一条实机记录（命令 + 输出或波形），写进 `docs/acceptance/`。
 跟踪：issue #26（已按三步清单写好，谁在板边 5 分钟能关）。
+
+## 12. rcc / RV32 原生路径的能力边界（2026-11-20）
+
+RV32 原生链路 `csc -> rvm -> rcc -> ELF` 已在 QEMU rv32 和 C3 上跑通 37 个用例
+（`docs/acceptance/2026-11-20-rv32-native-suite.md`）。下面几条是**已知边界**，
+不是回归；写下来免得下次当成 bug 重新查。
+
+1. **板上 `csc` 的 AST 预算很小。** `src/csc.c` 在 `__riscv`/`__arm__` 下把
+   `NODE_MAX` 降到 128、`IR_MAX` 降到 256。节点计数按**单个函数**重置，但一个
+   几十条语句的 `main`（每次调用约 5 个节点）就会 `AST full`。用板级宏在宿主
+   实测：`bigswitch` 通过，`many25`/`many32`/`bigbody`/`bigcode` 全部
+   `AST full`。大程序现在的做法是宿主 `csc` 生成 RIR2，板上只跑 `rcc`。
+   要改就得同时看窗口大小（C3 400 KiB SRAM）和 `NODE_MAX` 的静态占用，
+   目前没有需求驱动，先记录。
+
+2. **`rvm` 只有 256 条 IR。** 超过它的程序（`tests/bigcode.c`，535 IR，
+   10 KiB text）在宿主无法用解释器验证，只能在 QEMU/真机跑原生镜像；期望值
+   来自宿主 C 编译。宿主测试把它单列为 native-only，并断言 IR 真的超过 256，
+   防止以后悄悄挪回普通表。
+
+3. **qemu-virt ramdisk 只有 512 KiB。** 37 个 `.tos` 约 141 KiB，整套一次装不下，
+   冒烟要分批；`files.local/` 只用于本地暂存，不提交。
+
+4. **RP2350 Hazard3 的 T3 仍是 NOT RUN。** C3 已跑 `bigcode`/`many32`/`mixbig`/
+   `bigswitch`，RP2350 上同一批 RV32IM 镜像尚未上板；按 2026-11-19 的硬件策略，
+   它属于关闭条件的一部分，等板子排期。
+

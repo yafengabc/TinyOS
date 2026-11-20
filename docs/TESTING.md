@@ -120,6 +120,39 @@ go run ./cmd/tostest compat -targets rv32,arm
 
 x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
 
+### 4.4 RV32 原生镜像（改 `rcc` / RIR2 / ELF 加载时必跑）
+
+宿主 `tools/test.py` 只证明 `csc -> rvm`；`rcc` 的 ELF 必须在目标内核的加载器里跑。
+`rvm` 只有 256 条 IR，超过它的程序（如 `tests/bigcode.c`，535 IR / 10 KiB text）
+只能在原生路径验证。流程分两个仓库：
+
+```sh
+# 1. tinyos-script：生成 RIR2 和 build/<name>.tos（当前 37 个用例）
+python tools/test.py
+
+# 2. TinyOS：把要跑的 .tos 放进 files.local/bin/。files/ 是受版本控制的静态
+#    文件，生成物只写 files.local/（.gitignore 已忽略）；同名文件覆盖 files/。
+mkdir -p files.local/bin
+cp ../tinyos-script/build/bigcode.tos files.local/bin/rt-bigcode
+
+# 3. 构建 rv32 rir 镜像（含 csc+rvm+rcc，关掉 csa+pvm）
+go run ./cmd/tos build -config configs/rv32-rir.conf
+
+# 4. 冒烟：程序输出要和 rvm 一致（rvm 的 result= 汇总行原生镜像不打印）
+go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 25000
+```
+
+注意：
+
+- qemu-virt 的 ramdisk 是 512 KiB（`ramdisk_sectors = 1024`），37 个 `.tos` 约
+  141 KiB 装不下；一次 10–15 个，分批重建并冒烟。
+- 原生镜像只打印程序自己的输出；`rvm` 末尾的 `result=... ir=...` 不会出现，
+  比对时先去掉这一行。
+- 板上 `csc` 每函数只有 128 个 AST 节点（`NODE_MAX`），整个程序 256 条 IR；
+  几十条语句的 `main` 会报 `AST full`。这类用例由宿主 `csc` 生成 RIR2，
+  板上只跑 `rcc`。见 `OPEN-ITEMS.md` §12。
+- `bloop3` / `sieve3` / `deep 3` 在 TCG 下超过 10 s，`-commandwait-ms` 要给够。
+
 ## 5. T3：真机
 
 端口、板子、镜像必须写进证据；下面是模板，`COMx` 换成实际端口。

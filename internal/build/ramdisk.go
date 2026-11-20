@@ -210,31 +210,48 @@ func ELFEndAddress(path string) (uint64, error) {
 	return end, nil
 }
 
+// collectFiles returns the static files staged into the filesystem image:
+// everything under files/, then everything under files.local/.  The local tree
+// is gitignored scratch space for generated artifacts - an rcc .tos staged for
+// a QEMU smoke run, for example - and a local file replaces one of the same
+// name from files/, so a run cannot end up with two copies of /bin/x.
 func collectFiles(root string) ([]RamFile, error) {
 	var files []RamFile
-	dir := filepath.Join(root, "files")
-	if _, err := os.Stat(dir); err != nil {
-		return files, nil
-	}
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	index := map[string]int{}
+	for _, tree := range []string{"files", "files.local"} {
+		dir := filepath.Join(root, tree)
+		if _, err := os.Stat(dir); err != nil {
+			continue
 		}
-		if info.IsDir() {
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			name := filepath.ToSlash(rel)
+			if i, ok := index[name]; ok {
+				files[i].Data = data
+				return nil
+			}
+			index[name] = len(files)
+			files = append(files, RamFile{Name: name, Data: data})
 			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
+		})
 		if err != nil {
-			return err
+			return nil, err
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		files = append(files, RamFile{Name: filepath.ToSlash(rel), Data: data})
-		return nil
-	})
-	return files, err
+	}
+	return files, nil
 }
 
 func relName(root, path string) string {

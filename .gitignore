@@ -34,6 +34,11 @@ __pycache__/
 # Host-side debugging harness for the interpreter (not a board program).
 /tmp/
 
+# Local files staged into a filesystem image for a one-off run: generated
+# .tos images for a QEMU smoke test, files for a board experiment.  Never
+# committed; files/ is the tracked tree.
+/files.local/
+
 # Go build cache / GOPATH when a non-interactive bash run points them here
 /.gocache/
 /.gopath/
