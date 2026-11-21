@@ -151,28 +151,27 @@ MicroPython 没有 RV32 固件）。板与板之间只比同一个引擎，时�
 | | `clang` | **15** | 17 | **26** | **27** |
 | **Pico 2 M33** 150 MHz | `micropython` | 1096 | 1220 | 2015 | 696 |
 | | `@native` | 635 | 530 | 1149 | 368 |
-| | `pvm` | — | — | — | — |
+| | `pvm` | 398 | 1337 | 2358 | 841 |
 | | `rvm` | 289 | 407 | 799 | 340 |
 | | `goc32` | 24 | 30 | 62 | 1338\* |
 | | `rcc` | 70 | 44 | 120 | 47 |
 | | `clang` | **13** | **10** | **9** | **36** |
 | **Pico 2 RV32** 150 MHz | `micropython` | — | — | — | — |
 | | `@native` | — | — | — | — |
-| | `pvm` | — | — | — | — |
+| | `pvm` | 526 | 1724 | 3078 | 1106 |
 | | `rvm` | 281 | 397 | 803 | 352 |
 | | `goc32` | 21 | 27 | 42 | 40 |
 | | `rcc` | 61 | 27 | 60 | 42 |
 | | `clang` | **14** | **15** | **14** | **20** |
 
-\* M33 上 `goc32` 的 `div` 是 1338 ms，同一块板的 RV32 侧只有 40 ms。这**不是
-测量噪声**：goc32 的 ARM 后端对每一个 `%` 都发 `bl __aeabi_idivmod`，而
-`user/aeabi.c` 当时把 M0+ 的 32 步软件循环也用于 M3/M33——M33 明明有
-`SDIV/UDIV`。已改成 `__ARM_ARCH_EXT_IDIV__` 时直接使用指令。用同一份 goc32
-镜像在 QEMU mps2（Cortex-M3，同样有硬件除法）上复测：`div` **69 ms → 4 ms**
-（同轮 `fib` 2 ms），所以离群值来自 helper，不是 goc32 整体慢。这一格是**修复前**
-的板测数字，重编 `benchgoc` 后要重测，不能拿它当"goc32 慢 30 倍"（同板其它三个
-内核只差 1.2–2×）。
-
+\* M33 上 `goc32` 的 `div` 是 1338 ms，修复后重测 1343 ms（同一量级），
+同一块板的 RV32 侧只有 40 ms。`1cd70da` 在 `user/aeabi.c` 里加了
+`__ARM_ARCH_EXT_IDIV__` 分支，但 **goc32 用自己的前端编译该文件**，
+预处理器没有定义这个宏（`-E` 输出仍是 `tos_udiv32` 软件循环），
+所以修复对 goc32 无效。已立 **#45**：要么让 goc32 的 ARM 后端在有 IDIV
+时直接发 `sdiv`/`udiv`，要么在它的 helper 里用内联汇编；单纯补 `-D`
+会因为它把 `/` 翻成 `bl __aeabi_idivmod` 而无限递归。这一格是**未修复**数字，
+不能当作"goc32 整体慢 30×"（同板其它三个内核只差 1.2–2×）。
 ## 读法
 
 - **解释器组（C3）**：`rvm` 比 `pvm` 快 1.8–3.6×，比 MicroPython 字节码快
@@ -199,7 +198,7 @@ C3    mpy   fib 1146 loop 1570 array 2411 div  876
 M33   mpy   fib 1096 loop 1220 array 2015 div  696
       @nat  fib  635 loop  530 array 1149 div  368
       rvm   fib  289 loop  407 array  799 div  340
-      goc32 fib   24 loop   30 array   62 div 1338   (见 * )
+      goc32 fib   24 loop   30 array   62 div 1343   (#45：goc32 未修复)
       rcc   fib   70 loop   44 array  120 div   47
       clang fib   13 loop   10 array    9 div   36
 RV32  rvm   fib  281 loop  397 array  803 div  352
