@@ -409,22 +409,38 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。
 
-## 14. capture() 在板上 csc+rcc 生成的镜像里返回 0（2026-11-21）
+## 14. capture() 每个启动只可靠一次（2026-11-21）
 
-`capture(path, buf, cap)` 在**宿主 rcc** 生成的镜像上工作正常（QEMU mps2 抓到
-46 B，QEMU rv32 按 cap 截断），但镜像内 `csc` + `rcc` 现场编译出来的程序
-`capture()` 返回 0，`run()` 和文件 IO 的同一链路正常。
+`capture(path, buf, cap)` 的代码生成没有问题：
 
-已知：`/bin/hello` 存在，exec 没有报错（如果路径错会打印 `exec: ... not
-found`），所以更像是“读端 fd 没拿到数据”，即 fd 传递在板载 rcc 生成的代码里
-与宿主不同。下一步：
+- 宿主 `rcc` 和板上 `rcc` 对同一个 RIR 输出的 **text 校验和完全相同**
+  （`sum=1681930499`，3084 text / 121 labels），所以不是 csc/rcc 或编译器的
+  差异；
+- 第一次 `capture("/bin/hello", ...)` 在 mps2 和 rv32 上都能抓到数据
+  （mps2 46 B，rv32 按 cap 截断）。
 
-1. 把板上 `csc` 生成的 `.rir` 取回宿主，和宿主 `csc` 的 `.rir` 逐字节比较；
-2. 用 `riscv32-unknown-elf-objdump -D -b binary` 对比两个 `rcc` 生成的 helper
-   字节（宿主已确认 `e_ldr_imm(1, sp, 16)` 是 fds[0]）；
-3. 确认板载 rcc 是否真的重编了 `thumb2.inc`（构建只跟踪 rcc.c 的 mtime，
-   `.inc` 变了要 touch 或删对象）。
+问题是**之后的 capture 都返回 0**，而且同一个进程里的第二次调用、以及同一次
+启动里后续任何进程的 capture 都会失败。现象像是管道资源在第一次之后没有真正
+回收：
 
-在此之前，验收卡
-`2026-11-21-capture-qemu-c2b27ae.md` 把板上链路标为 FAIL。
+- 第一进程第一次调用成功；
+- 同一程序第二次调用返回 0；
+- 再次运行同一程序（新进程）也返回 0。
 
+已完成/已排除：
+
+- 早先“板上镜像失败、宿主镜像成功”是假象，两者字节一致，只是第一次成功；
+- `dup(1)`/`dup2(saved,1)` 的恢复顺序改成“等子进程结束后再恢复”没有解决；
+- 校验和诊断（`rcc: ... sum=`）已移除，需要时可临时加回。
+
+下一步（需要看内核 fd/管道生命周期，不是工具链层）：
+
+1. `pipe()` 的失败返回值在 capture 里被吞掉了（失败也走 `res=-1`），先把它
+   和 `dup`/`dup2` 的失败分开打印；
+2. 检查 `process_exec` 创建子进程时 fd 表是复制还是共享，以及子进程退出后
+   管道两端何时释放（`msh` 的 `run_pipeline` 在 spawn 后直接 `close(1)`，
+   和我们的“恢复 console”不同）；
+3. 若管道槽位有全局上限，确认第一次 capture 后是否有未释放的引用。
+
+在解决之前，验收卡 `2026-11-21-capture-qemu-c2b27ae.md` 的结论保持不变：
+单次 capture 在宿主生成的镜像上 PASS，多次/板上链路 FAIL。
