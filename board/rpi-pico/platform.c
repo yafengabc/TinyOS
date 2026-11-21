@@ -1316,12 +1316,17 @@ int plat_flash_unique_id(uint8_t out[8])
         for (i = 0; i < 8; i++)
             cached[i] = raw[5 + i];
 
+#if TOS_DIAG
+        /* Bring-up only: this line used to appear on every boot, including
+         * the release image, which is exactly what boot_trace = 0 is supposed
+         * to silence. */
         dbg_uart_puts("[uid]");
         for (i = 0; i < 8; i++) {
             dbg_uart_puts(" ");
             dbg_uart_hex(cached[i]);
         }
         dbg_uart_puts("\n");
+#endif
     }
     for (i = 0; i < 8; i++)
         if (cached[i] != 0x00u && cached[i] != 0xffu)

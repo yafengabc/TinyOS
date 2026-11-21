@@ -442,13 +442,28 @@ uint32_t plat_lfs_blocks(void)
 #if TOS_HAS_FLASH
     uint32_t configured = TOS_FLASH_BYTES;
     uint32_t detected = plat_flash_detected_bytes();
-    /* The measurement wins in both directions.  A part smaller than the
-     * board file claims must not be overrun, and a part larger than it
-     * claims is space that exists - "assume 1 MiB at build time, measure at
-     * boot, then grow" only works if the larger measurement is used.
-     * configured is what a port that cannot measure falls back to, and what
-     * the build checked the partition layout against. */
-    uint32_t bytes = detected ? detected : configured;
+    /* A detection that is SMALLER than the board file is used: it is what
+     * keeps a board whose flash_bytes overstates the part from overrunning
+     * it.  A detection that is larger is NOT trusted - the RP2350 fallback
+     * reports the ROM's FLASH_DEVINFO default CS0_SIZE = 12, i.e. 16 MiB,
+     * whenever the OTP is unprogrammed and the JEDEC probe failed, and that
+     * is an upper bound rather than a measurement (see rp2350_flash_detect).
+     * Growing the filesystem to a size the part does not have corrupts it,
+     * so the configured size wins upward and the mismatch is reported. */
+    uint32_t bytes = configured;
+
+    if (detected && detected < configured)
+        bytes = detected;
+    if (detected > configured) {
+        static int warned;
+
+        if (!warned) {
+            warned = 1;
+            kprintf("[ramdisk] detected %u bytes, board file says %u; using %u\n",
+                    (unsigned)detected, (unsigned)configured,
+                    (unsigned)configured);
+        }
+    }
 
     if (bytes <= TOS_LFS_OFFSET)
         return 0;

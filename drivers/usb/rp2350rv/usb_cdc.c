@@ -529,30 +529,45 @@ void usb_cdc_irq_enable(void)
 #endif
 }
 
-/* Boot-time enumeration wait.
+/* Boot-time enumeration wait, bounded by *time* rather than a cycle count.
  *
  * Restored on 2026-11-20 after the ATK-DNRP2350AM reproduced the 2026-11-19
  * trap with the wait removed: mcause=0x3 (ebreak), mepc=0x10016362 in
- * TinyUSB's usbd_control_xfer_cb, at TU_ASSERT(0 == xferred_bytes), with
- * ra=0x10015820 in tud_task_ext.  A Pico 2 survived 28 complete cold boots
- * without the wait, so that evidence was not portable across boards.
+ * TinyUSB's usbd_control_xfer_cb, at TU_ASSERT(0 == xferred_bytes).  A Pico 2
+ * survived 28 cold boots without the wait, so that evidence was not portable.
  *
- * The loop is a bound, not a delay: it exits as soon as tud_mounted().  Its
- * clock-derived upper bound was measured at 1 730 780 iterations = 8.3 s with
- * no host and ~0.35 s / ~72 000 polls with one.  Do not remove it without a
- * trap-free run on BOTH RP2350 RV32 boards; see
- * docs/acceptance/2026-11-20-rv32-atk-trap-reproduced.md. */
+ * The bound used to be `clk_hz * 3 / (2 * 130)` iterations, which assumed
+ * 130 cycles per poll.  Measured on this core a poll costs 4.79 us, so the
+ * old bound was 8.3 s - every boot without a host paid it, and the UART said
+ * nothing until it expired.  Now the loop runs until the port is mounted or
+ * 400 ms of TIMER0 time has passed, whichever comes first; a normal host ends
+ * it in ~0.35 s.  TIMER0's 1 MHz count is started by ticks_init() before this
+ * runs (see the RV32 port's ticks_init comment).
+ *
+ * The iteration cap is a safety net, not the policy: if TIMER0 is stopped the
+ * elapsed-time test never fires, and 200 000 polls (~1 s) is still bounded. */
+#define USB_BOOT_WAIT_US   400000u
+#define USB_BOOT_WAIT_POLL 200000u
+
+static uint32_t usb_boot_us(void)
+{
+    return mmio_read32(TIMER0_BASE + TIMERAWL_OFFSET);
+}
+
 static void usb_cdc_wait(uint32_t clk_hz)
 {
-    uint64_t spins;
+    uint32_t t0, polls;
 
+    (void)clk_hz;
     if (!g_hw_ready)
         return;
-    spins = ((uint64_t)clk_hz * 3ull) / (2ull * 130ull);
-    for (uint64_t i = 0; i < spins && !tud_mounted(); i++) {
+    t0 = usb_boot_us();
+    for (polls = 0; polls < USB_BOOT_WAIT_POLL; polls++) {
+        if (tud_mounted())
+            return;
+        if ((uint32_t)(usb_boot_us() - t0) >= USB_BOOT_WAIT_US)
+            return;
         usb_cdc_poll();
-        for (volatile int j = 0; j < 40; j++)
-            ;
     }
 }
 
