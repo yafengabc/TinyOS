@@ -5501,3 +5501,26 @@ csc 128 KiB   rcc 100 KiB   rvm 44 KiB   用户区 216 KiB
 
 `git push` 那次带 `-c http.proxy` 报 access rights（SSH 不吃该设置），裸 `git push`
 直接成功——写在这里免得下次再试一遍。
+
+## 100. 2026-11-21 Thumb-2 上 Pico 2：44 个程序两轮 37/37
+
+RP2350（Cortex-M33）此前只有 QEMU mps2 的 M3 证据，本轮补上真机：
+
+```
+镜像   build/tinyos-rpi-pico2-smp.uf2  sha256 075c90cc…
+       littlefs 自动长大到 1 MiB / 97 个文件
+心跳   HEARTBEAT OK 6/6
+语料   strict 37/37（18:27、18:28 各一轮），7 个观察项无 fault
+```
+
+目标用的是 `rpi-pico2-smp` 而不是 issue 里的 `rpi-pico2-quiet.conf`（单核）：单核 ARM 带
+44 个语料时到不了 USB 枚举，已立 #42，本轮按用户要求先用 SMP。两者 `build-config.txt`
+只差 `cpus 1|2` 一行。
+
+**顺带发现一处真缺陷**：`file1` 在 M33 上 `write("hello",5)` 返回 **5**、读回 5 字节；
+在 RP2040 和宿主 `rvm` 上返回 **24**、读回 0 字节。5 才是对的，所以可疑的是 RP2040 与
+解释器那条路径，不是 Thumb-2——#38 卡片里记的"既有 fs 语义"要改口径，另开 issue 追。
+
+另外记两条今天踩到的板级事实：17 MB 的"擦除+刷写"合成 UF2 会被 ROM 拒（34817 个块太
+多，文件留在盘上不消费），擦除要单独写；ARM 端口没有 `plat_boot_stage()`，`[E]` 到
+banner 之间是盲区，做单核 #42 时得先补这个。

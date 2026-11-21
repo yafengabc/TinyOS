@@ -412,7 +412,10 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 
 **还没做**：
 
-1. RP2350（Cortex-M33）真机 `NOT RUN`，目前只有 QEMU 的 M3；
+1. ~~RP2350（Cortex-M33）真机 `NOT RUN`，目前只有 QEMU 的 M3~~ → **已验（2026-11-21）**：
+   Pico 2 上 `rpi-pico2-smp` + 44 个 Thumb-2 语料，心跳 6/6、`strict 37/37` 两轮，
+   卡片 `docs/acceptance/2026-11-21-thumb2-rp2350-ae8c7c7.md`。剩下的口子是**单核**
+   ARM 目标带语料时到不了 USB 枚举（#42），与 Thumb-2 无关；
 2. native 的 GPIO/ADC/PWM 只有编译覆盖，没有外设实测；
 3. QEMU mps2 的 600 KiB ramdisk 装不下整套用例，冒烟要分批。
 
