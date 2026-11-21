@@ -405,10 +405,28 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 
 **还没做**：
 
-1. ARMv6-M（Thumb-1, RP2040）：完全没开始；
-2. RP2350（Cortex-M33）真机 `NOT RUN`，目前只有 QEMU 的 M3；
-3. native 的 GPIO/ADC/PWM 只有编译覆盖，没有外设实测；
-4. QEMU mps2 的 600 KiB ramdisk 装不下整套用例，冒烟要分批。
+1. RP2350（Cortex-M33）真机 `NOT RUN`，目前只有 QEMU 的 M3；
+2. native 的 GPIO/ADC/PWM 只有编译覆盖，没有外设实测；
+3. QEMU mps2 的 600 KiB ramdisk 装不下整套用例，冒烟要分批。
+
+## 13b. ARMv6-M（Thumb-1）：后端完成，等 RP2040 上板（2026-11-21）
+
+`thumb1.inc` 覆盖了 Thumb-2 的全部 RIR 操作（整数、字符串、Q16.16 float、
+native、`capture`），47 个语料中除 2 个故意编译失败的用例，其余在 QEMU mps2
+（Cortex-M3 执行 v6-M 子集）上全部与 `rvm` 输出一致；表驱动反汇编检查确认
+48 个镜像的代码段只含 ARMv6-M 编码。RP2040 没有 QEMU 模型，真机仍是 `NOT RUN`。
+
+与 Thumb-2 的差别：
+
+- 只有 r0..r7 能作基址和 ALU 操作数，所以 RIR 0..3 在 r4..r7，RIR 4..15 在帧槽；
+- 没有 `movw/movt`：常量用 `movs/lsls/adds` 逐字节拼，`e_la` 固定 7 条指令并
+  保存 r2/r3（helper 会把状态放在 r3）；
+- 条件跳转只有 ±256 B，长分支一律 `b<inv> +4; bl target`；只有“跳回 helper 入口”
+  那条必须用真正的 2 字节 `B`（BL 会覆盖被调方刚保存的返回地址）；
+- 没有 `udiv/sdiv/mls/smull`：软件除法（32 次移位减法）和 16×16 分块乘法；
+- 窗口约 90 KiB（与 rv32 相同量级）。
+
+**RP2040 上板需要 BOOTSEL 或 picotool**，仓库里还没有自动化的 UF2 流程。
 
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。

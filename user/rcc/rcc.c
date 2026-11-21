@@ -256,6 +256,14 @@ static void analyze(void)
         func_label[i] = -1;
 }
 
+/* RIR registers above VREG_IN_REG spill to the frame; R_LOADL/R_STOREL slots
+ * start right after them.  Keep this in step with the backend's LOCAL_BASE. */
+#if defined(RCC_ARCH_THUMB1)
+#define RIR_SLOT_BYTES 48      /* 12 slots: RIR 4..15 */
+#else
+#define RIR_SLOT_BYTES 36      /*  9 slots: RIR 7..15 */
+#endif
+
 static int frame_for(int fid)
 {
     int pc, maxslot = -1, frame;
@@ -266,7 +274,7 @@ static int frame_for(int fid)
         if (op == R_STOREL && ir_b(pc) > maxslot)
             maxslot = ir_b(pc);
     }
-    frame = 56 + 4 * (maxslot + 1);
+    frame = 20 + RIR_SLOT_BYTES + 4 * (maxslot + 1);
     if (frame < 64)
         frame = 64;
     return (frame + 15) & ~15;
@@ -274,10 +282,12 @@ static int frame_for(int fid)
 
 #if defined(__riscv) || defined(RCC_ARCH_RV32)
 #include "rv32.inc"
+#elif defined(RCC_ARCH_THUMB1)
+#include "thumb1.inc"
 #elif defined(__arm__) || defined(RCC_ARCH_THUMB2)
 #include "thumb2.inc"
 #else
-#error "rcc: no backend selected (RCC_ARCH_RV32 / RCC_ARCH_THUMB2)"
+#error "rcc: no backend selected (RCC_ARCH_RV32 / RCC_ARCH_THUMB1 / RCC_ARCH_THUMB2)"
 #endif
 
 static void write_elf_header(int data_off, int data_filesz, int data_memsz)

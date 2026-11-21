@@ -50,6 +50,10 @@ source.c --csc--> RIR2 镜像 --rvm--> 解释执行
 | `rcc` text | 48 KiB |
 | `rcc` 窗口 | 88 KiB（C3/rv32） |
 
+`rcc` 有三个后端：`rv32.inc`、`thumb2.inc`（ARMv7-M/ARMv8-M Mainline）和
+`thumb1.inc`（ARMv6-M，Cortex-M0/M0+）。Thumb-1 用 r0..r7 作操作数、软件除法/
+乘法、`bl` 长分支；改动在 `RCC_ARCH_THUMB1` 下，故事不影响前两个后端。
+
 超过单函数 AST 的程序（例如 90 条语句的 `bigbody`）在板上会报
 `AST full`，需要在宿主 `csc` 生成 RIR2。`rvm` 已改成按页读取指令区（宿主 8 页、
 板上 2 页，每页 256 条），不再有“整程序 256 条 IR”的上限，只剩换页开销。
