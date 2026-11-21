@@ -194,19 +194,29 @@ rcc  fib  70  loop  44  array 120  div  47
 `rvm` 比 C3 上慢、`rcc` 与 C3 接近（`fib` 70 vs 84、`loop` 44 vs 27、
 `array` 120 vs 71、`div` 47 vs 58），但**板子和时钟都不同**，只作量级参考。
 
-### Hazard3 RV32 SMP（`rpi-pico2-rv32-smp`）：`NOT RUN`
+### Hazard3 RV32 SMP（`rpi-pico2-rv32-smp`）
 
-`configs/rpi-pico2-rv32-rir.conf` 的镜像里三个工具都无法 exec：
+`configs/rpi-pico2-rv32-rir.conf`，同一块板、同一份 `bench.c`、同一套 `compare.py`；
+先前被 #44（栈提示与 4 KiB 窗口 grain 冲突）挡住，修好 16 KiB grain 后补测。
+四个内核校验和全部一致。
 
-```text
-exec: '/bin/csc' carries a bad stack hint (16384 bytes)
-exec: '/bin/rvm' carries a bad stack hint (8192 bytes)
-exec: '/bin/rcc' carries a bad stack hint (16384 bytes)
+| 内核 | `rvm` (ms) | `rcc` (ms) | 加速比 |
+|---|---:|---:|---:|
+| fib | 281 | **61** | 4.6× |
+| loop | 397 | **27** | 14.7× |
+| array | 803 | **60** | 13.4× |
+| div | 352 | **42** | 8.4× |
+
+原始 `BENCH` 行（RV32，一次运行）：
+
+```
+rvm  fib 281  loop 397  array 803  div 352
+rcc  fib  61  loop  27  array  60  div  42
 ```
 
-RV32 的 `stack_request_ok()` 要求栈提示整除窗口 grain（这块板 4 KiB），
-而工具分别请求 16/8/16 KiB；M33 走的是另一条分支所以不受影响。已立案 **#44**。
-修好之后按同一套 `compare.py --engine rcc --rvm` 补这一组数字。
+M33 与 RV32 在同一块 RP2350 上：`rvm` 基本持平（fib 289/281、loop 407/397、
+array 799/803、div 340/352），`rcc` 则是 RV32 更快（fib 70→61、loop 44→27、
+array 120→60、div 47→42）。这是同一块硅片两侧核心、同一份源码、同一口径的对照。
 
 ### 未测的列
 
