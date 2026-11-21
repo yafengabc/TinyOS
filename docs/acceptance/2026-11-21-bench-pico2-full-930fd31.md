@@ -60,5 +60,5 @@ python scripts/bench/compare.py --mpy --mpremote "connect COM22"
 - 每项取多次中位数（每个数字是一次运行，M33/RV32 口径一致）；
 - MicroPython RV32（固件不存在）。
 
-板子测完停在 MicroPython 固件上，要继续 TinyOS 开发需要重刷；本次已恢复为
-可用的 TinyOS 镜像。
+板子测完停在 MicroPython 固件上（COM22）；它不认 TinyOS 的 Ctrl-D 进 BOOTSEL，
+所以自动刷回失败，**尚未恢复为 TinyOS 镜像**——需要按住物理 BOOTSEL 再刷一次。
