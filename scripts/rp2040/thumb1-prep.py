@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Build the Thumb-1 (ARMv6-M) test set and the RP2040 image.
+"""Build a test-corpus set (Thumb-1 / Thumb-2 / RV32) and the matching image.
 
 Run this on the machine that has the toolchain (Go, a host C compiler,
 Python).  It does everything except flashing:
 
-  1. builds `csc` and `rcc` (RCC_ARCH_THUMB1) for the host,
+  1. builds `csc` and `rcc` (RCC_ARCH_<ARCH>) for the host,
   2. compiles every program in tinyos-script/tests into a .tos,
   3. records the expected output of each program from the host interpreter
      into build/thumb1/expected/<name>.txt,
   4. stages the images into files.local/bin/t1-<name>,
-  5. builds configs/rpi-pico.conf and reports the .uf2 path.
+  5. builds the matching config and reports the .uf2 path.
+
+The expected outputs come from the interpreter, so they do not depend on the
+backend: the same 44 programs are checked with thumb1, thumb2 and rv32.
 
     python scripts/rp2040/thumb1-prep.py
     python scripts/rp2040/thumb1-prep.py --script ../tinyos-script --cc clang
+    python scripts/rp2040/thumb1-prep.py --arch rv32     # RP2350 RISC-V side
 
 Nothing is written outside build/ and files.local/.
 """
@@ -73,8 +77,10 @@ def main():
                     help="reuse existing build/thumb1 images")
     ap.add_argument("--set", choices=("all", "core", "extra"), default="all",
                     help="which programs to stage (all fits in one flash now)")
-    ap.add_argument("--arch", choices=("thumb1", "thumb2"), default="thumb1",
-                    help="target core: RP2040 ARMv6-M or RP2350 ARMv7-M")
+    ap.add_argument("--arch", choices=("thumb1", "thumb2", "rv32"),
+                    default="thumb1",
+                    help="target core: RP2040 ARMv6-M, RP2350 ARMv7-M, or the "
+                         "RP2350 RISC-V (Hazard3) side")
     ap.add_argument("--config", default=None,
                     help="TinyOS config (default: rpi-pico[-rir] or rpi-pico2-quiet)")
     ap.add_argument("--source", action="store_true",
@@ -98,8 +104,9 @@ def main():
     rcc = os.path.join(BUILD, "rcc-" + args.arch + exe)
 
     if not args.skip_build:
-        arch_def = ("-DRCC_ARCH_THUMB1" if args.arch == "thumb1"
-                    else "-DRCC_ARCH_THUMB2")
+        arch_def = {"thumb1": "-DRCC_ARCH_THUMB1",
+                    "thumb2": "-DRCC_ARCH_THUMB2",
+                    "rv32": "-DRCC_ARCH_RV32"}[args.arch]
         rcc_name = "rcc-" + args.arch
         for name, extra in (("csc", []), ("rvm", []),
                             (rcc_name, [arch_def])):
@@ -165,16 +172,19 @@ def main():
         config = args.config
     elif args.arch == "thumb1":
         config = "configs/rpi-pico-rir.conf" if args.source else "configs/rpi-pico.conf"
+    elif args.arch == "rv32":
+        config = "configs/rpi-pico2-rv32-quiet.conf"
     else:
         config = "configs/rpi-pico2-quiet.conf"
     run(["go", "run", "./cmd/tos", "build", "-config", config], cwd=TOS)
-    board = "rpi-pico" if args.arch == "thumb1" else "rpi-pico2"
+    board = {"thumb1": "rpi-pico", "thumb2": "rpi-pico2",
+             "rv32": "rpi-pico2-rv32-smp"}[args.arch]
     uf2 = os.path.join(TOS, "build", "tinyos-%s.uf2" % board)
     print("\nimage:", uf2 if os.path.exists(uf2) else "(check build/ output)")
     print("arch:", args.arch, " set:", args.set, " programs:", len(made))
     if args.source:
         print("source mode: the board compiles each t1-*.c (csc -> rvm -> rcc)")
-    print("next: flash build/tinyos-rpi-pico.uf2, then")
+    print("next: flash %s, then" % os.path.relpath(uf2, TOS))
     print("      python scripts/rp2040/thumb1-run.py --port COMx --set %s"
           % args.set)
     return 0
