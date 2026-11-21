@@ -543,6 +543,14 @@ func (b *Builder) feature(name string) bool {
 // goc32 reads the same list back from build/build-config.txt, so a program
 // built with `goc32` sees TOS_THREADS/TOS_MAILBOX/TOS_NET exactly like one
 // built by `tos build`.
+// rccArchLabel spells out what rcc will emit, for build-config.txt.
+func rccArchLabel(arch string) string {
+	if arch != "" {
+		return arch
+	}
+	return "default"
+}
+
 func (b *Builder) userDefines() []string {
 	defs := append([]string{}, b.featureDefines()...)
 	if b.Threads {

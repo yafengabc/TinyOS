@@ -103,6 +103,7 @@ func loadTargetFile(path string) (Target, error) {
 		Board:   strings.TrimSpace(s["board"]),
 		Arch:    strings.TrimSpace(s["arch"]),
 		March:   strings.TrimSpace(s["march"]),
+		RCCArch: strings.TrimSpace(s["rcc_arch"]),
 	}
 	if t.Board == "" {
 		return Target{}, fmt.Errorf("%s: board is required", path)
@@ -128,6 +129,20 @@ func loadTargetFile(path string) (Target, error) {
 			return 0, fmt.Errorf("%s: %s is not a size (got %q)", path, key, raw)
 		}
 		return n, nil
+	}
+	switch t.RCCArch {
+	case "":
+	case "rv32":
+		if t.Arch != "rv32" {
+			return Target{}, fmt.Errorf("%s: rcc_arch = rv32 needs arch = rv32", path)
+		}
+	case "thumb1", "thumb2":
+		if t.Arch != "arm" {
+			return Target{}, fmt.Errorf("%s: rcc_arch = %s needs arch = arm", path, t.RCCArch)
+		}
+	default:
+		return Target{}, fmt.Errorf("%s: rcc_arch must be rv32, thumb1 or thumb2 (got %q)",
+			path, t.RCCArch)
 	}
 	if t.CPUs, err = intField("cpus"); err != nil {
 		return Target{}, err

@@ -312,6 +312,13 @@ func (t *Target) applyBoard(bc *BoardConfig) error {
 	}
 	t.Triple = isa.Triple
 	t.Machine = isa.Machine
+	/* rcc_arch is an image choice, but it still has to be one the core can
+	 * execute: Thumb-2 needs ARMv7-M or later, and an ARMv6-M part (the
+	 * cortex-m0 family) only runs Thumb-1. */
+	if t.RCCArch == "thumb2" && strings.Contains(t.Machine, "cortex-m0") {
+		return fmt.Errorf("board %s: rcc_arch = thumb2 but %s is ARMv6-M (use thumb1)",
+			t.Board, t.Machine)
+	}
 	t.FSBacking = bc.FSBacking
 	t.RamdiskSectors = bc.RamdiskSectors
 	t.XipFlashBase = bc.XipFlashBase

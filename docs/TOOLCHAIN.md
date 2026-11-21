@@ -51,8 +51,11 @@ source.c --csc--> RIR2 镜像 --rvm--> 解释执行
 | `rcc` 窗口 | 88 KiB（C3/rv32） |
 
 `rcc` 有三个后端：`rv32.inc`、`thumb2.inc`（ARMv7-M/ARMv8-M Mainline）和
-`thumb1.inc`（ARMv6-M，Cortex-M0/M0+）。Thumb-1 用 r0..r7 作操作数、软件除法/
-乘法、`bl` 长分支；改动在 `RCC_ARCH_THUMB1` 下，故事不影响前两个后端。
+`thumb1.inc`（ARMv6-M，Cortex-M0/M0+）。**用哪个由镜像显式决定**：`targets/*.conf`
+的 `rcc_arch = rv32|thumb1|thumb2`（不写则用编译器默认）。不按芯片推断——M33 也能
+跑 Thumb-1（可以做代码体积/速度对照），而同类 SoC 很多；构建只拒绝"让 ARMv6-M
+执行 Thumb-2"这种物理上不可能的搭配。Thumb-1 用 r0..r7 作操作数、软件除法/
+乘法、`bl` 长分支；`build-config.txt` 里的 `rcc_arch` 行记录本次构建的选择。
 
 超过单函数 AST 的程序（例如 90 条语句的 `bigbody`）在板上会报
 `AST full`，需要在宿主 `csc` 生成 RIR2。`rvm` 已改成按页读取指令区（宿主 8 页、

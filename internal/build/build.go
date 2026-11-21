@@ -53,6 +53,11 @@ type Target struct {
 	Triple  string // clang target triple
 	March   string // -march value ("" = whatever the compiler defaults to)
 	Machine string // zig -mcpu value ("" = default)
+	// RCCArch selects rcc's code generator: "rv32", "thumb1" or "thumb2".
+	// Empty keeps the compiler's default (Thumb-2 on ARM, RV32 on riscv).
+	// Per image, not per chip: an M33 can run Thumb-1 too, and several SoCs
+	// share a core.
+	RCCArch string
 
 	// How the filesystem reaches the kernel:
 	//   disk      PC: written into the boot disk after the kernel
@@ -397,25 +402,24 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		if b.Target.Machine != "" {
 			archFlags = append(archFlags, "-mcpu="+b.Target.Machine)
 		}
+		// rcc's code generator is chosen here, not by the chip: an M33 can
+		// run Thumb-1, and several SoCs share a core.  The image says which
+		// one it wants ([target] rcc_arch), and the loader validation in
+		// targets.go rejects a choice the core cannot execute.
+		if b.Target.RCCArch != "" {
+			archFlags = append(archFlags, "-DRCC_ARCH_"+strings.ToUpper(b.Target.RCCArch))
+		}
 		// RP2040 is a Cortex-M0+ (ARMv6-M): no MPU, no BASEPRI, no
 		// ldrex/strex, no CFSR/MMFAR/BFAR.  arch/arm isolates the M0+
 		// specific bits behind this macro so the M3 build is unaffected.
 		if chip == "rp2040" {
 			archFlags = append(archFlags, "-DTOS_ARM_M0P")
-			// rcc picks its code generator from a compile-time macro, and the
-			// generic __arm__ fallback is Thumb-2.  On an M0+ that produces
-			// images that fault on their first 32-bit instruction, so the
-			// board has to say which core it is.
-			archFlags = append(archFlags, "-DRCC_ARCH_THUMB1")
 			// M0+ has no LDREX/STREX.  The SMP build uses one of the
 			// SIO hardware spinlocks as the gate behind the software lock
 			// flag, exactly like the RP2350 port (see arch/arm/platform.c).
 			if b.Target.CPUs > 1 {
 				archFlags = append(archFlags, "-DTOS_ARM_SIO_SPIN")
 			}
-		}
-		if chip == "rp2350" {
-			archFlags = append(archFlags, "-DRCC_ARCH_THUMB2")
 		}
 		// Cortex-M33 has an MPU, but it is ARMv8-M PMSAv8 (PRBAR/PRLAR plus
 		// MAIR), not the ARMv7-M one: same region model on top, different
@@ -884,6 +888,7 @@ func (b *Builder) writeBuildConfig() error {
 		"check-guard " + fmt.Sprintf("%d bytes", guard),
 		"features    " + strings.Join(feats, ","),
 		"user-defines " + strings.Join(b.userDefines(), " "),
+		"rcc_arch    " + rccArchLabel(b.Target.RCCArch),
 		"config      " + cfg,
 		"note        runtime grain/stack/guard are in board/*/layout.c; the",
 		"            check-* lines are the build-time TOS_WINDOW validation",
