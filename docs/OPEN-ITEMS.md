@@ -426,19 +426,16 @@ native、`capture`），47 个语料中除 2 个故意编译失败的用例，�
 - 没有 `udiv/sdiv/mls/smull`：软件除法（32 次移位减法）和 16×16 分块乘法；
 - 窗口约 90 KiB（与 rv32 相同量级）。
 
-**RP2040 上板：HardFault，待定位（2026-11-21）。** 第一次上板（`7a25c54`）板上
-直接 HardFault；当天的"PASS"卡片已撤回（`2026-11-21-thumb1-rp2040-7a25c54.md`
-顶部有说明），#38 重新打开。本机复核：`thumb1-prep.py --arch thumb1` 生成的 44 个
-镜像代码段只含 ARMv6-M 编码（`scripts/rp2040/v6mcheck.py` 现在是 prep 的硬性检查），
-所以先排除"镜像其实是 Thumb-2"；下一步需要故障现场（pc/lr/寄存器）或可复现镜像。
+**RP2040 上板：已通过（2026-11-21 16:18，撤回解除）。** 当天 15:39 曾以"板上
+HardFault"撤回 `7a25c54` 的卡片；16:14 按原样重建得到**逐字节相同**的镜像
+（sha256 `39c9ae20…`），重刷后心跳 6/6、`thumb1-run.py --set all` 连续两轮
+`strict 37/37`、7 个观察项无 fault，撤回解除（卡片顶部有复现记录）。
 
-**候选根因（2026-11-21 下午，HISTORY §97）**：`tos build` 过去只传 `-mcpu`，`rcc.c`
-对任何 `__arm__` 都落 `thumb2.inc`，所以**含 rcc 的 RP2040 镜像里装着一个 Thumb-2
-代码生成器**，它产出的每个镜像都在第一条 32 位编码上 fault——实测正是
-`0x2001000a`（程序窗口第一条指令）。这已由远端 `7c51dae`/`451fa4d` 修掉
-（`[target] rcc_arch` + 配置期拒绝 thumb2 配 ARMv6-M）。但 #38 的 44 个镜像是宿主
-`--arch thumb1` 预生成、`v6mcheck.py` 已确认只含 v6-M 编码，**未必是同一件事**：
-定案要把 44 个 `t1-*` 重刷一次，看它是否仍 fault，再决定 #38 是关闭还是继续查。
+撤回时看到的 fault 另有来源：当时板上是 #39 的 rir 测试镜像。`tos build` 那时只传
+`-mcpu`，`rcc.c` 对任何 `__arm__` 都落 `thumb2.inc`，M0+ 镜像里装着一个 Thumb-2
+代码生成器，它产出的程序在 `0x2001000a`（窗口首条指令）就 fault——即 HISTORY §97，
+已由远端 `7c51dae`/`451fa4d` 修掉（`[target] rcc_arch`，配置期拒绝 thumb2 配
+ARMv6-M）。44 个镜像本身经 `v6mcheck.py` 复核为纯 v6-M（`OK (44 image(s))`）。
 
 镜像大小不再需要改 `ramdisk_sectors`：MKFS 装不下时构建会把 ramdisk 翻倍重试，
 直到板子的分区上限（仅 `fs_backing = flash`；disk/embedded 保持固定，因为镜像要
