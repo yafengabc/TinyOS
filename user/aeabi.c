@@ -90,6 +90,37 @@ __asm__(
     "    pop     {r4, r5, pc}\n"
     "    .size   __aeabi_idivmod, . - __aeabi_idivmod\n");
 
+/* Cortex-M0+ has no UMULL either: clang lowers every 64-bit multiply to a
+ * call to __aeabi_lmul, and the compiler side (csc's FNV-1a identifier
+ * hash) hits it as soon as the toolchain is built for ARMv6-M.  Splitting
+ * the operands into 16-bit halves keeps the body on plain 32-bit MULS -
+ * writing `(uint64_t)a * b` here would just call this function again. */
+static uint64_t tos_mul32x32(uint32_t a, uint32_t b)
+{
+    uint32_t al = a & 0xffffu, ah = a >> 16;
+    uint32_t bl = b & 0xffffu, bh = b >> 16;
+    uint32_t ll = al * bl;
+    uint32_t lh = al * bh;
+    uint32_t hl = ah * bl;
+    uint32_t hh = ah * bh;
+    uint32_t mid = (ll >> 16) + (lh & 0xffffu) + (hl & 0xffffu);
+    uint64_t hi = (uint64_t)hh + (lh >> 16) + (hl >> 16) + (mid >> 16);
+    uint32_t lo = (mid << 16) | (ll & 0xffffu);
+
+    return (hi << 32) | lo;
+}
+
+/* long long * long long -> low 64 bits; signedness is irrelevant for the
+ * low half, so one entry point serves both __aeabi_lmul spellings. */
+uint64_t __aeabi_lmul(uint64_t a, uint64_t b)
+{
+    uint64_t r = tos_mul32x32((uint32_t)a, (uint32_t)b);
+
+    r += tos_mul32x32((uint32_t)(a >> 32), (uint32_t)b) << 32;
+    r += tos_mul32x32((uint32_t)a, (uint32_t)(b >> 32)) << 32;
+    return r;
+}
+
 /* Cortex-M0+ has no CLZ, and clang lowers the normalisation loops in the
  * soft-float and fixed-point libraries to a call.  Binary search, five
  * steps, no table. */
