@@ -117,14 +117,19 @@ def main():
     ap.add_argument("-p", "--port", help="serial port, e.g. COM19")
     ap.add_argument("--dtr", action="store_true", help="assert DTR (USB CDC)")
     ap.add_argument("--replay", help="replay a captured transcript instead")
-    ap.add_argument("--set", choices=("core", "extra"), default="core")
+    ap.add_argument("--set", choices=("all", "core", "extra"), default="all")
     ap.add_argument("--timeout", type=float, default=20.0)
     args = ap.parse_args()
     if not args.port and not args.replay:
         ap.error("need --port or --replay")
 
-    strict = CORE_STRICT if args.set == "core" else EXTRA_STRICT
-    eyeball = CORE_EYEBALL if args.set == "core" else EXTRA_EYEBALL
+    if args.set == "core":
+        strict, eyeball = CORE_STRICT, CORE_EYEBALL
+    elif args.set == "extra":
+        strict, eyeball = EXTRA_STRICT, EXTRA_EYEBALL
+    else:
+        strict = CORE_STRICT + EXTRA_STRICT
+        eyeball = CORE_EYEBALL + EXTRA_EYEBALL
     missing = [n for n in strict if expected_lines(n) is None]
     if missing:
         print("missing expected output for:", " ".join(missing))

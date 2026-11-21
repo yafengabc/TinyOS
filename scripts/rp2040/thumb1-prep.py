@@ -70,8 +70,12 @@ def main():
                     help="reuse existing build/thumb1 binaries")
     ap.add_argument("--skip-tos", action="store_true",
                     help="reuse existing build/thumb1 images")
-    ap.add_argument("--set", choices=("core", "extra"), default="core",
-                    help="which half of the test set to stage (600 KiB limit)")
+    ap.add_argument("--set", choices=("all", "core", "extra"), default="all",
+                    help="which programs to stage (all fits in one flash now)")
+    ap.add_argument("--arch", choices=("thumb1", "thumb2"), default="thumb1",
+                    help="target core: RP2040 ARMv6-M or RP2350 ARMv7-M")
+    ap.add_argument("--config", default=None,
+                    help="TinyOS config (default: rpi-pico or rpi-pico2-quiet)")
     args = ap.parse_args()
 
     src = os.path.abspath(args.script)
@@ -86,19 +90,26 @@ def main():
 
     csc = os.path.join(BUILD, "csc" + exe)
     rvm = os.path.join(BUILD, "rvm" + exe)
-    rcc = os.path.join(BUILD, "rcc-thumb1" + exe)
+    rcc = os.path.join(BUILD, "rcc-" + args.arch + exe)
 
     if not args.skip_build:
+        arch_def = ("-DRCC_ARCH_THUMB1" if args.arch == "thumb1"
+                    else "-DRCC_ARCH_THUMB2")
+        rcc_name = "rcc-" + args.arch
         for name, extra in (("csc", []), ("rvm", []),
-                            ("rcc-thumb1", ["-DRCC_ARCH_THUMB1"])):
+                            (rcc_name, [arch_def])):
             sub = "rcc.c" if name.startswith("rcc") else name + ".c"
             path = os.path.join(src, "src", "rcc", sub) if name.startswith("rcc") \
                 else os.path.join(src, "src", sub)
             run([args.cc, "-std=gnu11", "-O2", "-I", os.path.join(src, "include"),
                  *extra, path, "-o", os.path.join(BUILD, name + exe)])
 
-    names = (CORE_STRICT + CORE_EYEBALL if args.set == "core"
-             else EXTRA_STRICT + EXTRA_EYEBALL)
+    if args.set == "core":
+        names = CORE_STRICT + CORE_EYEBALL
+    elif args.set == "extra":
+        names = EXTRA_STRICT + EXTRA_EYEBALL
+    else:
+        names = CORE_STRICT + EXTRA_STRICT + CORE_EYEBALL + EXTRA_EYEBALL
     made, skipped = [], []
     for n in names:
         source = os.path.join(src, "tests", n + ".c")
@@ -128,13 +139,13 @@ def main():
     for n, why in skipped:
         print(f"  skipped {n}: {why}")
 
-    run(["go", "run", "./cmd/tos", "build", "-config", "configs/rpi-pico.conf"],
-        cwd=TOS)
-    uf2 = os.path.join(TOS, "build", "tinyos-rpi-pico.uf2")
+    config = args.config or ("configs/rpi-pico.conf" if args.arch == "thumb1"
+                             else "configs/rpi-pico2-quiet.conf")
+    run(["go", "run", "./cmd/tos", "build", "-config", config], cwd=TOS)
+    board = "rpi-pico" if args.arch == "thumb1" else "rpi-pico2"
+    uf2 = os.path.join(TOS, "build", "tinyos-%s.uf2" % board)
     print("\nimage:", uf2 if os.path.exists(uf2) else "(check build/ output)")
-    print("set:", args.set,
-          " strict:", len(CORE_STRICT if args.set == "core" else EXTRA_STRICT),
-          " eyeball:", len(CORE_EYEBALL if args.set == "core" else EXTRA_EYEBALL))
+    print("arch:", args.arch, " set:", args.set, " programs:", len(made))
     print("next: flash build/tinyos-rpi-pico.uf2, then")
     print("      python scripts/rp2040/thumb1-run.py --port COMx --set %s"
           % args.set)
