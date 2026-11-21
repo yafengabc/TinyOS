@@ -155,6 +155,15 @@ typedef void (*rp_rom_program_t)(uint32_t addr, const uint8_t *data, size_t coun
 #define QMI_DIRECT_CSR_ASSERT_CS0N  (1u << 2)
 #define QMI_DIRECT_CSR_TXFULL       (1u << 10)
 #define QMI_DIRECT_CSR_RXEMPTY      (1u << 16)
+/* CLKDIV[29:22]: SCK = clk_sys / (CLKDIV + 1).  It lives in this same
+ * register and its reset value is 6, which is what the ROM leaves behind.
+ * Writing the register without it sets CLKDIV=0 - SCK at clk_sys, 150 MHz on
+ * this board - and the flash cannot answer at that rate, so RXEMPTY never
+ * clears and both bounded waits below run their full 1e6 iterations.  That
+ * stall (about 2 s, inside the window where XIP is off) is what made the
+ * single-core ARM image reset forever in the watchdog (#42). */
+#define QMI_DIRECT_CSR_CLKDIV_BITS  (0x3fu << 22)
+#define QMI_DIRECT_CSR_CLKDIV_DEF   (6u << 22)
 
 /* Data-table lookup ('F','D' = 0x4446, the bootram FLASH_DEVINFO16 copy).
  * The ROM's data table is addressed with the same (code, flags) lookup
@@ -200,27 +209,10 @@ static void *rp_rom_func(uint32_t code)
     return (void *)((uintptr_t)lookup(code, RT_FLAG_FUNC_ARM_SEC) | 1u);
 }
 
-/* Bound for the two QMI FIFO waits below: about 20 ms, folded from the clock
- * the core is actually running at rather than written as a literal.
- *
- * Both halves of that matter.  C6/A-6 in docs/ARCHITECTURE-NEXT.md says early
- * (pre-tick) waits keep an iteration cap but must scale it, and names a bare
- * 1e6 as the thing not to do - this is that case.  And the scaling has to be
- * done from a RAM global: this function runs inside the XIP-off window, so
- * plat_cpu_hz() is a *flash* call and using it here would hang exactly where
- * the bound is supposed to help.  g_clk_hz is .data, copied to SRAM by _start,
- * so reading it is safe. */
 /* Tentative definition; the one with an initialiser is with the clock code
  * further down.  Declared here because the QMI helper must not reach into
  * flash for a frequency while XIP is off. */
 static uint32_t g_clk_hz;
-
-static RAMFUNC uint32_t qmi_spin_limit(void)
-{
-    uint32_t hz = g_clk_hz ? g_clk_hz : 12000000u;
-
-    return (hz / 3000u) * 20u;      /* ~3 cycles per poll, ~20 ms of them */
-}
 
 
 /* Issue JEDEC RDID (0x9F) through QMI direct mode and return the 3-byte
@@ -245,15 +237,36 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
     uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
     uint32_t id, spins = 0;
-    const uint32_t bound = qmi_spin_limit();
+    /* Fail fast.  This runs inside the XIP-off window, before the tick exists
+     * to feed the watchdog, so a part that does not answer must not be waited
+     * on for long.  C6/A-6 in docs/ARCHITECTURE-NEXT.md says a pre-tick wait
+     * keeps an iteration cap and scales it with the clock; that rule assumed
+     * an allowance the watchdog could afford.  Here it cannot: an RP2350 QMI
+     * status read costs on the order of 100 cycles, so the old clock-scaled
+     * bound (~1e6) turned one unanswered byte into ~0.4 s and the whole probe
+     * into seconds - past the 2.1 s watchdog, which reset the board with no
+     * output at all (#42, Pico 2 single-core ARM).  A part that answers at
+     * all answers in microseconds, so the cap is sized for that instead of
+     * for milliseconds it is not allowed to spend. */
+    const uint32_t bound = 20000u;
+    uint32_t csr0, clkdiv;
 
     flash_init_boot2_copyout();
     g_rom_connect();
     g_rom_exit_xip();
 
+    /* Keep CLKDIV: it is a field of this register, and the reset value the
+     * ROM leaves is 6.  Writing EN|ASSERT alone divides by one, i.e. clocks
+     * the flash at clk_sys, which no part on these boards answers at - see
+     * the QMI_DIRECT_CSR_CLKDIV_BITS comment. */
+    csr0 = mmio_read32(QMI_DIRECT_CSR);
+    clkdiv = csr0 & QMI_DIRECT_CSR_CLKDIV_BITS;
+    if (!clkdiv)
+        clkdiv = QMI_DIRECT_CSR_CLKDIV_DEF;
+
     /* Assert CS0n and enable direct mode. */
     mmio_write32(QMI_DIRECT_CSR,
-                 QMI_DIRECT_CSR_EN | QMI_DIRECT_CSR_ASSERT_CS0N);
+                 clkdiv | QMI_DIRECT_CSR_EN | QMI_DIRECT_CSR_ASSERT_CS0N);
 
     /* Byte-by-byte FIFO exchange: each DIRECT_TX write clocks a byte in,
      * each DIRECT_RX read consumes the byte clocked by the previous write.
@@ -278,8 +291,9 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
         rx[i] = (uint8_t)mmio_read32(QMI_DIRECT_RX);
     }
 
-    /* Deassert CS0n and leave direct mode. */
-    mmio_write32(QMI_DIRECT_CSR, 0u);
+    /* Back to command-XIP mode: leave direct mode and put CLKDIV back the way
+     * the ROM had it (writing 0 here would clear the divider as well). */
+    mmio_write32(QMI_DIRECT_CSR, csr0);
 
     /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID.
      * A timed-out exchange leaves id at 0 = "unknown". */
@@ -1013,6 +1027,34 @@ static RAMFUNC void wdt_enable(void)
     wdt_feed();
 }
 
+/* ---- boot-progress marks ------------------------------------------------ */
+
+/* kmain() calls plat_boot_stage() between its stages.  Only the RV32 port had
+ * an implementation, so on the ARM half a boot that stopped between [E] usb
+ * and the banner left no trace at all - the [PREV] line only reports the
+ * watchdog/tick state, and a stall in ramdisk_init() or screen_init() sets
+ * none of it (#42).
+ *
+ * One SRAM store per stage and nothing else: the RV32 ring also samples UART
+ * and clock registers and its own comment records that those reads perturb
+ * the boot they measure.  A stage number cannot.  .noinit survives a reset,
+ * so the next boot reports where the previous one stopped. */
+#define BOOT_MARK_MAGIC 0x544f5342u     /* "TOSB" */
+TOS_NOINIT static uint32_t g_boot_mark_magic;
+TOS_NOINIT static uint32_t g_boot_mark_stage;
+
+void plat_boot_stage(uint32_t n)
+{
+    g_boot_mark_magic = BOOT_MARK_MAGIC;
+    g_boot_mark_stage = n;
+    /* Each stage is proof of progress, so it also feeds the watchdog: the
+     * dog is armed early (plat_board_early) but only the tick feeds it, and
+     * the tick starts after plat_timer_init - a slow stage (the littlefs
+     * mount on a 1 MiB image, say) would otherwise be reset with no output
+     * at all.  One register write, no reads. */
+    wdt_feed();
+}
+
 #if TOS_DIAG
 /* Straight to the PL011, bypassing the console ring. */
 static void diag_char(char c)
@@ -1120,6 +1162,13 @@ static void diag_prev_report(void)
 
     if (have) {
         diag_str("\r\n[PREV]");
+        /* Where the previous boot stopped, in kmain() stage numbers: 1 timer,
+         * 2 heap, 3 ramdisk, 4 devfs, 5 hwdev/screen, 6 process, 7 board
+         * check, 8 banner, 9 cpu_init, 10 irq enable, 11 shell about to
+         * start.  A number below 11 is the interesting case; 0 means the
+         * mark itself is gone (fresh flash, or SRAM lost). */
+        diag_kx(" ph=", g_boot_mark_magic == BOOT_MARK_MAGIC
+                        ? g_boot_mark_stage : 0u);
         diag_kv(" m0s=", g_mask_site[0]);
         diag_kx(" m0lr=", g_mask_lr[0]);
         diag_kv(" m0n=", g_mask_seq[0]);
@@ -2114,6 +2163,11 @@ void plat_board_init(void)
      * Kept in g_flash_detected so /proc/flash can show the true capacity
      * instead of the configured 4 MiB (ATK) / 8 MiB (Pico 2) upper bound. */
     g_flash_detected = rp2350_flash_detect();
+#if TOS_BOOT_TRACE
+    early_puts("[F] flash id/detected=");
+    early_put_hex(g_flash_detected);
+    early_puts("\r\n");
+#endif
 
     /* The ARM USB controller receives IRQ 14, but TinyUSB's task loop still
      * belongs in thread context.  Install it here, before the scheduler
