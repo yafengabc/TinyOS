@@ -17,13 +17,14 @@ enum {
     R_BOUNDS, R_PRINTFIXN, R_MOD,
     R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
     R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR,
-    R_NE, R_LE, R_GE
+    R_NE, R_LE, R_GE, R_NATIVEC
 };
 
 enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
-    NAT_SLEEP, NAT_UPTIME, NAT_RUN
+    NAT_SLEEP, NAT_UPTIME, NAT_RUN,
+    NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK
 };
 
 typedef struct { int op, a, b, c, d; } RIR;
@@ -494,6 +495,37 @@ int main(int argc, char **argv)
                 }
                 r[q.d] = res;
                 (void)a1;
+                break;
+            }
+            case R_NATIVEC: {
+                int res = -1;
+#if defined(__riscv) || defined(__arm__)
+                int a0 = argbuf[0], a1 = argbuf[1], a2 = argbuf[2];
+                switch (q.a) {
+                case NAT_OPEN:
+                    if (a0 >= 0 && a0 < arena_size)
+                        res = open((const char *)(arena + a0));
+                    break;
+                case NAT_CREATE:
+                    if (a0 >= 0 && a0 < arena_size)
+                        res = create((const char *)(arena + a0));
+                    break;
+                case NAT_READ:
+                    if (a0 >= 0 && a1 >= 0 && a2 >= 0 && a1 + a2 <= arena_size)
+                        res = read(a0, arena + a1, a2);
+                    break;
+                case NAT_WRITE:
+                    if (a0 >= 0 && a1 >= 0 && a2 >= 0 && a1 + a2 <= arena_size)
+                        res = write(a0, arena + a1, a2);
+                    break;
+                case NAT_CLOSE: res = close(a0); break;
+                case NAT_UNLINK:
+                    if (a0 >= 0 && a0 < arena_size)
+                        res = unlink((const char *)(arena + a0));
+                    break;
+                }
+#endif
+                if (q.b >= 0) r[q.b] = res;
                 break;
             }
             default: puts("rvm: bad op\n"); return 1;

@@ -324,6 +324,67 @@ static void emit_native(int op, int id, int a0, int a1, int a2, int dst)
     }
 }
 
+
+/* Native calls that take three arguments plus a result read them from the
+ * shared argument buffer (ARG), like normal calls do. */
+static void e_arg_val(int rd, int idx)
+{
+    e_la(X_T3, data_argbuf);
+    e_lw(rd, idx * 4, X_T3);
+}
+
+static void e_arg_ptr(int rd, int idx)
+{
+    e_la(X_T3, data_argbuf);
+    e_lw(rd, idx * 4, X_T3);
+    e_la(X_T4, data_arena);
+    e_add(rd, X_T4, rd);
+}
+
+static void emit_native_argbuf(int id, int dst)
+{
+    switch (id) {
+    case 12: /* open(path) */
+        e_arg_ptr(X_A0, 0);
+        e_li(X_A7, 4);
+        e_ecall();
+        break;
+    case 13: /* create(path) */
+        e_arg_ptr(X_A0, 0);
+        e_li(X_A7, 11);
+        e_ecall();
+        break;
+    case 14: /* read(fd, buf, len) */
+        e_arg_val(X_A0, 0);
+        e_arg_ptr(X_A1, 1);
+        e_arg_val(X_A2, 2);
+        e_li(X_A7, 2);
+        e_ecall();
+        break;
+    case 15: /* write(fd, buf, len) */
+        e_arg_val(X_A0, 0);
+        e_arg_ptr(X_A1, 1);
+        e_arg_val(X_A2, 2);
+        e_li(X_A7, 1);
+        e_ecall();
+        break;
+    case 16: /* close(fd) */
+        e_arg_val(X_A0, 0);
+        e_li(X_A7, 5);
+        e_ecall();
+        break;
+    case 17: /* unlink(path) */
+        e_arg_ptr(X_A0, 0);
+        e_li(X_A7, 31);
+        e_ecall();
+        break;
+    default:
+        die("bad argbuf native");
+    }
+    if (dst >= 0)
+        e_mv(rreg(dst), X_A0);
+}
+
 static void emit_insn(int fid, int pc)
 {
     int op = ir_op(pc);
@@ -608,6 +669,9 @@ static void emit_insn(int fid, int pc)
         e_mv(X_A0, rreg(a));
         e_li(X_A1, b);
         e_call(L_fixn);
+        break;
+    case R_NATIVEC:
+        emit_native_argbuf(a, b);
         break;
     case R_NATIVE:
     case R_NATIVER:

@@ -40,7 +40,7 @@ enum {
     R_BOUNDS, R_PRINTFIXN, R_MOD,
     R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
     R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR,
-    R_NE, R_LE, R_GE
+    R_NE, R_LE, R_GE, R_NATIVEC
 };
 
 static uint8_t rir_buf[RIR_MAX];

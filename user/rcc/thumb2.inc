@@ -438,6 +438,44 @@ static void emit_setcc(int cond, int tmp, int ra, int rb)
     bind_label(done);
 }
 
+
+static void emit_native_argbuf(int id, int dst)
+{
+    switch (id) {
+    case 12: /* open(path) */
+    case 13: /* create(path) */
+    case 17: /* unlink(path) */
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);
+        e_la(0, data_arena);
+        e_add_reg(1, 0, 1);
+        e_li(0, id == 12 ? 4 : id == 13 ? 11 : 31);
+        e_svc0();
+        break;
+    case 14: /* read(fd, buf, len) */
+    case 15: /* write(fd, buf, len) */
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);        /* fd  */
+        e_ldr_imm(2, 0, 4);        /* buf */
+        e_ldr_imm(3, 0, 8);        /* len */
+        e_la(0, data_arena);
+        e_add_reg(2, 0, 2);
+        e_li(0, id == 14 ? 2 : 1);
+        e_svc0();
+        break;
+    case 16: /* close(fd) */
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);
+        e_li(0, 5);
+        e_svc0();
+        break;
+    default:
+        die("bad argbuf native");
+    }
+    if (dst >= 0)
+        st_vreg(dst, 0);
+}
+
 static void emit_insn(int fid, int pc)
 {
     int op = ir_op(pc);
@@ -713,6 +751,9 @@ static void emit_insn(int fid, int pc)
         ld_vreg(0, a);
         e_li(1, (uint32_t)b);
         e_bl(L_fixn);
+        break;
+    case R_NATIVEC:
+        emit_native_argbuf(a, b);
         break;
     case R_NATIVE:
     case R_NATIVER:

@@ -105,7 +105,7 @@ enum {
     R_BOUNDS, R_PRINTFIXN, R_MOD,
     R_LOADB, R_STOREB, R_STRCPY, R_STRCAT,
     R_STRLEN, R_STRCMP, R_ATOI, R_PRINTSTR,
-    R_NE, R_LE, R_GE
+    R_NE, R_LE, R_GE, R_NATIVEC
 };
 
 typedef struct {
@@ -1536,7 +1536,8 @@ static int func_lookup_hash(uint64_t h)
 enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
-    NAT_SLEEP, NAT_UPTIME, NAT_RUN
+    NAT_SLEEP, NAT_UPTIME, NAT_RUN,
+    NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK
 };
 
 static int native_lookup(const char *name, int *nargs, int *hasret)
@@ -1554,6 +1555,12 @@ static int native_lookup(const char *name, int *nargs, int *hasret)
         { "sleep",      NAT_SLEEP,      1, 0 },
         { "uptime",     NAT_UPTIME,     0, 1 },
         { "run",        NAT_RUN,        1, 1 },
+        { "open",       NAT_OPEN,       1, 1 },
+        { "create",     NAT_CREATE,     1, 1 },
+        { "read",       NAT_READ,       3, 1 },
+        { "write",      NAT_WRITE,      3, 1 },
+        { "close",      NAT_CLOSE,      1, 1 },
+        { "unlink",     NAT_UNLINK,     1, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (!strcmp(name, tab[i].name)) {
@@ -1579,6 +1586,12 @@ static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
         { "sleep",      NAT_SLEEP,      1, 0 },
         { "uptime",     NAT_UPTIME,     0, 1 },
         { "run",        NAT_RUN,        1, 1 },
+        { "open",       NAT_OPEN,       1, 1 },
+        { "create",     NAT_CREATE,     1, 1 },
+        { "read",       NAT_READ,       3, 1 },
+        { "write",      NAT_WRITE,      3, 1 },
+        { "close",      NAT_CLOSE,      1, 1 },
+        { "unlink",     NAT_UNLINK,     1, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (str_hash(tab[i].name) == h) {
@@ -2244,8 +2257,16 @@ static int gen_expr_into(Node *n, int dst)
         if (nid >= 0) {
             int a0 = -1, a1 = -1, a2 = -1;
             /* Bit i: argument i is a string (an arena offset), not an int.
-             * `run(path)` is the first such native; file paths will follow. */
-            int strargs = (nid == NAT_RUN) ? 1 : 0;
+             * Paths are argument 0; read/write take the buffer as argument 1. */
+            int strargs = 0;
+            switch (nid) {
+            case NAT_RUN: case NAT_OPEN: case NAT_CREATE: case NAT_UNLINK:
+                strargs = 1;
+                break;
+            case NAT_READ: case NAT_WRITE:
+                strargs = 2;
+                break;
+            }
             for (Node *p = n->args; p; p = p->next) {
                 int v = gen_value(p);
                 if (strargs & (1 << argc)) {
@@ -2260,8 +2281,18 @@ static int gen_expr_into(Node *n, int dst)
                 argc++;
             }
             if (argc != nargs) die_node(n, "native argument count");
-            if (hasret) emit(R_NATIVER, nid, a0, a1, dst);
-            else emit(R_NATIVE, nid, a0, a1, a2);
+            if (nid >= NAT_OPEN) {
+                /* Three arguments plus a result do not fit NATIVER; stage them
+                 * in the shared argument buffer and use the NATIVEC form. */
+                if (nargs > 0) emit(R_ARG, 0, a0, 0, 0);
+                if (nargs > 1) emit(R_ARG, 1, a1, 0, 0);
+                if (nargs > 2) emit(R_ARG, 2, a2, 0, 0);
+                emit(R_NATIVEC, nid, hasret ? dst : -1, 0, 0);
+            } else if (hasret) {
+                emit(R_NATIVER, nid, a0, a1, dst);
+            } else {
+                emit(R_NATIVE, nid, a0, a1, a2);
+            }
             last_type = 0;
             return dst;
         }
@@ -2858,6 +2889,7 @@ static int rir_uses(const RIR *q, int *f)
     case R_STOREA_I: f[0] = 1; return 1;
     case R_NATIVE: f[0] = 1; f[1] = 2; f[2] = 3; return 3;
     case R_NATIVER: f[0] = 1; f[1] = 2; return 2;
+    case R_NATIVEC: return 0;   /* arguments come from ARG */
     case R_LOADD: f[0] = 0; return 1;
     case R_STORED: f[0] = 0; f[1] = 2; return 2;
     case R_SHLI: case R_SHRI: f[0] = 0; return 1;
@@ -2890,6 +2922,8 @@ static int rir_dest_field(const RIR *q)
         return 1;   /* return value goes to b */
     case R_NATIVER:
         return 3;   /* d */
+    case R_NATIVEC:
+        return 1;   /* b: dst, or -1 */
     case R_LOADD:
         return 3;   /* d */
     case R_SHLI: case R_SHRI: case R_FMUL: case R_FDIV:
