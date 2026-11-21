@@ -170,6 +170,126 @@ mpy   fib 1146 loop 1570 array 2411 div 876
 ## 结果：RP2350 Pico 2（2026-11-21 实测）
 
 板子：Raspberry Pi Pico 2（RP2350A，8 MiB，150 MHz），USB CDC COM27。
+同一份 `bench/bench.c`，四个内核在每次运行里的校验和都是
+`46368 / 999850000 / 225792000 / 599994`（脚本逐行检查，不一致的行不能比）。
+
+- TinyOS 侧 `csc`/`rvm`/`rcc` 来自 `configs/rpi-pico2-rir.conf` 与
+  `configs/rpi-pico2-rv32-rir.conf`（工具在板上运行）；
+- `clang` 是 `bench/clang/benchclang.c` 当普通用户程序编进镜像；
+- `goc32` 是 `goc32/bin/goc32.exe -target rp2350|rv32 bench/bench.c` 生成的 LZ4TOS；
+- MicroPython 是 `.tmp/micropython-pico2.uf2`（`mpremote run bench.py` /
+  `bench_native.py`），**只在 M33 侧有固件**；
+- `pvm` 需要另一套 `csa` 镜像，本次两边都 `NOT RUN`。
+
+### Cortex-M33 SMP（`rpi-pico2-smp`）
+
+| 内核 | micropython | @native | pvm | rvm | goc32 | rcc | clang |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fib | 1096 | 635 | — | 289 | 24 | 70 | **13** |
+| loop | 1220 | 530 | — | 407 | 30 | 44 | **10** |
+| array | 2015 | 1149 | — | 799 | 62 | 120 | **9** |
+| div | 696 | 368 | — | 340 | 1338 | 47 | **36** |
+
+### Hazard3 RV32 SMP（`rpi-pico2-rv32-smp`）
+
+MicroPython 没有 RV32 固件，这两列不适用；`#44`（栈提示与窗口 grain 冲突）
+修好后 `rvm`/`rcc`/`goc32`/`clang` 全部跑通。
+
+| 内核 | micropython | @native | pvm | rvm | goc32 | rcc | clang |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fib | n/a | n/a | — | 281 | 21 | 61 | **14** |
+| loop | n/a | n/a | — | 397 | 27 | 27 | **15** |
+| array | n/a | n/a | — | 803 | 42 | 60 | **14** |
+| div | n/a | n/a | — | 352 | 40 | 42 | **20** |
+
+读法：
+
+- **解释器组**：两侧 `rvm` 基本持平（289/281、407/397、799/803、340/352），
+  比 MicroPython 字节码快 2–3×，`@native` 也快不过它（除 div 368 vs 352 接近）；
+- **原生组 M33**：`clang -Oz` 最快；`rcc` 次之；
+  `goc32` 的 `div` 是 **1338 ms** 的离群值——goc32 的 ARM 后端把除法展开成软件
+  例程，而 RV32 后端有硬件 `div`（该列 40 ms），不要把这个数当编译器整体慢；
+- **同板两核心**：`rcc` 的 RV32 后端更快（fib 70→61、loop 44→27、array 120→60、
+  div 47→42），`clang` 两侧接近（13/14、10/15、9/14、36/20）——
+  RV32 的 `div` 明显快于 Thumb-2 的 36 ms。
+
+原始 `BENCH` 行（每列一次运行）：
+
+```
+M33  mpy   fib 1096 loop 1220 array 2015 div 696
+     @nat  fib  635 loop  530 array 1149 div 368
+     rvm   fib  289 loop  407 array  799 div 340
+     goc32 fib   24 loop   30 array   62 div 1338
+     rcc   fib   70 loop   44 array  120 div  47
+     clang fib   13 loop   10 array    9 div  36
+RV32 rvm   fib  281 loop  397 array  803 div 352
+     goc32 fib   21 loop   27 array   42 div  40
+     rcc   fib   61 loop   27 array   60 div  42
+     clang fib   14 loop   15 array   14 div  20
+```
+
+## 附加两列：clang 与 goc32
+
+同一个 `bench/bench.c` 还可以用两个**宿主编译器**生成原生镜像，和 `rcc` 对照：
+
+```sh
+# clang：把 bench/clang/benchclang.c 放进 user/ 让正常构建（clang -Oz）编译它
+mkdir -p user/benchclang
+cp bench/clang/benchclang.c user/benchclang/benchclang.c
+go run ./cmd/tos build -config configs/esp32c3-rir.conf
+python scripts/esp-c3/flash.py --full -p COM4
+# 板上：benchclang
+rm -rf user/benchclang          # 这个目录只为测量存在，不要提交
+
+# goc32：纯 Go 的 C 编译器，直接产出 LZ4TOS
+(cd goc32 && go build -o bin/goc32.exe .)
+goc32/bin/goc32.exe bench/bench.c        # -> bench/bench.tos
+cp bench/bench.tos files.local/bin/benchgoc
+go run ./cmd/tos build -config configs/esp32c3-rir.conf
+python scripts/esp-c3/flash.py --full -p COM4
+# 板上：benchgoc
+```
+
+`bench/clang/benchclang.c` 是 `bench/bench.c` 加上 `#include "lib.h"` 与
+`TOS_STACK(4*1024)`（普通 user 程序的形状），内核与输出格式完全相同。
+
+## 结果：ESP32-C3（2026-11-21 实测）
+
+板子：ESP32-C3 core（CH340K），RV32IMC，160 MHz，4 MiB flash，COM4。
+MicroPython：`ESP32_GENERIC_C3-20260824-v1.29.0.bin`。
+TinyOS：`configs/esp32c3-rir.conf`（csc/rvm/rcc）与 `configs/esp32c3.conf`（csa/pvm）。
+每次运行一遍，校验和全部一致（`46368 / 999850000 / 225792000 / 599994`）。
+
+| 内核 | micropython | @native | pvm | rvm | goc32 | rcc | clang |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fib | 1146 | 748 | 603 | 343 | 29 | 84 | **15** |
+| loop | 1570 | 631 | 1976 | 487 | **27** | **27** | 17 |
+| array | 2411 | 1314 | 3518 | 977 | 48 | 71 | **26** |
+| div | 876 | 469 | 1274 | 440 | 54 | 58 | **27** |
+
+读法：
+
+- **解释器组**：`rvm` 比 `pvm` 快 1.8–3.6×（fib 1.8×、loop 4.1×、array 3.6×、div 2.9×），
+  比 MicroPython 字节码快 1.9–3.3×，比 `@native` 快 1.1–1.6×；
+- **原生组**：`clang -Oz` 最快；`goc32` 与 `rcc` 互有胜负（loop 打平，fib/array/div
+  rcc 慢 2–3×）。`rcc` 的代码生成没有寄存器分配和指令调度，这个差距是预期的；
+- `@native` 相对字节码只快 1.2–2.5×：它仍是 emitter 产物，不是手写原生。
+
+原始 `BENCH` 行（C3，一次运行）：
+
+```
+rvm   fib 343  loop 487  array 977  div 440     (ms)
+rcc   fib  84  loop  27  array  71  div  58
+pvm   fib 603  loop 1976 array 3518 div 1274
+goc32 fib  29  loop  27  array  48  div  54
+clang fib  15  loop  17  array  26  div  27
+mpy   fib 1146 loop 1570 array 2411 div 876
+@nat  fib 748  loop 631  array 1314 div 469
+```
+
+## 结果：RP2350 Pico 2（2026-11-21 实测）
+
+板子：Raspberry Pi Pico 2（RP2350A，8 MiB，150 MHz），USB CDC COM27。
 镜像：`configs/rpi-pico2-rir.conf`（M33 SMP，`csc`/`rvm`/`rcc` 在板上运行）；
 `bench/bench.c` 经 `compare.py` stage 到 `files.local/bench.c` 后编进镜像。
 板上流程：`csc /bench.c /bench.rir` → `rvm /bench.rir` → `rcc /bench.rir /bin/benchc`
