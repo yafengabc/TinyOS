@@ -5471,3 +5471,33 @@ RP2040 板上跑 `csc -> rcc -> 执行` 时，`rcc` 生成的镜像在 `0x200100
 这也是"撤回要有可复现镜像"的正面例子：先重建比对 sha256，再决定是撤回还是查出
 另一份镜像——`v6mcheck.py` 拦住了"镜像其实是 Thumb-2"这条错路，才没把时间花在
 代码生成上。
+
+## 99. 2026-11-21 RP2040 板内 csc/rcc 链路验收，补上缺失的 elfwin.py
+
+`configs/rpi-pico-rir.conf` 能构建之后，在 RP2040 上跑通了三例：
+
+- `/src/arith.c -> /arith.rir -> /bin/nd-arith`：2424 text，输出 `-3 -2 17 9 20 14
+  2 -14 -2`；
+- `/src/strings2.c`：3020 text，输出含空行的 13 行，与 `rvm` 一致；
+- `/src/float3.c`：2556 text，Q16.16 到 `-0.6667` 都对。
+
+三份 `build/thumb1/expected/*.txt`（宿主 `rvm` 产生）逐行吻合。
+
+**窗口是这次的主要结论，也是配置取舍的依据**：#39 把 `elfwin.py` 列为证据，但两仓
+里都没有这个文件，本轮补了 `scripts/elfwin.py`——按 `exec()` 真正的口径
+（`max(span, raw_size) + stack + heap + guard`，再按 grain 向上取整）从 ELF 的
+`PT_NOTE`（name `TinyOS`, type 1/2）读数。实测：
+
+```
+csc 128 KiB   rcc 100 KiB   rvm 44 KiB   用户区 216 KiB
+```
+
+`csc` + `rcc` = 228 KiB > 216 KiB，两者无法同时驻留；`rcc` + `rvm` = 144 KiB 可以。
+所以三个工具只能作为文件放在 littlefs 里、由 shell 一次跑一个，这是 #39 三个候选
+方案里唯一成立的那个。
+
+顺带记两条板上边界（与 §12 一致，不是新问题）：板内 `csc` 编 `hugeir.c` 报
+`AST full at line 40`（256 节点上限），`rcc` 也受约 2000 IR 限制。
+
+`git push` 那次带 `-c http.proxy` 报 access rights（SSH 不吃该设置），裸 `git push`
+直接成功——写在这里免得下次再试一遍。

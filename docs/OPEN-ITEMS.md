@@ -389,6 +389,13 @@ RV32 原生链路 `csc -> rvm -> rcc -> ELF` 已在 QEMU rv32 和 C3 上跑通 4
    `bigir`（板上编译，1436 IR / 2062 标签）；RP2350 上同一批 RV32IM 镜像尚未上板。
    按 2026-11-19 的硬件策略，它属于关闭条件的一部分，等板子排期。
 
+6. **RP2040 板内链路已验收（2026-11-21）。** `csc -> rcc -> exec` 三例（整数/字符串/
+   浮点）在 M0+ 上跑通，输出与 `rvm` 逐行一致；窗口实测 `csc` 128 KiB、`rcc`
+   100 KiB、`rvm` 44 KiB，而用户区只有 216 KiB——`csc`+`rcc` 加起来 228 KiB 装不下，
+   所以三个工具只能作为文件分时运行，这就是 `configs/rpi-pico-rir.conf` 的取舍依据。
+   工具是 `scripts/elfwin.py`（#39 把它列为证据，但此前两仓都没有，本轮补上）。
+   卡片：`docs/acceptance/2026-11-21-rir-rp2040-f466efa.md`。
+
 ## 13. ARM Thumb-2：stage 2 完成，Thumb-1 与 RP2350 仍待做（2026-11-21）
 
 `rcc` 按架构选择后端（`rv32.inc` / `thumb2.inc`）。Thumb-2 已在 QEMU
