@@ -431,7 +431,22 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 
 - 早先“板上镜像失败、宿主镜像成功”是假象，两者字节一致，只是第一次成功；
 - `dup(1)`/`dup2(saved,1)` 的恢复顺序改成“等子进程结束后再恢复”没有解决；
+- 照 `msh` 的做法改成 spawn 后直接 `close(1)`（不恢复 console）也没有解决；
 - 校验和诊断（`rcc: ... sum=`）已移除，需要时可临时加回。
+
+**新线索**：先跑一次 `ls /bin | wc` 再跑带 capture 的程序，第一次 capture 也会
+返回 0；刚启动、shell 还没用过管道时第一次 capture 成功。也就是说 shell 的
+管道路径把某种 fd 状态留在了进程组里。内核侧事实：
+
+- `fds[MAX_FDS]` 是 `proc_t` 的成员，`PFD(p)` 取组长的表；
+- `proc_create` 用 `fd_clone()` 把父进程的描述符复制进子进程，不是共享；
+- 管道是 `kmalloc` + readers/writers 引用计数，没有固定槽位上限。
+
+所以下一步要在 capture 里把 `pipe`/`dup2`/`read` 的返回值分别暴露出来（例如
+返回 `-1000-rc` 之类的哨兵），确认是 `dup2` 失败导致子进程拿不到管道，还是
+`read` 看到 EOF；同时看 shell `close(1)` 之后 fd 1 是怎么“回到 console”的
+（`run_pipeline` 里的注释说“back to the console”，但 `user/` 里没有显式
+reopen，值得查 write 的内核默认路径）。
 
 下一步（需要看内核 fd/管道生命周期，不是工具链层）：
 
