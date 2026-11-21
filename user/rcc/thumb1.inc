@@ -111,11 +111,17 @@ static void e_add_reg(int rd, int rn, int rm)
         return;
     }
     if (rd == rm) {
-        /* rd = rn + rd: keep the old rd before it is overwritten */
+        /* rd = rn + rd: keep the old rd before it is overwritten.  The
+         * scratch is pushed first - the caller may be holding a live value
+         * there (the argbuf natives keep the syscall length in r3, and the
+         * first version of this path silently turned write(fd,buf,5) into
+         * write(fd,buf,<buf offset>)). */
         int t = pick_tmp(rd, rn);
+        e16((uint16_t)(0xB400 | (1 << t)));            /* push {t} */
         e_mov_w(t, rm);
         e_mov_w(rd, rn);
         e16((uint16_t)(0x4400 | ((rd & 8) << 4) | ((t & 0xF) << 3) | (rd & 7)));
+        e16((uint16_t)(0xBC00 | (1 << t)));            /* pop {t}  */
         return;
     }
     e_mov_w(rd, rn);
@@ -131,9 +137,11 @@ static void e_sub_reg(int rd, int rn, int rm)
     e_need_low("sub", rm);
     if (rd == rm && rd != rn) {
         int t = pick_tmp(rd, rn);
+        e16((uint16_t)(0xB400 | (1 << t)));                /* push {t}     */
         e16((uint16_t)(0x0000 | (rm << 3) | t));           /* movs t, rm   */
         e16((uint16_t)(0x0000 | (rn << 3) | rd));          /* movs rd, rn  */
         e16((uint16_t)(0x1A00 | (t << 6) | (rd << 3) | rd)); /* subs rd, t */
+        e16((uint16_t)(0xBC00 | (1 << t)));                /* pop {t}      */
         return;
     }
     if (rd != rn)
@@ -227,9 +235,11 @@ static void e_mul(int rd, int rn, int rm)
     e_need_low("mul", rm);
     if (rd == rm && rd != rn) {
         int t = pick_tmp(rd, rn);
+        e16((uint16_t)(0xB400 | (1 << t)));                /* push {t}    */
         e16((uint16_t)(0x0000 | (rm << 3) | t));           /* movs t, rm  */
         e16((uint16_t)(0x0000 | (rn << 3) | rd));          /* movs rd, rn */
         e16((uint16_t)(0x4340 | (t << 3) | rd));           /* muls rd, t  */
+        e16((uint16_t)(0xBC00 | (1 << t)));                /* pop {t}     */
         return;
     }
     if (rd != rn)
