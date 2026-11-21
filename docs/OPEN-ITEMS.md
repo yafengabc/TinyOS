@@ -375,10 +375,11 @@ RV32 原生链路 `csc -> rvm -> rcc -> ELF` 已在 QEMU rv32 和 C3 上跑通 4
    （8000+ IR）要把标签改稀疏、放宽 `PC_MAX`/`LABEL_MAX`；`label_off`/`label_seen`/
    `pc_label` 收窄到 u16/位图还能再省约 15 KiB。
 
-3. **`rvm` 只有 256 条 IR。** 超过它的程序（`bigcode` 535 IR、`many100` 898 IR、
-   `bigir` 1436 IR）在宿主无法用解释器验证，只能在 QEMU/真机跑原生镜像；期望值
-   来自宿主 C 编译。宿主测试把它们单列为 native-only，并断言 IR 真的超过 256，
-   防止以后悄悄挪回普通表。
+3. **`rvm` 不再有整程序 IR 上限。** 指令区改成按页读取（`PAGE_IR` 256 条，
+   一次 5120 B；宿主 8 页、板上 2 页），`ir[]` 不再整块驻留，`IRMAX` 只做头部
+   校验（65536 条）。`bigcode`（535 IR）、`many100`（898 IR）、`bigir`（1436 IR）
+   和 `hugeir`（2948 IR）因此从 native-only 转成普通用例：宿主同时校验解释器和
+   原生镜像。板上只有 2 页，跳转到 512 条以外的代码会换页，只是变慢，结果不变。
 
 4. **qemu-virt ramdisk 只有 512 KiB。** 40 个 `.tos` 约 200 KiB，整套一次装不下，
    冒烟要分批；`files.local/` 只用于本地暂存，不提交。

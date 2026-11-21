@@ -122,9 +122,9 @@ x86 暂不在默认列表；原因见 `OPEN-ITEMS.md` §5。
 
 ### 4.4 RV32 原生镜像（改 `rcc` / RIR2 / ELF 加载时必跑）
 
-宿主 `tools/test.py` 只证明 `csc -> rvm`；`rcc` 的 ELF 必须在目标内核的加载器里跑。
-`rvm` 只有 256 条 IR，超过它的程序（如 `tests/bigcode.c`，535 IR / 10 KiB text）
-只能在原生路径验证。流程分两个仓库：
+宿主 `tools/test.py` 既跑 `csc -> rvm`，也生成 `rcc` 的 `.tos`；ELF 必须在目标
+内核的加载器里跑。`rvm` 的指令区已改成按页读取，`bigcode`（535 IR / 10 KiB text）
+这类程序在宿主也能被解释器校验，不再有 native-only 豁免。流程分两个仓库：
 
 ```sh
 # 1. tinyos-script：生成 RIR2 和 build/<name>.tos（40 个程序用例）
@@ -152,8 +152,8 @@ go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 2
   256 条 IR。`many25`/`many32`/`bigcode`/`bigir` 现在都能在板上编译；
   90 条语句的 `bigbody`（约 450 节点）仍需宿主 `csc`。窗口 128 KiB。
   见 `OPEN-ITEMS.md` §12。
-- 板上 `rcc`：RIR2 ≤ 40 KiB（约 2000 IR）、4096 个标签、text ≤ 48 KiB；
-  C3/rv32 的窗口是 120 KiB。`tests/bigir.c`（1436 IR / 2062 标签）是这套
+- 板上 `rcc`：RIR2 ≤ 40 KiB（约 2000 IR，按 4 KiB 分块读）、4096 个标签、
+  text ≤ 48 KiB；C3/rv32 的窗口是 88 KiB。`tests/bigir.c`（1436 IR / 2062 标签）是这套
   上限的回归用例，`tests/hugeir.c`（2948 IR）只在宿主跑。
 - `bloop3` / `sieve3` / `deep 3` 在 TCG 下超过 10 s，`-commandwait-ms` 要给够。
 
@@ -175,8 +175,9 @@ go run ./cmd/tostest smoke -target arm \
 已验证 28 个用例，输出与 `rvm` 逐行一致：`fold mod flow flow2 switch
 switch2 arith cmp2 loops2 funcs spill deep many25 many32 bigswitch bigbody
 arrays2 copy nest sret native many20 bloop3 sieve3 fib24 struct3 ops
-strings2 str globals2 mixed float3 fmt sa3 floatfold`，以及 native-only 的
-`bigcode 12829 / bigir 1325 / many100 20009`。
+strings2 str globals2 mixed float3 fmt sa3 floatfold`，以及
+`bigcode 12829 / bigir 1325 / many100 20009`（这三个在 2026-11-21 之前是
+native-only，`rvm` 分页后进入普通对照）。
 
 ## 5. T3：真机
 

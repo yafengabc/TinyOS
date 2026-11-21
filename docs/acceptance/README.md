@@ -149,3 +149,4 @@
 | 2026-11-21 | 修 capture()：shell 管道后 fd 1 被复用 | `af87918` | QEMU mps2 + QEMU rv32 | T0 PASS；T2 PASS（管道前后各两次 capture 都成功）；根因：msh 关掉 fd 1 后 pipe() 拿到 1，dup2(w,1) 把读端关了；T1/T3/T4 `NOT RUN` | [capture fix](2026-11-21-capture-fix-arm-af87918.md) |
 | 2026-11-21 | readdir() + isdir() | `6924174` | QEMU mps2 + 18 目标 | T0 PASS；T1 18/18；T2 板上链路列出 / 并给出 1/0/-1；rv32/T3/T4 `NOT RUN` | [readdir](2026-11-21-readdir-arm-6924174.md) |
 | 2026-11-21 | rcc 按 4 KiB 块读取 RIR2 | `bb90935` | QEMU rv32 + QEMU mps2 + 18 目标 | T0 PASS（输出逐字节一致）；T1 18/18；T2 两个后端在板上编译 31.6 KB 的 RIR2 并运行（1351）；窗口 124 → 88 KiB，宿主编译慢约 2%；T3/T4 `NOT RUN` | [block read](2026-11-21-rcc-block-read-rv32-bb90935.md) |
+| 2026-11-21 | rvm 指令区改为按页读取（去掉 256 IR 上限） | `390b1e0` | QEMU rv32 + QEMU mps2 + 18 目标 | T0 PASS（40 用例，四个原 native-only 转正，旧版可跑用例输出一致）；T1 18/18；T2 板上跑 1574 IR 和 2948 IR 的镜像；窗口 36 → 40 KiB，最紧的 benchloop 慢 15–30%；T3/T4 `NOT RUN` | [rvm page](2026-11-21-rvm-page-390b1e0.md) |

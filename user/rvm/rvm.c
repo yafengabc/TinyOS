@@ -34,10 +34,31 @@ typedef struct { int op, a, b, c, d; } RIR;
 #define NFRAME  32
 #define NSPILL  16
 #define GMAX    512
-#define IRMAX   256
 #define SMAX    1024
 
-static RIR ir[IRMAX];
+/* The instruction array is paged in from the file, so a program is limited by
+ * the image, not by how many instructions fit in RAM.  A page is PAGE_IR fixed
+ * 20-byte records: a fault is one read of at most 5120 bytes and no record can
+ * straddle two pages.  Pages are immutable, so they survive across reps. */
+#define PAGE_IR 256
+#if defined(__riscv) || defined(__arm__)
+#define NSLOT   2
+#else
+#define NSLOT   8
+#endif
+#define IRMAX   (1 << 16)      /* header sanity cap, not a RAM budget */
+
+static RIR page[NSLOT][PAGE_IR];
+static int page_tag[NSLOT];
+static int rir_fd = -1;
+static int nir;
+
+/* The page mapped into `cur`, as a pc range [cur_lo, cur_hi).  The dispatch
+ * loop tests that range first: a sequential instruction is two subtractions
+ * and one compare, and only a jump that leaves the page maps a new one. */
+static RIR *cur;
+static int cur_lo;
+static int cur_hi;
 static int g[GMAX];
 static char strpool[SMAX];
 
@@ -231,19 +252,37 @@ static int entry_pc;
 static int func_pc[FUNCMAX];
 static int nfunc;
 
+static int map_page(int pc)
+{
+    int pg = pc / PAGE_IR;
+    int base = pg * PAGE_IR;
+    int n = nir - base < PAGE_IR ? nir - base : PAGE_IR;
+    int slot = pg & (NSLOT - 1);
+
+    if (page_tag[slot] != pg) {
+        if (lseek(rir_fd, 28L + base * 20L, 0) < 0)
+            return 0;
+        if (read(rir_fd, page[slot], n * 20) != n * 20)
+            return 0;
+        page_tag[slot] = pg;
+    }
+    cur = page[slot];
+    cur_lo = base;
+    cur_hi = base + n;
+    return 1;
+}
+
 static int load_rir(const char *path)
 {
-    int fd = open(path);
     uint32_t hdr[7];
-    int m, gs, ss, i, got = 0;
-    int as;
+    int m, gs, ss, as, i;
+    long fsize;
 
-    if (fd < 0)
+    rir_fd = open(path);
+    if (rir_fd < 0)
         return -1;
-    if (read(fd, hdr, 28) != 28 || hdr[0] != 0x32524952u) {
-        close(fd);
-        return -1;
-    }
+    if (read(rir_fd, hdr, 28) != 28 || hdr[0] != 0x32524952u)
+        goto bad;
     m = (int)hdr[1];
     gs = (int)hdr[2];
     entry_pc = (int)hdr[3];
@@ -252,49 +291,57 @@ static int load_rir(const char *path)
     as = (int)hdr[6];
     if (m <= 0 || m > IRMAX || gs < 0 || gs > GMAX ||
         nfunc <= 0 || nfunc > FUNCMAX || ss < 0 || ss > SMAX ||
-        as < 0 || as > AMAX) {
-        close(fd);
-        return -1;
-    }
-    while (got < m * (int)sizeof(RIR)) {
-        int n = read(fd, (uint8_t *)ir + got, m * (int)sizeof(RIR) - got);
-        if (n <= 0)
-            break;
-        got += n;
-    }
-    if (got != m * (int)sizeof(RIR))
-        { close(fd); return -1; }
+        as < 0 || as > AMAX)
+        goto bad;
+    /* The instruction array is not read here; only the tail sections are.
+     * Refuse a header that claims more bytes than the file holds, so a
+     * truncated image still fails at load time rather than mid-run. */
+    fsize = lseek(rir_fd, 0, 2);
+    if (fsize < 28L + (long)m * 20 + (long)nfunc * 4 + ss + as)
+        goto bad;
+    if (lseek(rir_fd, 28L + (long)m * 20, 0) < 0)
+        goto bad;
     for (i = 0; i < nfunc; i++) {
         uint32_t v;
-        if (read(fd, &v, 4) != 4) { close(fd); return -1; }
+        if (read(rir_fd, &v, 4) != 4)
+            goto bad;
         func_pc[i] = (int)v;
-        if (func_pc[i] < 0 || func_pc[i] >= m) { close(fd); return -1; }
+        if (func_pc[i] < 0 || func_pc[i] >= m)
+            goto bad;
     }
     if (ss > 0) {
         int rgot = 0;
         while (rgot < ss) {
-            int n = read(fd, strpool + rgot, ss - rgot);
+            int n = read(rir_fd, strpool + rgot, ss - rgot);
             if (n <= 0)
                 break;
             rgot += n;
         }
-        if (rgot != ss) { close(fd); return -1; }
+        if (rgot != ss)
+            goto bad;
     }
     arena_size = as;
     if (as > 0) {
         int agot = 0;
         while (agot < as) {
-            int n = read(fd, arena_init + agot, as - agot);
+            int n = read(rir_fd, arena_init + agot, as - agot);
             if (n <= 0)
                 break;
             agot += n;
         }
-        if (agot != as) { close(fd); return -1; }
+        if (agot != as)
+            goto bad;
     }
-    close(fd);
+    nir = m;
+    for (i = 0; i < NSLOT; i++)
+        page_tag[i] = -1;
     for (i = 0; i < gs; i++)
         g[i] = 0;
     return m;
+bad:
+    close(rir_fd);
+    rir_fd = -1;
+    return -1;
 }
 
 int main(int argc, char **argv)
@@ -324,8 +371,21 @@ int main(int argc, char **argv)
         spillp = frames[0].spill;
         pc = entry_pc;
         for (;;) {
-            RIR q = ir[pc++];
-            int *r = regs;
+            RIR q;
+            int *r;
+            if ((unsigned)(pc - cur_lo) >= (unsigned)(cur_hi - cur_lo)) {
+                if (pc < 0 || pc >= nir) {
+                    puts("rvm: pc out of range\n");
+                    return 1;
+                }
+                if (!map_page(pc)) {
+                    puts("rvm: image read failed\n");
+                    return 1;
+                }
+            }
+            q = cur[pc - cur_lo];
+            pc++;
+            r = regs;
             switch (q.op) {
             case R_CONST: r[q.d] = q.a; break;
             case R_MOV: r[q.d] = r[q.a]; break;
