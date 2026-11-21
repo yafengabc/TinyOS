@@ -5672,3 +5672,26 @@ SMP 的差异只可能是探测之后的启动路径，而不是"另一核喂狗
 修复保留：进入时保留 CLKDIV + 退出时恢复 `csr0`，快速失败（20000）和
 `plat_boot_stage()` 阶段喂狗都是合理的加固，只是不能再用 §104 那段话解释
 它们为什么必要。板子已刷回修复版镜像，CDC COM27 正常。
+
+## 106. 2026-11-22 RV32 单核数据点：QMI 探测的差异也不成立
+
+接着对照 `rpi-pico2-rv32`（Pico 2 Hazard3 **单核**，UF2 `8eeafa33…`）：
+CDC 正常、心跳 **6/6**（连 ARM 单核才有的 #46 截断都没有）、`cpus=1` /
+`rv32imac` / uptime 12 s。
+
+关键在于 RV32 的 `board/rp2350rv-generic/platform.c` 里的 JEDEC 探测与**修复前
+的 ARM 完全一样**：进入写 `EN|ASSERT_CS0N`（不清 CLKDIV 字段的写法都没有）、
+退出写 `QMI_DIRECT_CSR = 0`、`bound = qmi_spin_limit()`；`flash_enable_xip_via_boot2()`
+两边也都是同一段 boot2 copyout 调用。也就是说 §105 说的"退出写 0 清 CLKDIV
+是要害"同样不成立——RV32 单核带着这串写法跑得好好的。
+
+现在能确定的只剩：
+
+- 修复前 ARM 单核在今天的板上仍稳定复现，`dc393de` 确实让它能启动；
+- 探测本身 47–108 µs、期间无人喂狗，超时说排除；
+- **单核 ARM 专有**，与 QMI 探测代码、CLKDIV、bound、阶段喂狗都不是简单的
+  一一对应关系；SMP ARM 与 RV32 单核都不受影响。
+
+真正的差异得从 ARM 单核与其它三者（ARM SMP、RV32 单核、RV32 SMP）在
+探测之后到 banner 之间的路径去找，尤其是 CPU 数相关的分支和 CDC 初始化。
+本条不再猜测根因。
