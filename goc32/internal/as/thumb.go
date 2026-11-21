@@ -259,6 +259,25 @@ func (a *asm) thumbInsn(text string, off int, sizeOnly bool) ([]byte, bool, erro
 			return nil, false, a.errf("movs with a high register needs Thumb-2")
 		}
 		return two(0xEA5F, uint16(rd)<<8|uint16(rm))
+	case "mul":
+		rd, err := reg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		rn, err := reg(1)
+		if err != nil {
+			return nil, false, err
+		}
+		rm, err := reg(2)
+		if err != nil {
+			return nil, false, err
+		}
+		if a.arch != Thumb2 {
+			return nil, false, a.errf("mul with three registers needs Thumb-2")
+		}
+		/* MUL T2: FB00|Rn, F000|RdRm.  Verified with
+		   clang -mcpu=cortex-m33: mul r2,r4,r5 -> fb04 f205. */
+		return t32(0xFB00|uint16(rn), 0xF000|uint16(rd)<<8|uint16(rm)), false, nil
 	case "muls":
 		if len(ops) != 2 {
 			return nil, false, a.errf("muls takes two registers")
@@ -382,6 +401,31 @@ func (a *asm) thumbInsn(text string, off int, sizeOnly bool) ([]byte, bool, erro
 			return nil, false, a.errf("%s needs low registers on ARMv6-M", mn)
 		}
 		return two(wide[mn], 0xF000|uint16(rd)<<8|uint16(rm))
+	case "udiv", "sdiv":
+		rd, err := reg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		rn, err := reg(1)
+		if err != nil {
+			return nil, false, err
+		}
+		rm, err := reg(2)
+		if err != nil {
+			return nil, false, err
+		}
+		if a.arch != Thumb2 {
+			return nil, false, a.errf("%s needs ARMv7-M/ARMv8-M (ARMv6-M has no hardware divide)", mn)
+		}
+		/* T2 encoding: UDIV = FBB0|FBB0 Rn, F0F0 Rd Rm;
+		   SDIV = FB90 Rn, F0F0 Rd Rm.  Verified against
+		   `clang -target arm-none-eabi -mcpu=cortex-m33`:
+		   udiv r2,r4,r5 -> fbb4 f2f5, sdiv r3,r1,r6 -> fb91 f3f6. */
+		hw1 := uint16(0xFBB0)
+		if mn == "sdiv" {
+			hw1 = 0xFB90
+		}
+		return t32(hw1|uint16(rn), 0xF0F0|uint16(rd)<<8|uint16(rm)), false, nil
 	case "ldr", "str", "ldrb", "strb", "ldrh", "strh":
 		return a.thumbLoadStore(mn, ops, off, sizeOnly)
 	}

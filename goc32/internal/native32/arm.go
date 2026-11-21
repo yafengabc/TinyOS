@@ -1041,6 +1041,25 @@ func (e *arm) emitBin(in *Inst) error {
 		if rB != "r1" {
 			e.line("mov r1, %s", rB)
 		}
+		/* Operands are now in r0/r1, so r2 is a safe scratch.  On Thumb-2 the core
+		 * has UDIV/SDIV; on ARMv6-M fall back to the EABI helpers. */
+		if e.wide {
+			divOp := "udiv"
+			if in.Op == "sdiv" || in.Op == "srem" {
+				divOp = "sdiv"
+			}
+			e.line("%s r2, r0, r1", divOp)
+			if in.Op == "sdiv" || in.Op == "udiv" {
+				if out != "r2" {
+					e.line("mov %s, r2", out)
+				}
+				break
+			}
+			/* remainder = dividend - quotient * divisor */
+			e.line("mul r2, r2, r1")
+			e.line("subs %s, r0, r2", out)
+			break
+		}
 		switch in.Op {
 		case "sdiv":
 			e.line("bl __aeabi_idiv")

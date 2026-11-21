@@ -153,7 +153,7 @@ MicroPython 没有 RV32 固件）。板与板之间只比同一个引擎，时�
 | | `@native` | 635 | 530 | 1149 | 368 |
 | | `pvm` | 398 | 1337 | 2358 | 841 |
 | | `rvm` | 289 | 407 | 799 | 340 |
-| | `goc32` | 24 | 30 | 62 | 1338\* |
+| | `goc32` | 24 | 32 | 62 | **34** |
 | | `rcc` | 70 | 44 | 120 | 47 |
 | | `clang` | **13** | **10** | **9** | **36** |
 | **Pico 2 RV32** 150 MHz | `micropython` | — | — | — | — |
@@ -164,14 +164,13 @@ MicroPython 没有 RV32 固件）。板与板之间只比同一个引擎，时�
 | | `rcc` | 61 | 27 | 60 | 42 |
 | | `clang` | **14** | **15** | **14** | **20** |
 
-\* M33 上 `goc32` 的 `div` 是 1338 ms，修复后重测 1343 ms（同一量级），
-同一块板的 RV32 侧只有 40 ms。`1cd70da` 在 `user/aeabi.c` 里加了
-`__ARM_ARCH_EXT_IDIV__` 分支，但 **goc32 用自己的前端编译该文件**，
-预处理器没有定义这个宏（`-E` 输出仍是 `tos_udiv32` 软件循环），
-所以修复对 goc32 无效。已立 **#45**：要么让 goc32 的 ARM 后端在有 IDIV
-时直接发 `sdiv`/`udiv`，要么在它的 helper 里用内联汇编；单纯补 `-D`
-会因为它把 `/` 翻成 `bl __aeabi_idivmod` 而无限递归。这一格是**未修复**数字，
-不能当作"goc32 整体慢 30×"（同板其它三个内核只差 1.2–2×）。
+\* M33 的 `goc32` `div` 原先是 1338 ms：`goc32` 的 ARM 后端对每个 `%` 都发
+`bl __aeabi_idivmod`，而它用自己的前端编译 `user/aeabi.c`（预处理器不认识
+`__ARM_ARCH_EXT_IDIV__`），于是落进 32 步软件循环。**#45 已修**：goc32 的 Thumb-2
+后端现在在有 IDIV 的核上直接发 `udiv`/`sdiv`，余数用 `mul`+`subs` 展开；ARMv6-M
+（RP2040）仍走 EABI helper。表中 34 ms 是修后重测（把 `-target rp2350` 的 benchgoc
+重新生成、重建刷板），四个内核校验和全部一致。
+
 ## 读法
 
 - **解释器组（C3）**：`rvm` 比 `pvm` 快 1.8–3.6×，比 MicroPython 字节码快
@@ -198,7 +197,7 @@ C3    mpy   fib 1146 loop 1570 array 2411 div  876
 M33   mpy   fib 1096 loop 1220 array 2015 div  696
       @nat  fib  635 loop  530 array 1149 div  368
       rvm   fib  289 loop  407 array  799 div  340
-      goc32 fib   24 loop   30 array   62 div 1343   (#45：goc32 未修复)
+      goc32 fib   24 loop   32 array   62 div   34   (#45 修复后)
       rcc   fib   70 loop   44 array  120 div   47
       clang fib   13 loop   10 array    9 div   36
 RV32  rvm   fib  281 loop  397 array  803 div  352

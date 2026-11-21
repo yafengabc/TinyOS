@@ -115,3 +115,30 @@ func TestArmLiteralIsAlignedDown(t *testing.T) {
 		t.Fatalf("literal load: %s", hex(got[:4]))
 	}
 }
+
+func TestThumb2HardwareDivideEncodings(t *testing.T) {
+	/* Reference: clang -target arm-none-eabi -mcpu=cortex-m33 -c and
+	   arm-none-eabi-objdump -d.  Byte order is little-endian halfwords. */
+	cases := []struct{ insn, want string }{
+		{"udiv r0, r0, r1", "b0fbf1f0"},
+		{"sdiv r0, r0, r1", "90fbf1f0"},
+		{"udiv r2, r4, r5", "b4fbf5f2"},
+		{"sdiv r3, r1, r6", "91fbf6f3"},
+		{"mul r2, r4, r5", "04fb05f2"},
+	}
+	for _, c := range cases {
+		got := hex(assemble(t, Thumb2, "\t.text\n\t"+c.insn+"\n"))
+		if got != c.want {
+			t.Errorf("%s: got %s, want %s", c.insn, got, c.want)
+		}
+	}
+}
+
+func TestThumb1RejectsHardwareDivide(t *testing.T) {
+	for _, insn := range []string{"udiv r0, r0, r1", "sdiv r0, r0, r1", "mul r2, r4, r5"} {
+		src := ".syntax unified\n.thumb\n\t.text\n\t" + insn + "\n"
+		if _, err := Assemble([]byte(src), Opt{Arch: Thumb1, File: "test.s"}); err == nil {
+			t.Errorf("%s: expected ARMv6-M to reject the instruction", insn)
+		}
+	}
+}
