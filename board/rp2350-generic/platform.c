@@ -165,6 +165,58 @@ typedef void (*rp_rom_program_t)(uint32_t addr, const uint8_t *data, size_t coun
 #define QMI_DIRECT_CSR_CLKDIV_BITS  (0x3fu << 22)
 #define QMI_DIRECT_CSR_CLKDIV_DEF   (6u << 22)
 
+/* #42 diagnostic toggle: 1 restores the old "leave direct mode by writing 0"
+ * exit, which is the single line the board experiments finger.  The BM arms
+ * a test image with 0 and 1 and compares the two traces.  Default 0 is the
+ * fixed behaviour and what ships. */
+#ifndef QMI_DIAG_OLD_EXIT
+#define QMI_DIAG_OLD_EXIT 0
+#endif
+
+#if TOS_BOOT_TRACE
+/* The probe runs from SRAM inside the XIP-off window, so the printer is
+ * RAM-resident and its text sits in .data (SRAM): a flash-resident
+ * early_puts() would have to fetch the very code/data that a broken XIP
+ * restore makes unreadable, and would hang before printing anything.  Only
+ * the explicit XIP read at the end of the probe touches flash. */
+static char qmi_diag_csr0[]  = "\r\n[Q] csr0=";
+static char qmi_diag_clkdiv[] = " clkdiv=";
+static char qmi_diag_exit[]  = "\r\n[Q] exit=";
+static char qmi_diag_id[]    = " id=";
+static char qmi_diag_spins[] = " spins=";
+static char qmi_diag_csr1[]  = "\r\n[Q] csr1=";
+static char qmi_diag_m0[]    = " m0=";
+static char qmi_diag_xip[]   = " xip=";
+static char qmi_diag_ok[]    = " ok";
+static char qmi_diag_bad[]   = " MISMATCH";
+static char qmi_diag_pre[]   = " pre=";
+static char qmi_diag_post[]  = " post=";
+static char qmi_diag_nl[]    = "\r\n";
+
+static RAMFUNC void qmi_diag_putc(char c)
+{
+    while (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF)
+        ;
+    mmio_write32(RP_UART_DR, (uint32_t)(unsigned char)c);
+}
+
+static RAMFUNC void qmi_diag_puts(const char *s)
+{
+    while (*s)
+        qmi_diag_putc(*s++);
+}
+
+static RAMFUNC void qmi_diag_hex(uint32_t v)
+{
+    for (int i = 28; i >= 0; i -= 4) {
+        uint32_t d = (v >> i) & 0xfu;
+
+        qmi_diag_putc(d < 10u ? (char)('0' + d) : (char)('a' + d - 10u));
+    }
+}
+#endif /* TOS_BOOT_TRACE */
+
+
 /* Data-table lookup ('F','D' = 0x4446, the bootram FLASH_DEVINFO16 copy).
  * The ROM's data table is addressed with the same (code, flags) lookup
  * entry as the function table, only the flag differs: RT_FLAG_DATA (0x40)
@@ -250,9 +302,17 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
      * for milliseconds it is not allowed to spend. */
     const uint32_t bound = 20000u;
     uint32_t csr0, clkdiv;
+#if TOS_BOOT_TRACE
+    uint32_t xip_pre;
+#endif
 
     flash_init_boot2_copyout();
     g_rom_connect();
+#if TOS_BOOT_TRACE
+    /* A word from the image's vector table, read while XIP is still on; the
+     * same address is read again after the boot2 restore. */
+    xip_pre = *(const volatile uint32_t *)(XIP_BASE + 0x100u);
+#endif
     g_rom_exit_xip();
 
     /* Keep CLKDIV: it is a field of this register, and the reset value the
@@ -263,6 +323,12 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
     clkdiv = csr0 & QMI_DIRECT_CSR_CLKDIV_BITS;
     if (!clkdiv)
         clkdiv = QMI_DIRECT_CSR_CLKDIV_DEF;
+#if TOS_BOOT_TRACE
+    qmi_diag_puts(qmi_diag_csr0);
+    qmi_diag_hex(csr0);
+    qmi_diag_puts(qmi_diag_clkdiv);
+    qmi_diag_hex((csr0 >> 22) & 0x3fu);
+#endif
 
     /* Assert CS0n and enable direct mode. */
     mmio_write32(QMI_DIRECT_CSR,
@@ -293,7 +359,11 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
 
     /* Back to command-XIP mode: leave direct mode and put CLKDIV back the way
      * the ROM had it (writing 0 here would clear the divider as well). */
+#if QMI_DIAG_OLD_EXIT
+    mmio_write32(QMI_DIRECT_CSR, 0u);
+#else
     mmio_write32(QMI_DIRECT_CSR, csr0);
+#endif
 
     /* First byte is the RDID echo (0x9f); bytes 1..3 are the JEDEC ID.
      * A timed-out exchange leaves id at 0 = "unknown". */
@@ -302,8 +372,33 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
          : (((uint32_t)rx[1] << 16u) | ((uint32_t)rx[2] << 8u) | rx[3]);
     if (id == 0u || id == 0xffffffu)
         id = 0u;
+#if TOS_BOOT_TRACE
+    qmi_diag_puts(qmi_diag_exit);
+    qmi_diag_hex(mmio_read32(QMI_DIRECT_CSR));
+    qmi_diag_puts(qmi_diag_id);
+    qmi_diag_hex(id);
+    qmi_diag_puts(qmi_diag_spins);
+    qmi_diag_hex(spins);
+#endif
 
     flash_enable_xip_via_boot2();
+#if TOS_BOOT_TRACE
+    qmi_diag_puts(qmi_diag_csr1);
+    qmi_diag_hex(mmio_read32(QMI_DIRECT_CSR));
+    qmi_diag_puts(qmi_diag_m0);
+    qmi_diag_hex(mmio_read32(QMI_M0_TIMING));
+    {
+        uint32_t xip_post = *(const volatile uint32_t *)(XIP_BASE + 0x100u);
+
+        qmi_diag_puts(qmi_diag_xip);
+        qmi_diag_puts(xip_pre == xip_post ? qmi_diag_ok : qmi_diag_bad);
+        qmi_diag_puts(qmi_diag_pre);
+        qmi_diag_hex(xip_pre);
+        qmi_diag_puts(qmi_diag_post);
+        qmi_diag_hex(xip_post);
+    }
+    qmi_diag_puts(qmi_diag_nl);
+#endif
     return id;
 }
 
