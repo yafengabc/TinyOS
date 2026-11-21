@@ -408,3 +408,23 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。
+
+## 14. capture() 在板上 csc+rcc 生成的镜像里返回 0（2026-11-21）
+
+`capture(path, buf, cap)` 在**宿主 rcc** 生成的镜像上工作正常（QEMU mps2 抓到
+46 B，QEMU rv32 按 cap 截断），但镜像内 `csc` + `rcc` 现场编译出来的程序
+`capture()` 返回 0，`run()` 和文件 IO 的同一链路正常。
+
+已知：`/bin/hello` 存在，exec 没有报错（如果路径错会打印 `exec: ... not
+found`），所以更像是“读端 fd 没拿到数据”，即 fd 传递在板载 rcc 生成的代码里
+与宿主不同。下一步：
+
+1. 把板上 `csc` 生成的 `.rir` 取回宿主，和宿主 `csc` 的 `.rir` 逐字节比较；
+2. 用 `riscv32-unknown-elf-objdump -D -b binary` 对比两个 `rcc` 生成的 helper
+   字节（宿主已确认 `e_ldr_imm(1, sp, 16)` 是 fds[0]）；
+3. 确认板载 rcc 是否真的重编了 `thumb2.inc`（构建只跟踪 rcc.c 的 mtime，
+   `.inc` 变了要 touch 或删对象）。
+
+在此之前，验收卡
+`2026-11-21-capture-qemu-c2b27ae.md` 把板上链路标为 FAIL。
+

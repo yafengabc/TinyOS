@@ -24,7 +24,8 @@ enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
     NAT_SLEEP, NAT_UPTIME, NAT_RUN,
-    NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK
+    NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK,
+    NAT_CAPTURE
 };
 
 typedef struct { int op, a, b, c, d; } RIR;
@@ -523,6 +524,44 @@ int main(int argc, char **argv)
                     if (a0 >= 0 && a0 < arena_size)
                         res = unlink((const char *)(arena + a0));
                     break;
+                case NAT_CAPTURE: {
+                    /* run(path) with its stdout wired into a pipe.  The child
+                     * inherits fd 1 at exec time, so the parent points fd 1 at
+                     * the pipe, spawns, then restores it. */
+                    int fds[2];
+                    int saved, pid, n = 0;
+                    if (a0 < 0 || a0 >= arena_size || a1 < 0 ||
+                        a2 < 0 || a1 + a2 > arena_size)
+                        break;
+                    if (pipe(fds) < 0)
+                        break;
+                    saved = dup(1);
+                    if (saved < 0) {
+                        close(fds[0]);
+                        close(fds[1]);
+                        break;
+                    }
+                    dup2(fds[1], 1);
+                    close(fds[1]);
+                    pid = exec((const char *)(arena + a0), 0, 0);
+                    dup2(saved, 1);
+                    close(saved);
+                    if (pid < 0) {
+                        close(fds[0]);
+                        res = pid;
+                        break;
+                    }
+                    while (n < a2) {
+                        int r = read(fds[0], arena + a1 + n, a2 - n);
+                        if (r <= 0)
+                            break;
+                        n += r;
+                    }
+                    close(fds[0]);
+                    wait(pid);
+                    res = n;
+                    break;
+                }
                 }
 #endif
                 if (q.b >= 0) r[q.b] = res;

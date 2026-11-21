@@ -365,7 +365,7 @@ static void st_vreg(int v, int src)
 
 /* ---- labels and per-function emission ------------------------------- */
 
-static int L_bounds, L_pi, L_pin, L_picommon, rodata_msg;
+static int L_bounds, L_pi, L_pin, L_picommon, L_capture, rodata_msg;
 static int L_slen, L_scmp, L_scpy, L_scat, L_atoi, L_par;
 static int L_fmul, L_fdiv, L_fix, L_fixn0, L_fixn, rodata_p10;
 static int rodata_empty;
@@ -451,6 +451,19 @@ static void emit_native_argbuf(int id, int dst)
         e_add_reg(1, 0, 1);
         e_li(0, id == 12 ? 4 : id == 13 ? 11 : 31);
         e_svc0();
+        break;
+    case 18: /* capture(path, buf, cap) */
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);
+        e_ldr_imm(2, 0, 4);
+        e_ldr_imm(3, 0, 8);
+        e_la(0, data_arena);
+        e_add_reg(1, 0, 1);
+        e_add_reg(2, 0, 2);
+        e_mov_w(0, 1);
+        e_mov_w(1, 2);
+        e_mov_w(2, 3);
+        e_bl(L_capture);
         break;
     case 14: /* read(fd, buf, len) */
     case 15: /* write(fd, buf, len) */
@@ -1575,6 +1588,81 @@ static void emit_float_helpers(void)
     e_pop();
 }
 
+
+static void emit_capture_helper(void)
+{
+    int loop, done, childfail, fail, ret;
+    bind_label(L_capture);
+    loop = new_label();
+    done = new_label();
+    childfail = new_label();
+    fail = new_label();
+    ret = new_label();
+    e_push();
+    e_sub_imm(ARM_SP, ARM_SP, 32);
+    e_str_imm(ARM_LR, ARM_SP, 28);
+    e_str_imm(0, ARM_SP, 0);
+    e_str_imm(1, ARM_SP, 4);
+    e_str_imm(2, ARM_SP, 8);
+    e_add_imm(1, ARM_SP, 16);
+    e_li(0, 28); e_svc0();                 /* pipe */
+    e_cmp_zero(0);
+    e_bcond(11, fail);
+    e_li(1, 1); e_li(0, 35); e_svc0();     /* dup(1) */
+    e_str_imm(0, ARM_SP, 12);
+    e_ldr_imm(1, ARM_SP, 20);
+    e_li(2, 1);
+    e_li(0, 29); e_svc0();                 /* dup2(w, 1) */
+    e_ldr_imm(1, ARM_SP, 20);
+    e_li(0, 5); e_svc0();                  /* close(w) */
+    e_ldr_imm(1, ARM_SP, 0);
+    e_li(2, 0);
+    e_li(3, 0);
+    e_li(0, 3); e_svc0();                  /* exec */
+    e_str_imm(0, ARM_SP, 16);
+    e_ldr_imm(1, ARM_SP, 12);
+    e_li(2, 1);
+    e_li(0, 29); e_svc0();
+    e_ldr_imm(1, ARM_SP, 12);
+    e_li(0, 5); e_svc0();
+    e_ldr_imm(0, ARM_SP, 16);
+    e_cmp_zero(0);
+    e_bcond(11, childfail);
+    e_li(4, 0);
+    bind_label(loop);
+    e_ldr_imm(5, ARM_SP, 8);
+    e_cmp(4, 5);
+    e_bcond(10, done);                     /* n >= cap */
+    e_ldr_imm(1, ARM_SP, 16);
+    e_ldr_imm(2, ARM_SP, 4);
+    e_add_reg(2, 2, 4);
+    e_ldr_imm(3, ARM_SP, 8);
+    e_sub_reg(3, 3, 4);
+    e_li(0, 2); e_svc0();                  /* read */
+    e_cmp_zero(0);
+    e_bcond(13, done);                     /* <= 0 */
+    e_add_reg(4, 4, 0);
+    e_b(loop);
+    bind_label(done);
+    e_ldr_imm(1, ARM_SP, 16);
+    e_li(0, 5); e_svc0();
+    e_ldr_imm(1, ARM_SP, 16);
+    e_li(0, 12); e_svc0();                 /* wait */
+    e_mov_w(0, 4);
+    e_b(ret);
+    bind_label(childfail);
+    e_ldr_imm(1, ARM_SP, 16);
+    e_li(0, 5); e_svc0();
+    e_ldr_imm(0, ARM_SP, 16);
+    e_b(ret);
+    bind_label(fail);
+    e_li(0, 0xFFFFFFFFu);
+    bind_label(ret);
+    e_ldr_imm(ARM_LR, ARM_SP, 28);
+    e_add_imm(ARM_SP, ARM_SP, 32);
+    e_pop();
+}
+
 static void emit_helpers(void)
 {
     bind_label(L_bounds);
@@ -1592,6 +1680,7 @@ static void emit_helpers(void)
     e_b(L_picommon);
     bind_label(L_pin);
     e_li(1, 0);
+    emit_capture_helper();
     bind_label(L_picommon);
     emit_print_helper();
     emit_string_helpers();
@@ -1652,6 +1741,7 @@ void rcc_arch_init_labels(void)
     L_atoi = new_label();
     L_par = new_label();
     rodata_empty = new_label();
+    L_capture = new_label();
     L_fmul = new_label();
     L_fdiv = new_label();
     L_fix = new_label();

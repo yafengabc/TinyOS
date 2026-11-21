@@ -1537,7 +1537,8 @@ enum {
     NAT_GPIO_COUNT, NAT_GPIO_MODE, NAT_GPIO_WRITE, NAT_GPIO_READ,
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
     NAT_SLEEP, NAT_UPTIME, NAT_RUN,
-    NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK
+    NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK,
+    NAT_CAPTURE
 };
 
 static int native_lookup(const char *name, int *nargs, int *hasret)
@@ -1561,6 +1562,7 @@ static int native_lookup(const char *name, int *nargs, int *hasret)
         { "write",      NAT_WRITE,      3, 1 },
         { "close",      NAT_CLOSE,      1, 1 },
         { "unlink",     NAT_UNLINK,     1, 1 },
+        { "capture",    NAT_CAPTURE,    3, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (!strcmp(name, tab[i].name)) {
@@ -1592,6 +1594,7 @@ static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
         { "write",      NAT_WRITE,      3, 1 },
         { "close",      NAT_CLOSE,      1, 1 },
         { "unlink",     NAT_UNLINK,     1, 1 },
+        { "capture",    NAT_CAPTURE,    3, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (str_hash(tab[i].name) == h) {
@@ -2265,6 +2268,9 @@ static int gen_expr_into(Node *n, int dst)
                 break;
             case NAT_READ: case NAT_WRITE:
                 strargs = 2;
+                break;
+            case NAT_CAPTURE:
+                strargs = 3;    /* path + buffer */
                 break;
             }
             for (Node *p = n->args; p; p = p->next) {

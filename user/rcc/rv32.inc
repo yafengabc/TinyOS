@@ -199,7 +199,7 @@ static void cond_jump_zero(int rs, int target)
 
 /* ---- emission -------------------------------------------------------- */
 
-static int L_bounds, L_pi, L_pin, L_picommon, L_par;
+static int L_bounds, L_pi, L_pin, L_picommon, L_par, L_capture;
 static int L_scmp, L_slen, L_scpy, L_scat, L_atoi;
 static int L_fmul, L_fdiv, L_fix, L_fixn0, L_fixn;
 static int rodata_msg, rodata_p10, rodata_empty;
@@ -377,6 +377,12 @@ static void emit_native_argbuf(int id, int dst)
         e_arg_ptr(X_A0, 0);
         e_li(X_A7, 31);
         e_ecall();
+        break;
+    case 18: /* capture(path, buf, cap) */
+        e_arg_ptr(X_A0, 0);
+        e_arg_ptr(X_A1, 1);
+        e_arg_val(X_A2, 2);
+        e_call(L_capture);
         break;
     default:
         die("bad argbuf native");
@@ -1215,8 +1221,68 @@ static void emit_float_helpers(void)
     }
 }
 
+
+/* capture(path, buf, cap): run a program with its stdout on a pipe and read
+ * up to cap bytes back.  fd 1 is moved for the spawn (the child inherits it)
+ * and restored immediately afterwards. */
+static void emit_capture_helper(void)
+{
+    int loop, done, childfail, fail, ret;
+    bind_label(L_capture);
+    loop = new_label();
+    done = new_label();
+    childfail = new_label();
+    fail = new_label();
+    ret = new_label();
+    e_addi(X_SP, X_SP, -32);
+    e_sw(X_RA, 28, X_SP);
+    e_sw(X_A0, 0, X_SP);                 /* path */
+    e_sw(X_A1, 4, X_SP);                 /* buf  */
+    e_sw(X_A2, 8, X_SP);                 /* cap  */
+    e_addi(X_A0, X_SP, 16);              /* &fds */
+    e_li(X_A7, 28); e_ecall();           /* pipe */
+    e_branch_to(4, X_A0, X_ZERO, fail);
+    e_li(X_A0, 1); e_li(X_A7, 35); e_ecall();          /* dup(1) */
+    e_sw(X_A0, 12, X_SP);
+    e_lw(X_A0, 20, X_SP); e_li(X_A1, 1); e_li(X_A7, 29); e_ecall();
+    e_lw(X_A0, 20, X_SP); e_li(X_A7, 5); e_ecall();    /* close(write end) */
+    e_lw(X_A0, 0, X_SP); e_li(X_A1, 0); e_li(X_A2, 0); e_li(X_A7, 3); e_ecall();
+    e_sw(X_A0, 24, X_SP);                /* pid */
+    e_lw(X_A0, 12, X_SP); e_li(X_A1, 1); e_li(X_A7, 29); e_ecall();
+    e_lw(X_A0, 12, X_SP); e_li(X_A7, 5); e_ecall();    /* restore fd 1 */
+    e_lw(X_A0, 24, X_SP);
+    e_branch_to(4, X_A0, X_ZERO, childfail);
+    e_li(X_T0, 0);
+    bind_label(loop);
+    e_lw(X_T1, 8, X_SP);
+    e_branch_to(5, X_T0, X_T1, done);    /* n >= cap */
+    e_lw(X_A0, 16, X_SP);
+    e_lw(X_A1, 4, X_SP); e_add(X_A1, X_A1, X_T0);
+    e_lw(X_A2, 8, X_SP); e_sub(X_A2, X_A2, X_T0);
+    e_li(X_A7, 2); e_ecall();            /* read */
+    e_branch_to(5, X_ZERO, X_A0, done);  /* r <= 0 */
+    e_add(X_T0, X_T0, X_A0);
+    e_j(loop);
+    bind_label(done);
+    e_lw(X_A0, 16, X_SP); e_li(X_A7, 5); e_ecall();
+    e_lw(X_A0, 24, X_SP); e_li(X_A7, 12); e_ecall();
+    e_mv(X_A0, X_T0);
+    e_j(ret);
+    bind_label(childfail);
+    e_lw(X_A0, 16, X_SP); e_li(X_A7, 5); e_ecall();
+    e_lw(X_A0, 24, X_SP);
+    e_j(ret);
+    bind_label(fail);
+    e_li(X_A0, -1);
+    bind_label(ret);
+    e_lw(X_RA, 28, X_SP);
+    e_addi(X_SP, X_SP, 32);
+    e32(enc_i(0, X_ZERO, X_RA, 0, 0x67));
+}
+
 static void emit_helpers(void)
 {
+    emit_capture_helper();
     bind_label(L_bounds);
     e_la(X_A1, rodata_msg);
     e_li(X_A2, 7);
@@ -1375,6 +1441,7 @@ void rcc_arch_init_labels(void)
     rodata_msg = new_label();
     rodata_p10 = new_label();
     rodata_empty = new_label();
+    L_capture = new_label();
 }
 
 int rcc_arch_data_align(void) { return 16; }
