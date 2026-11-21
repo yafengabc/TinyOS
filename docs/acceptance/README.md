@@ -160,3 +160,4 @@
 | 2026-11-21 | PMP 窗口 NAPOT 预算逐级降级（#44） | `41a5b3d` | rpi-pico2-rv32-smp（无板在机）；18 目标 | T0 PASS（新宿主机用例复现 rcc 的 8 块几何，4180 组映射全过）；T1 18/18；T2 rv32 smoke PASS；T3/T4 `NOT RUN`（无 Pico 2） | [pmp ladder](2026-11-21-pmp-window-ladder-rp2350rv-41a5b3d.md) |
 | 2026-11-21 | Pico 2 RV32 SMP 脚本跑分（#44 修复后） | `412038c` | Pico 2（COM27）+ rv32 rir 镜像 | T0/T1/T3 PASS（rvm 281/397/803/352 ms，rcc 61/27/60/42 ms）；余列 `NOT RUN` | [bench pico2 rv32](2026-11-21-bench-pico2-rv32-412038c.md) |
 | 2026-11-21 | Pico 2 两侧 SMP 完整脚本跑分（clang/goc32/MicroPython） | `930fd31` | Pico 2（COM27/COM22）+ 多镜像 | T0/T1/T3 PASS（七列数据，校验和全一致）；pvm 与 RV32 MicroPython `NOT RUN` | [bench pico2 full](2026-11-21-bench-pico2-full-930fd31.md) |
+| 2026-11-21 | 跑分总表（纵向）+ M33 goc32 div 的 EABI helper 修复 | `9ee7a1f` | QEMU mps2-an385 + 18 目标（M33 无板） | T0/T1/T2 PASS（同一份 goc32 镜像在 mps2 上 div 69→4 ms，校验和不变）；T3/T4 `NOT RUN`（M33 需重编 benchgoc 后重测） | [bench table](2026-11-21-bench-table-aeabi-9ee7a1f.md) |
