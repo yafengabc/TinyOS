@@ -472,6 +472,20 @@ NAPOT 区域，`stack_request_ok()` 要求栈提示整除 `PLAT_APP_GRAIN`，而
 `mklfs --grain` 在打包时校验每个程序的栈提示，不合格直接报程序名——以前只有内核
 在 exec 时才拒绝（#44）。ARM 半边用 MPU，保持 4 KiB。
 
+**NAPOT 块预算不够时逐级降级，而不是每次调度刷一行。** Hazard3 只有 8 个软件
+可写 region，其中一个（entry 5）固定给 trap vector，所以窗口只有 7 块可用。
+16 KiB 粒度下，页粒度的 code/data 切分可能把窗口拆成 8 块：实测 rcc 的 96 KiB
+窗口（wx 在 +28 KiB）在**一半的 16 KiB 对齐基址**上需要 3 code + 4 data + 1
+stack = 8 块——所以失败看起来是随机的，取决于 `win_alloc` 把窗口放在哪。旧代码
+会带着半套 PMP 继续跑，并在每次任务切换时打印
+`[pmp] window needs more NAPOT blocks...`。现在
+`board/rp2350rv-generic/pmp_map.h` 的 `pmp_map()` 按保护强度依次尝试：页粒度
+切分 → 按粒度对齐切分 → 整个 image RWX → 整个窗口 RWX。只有最后一级（会盖住
+guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；四级都放不下
+时才把用户内存全部关掉并只报一次。算法由 `internal/build/pmpmap_test.go` 在
+宿主机上编译真实头文件、枚举 32–192 KiB 的所有页粒度切分来验证，并固定了 rcc
+（必须降级）和 csc（必须保持完整保护）两组实测几何。
+
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。
 

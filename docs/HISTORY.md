@@ -5550,3 +5550,34 @@ RV32/Hazard3（`2026-11-21-corpus-rv32-rp2350-67a70ea.md`）。
 
 脚本名 `thumb1-prep.py` 比它现在做的事窄，但改名要动所有引用它的验收卡命令，成本大于
 收益，所以在 docstring 里说清楚它能出三种后端。
+
+## 102. 2026-11-21 NAPOT 预算：8 块墙与逐级降级（#44）
+
+16 KiB 粒度上板后，第一次运行板上编译器就刷屏：
+
+```
+[pmp] window needs more NAPOT blocks than there are regions
+```
+
+Hazard3 只有 8 个软件可写 PMP region，其中 entry 5 固定给 trap vector，窗口只有
+7 块。用 `elfwin.py` 的同一套口径把 `build/fs-stage/bin` 里 46 个程序全部算一遍，
+真正越界的只有 `rcc`：68 KiB 镜像 + 16 KiB 栈 = 96 KiB 窗口，wx 在 +28 KiB 时
+code 3 块 + data 4 块 + stack 1 块 = 8 块。
+
+关键点是**它取决于 `win_alloc` 给窗口的基址**：0x20020000、0x20028000…… 这些
+32 KiB 对齐的基址只要 7 块，0x20024000、0x2002c000…… 要 8 块。所以现象看起来
+是随机的；而旧代码在失败时只打印一行，然后带着半套 PMP 继续跑，每次任务切换都
+打印一次——这就是"刷屏"。
+
+修法不是把保护关掉，而是把映射按保护强度排成阶梯
+（`board/rp2350rv-generic/pmp_map.h`）：页粒度切分 → 按 grain 对齐切分（最多
+一个 grain 的 .text 变成 RWX）→ 整个 image 一条 RWX → 整个窗口一条 RWX（会
+盖住 guard hole，只在开机提示一次）。四级都放不下才把用户内存全部关掉并只报
+一次。用同一套脚本重算 46 个程序：45 个保持页粒度切分，`rcc` 落到第二级，没有
+程序需要第三级。
+
+算法本身可以在宿主机上验证：`pmp_map.h` 是纯算术，
+`internal/build/pmpmap_test.go` 编译真实头文件，固定 rcc（必须降级）和 csc
+（128 KiB 窗口必须保持完整保护）两组实测几何，并枚举 32–192 KiB 的所有页粒度
+切分（4180 组：SPLIT 3068、SNAP 1032、IMAGE 80、WINDOW 0、放弃 0），逐块检查
+不越窗、不盖 guard hole、段页全覆盖。

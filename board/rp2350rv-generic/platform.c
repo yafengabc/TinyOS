@@ -1,5 +1,6 @@
 #include "platform.h"
 #include "board_config.h"
+#include "pmp_map.h"
 
 /* Park-skeleton hooks (issue #17).  Defined before rp_park.h so the shared
  * RP_PARK_OWNER_TAKE / RP_PARK_PARKED_LOOP macros pick them up.  They name
@@ -1626,145 +1627,23 @@ uint32_t plat_block_count(void)
  * part, so `prot rodata` survives.  Full W^X and rodata protection need the
  * linker to put wx on a page boundary - see OPEN-ITEMS §31.0.
  *
- * The budget, not alignment, is the limit: a window whose pieces fragment
- * into more than eight blocks cannot be described. */
-#define PMP_NAPOT 0x18u
-#define PMP_R     0x01u
-#define PMP_W     0x02u
-#define PMP_X     0x04u
-/* RP2350 gives Hazard3 eight software-writable regions (0..7); 8..10 are
- * hardwired by the bootrom (ROM and peripherals, RWX) and 11..15 hardwired
- * OFF, so writing those is a no-op - they are not budget. */
-#define PMP_ENTRIES   8
-#define PMP_VEC_ENTRY 5
-#define PMP_PAGE  0x1000u
+ * The budget, not alignment, is the limit: a window can need more NAPOT
+ * blocks than the eight (seven usable) regions the part gives.  rcc's 96 KiB
+ * window needs eight with a page-granular split at half of the 16 KiB-aligned
+ * base addresses, so whether it fits depends on where win_alloc put it.
+ * pmp_map() (pmp_map.h) therefore walks a ladder of mapping policies and only
+ * gives up protection when the exact map does not fit, so a large program
+ * still loads instead of being denied by a map the port could describe
+ * another way. */
 extern char trap_vectors[];
 
 static void pmp_program(const uint32_t *addr, const uint32_t *cfg);
-
-static uint32_t napot(uint32_t base, uint32_t size)
-{
-    return (base >> 2) | ((size >> 3) - 1u);
-}
-
-/* Cover [base, top) with NAPOT blocks, recording entry numbers in addr[] and
- * cfg[].  Returns the next free entry, or -1 when the range cannot be named.
- *
- * Every block is at least one page and naturally aligned, and a block never
- * spills past top: overshooting would cover the guard hole below the stack and
- * a stack overflow would stop faulting.  Blocks are page-granular - measured
- * on the part, sub-page NAPOT blocks do not describe the intended range. */
-static int pmp_cover(uint32_t base, uint32_t top, uint32_t perm,
-                     uint32_t *addr, uint32_t *cfg, int next)
-{
-    while (base < top) {
-        uint32_t rem = top - base;
-        uint32_t size = 1u << 20;
-
-        if (next == PMP_VEC_ENTRY)
-            next++;
-        if (next >= PMP_ENTRIES)
-            return -1;
-        while (size > PMP_PAGE &&
-               (size > rem || (base & (size - 1u)) != 0))
-            size >>= 1;
-        if (size > rem || (base & (size - 1u)) != 0)
-            return -1;                 /* tail not representable */
-        addr[next] = napot(base, size);
-        cfg[next] = perm | PMP_NAPOT;
-        next++;
-        base += size;
-    }
-    return next;
-}
-
-/* Attributes per page, derived from the segment list.
- *
- * A page that holds code only stays R+X; any page that also touches data or
- * the stack becomes R+W+X, because Hazard3 cannot express a permission union
- * and the page cannot be cut - and that RWX page is exactly the known
- * limitation (OPEN-ITEMS 31.0): wx usually lands inside the same page that
- * holds the start of .data.  The guard hole is not a segment, so its pages
- * are simply absent and stay uncovered, which is what keeps `prot heap` and
- * `prot stack` faulting.
- *
- * The map is one page per byte, and a window can never exceed the whole task
- * area (96 pages at the 4 KiB grain), so a fixed buffer keeps this off the
- * heap - this runs on every task switch. */
-#define PMP_PAGE_CODE  0x1u
-#define PMP_PAGE_DATA  0x2u
-#define PMP_MAX_PAGES  128
-
-static int pmp_page_attrs(const plat_seg_t *segs, int n, uint32_t win_base,
-                          int pages, uint8_t *attr)
-{
-    for (int i = 0; i < pages; i++)
-        attr[i] = 0;
-
-    for (int i = 0; i < n; i++) {
-        uint32_t b = segs[i].base;
-        uint32_t t = segs[i].top;
-        uint8_t bit = (segs[i].attr == PLAT_SEG_CODE) ? PMP_PAGE_CODE
-                                                      : PMP_PAGE_DATA;
-
-        for (uint32_t p = b & ~(PMP_PAGE - 1u); p < t; p += PMP_PAGE) {
-            int idx = (int)((p - win_base) / PMP_PAGE);
-
-            if (idx >= 0 && idx < pages)
-                attr[idx] |= bit;
-        }
-    }
-
-    return pages;
-}
-
-/* Program [win_base, win_end) from the segment list.  Runs of pages with the
- * same attribute become runs of NAPOT blocks; pages that are in no segment
- * are skipped, which is how the hole survives. */
-static int pmp_layout(const plat_seg_t *segs, int n, uint32_t win_base,
-                      uint32_t win_end, uint32_t *addr, uint32_t *cfg)
-{
-    uint8_t page[PMP_MAX_PAGES];
-    int pages = (int)((win_end - win_base + PMP_PAGE - 1u) / PMP_PAGE);
-    int next = 0;
-
-    if (pages > PMP_MAX_PAGES)
-        return -1;                      /* a window this wide is a bug */
-
-    pmp_page_attrs(segs, n, win_base, pages, page);
-
-    for (int i = 0; i < pages; ) {
-        uint32_t perm, top;
-        int j;
-
-        if (!page[i]) {                 /* hole: never covered */
-            i++;
-            continue;
-        }
-        perm = (page[i] & PMP_PAGE_DATA) ? (PMP_R | PMP_W | PMP_X)
-                                         : (PMP_R | PMP_X);
-        for (j = i; j < pages && page[j] == page[i]; j++)
-            ;
-        /* A block may not spill past the window: a page that is only partly
-         * inside it stops the run.  On this board stack_top is page aligned,
-         * so this is a guard against a future layout, not a live case. */
-        top = win_base + (uint32_t)j * PMP_PAGE;
-        if (top > win_end)
-            top = win_end;
-        next = pmp_cover(win_base + (uint32_t)i * PMP_PAGE, top, perm,
-                         addr, cfg, next);
-        if (next < 0)
-            return -1;
-        i = j;
-    }
-    return next;
-}
 
 int plat_board_task_protect(const plat_seg_t *segs, int n)
 {
     uint32_t addr[PMP_ENTRIES], cfg[PMP_ENTRIES];
     uint32_t win_base, win_end;
-    int i, next;
+    int mode;
 
     if (n <= 0)
         return 1;                       /* nothing to protect: leave PMP alone */
@@ -1772,14 +1651,30 @@ int plat_board_task_protect(const plat_seg_t *segs, int n)
     win_base = segs[0].base & ~(PMP_PAGE - 1u);
     win_end = segs[n - 1].top;
 
-    for (i = 0; i < PMP_ENTRIES; i++) {
-        addr[i] = 0;
-        cfg[i] = 0;
+    /* pmp_map() tries each policy in turn and fills addr/cfg for the first
+     * that fits; only that map is programmed, so a failed attempt cannot
+     * leave a partial one behind. */
+    mode = pmp_map(segs, n, win_base, win_end, addr, cfg);
+
+    if (mode < 0) {
+        /* No policy can name this window: leave every writable entry OFF, so
+         * the task faults on its first user access instead of running with
+         * somebody else's permissions.  Say so once - this runs on every task
+         * switch, and a per-switch line floods the console (issue #44). */
+        static int warned_deny;
+        if (!warned_deny) {
+            warned_deny = 1;
+            early_puts("\r\n[pmp] window cannot be described; user memory "
+                       "denied\r\n");
+        }
+    } else if (mode == PMP_MAP_WINDOW) {
+        static int warned_hole;
+        if (!warned_hole) {
+            warned_hole = 1;
+            early_puts("\r\n[pmp] window map degraded: guard hole covered, "
+                       "prot heap/stack no longer fault\r\n");
+        }
     }
-    next = pmp_layout(segs, n, win_base, win_end, addr, cfg);
-    if (next < 0)
-        early_puts("\r\n[pmp] window needs more NAPOT blocks than there are "
-                   "regions\r\n");
 
     /* Entry 5 is the trap vector: U-mode has to be able to fetch the first
      * vector slot when a trap arrives from user code. */
@@ -1827,7 +1722,7 @@ static void pmp_program(const uint32_t *addr, const uint32_t *cfg)
  * stack itself is the thing that usually grows.
  *
  * Page alignment is a hard requirement here after all: the regions this board
- * can program are page-granular (see pmp_layout - sub-page NAPOT blocks are
+ * can program are page-granular (see pmp_map.h - sub-page NAPOT blocks are
  * exactly what broke the first attempt at 4 KiB windows), and an unaligned
  * stack_top would leave the stack region unrepresentable, i.e. the task would
  * start with its own stack denied.  Asking the kernel to keep stack_top
