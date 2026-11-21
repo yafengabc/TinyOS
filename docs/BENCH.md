@@ -1,7 +1,8 @@
 # 脚本工具链跑分：MicroPython vs pvm / rvm / rcc
 
 同一组整数内核在同一块板上跑五个执行环境，比较**毫秒数**，不看主观感受。
-本文只描述方法与脚本；结果表填在最后，RP2350 的对照以后补。
+本文只描述方法与脚本；结果表在最后。ESP32-C3 是完整七列；RP2350 目前只有
+`rcc` 原生的两行（见对应小节），其余列标 `NOT RUN`。
 
 ## 被测对象
 
@@ -136,8 +137,36 @@ mpy   fib 1146 loop 1570 array 2411 div 876
 @nat  fib 748  loop 631  array 1314 div 469
 ```
 
-## RP2350（以后）
+## 结果：RP2350 Pico 2（2026-11-21 实测，部分）
 
-同一套脚本，把 `--port` 换成 Pico 2 的串口、`--engine rcc` 的镜像换成
-`configs/rpi-pico2-*.conf`，`rcc` 用 `RCC_ARCH_THUMB2`；MicroPython 换成
-`RPI_PICO2` 固件，clang/goc32 用 `--arch thumb2` 的构建。表结构不变，直接加一组行。
+板子：Raspberry Pi Pico 2（RP2350A，8 MiB），两套 SMP 镜像：
+
+- `rpi-pico2-smp`（Cortex-M33，`rcc_arch = thumb2`），CDC COM27；
+- `rpi-pico2-rv32-smp`（Hazard3 RV32，`rcc_arch = rv32`），同一块板另一侧核心。
+
+语料由 `python scripts/rp2040/thumb1-prep.py --script ../tinyos-script
+--arch thumb2|rv32` 生成，期望输出由宿主 `rvm` 产生；镜像 SHA-256 与完整验收数据见
+`2026-11-21-thumb2-rp2350-ae8c7c7.md` 与 `2026-11-21-corpus-rv32-rp2350-67a70ea.md`
+（两镜像均心跳 6/6、语料 `strict 37/37` 两轮一致）。
+
+| 内核 | 校验和 | M33 SMP / `rcc` (ms) | RV32 SMP / `rcc` (ms) |
+|---|---:|---:|---:|
+| fib | `46368` | 69 | **60** |
+| loop | `-2014260032` | 1013 | **554** |
+
+读法与限制：
+
+- **只有 `rcc` 一列**：板上跑的是 `csc → rcc → 原生 ELF` 的语料程序，不是
+  `scripts/bench/compare.py` 的七引擎表格。`pvm` / `rvm` / `goc32` / `clang` /
+  MicroPython 两版在该板上均未测（`NOT RUN`）；MicroPython 需要单独刷
+  `RPI_PICO2` 固件，`rvm`/`goc32`/`clang` 需要各自对应的镜像；
+- **`array` / `div` 未测**（`NOT RUN`）：当前 44 程序语料里没有这两个内核；
+- **loop 不能和 C3 那张表比**：语料版 `benchloop` 用自减绕回累加器（csc 暂不支持
+  位运算），校验和是 `-2014260032`，不是上面 C3 表的 `999850000`；
+- **fib 可以横向看**：校验和同为 `46368`，M33 69 ms、RV32 60 ms（C3/rcc 84 ms，
+  但板子与时钟不同，只看量级，不作排名）；
+- RV32 的 loop 比 M33 快约 1.8×，这是同一块芯片两侧核心在同一语料下的实测
+  （554 ms vs 1013 ms）。
+
+按 C3 的脚本补齐这张表的方法见上一节；把 `--port` 换成 Pico 2 的 CDC，
+镜像换成 `configs/rpi-pico2-*.conf`，`rcc` 用 `RCC_ARCH_THUMB2` / `RCC_ARCH_RV32`。
