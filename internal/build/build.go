@@ -1773,15 +1773,40 @@ func (b *Builder) buildFSImage(bins []string) error {
 	if err := os.Remove(ramdiskPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	args := []string{
-		ramdiskPath,
-		fmt.Sprintf("%d", b.Target.RamdiskSectors*512),
-		stage,
+	/* The board's ramdisk_sectors is a starting point, not a budget: it is the
+	   size of the image that gets flashed, and the kernel grows the mounted
+	   filesystem to the real partition (lfs_fs_grow) either way.  On a
+	   flash-backed board the only hard limit is the partition itself, so a
+	   staged set that does not fit (a test corpus, say) doubles the image
+	   instead of failing the build.  Disk/embedded ramdisks stay fixed: there
+	   the image is loaded into RAM as-is, and silently growing it is worse
+	   than a clear build error. */
+	size := b.Target.RamdiskSectors * 512
+	maxSize := size
+	if b.BoardConfig != nil && b.Target.FSBacking == "flash" {
+		if fb, off := b.BoardConfig.FlashBytes, b.BoardConfig.LFSOffset; fb > off {
+			maxSize = fb - off
+		}
 	}
-	args = append(args, names...)
-
-	if err := b.runTool(filepath.Join(b.BuildDir, "mklfs.exe"), args, "MKFS"); err != nil {
-		return err
+	tool := filepath.Join(b.BuildDir, "mklfs.exe")
+	for {
+		args := []string{ramdiskPath, fmt.Sprintf("%d", size), stage}
+		args = append(args, names...)
+		err := b.runTool(tool, args, "MKFS")
+		if err == nil {
+			break
+		}
+		if size >= maxSize {
+			return fmt.Errorf("%w (image already at the %d-byte partition)", err, maxSize)
+		}
+		size *= 2
+		if size > maxSize {
+			size = maxSize
+		}
+		if rm := os.Remove(ramdiskPath); rm != nil && !os.IsNotExist(rm) {
+			return rm
+		}
+		b.logf("      ramdisk does not fit, retrying at %d KiB\n", size/1024)
 	}
 
 	ramdisk, err := os.ReadFile(ramdiskPath)

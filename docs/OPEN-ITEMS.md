@@ -440,6 +440,10 @@ native、`capture`），47 个语料中除 2 个故意编译失败的用例，�
 `--arch thumb1` 预生成、`v6mcheck.py` 已确认只含 v6-M 编码，**未必是同一件事**：
 定案要把 44 个 `t1-*` 重刷一次，看它是否仍 fault，再决定 #38 是关闭还是继续查。
 
+镜像大小不再需要改 `ramdisk_sectors`：MKFS 装不下时构建会把 ramdisk 翻倍重试，
+直到板子的分区上限（仅 `fs_backing = flash`；disk/embedded 保持固定，因为镜像要
+原样进 RAM）。所以 44 个测试镜像可以直接 stage，RP2040 和 Pico 2 都不用手改板子。
+
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。
 

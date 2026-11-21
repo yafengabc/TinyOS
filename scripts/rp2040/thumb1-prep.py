@@ -28,9 +28,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOS = os.path.abspath(os.path.join(HERE, "..", ".."))
 BUILD = os.path.join(TOS, "build", "thumb1")
 
-# The RP2040 image's littlefs partition is ramdisk_sectors * 512 = 600 KiB,
-# which holds the core set plus the stock user programs.  The rest needs a
-# second flash (`--set extra`).
+# `--set` splits the corpus in three groups for convenience, not because of
+# space: the build grows the littlefs image (doubling up to the board's
+# partition) when the staged set does not fit, so `all` needs no board.conf
+# edit.
 CORE_STRICT = [
     "arith", "arrays2", "bigcode", "bigir", "bloop3", "copy", "deep",
     "float3", "fmt", "fold", "funcs", "mixed", "mod", "ops", "sa3", "sb3",
