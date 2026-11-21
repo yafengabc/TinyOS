@@ -1591,69 +1591,84 @@ static void emit_float_helpers(void)
 
 static void emit_capture_helper(void)
 {
-    int loop, done, childfail, fail, ret;
+    int loop, done, childfail, fail, ret, f0ok, f1ok;
     bind_label(L_capture);
     loop = new_label();
     done = new_label();
     childfail = new_label();
     fail = new_label();
     ret = new_label();
+    f0ok = new_label();
+    f1ok = new_label();
     e_push();
     e_sub_imm(ARM_SP, ARM_SP, 32);
     e_str_imm(ARM_LR, ARM_SP, 28);
-    e_str_imm(0, ARM_SP, 0);
-    e_str_imm(1, ARM_SP, 4);
-    e_str_imm(2, ARM_SP, 8);
+    e_str_imm(0, ARM_SP, 0);                 /* path */
+    e_str_imm(1, ARM_SP, 4);                 /* buf  */
+    e_str_imm(2, ARM_SP, 8);                 /* cap  */
     e_add_imm(1, ARM_SP, 16);
-    e_li(0, 28); e_svc0();                 /* pipe */
+    e_li(0, 28); e_svc0();                   /* pipe */
     e_cmp_zero(0);
     e_bcond(11, fail);
-    e_li(1, 1); e_li(0, 35); e_svc0();     /* dup(1) */
-    e_str_imm(0, ARM_SP, 12);
+    /* When the shell has closed fd 1, pipe() can hand out 0/1/2.  Move both
+     * ends above 2 first: dup2(end, 1) would otherwise close the other end. */
+    e_ldr_imm(2, ARM_SP, 16);
+    e_cmp(2, 3);
+    e_bcond(10, f0ok);
+    e_mov_w(1, 2); e_li(0, 35); e_svc0();    /* dup */
+    e_str_imm(0, ARM_SP, 16);
+    e_mov_w(1, 2); e_li(0, 5); e_svc0();     /* close old */
+    bind_label(f0ok);
+    e_ldr_imm(2, ARM_SP, 20);
+    e_cmp(2, 3);
+    e_bcond(10, f1ok);
+    e_mov_w(1, 2); e_li(0, 35); e_svc0();
+    e_str_imm(0, ARM_SP, 20);
+    e_mov_w(1, 2); e_li(0, 5); e_svc0();
+    bind_label(f1ok);
     e_ldr_imm(1, ARM_SP, 20);
     e_li(2, 1);
-    e_li(0, 29); e_svc0();                 /* dup2(w, 1) */
+    e_li(0, 29); e_svc0();                   /* dup2(write end, 1) */
+    e_cmp_zero(0);
+    e_bcond(11, fail);
     e_ldr_imm(1, ARM_SP, 20);
-    e_li(0, 5); e_svc0();                  /* close(w) */
+    e_li(0, 5); e_svc0();                    /* close(write end) */
     e_ldr_imm(1, ARM_SP, 0);
     e_li(2, 0);
     e_li(3, 0);
-    e_li(0, 3); e_svc0();                  /* exec */
-    e_str_imm(0, ARM_SP, 16);
-    e_ldr_imm(1, ARM_SP, 12);
-    e_li(2, 1);
-    e_li(0, 29); e_svc0();
-    e_ldr_imm(1, ARM_SP, 12);
-    e_li(0, 5); e_svc0();
-    e_ldr_imm(0, ARM_SP, 16);
+    e_li(0, 3); e_svc0();                    /* exec */
+    e_str_imm(0, ARM_SP, 12);                /* pid */
+    e_li(1, 1); e_li(0, 5); e_svc0();        /* close(1): console by default */
+    e_ldr_imm(0, ARM_SP, 12);
     e_cmp_zero(0);
     e_bcond(11, childfail);
     e_li(4, 0);
     bind_label(loop);
     e_ldr_imm(5, ARM_SP, 8);
     e_cmp(4, 5);
-    e_bcond(10, done);                     /* n >= cap */
-    e_ldr_imm(1, ARM_SP, 16);
+    e_bcond(10, done);                       /* n >= cap */
+    e_ldr_imm(1, ARM_SP, 16);                /* read end */
     e_ldr_imm(2, ARM_SP, 4);
     e_add_reg(2, 2, 4);
     e_ldr_imm(3, ARM_SP, 8);
     e_sub_reg(3, 3, 4);
-    e_li(0, 2); e_svc0();                  /* read */
+    e_li(0, 2); e_svc0();                    /* read */
     e_cmp_zero(0);
-    e_bcond(13, done);                     /* <= 0 */
+    e_bcond(0, done);                        /* EOF */
+    e_bcond(11, done);                       /* error: keep what we have */
     e_add_reg(4, 4, 0);
     e_b(loop);
     bind_label(done);
     e_ldr_imm(1, ARM_SP, 16);
     e_li(0, 5); e_svc0();
-    e_ldr_imm(1, ARM_SP, 16);
-    e_li(0, 12); e_svc0();                 /* wait */
+    e_ldr_imm(1, ARM_SP, 12);
+    e_li(0, 12); e_svc0();                   /* wait(pid) */
     e_mov_w(0, 4);
     e_b(ret);
     bind_label(childfail);
     e_ldr_imm(1, ARM_SP, 16);
     e_li(0, 5); e_svc0();
-    e_ldr_imm(0, ARM_SP, 16);
+    e_li(0, 0xFFFFFFF2u);                    /* -14: exec failed */
     e_b(ret);
     bind_label(fail);
     e_li(0, 0xFFFFFFFFu);
