@@ -1714,6 +1714,7 @@ static void emit_capture_helper(void)
 
 static void emit_helpers(void)
 {
+    emit_capture_helper();
     bind_label(L_bounds);
     e_la(2, rodata_msg);
     e_li(3, 7);
@@ -1724,12 +1725,15 @@ static void emit_helpers(void)
     e_li(0, 0);                 /* SYS_exit */
     e_svc0();
 
+    /* L_pin falls into L_picommon, so nothing may be emitted in between.
+     * The capture helper lives above; putting it here once made printf("%d")
+     * run it (the corpus only printed strings through print(), so nothing
+     * caught it until the benchmark). */
     bind_label(L_pi);
     e_li(1, 1);
     e_b(L_picommon);
     bind_label(L_pin);
     e_li(1, 0);
-    emit_capture_helper();
     bind_label(L_picommon);
     emit_print_helper();
     emit_string_helpers();
