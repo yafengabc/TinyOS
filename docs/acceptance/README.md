@@ -147,4 +147,5 @@
 | 2026-11-21 | 脚本文件 IO：open/create/read/write/close/unlink | `c899586` | QEMU mps2 + QEMU rv32 + 18 目标 | T0/T1/T2 PASS；新增 `NATIVEC`（参数走 ARG）；两目标输出 `1 5 0 5 hello 0 0`，板上 `csc→rcc→exec` 同样；T3/T4 `NOT RUN` | [file io](2026-11-21-file-io-qemu-c899586.md) |
 | 2026-11-21 | capture(path,buf,cap)：读子程序 stdout | `c2b27ae` | QEMU mps2 + QEMU rv32 + 18 目标 | 宿主镜像 PASS（mps2 46 B，rv32 按 cap 截断）；板上 csc+rcc 链路 **FAIL**（返回 0，OPEN-ITEMS §14）；T3/T4 `NOT RUN` | [capture](2026-11-21-capture-qemu-c2b27ae.md) |
 | 2026-11-21 | 修 capture()：shell 管道后 fd 1 被复用 | `af87918` | QEMU mps2 + QEMU rv32 | T0 PASS；T2 PASS（管道前后各两次 capture 都成功）；根因：msh 关掉 fd 1 后 pipe() 拿到 1，dup2(w,1) 把读端关了；T1/T3/T4 `NOT RUN` | [capture fix](2026-11-21-capture-fix-arm-af87918.md) |
-| 2026-11-21 | readdir() + isdir() | `6924174` | QEMU mps2 + 18 ?? | T0 PASS?T1 18/18?T2 ?????? / ??? 1/0/-1?rv32/T3/T4 `NOT RUN` | [readdir](2026-11-21-readdir-arm-6924174.md) |
+| 2026-11-21 | readdir() + isdir() | `6924174` | QEMU mps2 + 18 目标 | T0 PASS；T1 18/18；T2 板上链路列出 / 并给出 1/0/-1；rv32/T3/T4 `NOT RUN` | [readdir](2026-11-21-readdir-arm-6924174.md) |
+| 2026-11-21 | rcc 按 4 KiB 块读取 RIR2 | `bb90935` | QEMU rv32 + QEMU mps2 + 18 目标 | T0 PASS（输出逐字节一致）；T1 18/18；T2 两个后端在板上编译 31.6 KB 的 RIR2 并运行（1351）；窗口 124 → 88 KiB，宿主编译慢约 2%；T3/T4 `NOT RUN` | [block read](2026-11-21-rcc-block-read-rv32-bb90935.md) |

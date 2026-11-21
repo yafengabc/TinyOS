@@ -43,16 +43,27 @@ enum {
     R_NE, R_LE, R_GE, R_NATIVEC
 };
 
-static uint8_t rir_buf[RIR_MAX];
-
+/* The RIR2 image is read in 4 KiB blocks.  Both passes scan the instruction
+ * array sequentially, so a sliding window is all a compiler this size needs:
+ * a 40 KiB image costs about ten reads per pass.  The function table, string
+ * pool and arena are small and are kept separately. */
+#define RIR_BLK 4096
+static uint8_t rir_blk[RIR_BLK];
+static int rir_fd;
 static int rir_len;
+static int blk_off = -1;
+static int blk_len;
+static int code_off;
+static uint8_t func_tab[FUNC_MAX * 4];
+static uint8_t str_buf[1024];
+static uint8_t arena_buf[512];
+
 static int text_len;
 static int out_len;
 static const char *out_path;
 static int emit_pass;
 static int out_fd;
 
-static const uint8_t *code;
 static int nir;
 static int gsize;
 static int entry_pc;
@@ -100,11 +111,42 @@ static void put16(uint8_t *p, uint16_t v)
     p[1] = (uint8_t)(v >> 8);
 }
 
-static int32_t ir_a(int pc) { return (int32_t)get32(code + pc * 20 + 4); }
-static int32_t ir_b(int pc) { return (int32_t)get32(code + pc * 20 + 8); }
-static int32_t ir_c(int pc) { return (int32_t)get32(code + pc * 20 + 12); }
-static int32_t ir_d(int pc) { return (int32_t)get32(code + pc * 20 + 16); }
-static int ir_op(int pc) { return (int32_t)get32(code + pc * 20); }
+static void rir_read(void *dst, int off, int len)
+{
+    uint8_t *p = dst;
+    if (off < 0 || len < 0 || off > rir_len - len)
+        die("short RIR2 image");
+    while (len > 0) {
+        int avail, k;
+        if (off < blk_off || off >= blk_off + blk_len) {
+            blk_off = off & ~(RIR_BLK - 1);
+            if (lseek(rir_fd, blk_off, 0) < 0)
+                die("seek failed");
+            blk_len = read(rir_fd, rir_blk, RIR_BLK);
+            if (blk_len <= 0)
+                die("read failed");
+        }
+        avail = blk_off + blk_len - off;
+        k = len < avail ? len : avail;
+        memcpy(p, rir_blk + (off - blk_off), (size_t)k);
+        p += k;
+        off += k;
+        len -= k;
+    }
+}
+
+static uint32_t rir_u32(int off)
+{
+    uint8_t b[4];
+    rir_read(b, off, 4);
+    return get32(b);
+}
+
+static int32_t ir_a(int pc) { return (int32_t)rir_u32(code_off + pc * 20 + 4); }
+static int32_t ir_b(int pc) { return (int32_t)rir_u32(code_off + pc * 20 + 8); }
+static int32_t ir_c(int pc) { return (int32_t)rir_u32(code_off + pc * 20 + 12); }
+static int32_t ir_d(int pc) { return (int32_t)rir_u32(code_off + pc * 20 + 16); }
+static int ir_op(int pc) { return (int32_t)rir_u32(code_off + pc * 20); }
 
 static void e32(uint32_t v)
 {
@@ -174,7 +216,7 @@ static void analyze(void)
     if (entry_pc < 0 || entry_pc >= nir)
         die("bad entry pc");
     for (i = 0; i < nfunc; i++)
-        func_start[i] = (int)get32(rir_buf + 28 + nir * 20 + i * 4);
+        func_start[i] = (int)get32(func_tab + i * 4);
     for (i = 0; i < nfunc; i++) {
         func_end[i] = nir;
         for (j = 0; j < nfunc; j++)
@@ -321,47 +363,53 @@ static int lz4_token(int fd, int n)
 
 static int load_rir(const char *path)
 {
-    int fd = open(path);
-    int n = 0;
-    if (fd < 0)
+    rir_fd = open(path);
+    if (rir_fd < 0)
         return -1;
-    for (;;) {
-        int r;
-        if (n >= RIR_MAX) {
-            close(fd);
-            return -1;
-        }
-        r = read(fd, rir_buf + n, RIR_MAX - n);
-        if (r <= 0)
-            break;
-        n += r;
-    }
-    close(fd);
-    rir_len = n;
-    return n;
+    rir_len = lseek(rir_fd, 0, 2);      /* SEEK_END */
+    if (rir_len < 28)
+        return -1;
+    blk_off = -1;
+    blk_len = 0;
+    return 0;
 }
 
 static void parse_rir(void)
 {
+    uint8_t h[28];
     uint32_t magic;
+    int func_off, str_off, arena_off;
     if (rir_len < 28)
         die("short RIR2 header");
-    magic = get32(rir_buf);
+    if (rir_len > RIR_MAX)
+        die("RIR2 image too large");   /* same accepted input as the old buffer */
+    rir_read(h, 0, 28);
+    magic = get32(h);
     if (magic != 0x32524952u)
         die("not a RIR2 image");
-    nir = (int)get32(rir_buf + 4);
-    gsize = (int)get32(rir_buf + 8);
-    entry_pc = (int)get32(rir_buf + 12);
-    nfunc = (int)get32(rir_buf + 16);
-    strsize = (int)get32(rir_buf + 20);
-    dsize = (int)get32(rir_buf + 24);
-    if (nir <= 0 || gsize < 0 || nfunc <= 0 || strsize < 0 || dsize < 0)
+    nir = (int)get32(h + 4);
+    gsize = (int)get32(h + 8);
+    entry_pc = (int)get32(h + 12);
+    nfunc = (int)get32(h + 16);
+    strsize = (int)get32(h + 20);
+    dsize = (int)get32(h + 24);
+    if (nir <= 0 || gsize < 0 || nfunc <= 0 || nfunc > FUNC_MAX ||
+        strsize < 0 || strsize > (int)sizeof str_buf ||
+        dsize < 0 || dsize > (int)sizeof arena_buf)
         die("bad RIR2 header");
-    if (28 + nir * 20 + nfunc * 4 + strsize + dsize > rir_len)
+    code_off = 28;
+    func_off = code_off + nir * 20;
+    str_off = func_off + nfunc * 4;
+    arena_off = str_off + strsize;
+    if ((int64_t)arena_off + dsize > (int64_t)rir_len)
         die("truncated RIR2 image");
-    code = rir_buf + 28;
-    strpool = code + nir * 20 + nfunc * 4;
-    arena = strpool + strsize;
+    rir_read(func_tab, func_off, nfunc * 4);
+    if (strsize > 0)
+        rir_read(str_buf, str_off, strsize);
+    if (dsize > 0)
+        rir_read(arena_buf, arena_off, dsize);
+    strpool = str_buf;
+    arena = arena_buf;
 }
 
 static int align16(int v) { return (v + 15) & ~15; }

@@ -45,10 +45,10 @@ source.c --csc--> RIR2 镜像 --rvm--> 解释执行
 | 函数表 | 256 |
 | 单函数 AST | 256 节点 |
 | 单函数 IR | 256 条 |
-| `rcc` RIR2 输入 | 40 KiB（约 2000 IR） |
+| `rcc` RIR2 输入 | 40 KiB（约 2000 IR），按 4 KiB 分块读 |
 | `rcc` 标签 | 4096 |
 | `rcc` text | 48 KiB |
-| `rcc` 窗口 | 120 KiB（C3/rv32） |
+| `rcc` 窗口 | 88 KiB（C3/rv32） |
 
 超过单函数 AST 的程序（例如 90 条语句的 `bigbody`）在板上会报
 `AST full`，需要在宿主 `csc` 生成 RIR2；`rvm` 的 256 条整程序 IR 上限同理，
