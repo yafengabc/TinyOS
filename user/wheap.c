@@ -21,7 +21,7 @@
  * 32 KiB window - so the request is what pushed the window up a step, and
  * `ps` shows it in the wink column. */
 
-TOS_HEAP(12 * 1024);
+TOS_HEAP(12 * 1024 + 64);      /* usable 12 KiB plus one block header */
 
 #define WANT (12 * 1024)
 

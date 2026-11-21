@@ -32,7 +32,7 @@
  * without this note the window has no heap at all and every malloc returns
  * NULL (measured: this program printed "out of memory" while `wheap`, which
  * declares, worked). */
-TOS_HEAP(8 * 1024);
+TOS_HEAP(8 * 1024 + 64);       /* + one allocator header per buffer */
 
 static int bytes = BYTES;       /* runtime size, so a machine that is */
 static int reps = REPS;         /* absurdly slow can be measured small */

@@ -1,4 +1,5 @@
 #include "lib.h"
+#include "heap.h"
 
 /* Write everything or report why not.
  *
@@ -347,31 +348,16 @@ int getline(char *buf, int max)
     return n;
 }
 
-static unsigned int heap_ptr;
-static unsigned int heap_end;
-
+/* The free-list allocator lives in heap.c so the host test can compile it
+ * alone; malloc()/free() are the public names every program already uses. */
 void *malloc(size_t n)
 {
-    n = (n + 7) & ~7u;
-    if (!heap_ptr) {
-        heap_ptr = (unsigned int)sbrk(0);
-        heap_end = heap_ptr;
-    }
-    if (heap_ptr + n > heap_end) {
-        int grow = (int)(((n + 4095) & ~4095u));
-        void *p = sbrk(grow);
-        if (!p || (unsigned int)p == 0xFFFFFFFFu)
-            return 0;
-        heap_end += grow;
-    }
-    void *p = (void *)heap_ptr;
-    heap_ptr += n;
-    return p;
+    return heap_alloc((unsigned)n);
 }
 
 void free(void *p)
 {
-    (void)p; /* bump allocator, nothing to do */
+    heap_free(p);
 }
 
 /* ---- directory streams ------------------------------------------------ */

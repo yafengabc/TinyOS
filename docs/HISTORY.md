@@ -5581,3 +5581,32 @@ code 3 块 + data 4 块 + stack 1 块 = 8 块。
 （128 KiB 窗口必须保持完整保护）两组实测几何，并枚举 32–192 KiB 的所有页粒度
 切分（4180 组：SPLIT 3068、SNAP 1032、IMAGE 80、WINDOW 0、放弃 0），逐块检查
 不越窗、不盖 guard hole、段页全覆盖。
+
+## 103. 2026-11-21 用户态堆：从 bump 到 first-fit 空闲链表
+
+`free()` 原来是 `(void)p;`，所以任何 `malloc/free` 循环都稳定泄漏到窗口的堆上限；
+`malloc` 只是把 break 往上推。工具和多数程序都短命，这个问题一直没暴露，但它是
+用户态最容易踩的坑（Berry 评估就卡在这里）。
+
+换成 `user/heap.c`（FreeRTOS `heap_4` 形状）：
+
+- 地址有序的块链表，每块 16 字节头（32 位目标）；
+- `malloc` 首次适配，找到就切掉尾部留成新的空闲块；整张链表都不够才 `sbrk`；
+- `free` 标记后与**物理相邻**的空闲块合并（相邻用地址检查，不信任链表顺序，
+  所以中间被裸 `sbrk` 挖出的空隙不会被跨过）；
+- **从不收缩 break**，`free` 只让内存可复用。这样堆和栈增长、以及程序自己的
+  `sbrk` 都不冲突。
+
+`kthread_create` 的栈和 start 记录改走 `malloc`，不再直接 `sbrk`，所以
+“先建线程再 malloc”的规则取消了。`bench`/`wheap`/`mem` 的 `TOS_HEAP` 各加 64
+字节，因为声明的区域现在要容纳块头；`wheap` 仍然能一次拿走 12 KiB。
+
+验证：
+
+- `internal/build/heap_test.go` 用 mock `sbrk` 编译真实的 `heap.c`，覆盖复用、
+  切分、合并、增长、裸 `sbrk` 空隙、窗口尽头、double free、`free(NULL)`；
+- T1：18/18；T2：QEMU rv32 上 `wheap`/`mem 16`/`bench`/`deep 3`、mps2 上
+  `kthreadtest`/`prodcons` 全部通过；goc32 的 `benchgoc` 在 mps2 上四个校验和不变；
+- T3 `NOT RUN`（没有板子）。
+
+未做：`realloc`/`calloc`、线程安全的锁、收缩 break。需要确定性时仍推荐固定块池。

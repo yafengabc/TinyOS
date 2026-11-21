@@ -489,5 +489,25 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。
 
+## 14. 用户态堆：first-fit 空闲链表（2026-11-21）
+
+`user/heap.c` 取代了原来的 bump 分配器：`malloc` 先扫空闲链表找可复用的块并切出
+需要的大小，`free` 标记后与地址相邻的空闲块合并，只有整张链表都不够时才 `sbrk`。
+形状与 FreeRTOS `heap_4` 相同。
+
+已知边界，暂不打算在本轮补：
+
+- **不收缩 `brk`**：`free` 让内存可复用，但不还给窗口，所以栈不能长进已释放的
+  堆尾。这样 `sbrk` 只增不减，和 `kthread`、`deep` 的栈增长路径都不冲突。
+- **没有 `realloc` / `calloc`**；需要时在 `heap.c` 上补。
+- **不是线程安全的**：kthreads 共享组窗口，两个线程同时 malloc 会竞争；和原来的
+  bump 指针一样。`kthread_create` 只在创建时分配，运行中的线程各自 malloc 才需要
+  锁。
+- 块头 16 字节（32 位目标），所以 `TOS_HEAP(n)` + 一次 malloc(n) 需要 n+16 的区域；
+  `bench`/`wheap`/`mem` 已各留 64 字节。声明多个块时每块再占一个头。
+
+固定块池（`mempool` 形状）仍然是确定性要求高的程序的更好选择；这里只把“free 是
+空操作”这个最容易踩的坑去掉。
+
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。

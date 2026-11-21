@@ -1467,7 +1467,8 @@ func (b *Builder) buildUser() ([]string, error) {
 	// grow.  softfloat-min only changes which semantics softfloat32.c is
 	// compiled with (see TOS_SOFTFLOAT_MIN there).
 	common := []string{"crt0_" + b.Target.Arch + ".S", "lib.c", "syscall.c",
-		"aeabi.c", "fix16.c", "floatprint.c", "faeabi.c", "softfloat32.c"}
+		"heap.c", "aeabi.c", "fix16.c", "floatprint.c", "faeabi.c",
+		"softfloat32.c"}
 
 	// Threads are optional code, not a kernel feature: when the config turns
 	// them on, one more library and its per-arch switch are linked into every
@@ -1536,7 +1537,8 @@ func (b *Builder) buildUser() ([]string, error) {
 		if b.UserExclude[prog] {
 			continue
 		}
-		if name == "lib.c" || name == "syscall.c" || name == "aeabi.c" ||
+		if name == "lib.c" || name == "syscall.c" || name == "heap.c" ||
+			name == "aeabi.c" ||
 			name == "softfloat32.c" || name == "fix16.c" ||
 			name == "floatprint.c" || name == "faeabi.c" ||
 			name == "thread.c" || name == "kthread.c" {

@@ -11,7 +11,9 @@
  * to walk 16 pages and still fits everywhere. */
 #define WANT (64 * 1024)
 
-TOS_HEAP(WANT);
+/* +64: the declared region has to hold the allocator's block header too, or
+ * a full WANT-byte malloc comes up 16 bytes short. */
+TOS_HEAP(WANT + 64);
 
 int main(int argc, char *argv[])
 {

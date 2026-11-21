@@ -11,10 +11,11 @@
    是自研「宿主编译 + VM」方案（3.3 KiB）的 **22 倍**。C3 用户区 192 KiB 理论上塞得下
    一个 96 KiB 窗口的程序，但会吃掉一半用户区并挤掉脚本对象堆；RP2040 的 136 KiB
    用户区则基本出局。
-2. **比体积更硬的是运行时依赖**：Berry 的 mark-sweep GC 需要真正能 `free()` 的堆，
-   而 TinyOS 用户态 `free()` 是空操作；异常处理需要 `setjmp/longjmp`，目标代码里
-   一个都没有；即便 `BE_USE_SINGLE_FLOAT=1`，仍要 `__addsf3` 一族软浮点。
-   这三项不是「裁剪一下就好」，是要先改语言运行时或内核。
+2. **比体积更硬的是运行时依赖**：Berry 的 mark-sweep GC 需要能复用的堆——TinyOS
+   用户态的 `free()` 现在会合并并复用块（`user/heap.c`），但不会把内存还给窗口，
+   `realloc` 也还没有；异常处理需要 `setjmp/longjmp`，目标代码里一个都没有；
+   即便 `BE_USE_SINGLE_FLOAT=1`，仍要 `__addsf3` 一族软浮点。后两项不是「裁剪一下就好」，
+   是要先补运行时。
 3. **官方没有原生码 AOT。** 源码里 `aot|jit|native code|machine code` 零命中。
    所谓 solidify 生成的是 `const binstruction[] { 0x80060000, // RET }`
    —— **还是字节码**，只是从「文件」变成「C 常量数组」，VM 照跑。
@@ -94,14 +95,15 @@ TinyOS 最缺的东西。
 | 类别 | 符号 | 后果 |
 |---|---|---|
 | 软浮点 | `__addsf3 __subsf3 __mulsf3 __divsf3 __eqsf2 __lesf2 __ltsf2 __fixsfsi __floatsisf __floatunsisf __truncdfsf2 __extendsfdf2` | 即使单精度也要 vendored compiler-rt 一族；`full` 还要 20 个 `__*df3` 和 `__divdi3/__moddi3/__ashldi3/__ashrdi3` |
-| 分配器 | `malloc free realloc` | **GC 的 sweep 阶段必须真能释放**。TinyOS 用户态 `free()` 是 `(void)p;` 空操作、`sbrk` 只增不减 → 跑几轮就泄漏到窗口上限 |
+| 分配器 | `malloc free realloc` | `free()` 会合并并复用块（不收缩 break），`realloc` 仍然缺失；GC 的对象可以复用，但窗口不会缩小 |
 | 异常 | `setjmp longjmp` | Berry 的 `raise` / 保护调用全靠它；`include/` 里连 `setjmp.h` 都没有 |
 | 格式化 | `snprintf strncpy strncat memchr isdigit` | `string.format` 和词法器要用；自研 `printf` 只有 `%d/%i/%u/%x/%c/%s/%%` |
 | 文件 | `fopen fread fwrite fseek ftell fclose fflush fgets` | `.bec` 加载路径；要换成 TinyOS 的 `open/read/write` 并自己实现 `be_sys.h` 那层 |
 | 其它（`full` 追加） | `strtod`、全套 `sin/cos/pow/log/atan2/...`、`time/localtime/clock`、`system`、`abort/exit` | 关掉对应模块可去掉，但需要 linker 配合 `--gc-sections` |
 
-`BE_EXPLICIT_MALLOC/FREE/REALLOC` 可以重定向到一个自写 allocator，这是唯一
-「有官方钩子」的一项；`setjmp/longjmp`、软浮点、格式化则完全没有钩子，只能补或改源码。
+`BE_EXPLICIT_MALLOC/FREE/REALLOC` 可以重定向到一个自写 allocator；TinyOS 的
+`user/heap.c` 现在就能当 `malloc/free` 用，只差 `realloc`。`setjmp/longjmp`、
+软浮点、格式化则完全没有钩子，只能补或改源码。
 
 ## 5 「Berry AOT」的四个层次
 

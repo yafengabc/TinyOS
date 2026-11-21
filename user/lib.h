@@ -52,6 +52,10 @@
  * grain), so every malloc returns NULL with no other symptom.  A program
  * that calls malloc must declare what it needs.
  *
+ * The region also carries the allocator's bookkeeping: one 16-byte block
+ * header per live allocation (user/heap.c), so a program that takes the whole
+ * region asks for its payload plus that much again per block.
+ *
  * Unlike the stack, the heap has no alignment constraint of its own - the
  * break is a plain address and the PMP entry that covers it is TOR - so any
  * byte value is legal, and the only check is that the whole window still

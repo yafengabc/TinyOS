@@ -7,10 +7,11 @@
  * of a stack, and the scheduler treats the thread like any other task, so it
  * is preempted by the 1 ms tick and a blocking read() parks only that thread.
  *
- * The stack comes from the program heap (sbrk), i.e. from inside the group's
- * window, which is what makes it visible to the shared protection regions.
- * Create every thread before malloc() starts handing out the rest of the
- * heap: the break is shared, so both work, but the stacks are not movable.
+ * The stack comes from the program heap (malloc), i.e. from inside the
+ * group's window, which is what makes it visible to the shared protection
+ * regions.  It uses the same free list as the program's own allocations, so
+ * there is no ordering rule between thread creation and malloc: a stack is
+ * just a block that nobody frees while the thread runs.
  */
 
 #include "lib.h"
@@ -43,7 +44,7 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
         stack_bytes = 512;
     bytes = (stack_bytes + 31u) & ~15u;
 
-    base = sbrk((int)bytes);
+    base = malloc(bytes);
     if (!base)
         return -1;
 
@@ -51,9 +52,11 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
      * 32-byte hardware exception frame just below the initial sp, so anything
      * parked at the top of the stack would be overwritten before the first
      * instruction runs. */
-    s = (struct kstart *)sbrk((int)sizeof(*s));
-    if (!s)
+    s = (struct kstart *)malloc(sizeof(*s));
+    if (!s) {
+        free(base);
         return -1;
+    }
 
     top = ((unsigned)base + bytes) & ~15u;
     s->fn = fn;

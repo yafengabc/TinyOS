@@ -6,8 +6,9 @@
 #define MAX_SOURCE 4
 /* Script text lives in one pool.  A `source` appends its file after the
  * caller's and gives the bytes back on return, so a `source` inside a loop
- * does not grow anything - the reason for not using malloc(), whose bump
- * allocator has no free().  Only MAX_SOURCE layers are ever alive at once. */
+ * does not grow anything - the reason for a pool instead of malloc(): the
+ * shell's window declares no heap, and the pool's reuse is exact.
+ * Only MAX_SOURCE layers are ever alive at once. */
 /* 3 KiB, and the number is not free: it sets the shell's window.  The window
  * is image + stack + guard rounded up to the 16 KiB grain, so sh lands in
  * 32 KiB only while its image stays within 20 KiB (20 + 8 + 4 = 32, and 21 KiB
