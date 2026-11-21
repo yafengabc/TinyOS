@@ -432,6 +432,14 @@ native、`capture`），47 个语料中除 2 个故意编译失败的用例，�
 镜像代码段只含 ARMv6-M 编码（`scripts/rp2040/v6mcheck.py` 现在是 prep 的硬性检查），
 所以先排除"镜像其实是 Thumb-2"；下一步需要故障现场（pc/lr/寄存器）或可复现镜像。
 
+**候选根因（2026-11-21 下午，HISTORY §97）**：`tos build` 过去只传 `-mcpu`，`rcc.c`
+对任何 `__arm__` 都落 `thumb2.inc`，所以**含 rcc 的 RP2040 镜像里装着一个 Thumb-2
+代码生成器**，它产出的每个镜像都在第一条 32 位编码上 fault——实测正是
+`0x2001000a`（程序窗口第一条指令）。这已由远端 `7c51dae`/`451fa4d` 修掉
+（`[target] rcc_arch` + 配置期拒绝 thumb2 配 ARMv6-M）。但 #38 的 44 个镜像是宿主
+`--arch thumb1` 预生成、`v6mcheck.py` 已确认只含 v6-M 编码，**未必是同一件事**：
+定案要把 44 个 `t1-*` 重刷一次，看它是否仍 fault，再决定 #38 是关闭还是继续查。
+
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。
 
