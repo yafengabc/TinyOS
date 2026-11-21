@@ -137,36 +137,53 @@ mpy   fib 1146 loop 1570 array 2411 div 876
 @nat  fib 748  loop 631  array 1314 div 469
 ```
 
-## 结果：RP2350 Pico 2（2026-11-21 实测，部分）
+## 结果：RP2350 Pico 2（2026-11-21 实测）
 
-板子：Raspberry Pi Pico 2（RP2350A，8 MiB），两套 SMP 镜像：
+板子：Raspberry Pi Pico 2（RP2350A，8 MiB，150 MHz），USB CDC COM27。
+镜像：`configs/rpi-pico2-rir.conf`（M33 SMP，`csc`/`rvm`/`rcc` 在板上运行）；
+`bench/bench.c` 经 `compare.py` stage 到 `files.local/bench.c` 后编进镜像。
+板上流程：`csc /bench.c /bench.rir` → `rvm /bench.rir` → `rcc /bench.rir /bin/benchc`
+→ `benchc`。四个内核的校验和全部一致（`46368 / 999850000 / 225792000 / 599994`）。
 
-- `rpi-pico2-smp`（Cortex-M33，`rcc_arch = thumb2`），CDC COM27；
-- `rpi-pico2-rv32-smp`（Hazard3 RV32，`rcc_arch = rv32`），同一块板另一侧核心。
+### Cortex-M33 SMP（`rpi-pico2-smp`）
 
-语料由 `python scripts/rp2040/thumb1-prep.py --script ../tinyos-script
---arch thumb2|rv32` 生成，期望输出由宿主 `rvm` 产生；镜像 SHA-256 与完整验收数据见
-`2026-11-21-thumb2-rp2350-ae8c7c7.md` 与 `2026-11-21-corpus-rv32-rp2350-67a70ea.md`
-（两镜像均心跳 6/6、语料 `strict 37/37` 两轮一致）。
-
-| 内核 | 校验和 | M33 SMP / `rcc` (ms) | RV32 SMP / `rcc` (ms) |
+| 内核 | `rvm` (ms) | `rcc` (ms) | 加速比 |
 |---|---:|---:|---:|
-| fib | `46368` | 69 | **60** |
-| loop | `-2014260032` | 1013 | **554** |
+| fib | 289 | **70** | 4.1× |
+| loop | 407 | **44** | 9.3× |
+| array | 799 | **120** | 6.7× |
+| div | 340 | **47** | 7.2× |
 
-读法与限制：
+原始 `BENCH` 行（M33，一次运行）：
 
-- **只有 `rcc` 一列**：板上跑的是 `csc → rcc → 原生 ELF` 的语料程序，不是
-  `scripts/bench/compare.py` 的七引擎表格。`pvm` / `rvm` / `goc32` / `clang` /
-  MicroPython 两版在该板上均未测（`NOT RUN`）；MicroPython 需要单独刷
-  `RPI_PICO2` 固件，`rvm`/`goc32`/`clang` 需要各自对应的镜像；
-- **`array` / `div` 未测**（`NOT RUN`）：当前 44 程序语料里没有这两个内核；
-- **loop 不能和 C3 那张表比**：语料版 `benchloop` 用自减绕回累加器（csc 暂不支持
-  位运算），校验和是 `-2014260032`，不是上面 C3 表的 `999850000`；
-- **fib 可以横向看**：校验和同为 `46368`，M33 69 ms、RV32 60 ms（C3/rcc 84 ms，
-  但板子与时钟不同，只看量级，不作排名）；
-- RV32 的 loop 比 M33 快约 1.8×，这是同一块芯片两侧核心在同一语料下的实测
-  （554 ms vs 1013 ms）。
+```
+rvm  fib 289  loop 407  array 799  div 340
+rcc  fib  70  loop  44  array 120  div  47
+```
 
-按 C3 的脚本补齐这张表的方法见上一节；把 `--port` 换成 Pico 2 的 CDC，
-镜像换成 `configs/rpi-pico2-*.conf`，`rcc` 用 `RCC_ARCH_THUMB2` / `RCC_ARCH_RV32`。
+`rvm` 比 C3 上慢、`rcc` 与 C3 接近（`fib` 70 vs 84、`loop` 44 vs 27、
+`array` 120 vs 71、`div` 47 vs 58），但**板子和时钟都不同**，只作量级参考。
+
+### Hazard3 RV32 SMP（`rpi-pico2-rv32-smp`）：`NOT RUN`
+
+`configs/rpi-pico2-rv32-rir.conf` 的镜像里三个工具都无法 exec：
+
+```text
+exec: '/bin/csc' carries a bad stack hint (16384 bytes)
+exec: '/bin/rvm' carries a bad stack hint (8192 bytes)
+exec: '/bin/rcc' carries a bad stack hint (16384 bytes)
+```
+
+RV32 的 `stack_request_ok()` 要求栈提示整除窗口 grain（这块板 4 KiB），
+而工具分别请求 16/8/16 KiB；M33 走的是另一条分支所以不受影响。已立案 **#44**。
+修好之后按同一套 `compare.py --engine rcc --rvm` 补这一组数字。
+
+### 未测的列
+
+`micropython` / `@native` / `pvm` / `goc32` / `clang` 在两块 RP2350 镜像上均未测
+（`NOT RUN`）：MicroPython 要单独刷 `RPI_PICO2` 固件，`pvm` 要 `csa` 镜像，
+`goc32`/`clang` 要宿主生成的原生镜像。
+
+另外 11-21 的 44 程序语料卡里也记了两个原生 `rcc` 数字（M33 `t1-benchfib` 69 ms /
+`t1-benchloop` 1013 ms，RV32 60 ms / 554 ms），但那版 `benchloop` 的校验和是
+`-2014260032`（累加器自减绕回），**不是本表的 `999850000`**，所以不能并进上表。
