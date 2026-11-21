@@ -200,6 +200,16 @@ def run_checks(con, image, results, opts, boot_text):
     check(results, "E deep 3 grows the stack", out, want=("stack grown",))
     check(results, "E deep 3 journal intact", out, want=("journal intact",))
 
+    # stk asks for its own 16 KiB stack through TOS_STACK.  On a board whose
+    # port puts the stack in its own aligned region (stack_align = 1, the
+    # Hazard3/PMP half) that loads only when the hint divides the window
+    # grain; a mismatch used to reach the board and fail at exec with
+    # "carries a bad stack hint" (issue #44).
+    out = con.cmd("stk 3 100", timeout=30.0)
+    check(results, "E stk 3 loads a 16 KiB stack hint", out,
+          avoid=BAD + ("bad stack hint", "exec:"),
+          note="no hint refusal, no fault")
+
     # --- 33.2: does the second core still earn its keep ---
     if spec["cpus"] > 1:
         out = con.cmd("smpbench", timeout=60.0)
