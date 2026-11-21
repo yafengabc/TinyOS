@@ -93,6 +93,14 @@ class SerialConsole:
         return buf.decode("utf-8", "replace")
 
 
+def run_cmd(con, line, timeout):
+    con.write(line.encode() + b"\r\n")
+    text = con.read_until_prompt(timeout)
+    m = re.search(re.escape(line.split()[0]) + r".*?\r?\n(.*)", text, re.S)
+    body = m.group(1) if m else text
+    return [ln.rstrip("\r") for ln in re.sub(r"tos>\s*$", "", body).splitlines()]
+
+
 def run_one(con, name, timeout):
     con.write(("t1-" + name).encode() + b"\r\n")
     text = con.read_until_prompt(timeout)
@@ -118,6 +126,9 @@ def main():
     ap.add_argument("--dtr", action="store_true", help="assert DTR (USB CDC)")
     ap.add_argument("--replay", help="replay a captured transcript instead")
     ap.add_argument("--set", choices=("all", "core", "extra"), default="all")
+    ap.add_argument("--source", action="store_true",
+                    help="images were staged as .c: run csc, rvm, rcc and the "
+                         "native image on the board for every program")
     ap.add_argument("--timeout", type=float, default=20.0)
     args = ap.parse_args()
     if not args.port and not args.replay:
@@ -157,6 +168,23 @@ def main():
     try:
         emit(con.read_until_prompt(args.timeout))
         for name in strict:
+            if args.source:
+                # One program, three stages: csc -> rvm, rcc -> native run.
+                rir = "/t1-" + name + ".rir"
+                src = "/t1-" + name + ".c"
+                run_cmd(con, "csc " + src + " " + rir, args.timeout)
+                lines = run_cmd(con, "rvm " + rir, args.timeout)
+                run_cmd(con, "rcc " + rir + " /bin/t1c-" + name, args.timeout)
+                native = run_cmd(con, "t1c-" + name, args.timeout)
+                run_cmd(con, "unlink " + rir, args.timeout)
+                want = expected_lines(name)
+                ok = lines == want and native == want
+                emit("%s  %-12s %s" % ("PASS" if ok else "FAIL", name,
+                                       "" if ok else
+                                       f"want={want} rvm={lines} native={native}"))
+                if not ok:
+                    bad += 1
+                continue
             lines = run_one(con, name, args.timeout)
             want = expected_lines(name)
             ok = lines == want
@@ -169,8 +197,9 @@ def main():
             emit("INFO  %-12s %s" % (name, " | ".join(lines[:6])))
             emit("      expect: " + HINTS.get(name, "as documented"))
         emit("")
-        emit("strict %d/%d, eyeball %d listed, transcript %s"
-             % (len(strict) - bad, len(strict), len(eyeball), log_path))
+        emit("strict %d/%d, eyeball %d listed%s, transcript %s"
+             % (len(strict) - bad, len(strict), len(eyeball),
+            " (source mode)" if args.source else "", log_path))
     finally:
         log.close()
     return 0 if bad == 0 else 1

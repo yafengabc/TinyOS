@@ -76,7 +76,11 @@ def main():
     ap.add_argument("--arch", choices=("thumb1", "thumb2"), default="thumb1",
                     help="target core: RP2040 ARMv6-M or RP2350 ARMv7-M")
     ap.add_argument("--config", default=None,
-                    help="TinyOS config (default: rpi-pico or rpi-pico2-quiet)")
+                    help="TinyOS config (default: rpi-pico[-rir] or rpi-pico2-quiet)")
+    ap.add_argument("--source", action="store_true",
+                    help="stage the .c files and let the board compile them "
+                         "(needs a rir image with csc/rvm/rcc; peak window is "
+                         "one tool, not the sum)")
     args = ap.parse_args()
 
     src = os.path.abspath(args.script)
@@ -121,8 +125,9 @@ def main():
         tos = os.path.join(BUILD, n + ".tos")
         if not args.skip_tos:
             run([csc, source, rir])
-            run([rcc, rir, tos])
-        if not os.path.exists(tos):
+            if not args.source:
+                run([rcc, rir, tos])
+        if not args.source and not os.path.exists(tos):
             skipped.append((n, "no .tos"))
             continue
         # expected output: the interpreter, minus its summary line.  sb3 stops
@@ -133,12 +138,17 @@ def main():
             lines = lines[:-1]
         with open(os.path.join(exp_dir, n + ".txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + ("\n" if lines else ""))
-        shutil.copyfile(tos, os.path.join(bin_dir, "t1-" + n))
+        if args.source:
+            # 84 KiB of .c instead of 260 KiB of images, and the board exercises
+            # csc -> rvm -> rcc -> exec for every program.
+            shutil.copyfile(source, os.path.join(TOS, "files.local", "t1-" + n + ".c"))
+        else:
+            shutil.copyfile(tos, os.path.join(bin_dir, "t1-" + n))
         made.append(n)
 
     # A staged image built for the wrong core faults on the first 32-bit
     # instruction.  Check the ARMv6-M subset before anyone flashes this.
-    if args.arch == "thumb1" and made:
+    if args.arch == "thumb1" and made and not args.source:
         check = os.path.join(HERE, "v6mcheck.py")
         staged = [os.path.join(bin_dir, "t1-" + n) for n in made]
         r = subprocess.run([sys.executable, check] + staged,
@@ -151,13 +161,19 @@ def main():
     for n, why in skipped:
         print(f"  skipped {n}: {why}")
 
-    config = args.config or ("configs/rpi-pico.conf" if args.arch == "thumb1"
-                             else "configs/rpi-pico2-quiet.conf")
+    if args.config:
+        config = args.config
+    elif args.arch == "thumb1":
+        config = "configs/rpi-pico-rir.conf" if args.source else "configs/rpi-pico.conf"
+    else:
+        config = "configs/rpi-pico2-quiet.conf"
     run(["go", "run", "./cmd/tos", "build", "-config", config], cwd=TOS)
     board = "rpi-pico" if args.arch == "thumb1" else "rpi-pico2"
     uf2 = os.path.join(TOS, "build", "tinyos-%s.uf2" % board)
     print("\nimage:", uf2 if os.path.exists(uf2) else "(check build/ output)")
     print("arch:", args.arch, " set:", args.set, " programs:", len(made))
+    if args.source:
+        print("source mode: the board compiles each t1-*.c (csc -> rvm -> rcc)")
     print("next: flash build/tinyos-rpi-pico.uf2, then")
     print("      python scripts/rp2040/thumb1-run.py --port COMx --set %s"
           % args.set)

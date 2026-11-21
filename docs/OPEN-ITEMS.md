@@ -437,6 +437,14 @@ HardFault"撤回 `7a25c54` 的卡片；16:14 按原样重建得到**逐字节相
 已由远端 `7c51dae`/`451fa4d` 修掉（`[target] rcc_arch`，配置期拒绝 thumb2 配
 ARMv6-M）。44 个镜像本身经 `v6mcheck.py` 复核为纯 v6-M（`OK (44 image(s))`）。
 
+**板上工具链可以装下（2026-11-21 实测，M0+ 构建）：** `configs/rpi-pico-rir.conf`
+把 csc/rvm/rcc 放进同一个镜像，窗口分别是 128 / 44 / 100 KiB。三者不同时运行，
+峰值 128 KiB，RP2040 的 256 KiB SRAM 够用；`__aeabi_lmul` 由 M0+ 的 libgcc 提供。
+C3 上实测 `csc` 2.4 KB 源 140 ms、`rcc` 95 IR 130 ms，44 个程序一轮约 30–60 秒，
+RP2040 大约翻倍。因此测试可以只 stage 84 KiB 的 `.c`，在板上依次
+`csc -> rvm -> rcc -> exec`，一次覆盖三个阶段（`thumb1-prep.py --source` +
+`thumb1-run.py --source`）。
+
 镜像大小不再需要改 `ramdisk_sectors`：MKFS 装不下时构建会把 ramdisk 翻倍重试，
 直到板子的分区上限（仅 `fs_backing = flash`；disk/embedded 保持固定，因为镜像要
 原样进 RAM）。所以 44 个测试镜像可以直接 stage，RP2040 和 Pico 2 都不用手改板子。
