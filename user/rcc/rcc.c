@@ -155,6 +155,7 @@ static void bind_label(int l)
 }
 
 static int data_strpool, data_arena, data_g, data_argbuf, data_pwmreq;
+static int data_statbuf;
 static int data_va;
 
 /* ---- RIR program analysis ------------------------------------------- */
@@ -387,6 +388,7 @@ static void generate(void)
     data_g = new_label();
     data_argbuf = new_label();
     data_pwmreq = new_label();
+    data_statbuf = new_label();
     analyze();
     rcc_arch_init_labels();
     label_base = label_next;
@@ -407,12 +409,13 @@ static void generate(void)
         g_bytes = 4;
     argbuf_off = (g_bytes + 3) & ~3;
     pwm_off = argbuf_off + 64;
-    bss = pwm_off + 12;
+    bss = pwm_off + 12 + 8;
 
     label_off[data_arena] = data_va;
     label_off[data_g] = data_va + arena_bytes;
     label_off[data_argbuf] = data_va + arena_bytes + argbuf_off;
     label_off[data_pwmreq] = data_va + arena_bytes + pwm_off;
+    label_off[data_statbuf] = data_va + arena_bytes + pwm_off + 12;
     data_bss_size = bss;
 
     out_len = data_off + data_filesz;

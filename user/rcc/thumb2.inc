@@ -452,6 +452,40 @@ static void emit_native_argbuf(int id, int dst)
         e_li(0, id == 12 ? 4 : id == 13 ? 11 : 31);
         e_svc0();
         break;
+    case 19: /* readdir(index, buf, len) */
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);
+        e_ldr_imm(2, 0, 4);
+        e_ldr_imm(3, 0, 8);
+        e_la(0, data_arena);
+        e_add_reg(2, 0, 2);
+        e_li(0, 6); e_svc0();
+        break;
+    case 20: { /* isdir(path) */
+        int no = new_label(), yes = new_label(), done = new_label();
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);
+        e_la(0, data_arena);
+        e_add_reg(1, 0, 1);
+        e_la(2, data_statbuf);
+        e_li(0, 18); e_svc0();          /* SYS_STAT */
+        e_cmp_zero(0);
+        e_bcond(11, no);
+        e_la(2, data_statbuf);
+        e_ldrb_imm(3, 2, 4);
+        e_li(1, 1);
+        e_cmp(3, 1);
+        e_bcond(0, yes);
+        e_li(0, 0);
+        e_b(done);
+        bind_label(no);
+        e_li(0, 0xFFFFFFFFu);
+        e_b(done);
+        bind_label(yes);
+        e_li(0, 1);
+        bind_label(done);
+        break;
+    }
     case 18: /* capture(path, buf, cap) */
         e_la(0, data_argbuf);
         e_ldr_imm(1, 0, 0);

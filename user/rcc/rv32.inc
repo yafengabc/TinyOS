@@ -384,6 +384,34 @@ static void emit_native_argbuf(int id, int dst)
         e_arg_val(X_A2, 2);
         e_call(L_capture);
         break;
+    case 19: /* readdir(index, buf, len) */
+        e_arg_val(X_A0, 0);
+        e_arg_ptr(X_A1, 1);
+        e_arg_val(X_A2, 2);
+        e_li(X_A7, 6);
+        e_ecall();
+        break;
+    case 20: { /* isdir(path) */
+        int no = new_label(), yes = new_label(), done = new_label();
+        e_arg_ptr(X_A0, 0);
+        e_la(X_A1, data_statbuf);
+        e_li(X_A7, 18);                 /* SYS_STAT */
+        e_ecall();
+        e_branch_to(4, X_A0, X_ZERO, no);
+        e_la(X_T3, data_statbuf);
+        e_lbu(X_A0, 4, X_T3);
+        e_li(X_T3, 1);
+        e_branch_to(0, X_A0, X_T3, yes);
+        e_li(X_A0, 0);
+        e_j(done);
+        bind_label(no);
+        e_li(X_A0, -1);
+        e_j(done);
+        bind_label(yes);
+        e_li(X_A0, 1);
+        bind_label(done);
+        break;
+    }
     default:
         die("bad argbuf native");
     }

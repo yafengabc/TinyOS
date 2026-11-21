@@ -25,7 +25,7 @@ enum {
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
     NAT_SLEEP, NAT_UPTIME, NAT_RUN,
     NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK,
-    NAT_CAPTURE
+    NAT_CAPTURE, NAT_READDIR, NAT_ISDIR
 };
 
 typedef struct { int op, a, b, c, d; } RIR;
@@ -524,6 +524,17 @@ int main(int argc, char **argv)
                     if (a0 >= 0 && a0 < arena_size)
                         res = unlink((const char *)(arena + a0));
                     break;
+                case NAT_READDIR:
+                    if (a0 >= 0 && a1 >= 0 && a2 > 0 && a1 + a2 <= arena_size)
+                        res = readdir_index(a0, (char *)(arena + a1), a2);
+                    break;
+                case NAT_ISDIR: {
+                    struct stat st;
+                    if (a0 >= 0 && a0 < arena_size &&
+                        stat((const char *)(arena + a0), &st) == 0)
+                        res = st.type == 1;      /* TOS_FTYPE_DIR */
+                    break;
+                }
                 case NAT_CAPTURE: {
                     /* run(path) with its stdout wired into a pipe.  The child
                      * inherits fd 1 at exec time, so the parent points fd 1 at
