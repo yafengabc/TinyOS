@@ -305,7 +305,7 @@ python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-rv32-smp --rounds
 python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
 ```
 
-单核镜像和 `accept33.py` 的 24 项表仍可用于排查，但**不是关闭依据**（那张表是 ATK
+单核镜像和 `accept33.py` 的 24 项 + #44 的 `stk` 一项表仍可用于排查，但**不是关闭依据**（那张表是 ATK
 的 LCD/TF/按键假设）。
 
 - UART0 在 GP0/GP1（115200 8N1，需要一个 USB-TTL 适配器）；板上 USB（2e8a:000a）
@@ -320,7 +320,7 @@ python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
   以及首行串口用猜测的 12 MHz 算分频（把前面两处伪装成“死机”）。
   详见 `docs/PICO2-VS-ATK-BOOT.md` 与 `docs/acceptance/2026-11-18-pico2-boot-rp2350-cff442f.md`。
 - 仍不要把 ATK 镜像刷到 Pico 2（LED/屏幕/flash 大小都不同），也不要反过来。
-- 未纳入的项：屏幕、TF 卡、PIO 灯带（板子没有这些外设）；`accept33.py` 的 24 项表
+- 未纳入的项：屏幕、TF 卡、PIO 灯带（板子没有这些外设）；`accept33.py` 的 24 项 + #44 的 `stk` 一项表
   只适用于 ATK 四个镜像。
 - GP25 上的 1 Hz 心跳目前**不会亮**（`led_set()` 仍硬编码 GP3，issue #27）；
   判断“内核活着”请看串口或 `uptime`。
