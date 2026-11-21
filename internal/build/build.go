@@ -402,12 +402,20 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 		// specific bits behind this macro so the M3 build is unaffected.
 		if chip == "rp2040" {
 			archFlags = append(archFlags, "-DTOS_ARM_M0P")
+			// rcc picks its code generator from a compile-time macro, and the
+			// generic __arm__ fallback is Thumb-2.  On an M0+ that produces
+			// images that fault on their first 32-bit instruction, so the
+			// board has to say which core it is.
+			archFlags = append(archFlags, "-DRCC_ARCH_THUMB1")
 			// M0+ has no LDREX/STREX.  The SMP build uses one of the
 			// SIO hardware spinlocks as the gate behind the software lock
 			// flag, exactly like the RP2350 port (see arch/arm/platform.c).
 			if b.Target.CPUs > 1 {
 				archFlags = append(archFlags, "-DTOS_ARM_SIO_SPIN")
 			}
+		}
+		if chip == "rp2350" {
+			archFlags = append(archFlags, "-DRCC_ARCH_THUMB2")
 		}
 		// Cortex-M33 has an MPU, but it is ARMv8-M PMSAv8 (PRBAR/PRLAR plus
 		// MAIR), not the ARMv7-M one: same region model on top, different
