@@ -426,7 +426,14 @@ native、`capture`），47 个语料中除 2 个故意编译失败的用例，�
 - 没有 `udiv/sdiv/mls/smull`：软件除法（32 次移位减法）和 16×16 分块乘法；
 - 窗口约 90 KiB（与 rv32 相同量级）。
 
-**RP2040 上板需要 BOOTSEL 或 picotool**，仓库里还没有自动化的 UF2 流程。
+**RP2040 上板：HardFault，待定位（2026-11-21）。** 第一次上板（`7a25c54`）板上
+直接 HardFault；当天的"PASS"卡片已撤回（`2026-11-21-thumb1-rp2040-7a25c54.md`
+顶部有说明），#38 重新打开。本机复核：`thumb1-prep.py --arch thumb1` 生成的 44 个
+镜像代码段只含 ARMv6-M 编码（`scripts/rp2040/v6mcheck.py` 现在是 prep 的硬性检查），
+所以先排除"镜像其实是 Thumb-2"；下一步需要故障现场（pc/lr/寄存器）或可复现镜像。
+
+RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
+只负责等待盘符并拷贝。
 
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。

@@ -135,6 +135,17 @@ def main():
         shutil.copyfile(tos, os.path.join(bin_dir, "t1-" + n))
         made.append(n)
 
+    # A staged image built for the wrong core faults on the first 32-bit
+    # instruction.  Check the ARMv6-M subset before anyone flashes this.
+    if args.arch == "thumb1" and made:
+        check = os.path.join(HERE, "v6mcheck.py")
+        staged = [os.path.join(bin_dir, "t1-" + n) for n in made]
+        r = subprocess.run([sys.executable, check] + staged,
+                           capture_output=True, text=True)
+        print(r.stdout.strip())
+        if r.returncode != 0:
+            raise SystemExit("refusing to continue: non-ARMv6-M images staged")
+
     print(f"\nstaged {len(made)} images in files.local/bin")
     for n, why in skipped:
         print(f"  skipped {n}: {why}")
