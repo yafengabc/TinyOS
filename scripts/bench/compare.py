@@ -47,7 +47,10 @@ class Console:
     def __init__(self, port, dtr=False):
         import serial
         self.s = serial.Serial(port, 115200, timeout=0.1)
-        self.s.dtr = bool(dtr)
+        # Only touch DTR when the caller asks: on a CH340 the line is wired to
+        # the auto-reset circuit, and clearing it reboots the board.
+        if dtr:
+            self.s.dtr = True
         self.s.reset_input_buffer()
 
     def write(self, data):
@@ -65,6 +68,7 @@ class Console:
         return buf.decode("utf-8", "replace")
 
     def cmd(self, line, timeout=120.0):
+        self.s.reset_input_buffer()
         self.write(line.encode() + b"\r\n")
         return self.prompt(timeout)
 
@@ -95,6 +99,12 @@ def tos_phase(args):
     results = {}
     try:
         con.prompt(args.timeout)
+        if args.engine in ("clang", "goc32"):
+            text = con.cmd("bench" + ("clang" if args.engine == "clang" else "goc"),
+                           args.run_timeout)
+            results[args.engine] = parse(text)
+            print(text)
+            return results
         if args.engine == "pvm":
             if args.compile:
                 print(con.cmd("csa /bench.c /bench.amx", 180))
@@ -174,8 +184,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-p", "--port", help="serial port of the TinyOS console")
     ap.add_argument("--dtr", action="store_true", help="assert DTR (USB CDC)")
-    ap.add_argument("--engine", choices=("pvm", "rvm", "rcc"), default=None,
-                    help="TinyOS engine to measure (rvm/rcc need a rir image)")
+    ap.add_argument("--engine",
+                    choices=("pvm", "rvm", "rcc", "clang", "goc32"),
+                    default=None,
+                    help="engine to measure; clang/goc32 are native images "
+                         "built by the host (see docs/BENCH.md)")
     ap.add_argument("--rvm", action="store_true",
                     help="with --engine rcc: also measure rvm on the same image")
     ap.add_argument("--no-compile", dest="compile", action="store_false",

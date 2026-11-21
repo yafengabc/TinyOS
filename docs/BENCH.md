@@ -77,21 +77,67 @@ python scripts/bench/compare.py --report
 - `csc` 目前一次 `printf` 只支持一个转换，也没有位运算符 `&`；内核因此把 ms 和
   sum 分成两行打印，累加器用自减绕回而不是掩码。跨语言对照时这一点必须保持一致。
 
-## 结果（待填）
+## 附加两列：clang 与 goc32
 
-板子：ESP32-C3，160 MHz，`configs/esp32c3*.conf`；每次运行取 1 次（抖动大的再加）。
+同一个 `bench/bench.c` 还可以用两个**宿主编译器**生成原生镜像，和 `rcc` 对照：
 
-| 内核 | micropython | @native | pvm | rvm | rcc |
-|---|---:|---:|---:|---:|---:|
-| fib | | | | | |
-| loop | | | | | |
-| array | | | | | |
-| div | | | | | |
+```sh
+# clang：把 bench/clang/benchclang.c 放进 user/ 让正常构建（clang -Oz）编译它
+mkdir -p user/benchclang
+cp bench/clang/benchclang.c user/benchclang/benchclang.c
+go run ./cmd/tos build -config configs/esp32c3-rir.conf
+python scripts/esp-c3/flash.py --full -p COM4
+# 板上：benchclang
+rm -rf user/benchclang          # 这个目录只为测量存在，不要提交
 
-记录：镜像 commit、MicroPython 版本、串口、原始 `BENCH` 行。
+# goc32：纯 Go 的 C 编译器，直接产出 LZ4TOS
+(cd goc32 && go build -o bin/goc32.exe .)
+goc32/bin/goc32.exe bench/bench.c        # -> bench/bench.tos
+cp bench/bench.tos files.local/bin/benchgoc
+go run ./cmd/tos build -config configs/esp32c3-rir.conf
+python scripts/esp-c3/flash.py --full -p COM4
+# 板上：benchgoc
+```
+
+`bench/clang/benchclang.c` 是 `bench/bench.c` 加上 `#include "lib.h"` 与
+`TOS_STACK(4*1024)`（普通 user 程序的形状），内核与输出格式完全相同。
+
+## 结果：ESP32-C3（2026-11-21 实测）
+
+板子：ESP32-C3 core（CH340K），RV32IMC，160 MHz，4 MiB flash，COM4。
+MicroPython：`ESP32_GENERIC_C3-20260824-v1.29.0.bin`。
+TinyOS：`configs/esp32c3-rir.conf`（csc/rvm/rcc）与 `configs/esp32c3.conf`（csa/pvm）。
+每次运行一遍，校验和全部一致（`46368 / 999850000 / 225792000 / 599994`）。
+
+| 内核 | micropython | @native | pvm | rvm | goc32 | rcc | clang |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fib | 1146 | 748 | 603 | 343 | 29 | 84 | **15** |
+| loop | 1570 | 631 | 1976 | 487 | **27** | **27** | 17 |
+| array | 2411 | 1314 | 3518 | 977 | 48 | 71 | **26** |
+| div | 876 | 469 | 1274 | 440 | 54 | 58 | **27** |
+
+读法：
+
+- **解释器组**：`rvm` 比 `pvm` 快 1.8–3.6×（fib 1.8×、loop 4.1×、array 3.6×、div 2.9×），
+  比 MicroPython 字节码快 1.9–3.3×，比 `@native` 快 1.1–1.6×；
+- **原生组**：`clang -Oz` 最快；`goc32` 与 `rcc` 互有胜负（loop 打平，fib/array/div
+  rcc 慢 2–3×）。`rcc` 的代码生成没有寄存器分配和指令调度，这个差距是预期的；
+- `@native` 相对字节码只快 1.2–2.5×：它仍是 emitter 产物，不是手写原生。
+
+原始 `BENCH` 行（C3，一次运行）：
+
+```
+rvm   fib 343  loop 487  array 977  div 440     (ms)
+rcc   fib  84  loop  27  array  71  div  58
+pvm   fib 603  loop 1976 array 3518 div 1274
+goc32 fib  29  loop  27  array  48  div  54
+clang fib  15  loop  17  array  26  div  27
+mpy   fib 1146 loop 1570 array 2411 div 876
+@nat  fib 748  loop 631  array 1314 div 469
+```
 
 ## RP2350（以后）
 
 同一套脚本，把 `--port` 换成 Pico 2 的串口、`--engine rcc` 的镜像换成
 `configs/rpi-pico2-*.conf`，`rcc` 用 `RCC_ARCH_THUMB2`；MicroPython 换成
-`RPI_PICO2` 固件。表结构不变，直接加一列。
+`RPI_PICO2` 固件，clang/goc32 用 `--arch thumb2` 的构建。表结构不变，直接加一组行。
