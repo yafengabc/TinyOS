@@ -464,6 +464,14 @@ RP2040 大约翻倍。因此测试可以只 stage 84 KiB 的 `.c`，在板上依
 直到板子的分区上限（仅 `fs_backing = flash`；disk/embedded 保持固定，因为镜像要
 原样进 RAM）。所以 44 个测试镜像可以直接 stage，RP2040 和 Pico 2 都不用手改板子。
 
+**RP2350 RV32 的窗口粒度是 16 KiB，不是 4 KiB。** PMP 端口把栈放在独立的
+NAPOT 区域，`stack_request_ok()` 要求栈提示整除 `PLAT_APP_GRAIN`，而板上工具
+（csc/rcc）要 16 KiB 栈。所以 `board/rp2350rv-generic/layout.c` 覆盖 ARM 基线
+的 4 KiB，用 16 KiB（24 个窗口）；`board.conf` 里配 `stack_align = 1`，构建把它
+生成成 `TOS_APP_STACK_ALIGN`，内核钩子读同一个值。`tos build` 通过
+`mklfs --grain` 在打包时校验每个程序的栈提示，不合格直接报程序名——以前只有内核
+在 exec 时才拒绝（#44）。ARM 半边用 MPU，保持 4 KiB。
+
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。
 

@@ -29,6 +29,10 @@
 #define CACHE_SIZE 512
 
 static uint8_t *disk;
+/* --grain N: the board puts the stack in its own aligned region, so a stack
+ * hint that does not divide the window grain is refused by the kernel at exec
+ * time (stack_request_ok).  Refuse it here instead, with the file name. */
+static long opt_grain;
 static lfs_t    lfs;
 static struct lfs_config cfg;
 static uint8_t readbuf[CACHE_SIZE] __attribute__((aligned(8)));
@@ -295,6 +299,15 @@ static int write_file(const char *name, const char *src)
             rc = -1;
             goto out;
         }
+        if (opt_grain > 0 && stack != 0 && opt_grain % (long)stack != 0) {
+            fprintf(stderr,
+                    "mklfs: %s asks for a %u-byte stack, which does not divide "
+                    "the %ld-byte window grain this board requires\n",
+                    name, (unsigned)stack, opt_grain);
+            free(comp);
+            rc = -1;
+            goto out;
+        }
         uint8_t hdr[LZ4_WRAP_HEADER_V1];
         memset(hdr, 0, sizeof(hdr));
         memcpy(hdr, "LZ4TOS", 6);
@@ -529,11 +542,16 @@ int main(int argc, char **argv)
     if (argc < 2) {
         fprintf(stderr,
                 "usage:\n"
-                "  mklfs <image> <size> <base-dir> <name> [name...]\n"
+                "  mklfs [--grain N] <image> <size> <base-dir> <name> [name...]\n"
                 "  mklfs -v <image>\n");
         return 1;
     }
     if (strcmp(argv[1], "-v") == 0)
         return verify(argc, argv);
+    if (strcmp(argv[1], "--grain") == 0 && argc > 3) {
+        opt_grain = atol(argv[2]);
+        argv += 2;
+        argc -= 2;
+    }
     return create(argc, argv);
 }

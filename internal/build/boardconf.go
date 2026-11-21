@@ -46,6 +46,11 @@ type BoardConfig struct {
 	WindowGrain     int
 	WindowStack     int
 	WindowGuard     int
+	/* WindowStackAlign: the port puts the stack in its own aligned region, so
+	 * a requested stack must divide the grain (kernel stack_request_ok).
+	 * Declared here so the build can refuse an image the kernel would reject
+	 * at exec time, and so the kernel hook reads the same number. */
+	WindowStackAlign int
 }
 
 // LFSBlocks is the size of the littlefs partition in 4 KiB blocks: from the
@@ -248,6 +253,15 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	}
 	if bc.WindowGuard, err = windowSize("guard"); err != nil {
 		return nil, err
+	}
+	if raw := strings.TrimSpace(w["stack_align"]); raw != "" {
+		v, perr := parseOnOff(raw)
+		if perr != nil {
+			return nil, fmt.Errorf("%s: [window] stack_align: %w", relName(root, path), perr)
+		}
+		if v {
+			bc.WindowStackAlign = 1
+		}
 	}
 	return bc, nil
 }

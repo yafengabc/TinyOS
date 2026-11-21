@@ -143,7 +143,13 @@ func TestMklfsWindowHint(t *testing.T) {
 	}
 
 	img := filepath.Join(dir, "lfs.img")
-	args := append([]string{img, "307200", stage}, names...)
+	/* The throwaway image only has to hold the staging tree, which is whatever
+	 * the last `tos build` left behind (a rir image stages csc + rcc + the
+	 * corpus, ~240 KiB of ELF plus littlefs block overhead).  A fixed 300 KiB
+	 * image stopped fitting; the size is not part of any assertion here, so
+	 * pick one that is comfortably above the data. */
+	need := 2 * 1024 * 1024
+	args := append([]string{img, strconv.Itoa(need), stage}, names...)
 	if b, err := exec.Command(mklfs, args...).CombinedOutput(); err != nil {
 		t.Fatalf("mklfs create failed: %v\n%s", err, b)
 	}

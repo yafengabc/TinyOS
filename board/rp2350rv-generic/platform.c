@@ -1840,7 +1840,10 @@ uint32_t plat_window_grow_reserve(void)
 
 int plat_window_needs_stack_alignment(void)
 {
-    return 1;
+    /* board.conf [window] stack_align.  The PMP port needs it; the number is
+     * generated so the build can validate hints with the same value the
+     * kernel enforces at exec time. */
+    return TOS_APP_STACK_ALIGN;
 }
 
 /* ---- bringing core 1 up ------------------------------------------------ */

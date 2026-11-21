@@ -37,6 +37,7 @@ func (b *Builder) writeBoardHeader() error {
 	fmt.Fprintf(&sb, "#define TOS_APP_GRAIN %#xu\n", uint32(bc.WindowGrain))
 	fmt.Fprintf(&sb, "#define TOS_APP_STACK %#xu\n", uint32(bc.WindowStack))
 	fmt.Fprintf(&sb, "#define TOS_APP_GUARD %#xu\n", uint32(bc.WindowGuard))
+	fmt.Fprintf(&sb, "#define TOS_APP_STACK_ALIGN %d\n", bc.WindowStackAlign)
 	sb.WriteString("\n")
 	/* Flash geometry, for boards that mount littlefs straight off the QSPI
 	 * chip.  Same contract as the window numbers above: layout.c declares

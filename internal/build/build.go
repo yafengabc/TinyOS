@@ -1790,7 +1790,14 @@ func (b *Builder) buildFSImage(bins []string) error {
 	}
 	tool := filepath.Join(b.BuildDir, "mklfs.exe")
 	for {
-		args := []string{ramdiskPath, fmt.Sprintf("%d", size), stage}
+		args := []string{}
+		if b.BoardConfig != nil && b.BoardConfig.WindowStackAlign != 0 {
+			/* The kernel refuses a stack hint that does not divide the grain
+			 * (stack_request_ok); fail here instead, with the program name. */
+			args = append(args, "--grain",
+				fmt.Sprintf("%d", b.BoardConfig.WindowGrain))
+		}
+		args = append(args, ramdiskPath, fmt.Sprintf("%d", size), stage)
 		args = append(args, names...)
 		err := b.runTool(tool, args, "MKFS")
 		if err == nil {
