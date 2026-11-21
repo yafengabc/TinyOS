@@ -42,6 +42,20 @@ TOS = os.path.abspath(os.path.join(HERE, "..", ".."))
 BUILD = os.path.join(TOS, "build", "bench")
 LINE = re.compile(r"^BENCH (\w+) (ms|sum)=(-?\d+)$")
 
+# Every engine the report prints, so a partial run cannot look complete.
+ALL_ENGINES = ["micropython", "micropython-native", "pvm", "rvm", "goc32",
+               "rcc", "clang"]
+# Why an engine needs a different image or a different tool.
+ENGINE_NEEDS = {
+    "micropython": "MicroPython firmware (not the TinyOS image)",
+    "micropython-native": "MicroPython firmware (not the TinyOS image)",
+    "pvm": "csa+pvm image (no rir feature)",
+    "rvm": "rir image (csc+rvm)",
+    "goc32": "a goc32-built /bin/benchgoc in the image",
+    "rcc": "rir image (csc+rcc)",
+    "clang": "a clang-built /bin/benchclang in the image",
+}
+
 
 class Console:
     def __init__(self, port, dtr=False):
@@ -90,6 +104,59 @@ def stage(name, data):
     with open(path, "wb") as f:
         f.write(data)
     print("staged", path)
+
+
+def probe(con, timeout):
+    """What this image can measure: which tools and which bench inputs exist."""
+    bins = con.cmd("ls /bin", timeout)
+    root = con.cmd("ls /", timeout)
+    have = {n: (n in bins) for n in ("csc", "rvm", "rcc", "csa", "pvm",
+                                     "benchclang", "benchgoc")}
+    have["bench.c"] = "bench.c" in root
+    have["bench.rir"] = "bench.rir" in root
+    have["bench.amx"] = "bench.amx" in root
+    return have
+
+
+def auto_phase(args):
+    """Run every engine the current image can run; the rest is NOT RUN."""
+    con = Console(args.port, args.dtr)
+    results = {}
+    try:
+        con.prompt(args.timeout)
+        have = probe(con, args.timeout)
+        print("image provides:", ", ".join(sorted(k for k, v in have.items() if v)))
+
+        # One .rir feeds rvm and rcc.
+        if have["csc"] and have["bench.c"]:
+            print(con.cmd("csc /bench.c /bench.rir", 180))
+        if have["bench.rir"]:
+            if have["rvm"]:
+                text = con.cmd("rvm /bench.rir", args.run_timeout)
+                print(text)
+                results["rvm"] = parse(text)
+            if have["rcc"]:
+                print(con.cmd("rcc /bench.rir /bin/benchc", 180))
+                text = con.cmd("benchc", args.run_timeout)
+                print(text)
+                results["rcc"] = parse(text)
+
+        if have["pvm"]:
+            if have["csa"] and have["bench.c"]:
+                print(con.cmd("csa /bench.c /bench.amx", 180))
+            if have["bench.amx"]:
+                text = con.cmd("pvm /bench.amx", args.run_timeout)
+                print(text)
+                results["pvm"] = parse(text)
+
+        for engine, prog in (("clang", "benchclang"), ("goc32", "benchgoc")):
+            if have[prog]:
+                text = con.cmd(prog, args.run_timeout)
+                print(text)
+                results[engine] = parse(text)
+    finally:
+        con.s.close()
+    return results
 
 
 def tos_phase(args):
@@ -163,7 +230,9 @@ def report():
     for f in files:
         data[f[:-5]] = json.load(open(os.path.join(BUILD, f), encoding="utf-8"))
     kernels = ["fib", "loop", "array", "div"]
-    engines = list(data)
+    engines = [e for e in ALL_ENGINES if e in data] + \
+              [e for e in data if e not in ALL_ENGINES]
+    missing = [e for e in ALL_ENGINES if e not in data]
     print("| kernel | " + " | ".join(engines) + " |")
     print("|---|" + "---:|" * len(engines))
     for k in kernels:
@@ -172,6 +241,10 @@ def report():
             row = data[e].get(k)
             cells.append(f"{row['ms']} ms" if row else "-")
         print(f"| {k} | " + " | ".join(cells) + " |")
+    if missing:
+        print("\nNOT RUN:")
+        for e in missing:
+            print(f"  {e:18} needs {ENGINE_NEEDS.get(e, 'a different image')}")
     print("\nchecksums:")
     for k in kernels:
         sums = {e: data[e].get(k, {}).get("sum") for e in engines}
@@ -197,6 +270,8 @@ def main():
                     help="run MicroPython over mpremote instead of the board")
     ap.add_argument("--mpremote", default="", help="extra mpremote args")
     ap.add_argument("--report", action="store_true", help="print the table")
+    ap.add_argument("--auto", action="store_true",
+                    help="run every engine the current image can run")
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--run-timeout", type=float, default=300.0)
     args = ap.parse_args()
@@ -205,6 +280,11 @@ def main():
         return report()
     if args.mpy:
         save(mpy_phase(args))
+        return 0
+    if args.auto:
+        if not args.port:
+            ap.error("--auto needs --port")
+        save(auto_phase(args))
         return 0
     if not args.port or not args.engine:
         ap.error("need --port and --engine, or --mpy, or --report")

@@ -4,6 +4,36 @@
 本文只描述方法与脚本；结果表在最后。ESP32-C3 是完整七列；RP2350 目前只有
 `rcc` 原生的两行（见对应小节），其余列标 `NOT RUN`。
 
+> **两套东西，别混：**
+> - `bench/bench.c` + `bench/bench.py` 是**计时基准**：4 个内核（fib/loop/array/div），
+>   一次跑完只有 4 行 `BENCH`。
+> - `tests/*.c`（44 个）是**功能回归语料**，用来看正确性，不是基准。
+>   把语料当基准跑出来的表只有 `rcc` 一列，而且没有 array/div 这两个内核——
+>   那不是本表，别贴进结果。
+
+## 一条命令（推荐）
+
+镜像里有什么工具，就跑什么引擎，缺的显式记 `NOT RUN`：
+
+```sh
+python scripts/bench/compare.py --auto --port COM4
+python scripts/bench/compare.py --report
+```
+
+`--auto` 先探测 `/bin` 和 `/`：有 csc 就编 `/bench.c`，有 rvm/rcc 就跑，
+有 `benchclang`/`benchgoc` 就跑，镜像带 csa/pvm 就跑 amx。`--report` 会把
+七个引擎全部列出，没测的写 `NOT RUN` 和原因，避免"只出一列"看起来像完整结果。
+
+哪些引擎在哪个镜像里：
+
+| 引擎 | 需要的镜像/固件 |
+|---|---|
+| `rvm`, `rcc` | rir 镜像（csc+rvm+rcc），`bench.c` 在根目录 |
+| `pvm` | 默认镜像（csa+pvm，无 rir） |
+| `clang` | 镜像里含 `/bin/benchclang`（见下节） |
+| `goc32` | 镜像里含 `/bin/benchgoc`（见下节） |
+| `micropython`, `-native` | 刷 MicroPython 固件（`--mpy`，在宿主跑 mpremote） |
+
 ## 被测对象
 
 | 名称 | 是什么 | 怎么跑 |
