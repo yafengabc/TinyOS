@@ -164,7 +164,7 @@ MicroPython 没有 RV32 固件）。板与板之间只比同一个引擎，时�
 | | `rcc` | 61 | 27 | 60 | 42 |
 | | `clang` | **14** | **15** | **14** | **20** |
 
-\* M33 的 `goc32` `div` 原先是 1338 ms：`goc32` 的 ARM 后端对每个 `%` 都发
+注：M33 的 `goc32` `div` 原先是 1338 ms：`goc32` 的 ARM 后端对每个 `%` 都发
 `bl __aeabi_idivmod`，而它用自己的前端编译 `user/aeabi.c`（预处理器不认识
 `__ARM_ARCH_EXT_IDIV__`），于是落进 32 步软件循环。**#45 已修**：goc32 的 Thumb-2
 后端现在在有 IDIV 的核上直接发 `udiv`/`sdiv`，余数用 `mul`+`subs` 展开；ARMv6-M

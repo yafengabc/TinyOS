@@ -6,36 +6,16 @@
  *
  * The Cortex-M0+ (RP2040) has no hardware divide, so every / and % that the
  * compiler cannot fold into a shift becomes a call to __aeabi_uidiv and
- * friends.  The Cortex-M3 (qemu-mps2) and M33 (RP2350) have UDIV/SDIV: clang
- * emits those directly and never references this file, so --gc-sections drops
- * it from a clang-built program.
- *
- * Not every compiler does, though: goc32's ARM backend always emits
- * `bl __aeabi_idivmod`, so on an M33 its every division landed in the 32-step
- * loop below instead of a single SDIV (measured on the Pico 2 as 1338 ms for
- * the div kernel against 40 ms on the RV32 half).  When the core has
- * __ARM_ARCH_EXT_IDIV__, use the instruction even though the caller came
- * through the EABI helper.
- *
- * User programs link only crt0 + lib + syscall, so unlike the kernel they
- * cannot borrow kernel/libgcc.c; the helpers here are self-contained.
+ * friends.  The Cortex-M3 (qemu-mps2) has UDIV/SDIV, so nothing references
+ * this file there and --gc-sections drops it.  User programs link only
+ * crt0 + lib + syscall, so unlike the kernel they cannot borrow
+ * kernel/libgcc.c; the helpers here are self-contained.
  *
  * The divmod entry points return the quotient and the remainder in separate
  * registers (r0 and r1), which a C function cannot express - AAPCS would
  * hand a two-int struct back through a hidden pointer.  Like the kernel,
  * the shims marshal registers by hand and call a plain C helper. */
 
-#if defined(__ARM_ARCH_EXT_IDIV__)
-uint32_t __aeabi_uidiv(uint32_t n, uint32_t d)
-{
-    return d ? n / d : 0;
-}
-
-int __aeabi_idiv(int n, int d)
-{
-    return d ? n / d : 0;
-}
-#else
 static uint32_t tos_udiv32(uint32_t n, uint32_t d)
 {
     uint32_t q = 0, r = 0;
@@ -66,7 +46,6 @@ int __aeabi_idiv(int n, int d)
     uint32_t q = tos_udiv32(un, ud);
     return neg ? -(int)q : (int)q;
 }
-#endif
 
 __asm__(
     "    .syntax unified\n"
