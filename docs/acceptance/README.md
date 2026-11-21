@@ -165,3 +165,4 @@
 | 2026-11-21 | 用户态堆改为 first-fit 空闲链表 | `d24cbf5` | QEMU rv32 + mps2 + 18 目标（无板） | T0/T1/T2 PASS（宿主机 mock sbrk 用例、rv32 的 wheap/mem/bench/deep、mps2 的 kthreadtest/prodcons、goc32 benchgoc 校验和不变）；T3/T4 `NOT RUN` | [userland heap](2026-11-21-userland-heap-d24cbf5.md) |
 | 2026-11-21 | goc32 Thumb-2 硬件除法（#45） | `b697eb6` | Pico 2 M33/RV32 + goc32 单测 | T0/T1/T3 PASS（M33 div 1343 ms → 34 ms；RV32 无回归）；RP2040 真机 `NOT RUN` | [goc32 hwdiv](2026-11-21-goc32-hwdiv-b697eb6.md) |
 | 2026-11-21 | 回退 EABI 硬件除法分支（#45 由 goc32 修复） | `022b451` | QEMU arm/rv32 + 18 目标（无板） | T0/T1/T2 PASS（tostest arm/rv32 smoke、goc32 与 native32 单测）；T3/T4 `NOT RUN`（板上 34 ms 见 #45 卡片） | [aeabi revert](2026-11-21-aeabi-revert-022b451.md) |
+| 2026-11-21 | Pico 2 单核 ARM 起不来（#42）：QMI 探测 CLKDIV 被清零 | `5557f33` | Pico 2 CDC COM27（rpi-pico2 + 44 语料） | T0/T1 PASS；T3 PASS（枚举、uptime 32.8 s、心跳 4/6；SMP 对照 6/6）；T2/T4 `NOT RUN`；遗留：控制台输出约 192 B 截断，另案 | [uni arm boot](2026-11-21-pico2-uni-arm-boot-5557f33.md) |

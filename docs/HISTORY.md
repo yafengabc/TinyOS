@@ -5610,3 +5610,32 @@ code 3 块 + data 4 块 + stack 1 块 = 8 块。
 - T3 `NOT RUN`（没有板子）。
 
 未做：`realloc`/`calloc`、线程安全的锁、收缩 break。需要确定性时仍推荐固定块池。
+
+## 104. 2026-11-21 单核 ARM 起不来：QMI 探测的 CLKDIV 被清零（#42）
+
+现象是 Pico 2 单核 ARM 镜像从不到 USB 枚举，UART0 上 `[A]..[E] usb hw=1 cfg=0`，约 4 秒
+一轮复位，`[PREV]` 全 0。此前分不开的两个变量（1 MiB 初始镜像 / quiet 配置）其实都不相关。
+
+ARM 端口一直**没有** `plat_boot_stage()` 实现（只有 RV32 有），`[E]` 到 banner 之间是盲区，
+所以先补它：一次 .noinit 存储（不读寄存器——RV32 环形日志自己的注释记录了这些读会干扰被
+测的启动），下一次启动打印 `[PREV] ph=NN`，并在每个阶段喂狗（看门狗在时钟树起来前就上膛，
+而只有 tick 喂它）。再在探测内部用 RAM 常驻的原始 UART 单字节标记，得到 `1234` 后停在
+CS 拉低之后、FIFO 循环之内。
+
+根因在 `rp2350_flash_detect_jedec()`：写 `QMI_DIRECT_CSR` 只写了 `EN|ASSERT_CS0N`。
+CLKDIV[29:22] 是这个寄存器的字段、复位值 6；不写它就是 0，等于 SCK = clk_sys = 150 MHz，
+这颗芯片不回应，`RXEMPTY` 永远不清，于是每个字节的两次有界等待各跑满 `qmi_spin_limit()`
+（约 1e6 次，实测每次约 0.4 s）。整个探测拖到数秒，落在 XIP 关闭窗口内、tick 之前，2.1 s
+后看门狗把启动踢掉——这就是"没有 banner、没有 fault"的形态。
+
+修法三条：保留 CLKDIV 并在退出时恢复原寄存器值（写 0 同样清分频）；有界等待从 1e6 降到
+20000（要答就是微秒级，不答必须快速失败，探针整体从数秒降到约 20 ms，容量改由 ROM 的
+FLASH_DEVINFO 兜底，`/proc/flash` 一直报的 8 MiB 就是它）；`plat_boot_stage()` 阶段喂狗。
+
+结果：单核镜像枚举、启动到 shell（uptime 32.8 s / tick 1000 Hz / cpus=1），SMP 对照
+心跳 6/6 不变。单核心跳仍 4/6——第 3、6 项失败的原因是**控制台输出在约 192 字节处截断**
+（`ls /bin` 停在 `coremark`，`crash` 停在 `sfar=…`），SMP 没有这个现象，另开 #46 追。
+
+顺带同步了一处钉住副本漂移：`user/rcc/thumb1.inc` 在 TinyOS 侧带着 #43 的修复（add 的
+目标寄存器在被覆盖前先保存），tinyos-script 侧还没有，`TestPinnedToolchainSources` 因此
+变红；把它复制过去并在 canon 仓提交（`78df25c`）。
