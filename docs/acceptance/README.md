@@ -161,3 +161,4 @@
 | 2026-11-21 | Pico 2 RV32 SMP 脚本跑分（#44 修复后） | `412038c` | Pico 2（COM27）+ rv32 rir 镜像 | T0/T1/T3 PASS（rvm 281/397/803/352 ms，rcc 61/27/60/42 ms）；余列 `NOT RUN` | [bench pico2 rv32](2026-11-21-bench-pico2-rv32-412038c.md) |
 | 2026-11-21 | Pico 2 两侧 SMP 完整脚本跑分（clang/goc32/MicroPython） | `930fd31` | Pico 2（COM27/COM22）+ 多镜像 | T0/T1/T3 PASS（七列数据，校验和全一致）；pvm 与 RV32 MicroPython `NOT RUN` | [bench pico2 full](2026-11-21-bench-pico2-full-930fd31.md) |
 | 2026-11-21 | 跑分总表（纵向）+ M33 goc32 div 的 EABI helper 修复 | `9ee7a1f` | QEMU mps2-an385 + 18 目标（M33 无板） | T0/T1/T2 PASS（同一份 goc32 镜像在 mps2 上 div 69→4 ms，校验和不变）；T3/T4 `NOT RUN`（M33 需重编 benchgoc 后重测） | [bench table](2026-11-21-bench-table-aeabi-9ee7a1f.md) |
+| 2026-11-21 | Pico 2 两侧 pvm 跑分；goc32 M33 div 复测 | `24c8284` | Pico 2（COM27）+ scripting 镜像 | T0/T1/T3 PASS（pvm M33 398/1337/2358/841，RV32 526/1724/3078/1106）；goc32 div 仍 1343 ms，#45 | [pvm + goc32](2026-11-21-bench-pvm-goc32-24c8284.md) |
