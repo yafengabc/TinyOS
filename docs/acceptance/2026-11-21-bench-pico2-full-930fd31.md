@@ -60,5 +60,12 @@ python scripts/bench/compare.py --mpy --mpremote "connect COM22"
 - 每项取多次中位数（每个数字是一次运行，M33/RV32 口径一致）；
 - MicroPython RV32（固件不存在）。
 
-板子测完停在 MicroPython 固件上（COM22）；它不认 TinyOS 的 Ctrl-D 进 BOOTSEL，
-所以自动刷回失败，**尚未恢复为 TinyOS 镜像**——需要按住物理 BOOTSEL 再刷一次。
+板子测完停在 MicroPython 固件上（COM22），但**不用按物理按钮**：
+
+```sh
+mpremote connect COM22 exec "import machine; machine.bootloader()"
+```
+
+（mpremote 会因设备立刻断开而报错，但 BOOTSEL 盘已经出来了。）刷回
+`build/tinyos-rpi-pico2-smp.uf2` 后 `heartbeat.py -p COM27 --dtr` = **6/6**，
+板子已回到可用的 TinyOS 镜像。
