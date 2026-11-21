@@ -5524,3 +5524,29 @@ RP2350（Cortex-M33）此前只有 QEMU mps2 的 M3 证据，本轮补上真机�
 另外记两条今天踩到的板级事实：17 MB 的"擦除+刷写"合成 UF2 会被 ROM 拒（34817 个块太
 多，文件留在盘上不消费），擦除要单独写；ARM 端口没有 `plat_boot_stage()`，`[E]` 到
 banner 之间是盲区，做单核 #42 时得先补这个。
+
+## 101. 2026-11-21 同一套 44 个程序补上 RV32 端：三个后端齐了
+
+Thumb-2 的验收只在 ARM 侧跑过，而这块板另一侧是 Hazard3 RISC-V，验收口径要两端都过。
+补的办法不是新写一套判据，而是给 `thumb1-prep.py` 加 `--arch rv32`：`rcc.c` 早就有
+`RCC_ARCH_RV32` 后端（`#if defined(__riscv) || defined(RCC_ARCH_RV32)`），所以只是把
+宏选对、镜像目标换成 `rpi-pico2-rv32-smp`、配一份安静镜像
+（`configs/rpi-pico2-rv32-quiet.conf`）。
+
+关键点：**期望输出由宿主 `rvm` 产生，与后端无关**，所以 `thumb1-run.py` 和
+`build/thumb1/expected/*.txt` 一行没改，换的只是代码生成器。`v6mcheck.py` 那道闸门
+仍然只对 thumb1 生效——它拒绝一切非 ARMv6-M 编码，RV32 镜像按定义就过不了。
+
+结果：`rpi-pico2-rv32-smp` + 44 个语料，心跳 6/6、`strict 37/37` 两轮，7 个观察项
+无 fault。至此同一套 44 个程序三个后端全绿：Thumb-1/RP2040（#38）、Thumb-2/M33（#40）、
+RV32/Hazard3（`2026-11-21-corpus-rv32-rp2350-67a70ea.md`）。
+
+两个副产物：
+
+- `file1` 的 `write("hello",5)` 在 RV32 上也返回 **5**（与 M33 一致），只有 RP2040
+  native 与宿主 `rvm` 返回 24。#43 的怀疑范围因此进一步收窄到那两处；
+- 同一个 87 文件 / 1 MiB 的暂存集在 RV32 端正常启动，所以 #42 的"带语料起不来"
+  只属于单核 ARM，与 littlefs 大小、与镜像尺寸都无关。
+
+脚本名 `thumb1-prep.py` 比它现在做的事窄，但改名要动所有引用它的验收卡命令，成本大于
+收益，所以在 docstring 里说清楚它能出三种后端。

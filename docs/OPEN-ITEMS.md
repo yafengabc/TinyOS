@@ -419,6 +419,11 @@ float 和 native 系统调用；输出与 `rvm` 一致：
 2. native 的 GPIO/ADC/PWM 只有编译覆盖，没有外设实测；
 3. QEMU mps2 的 600 KiB ramdisk 装不下整套用例，冒烟要分批。
 
+**三个后端同语料（2026-11-21）**：同一套 44 个程序现在在 Thumb-1/RP2040（#38）、
+Thumb-2/M33（#40）、RV32/Hazard3（`docs/acceptance/2026-11-21-corpus-rv32-rp2350-67a70ea.md`）
+上都跑过 `strict 37/37`。RV32 端不需要另写运行器——`thumb1-prep.py --arch rv32` 用
+`RCC_ARCH_RV32` 后端出镜像，期望输出仍来自宿主 `rvm`，所以判据和金标文件完全一样。
+
 ## 13b. ARMv6-M（Thumb-1）：后端完成，等 RP2040 上板（2026-11-21）
 
 `thumb1.inc` 覆盖了 Thumb-2 的全部 RIR 操作（整数、字符串、Q16.16 float、
