@@ -814,7 +814,20 @@ static void emit_insn(int fid, int pc)
     case R_ADD: ld_vreg(0, a); ld_vreg(1, b); e_add_reg(2, 0, 1); st_vreg(d, 2); break;
     case R_SUB: ld_vreg(0, a); ld_vreg(1, b); e_sub_reg(2, 0, 1); st_vreg(d, 2); break;
     case R_MUL: ld_vreg(0, a); ld_vreg(1, b); e_mul(2, 0, 1); st_vreg(d, 2); break;
-    case R_DIV: ld_vreg(0, a); ld_vreg(1, b); e_sdiv(2, 0, 1); st_vreg(d, 2); break;
+    case R_DIV: {
+        int nz = new_label(), end = new_label();
+        ld_vreg(0, a);
+        ld_vreg(1, b);
+        e_cmp_zero(1);
+        e_bcond(1 /* NE */, nz);
+        e_li(2, 0);
+        e_b(end);
+        bind_label(nz);
+        e_sdiv(2, 0, 1);
+        bind_label(end);
+        st_vreg(d, 2);
+        break;
+    }
     case R_MOD: {
         int nz = new_label(), end = new_label();
         ld_vreg(0, a);

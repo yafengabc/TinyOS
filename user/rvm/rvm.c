@@ -392,10 +392,25 @@ int main(int argc, char **argv)
             case R_ADD: r[q.d] = r[q.a] + r[q.b]; break;
             case R_SUB: r[q.d] = r[q.a] - r[q.b]; break;
             case R_MUL: r[q.d] = r[q.a] * r[q.b]; break;
-            case R_DIV: r[q.d] = r[q.a] / r[q.b]; break;
+            case R_DIV: {
+                /* Match the native backends: /0 -> 0, INT_MIN / -1 -> INT_MIN
+                 * (the overflow trap the host C compiler raises is not a
+                 * portable result).  R_MOD already guards zero above. */
+                int b = r[q.b];
+                if (!b)
+                    r[q.d] = 0;
+                else if (r[q.a] == INT32_MIN && b == -1)
+                    r[q.d] = INT32_MIN;
+                else
+                    r[q.d] = r[q.a] / b;
+                break;
+            }
             case R_MOD: {
                 int b = r[q.b];
-                r[q.d] = b ? (r[q.a] % b) : 0;
+                if (!b || (r[q.a] == INT32_MIN && b == -1))
+                    r[q.d] = 0;
+                else
+                    r[q.d] = r[q.a] % b;
                 break;
             }
             case R_LOADB: {
@@ -477,8 +492,14 @@ int main(int argc, char **argv)
                     frames[nframe].r[k] = argbuf[k];
                 pc = func_pc[q.a];
                 break;
-            case R_LOADL: r[q.d] = spillp[q.a]; break;
-            case R_STOREL: spillp[q.b] = r[q.a]; break;
+            case R_LOADL:
+                if (q.a >= NSPILL) { puts("spill load out of range\n"); return 1; }
+                r[q.d] = spillp[q.a];
+                break;
+            case R_STOREL:
+                if (q.b >= NSPILL) { puts("spill store out of range\n"); return 1; }
+                spillp[q.b] = r[q.a];
+                break;
             case R_LOADD: r[q.d] = g[r[q.a] + q.b]; break;
             case R_STORED: g[r[q.a] + q.b] = r[q.c]; break;
             case R_SHLI: r[q.d] = r[q.a] << q.b; break;

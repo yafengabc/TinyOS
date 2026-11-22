@@ -938,14 +938,25 @@ static Node *fold_const(Node *n)
         else if (n->kind == N_SUB) { v = a - b; rfloat = isf; }
         else if (n->kind == N_MUL) { v = isf ? fix_mul(a, b) : a * b; rfloat = isf; }
         else if (n->kind == N_DIV) {
+            /* Divide by zero is defined as 0 in rvm/rcc; keep the node so
+             * the backend applies the same rule (issue #2).  INT_MIN / -1
+             * overflows in C, so fold it to the same saturated result the
+             * RV32/ARM divide instructions produce. */
             if (b == 0)
                 return n;
-            v = isf ? fix_div(a, b) : a / b;
+            if (!isf && a == INT32_MIN && b == -1)
+                v = INT32_MIN;
+            else
+                v = isf ? fix_div(a, b) : a / b;
             rfloat = isf;
         } else if (n->kind == N_MOD) {
             if (isf || b == 0)
                 return n;
-            v = a % b;
+            /* INT_MIN % -1 overflows in C; the native backends define 0. */
+            if (a == INT32_MIN && b == -1)
+                v = 0;
+            else
+                v = a % b;
         } else if (n->kind == N_LT) v = a < b;
         else if (n->kind == N_GT) v = a > b;
         else if (n->kind == N_EQ) v = a == b;
@@ -2854,6 +2865,7 @@ static void gen_stmt(Node *n)
 /* ---- Register allocation: liveness intervals + linear scan + spill ---- */
 
 #define NPHYS 16
+#define NSPILL 16           /* rvm's fixed per-frame spill[]; see spec/rir2.md */
 #define NSCRATCH 3          /* physical 13,14,15 reserved for spill reloads/stores */
 
 static int func_phys[VREG_MAX];
@@ -3187,6 +3199,10 @@ static void allocate_func(int fi, int lo, int hi)
             reg_end[r] = last[v];
         } else {
             phys[v] = -1;
+            /* rvm has a fixed 16-slot spill area per frame; exceeding it
+             * used to silently corrupt the frame (issue #1). */
+            if (nspill >= NSPILL)
+                die("too many live variables: spill slots exceed 16");
             slot[v] = nspill++;
         }
     }

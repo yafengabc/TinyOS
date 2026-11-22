@@ -430,7 +430,19 @@ static void emit_insn(int fid, int pc)
     case R_ADD: e_add(rreg(d), rreg(a), rreg(b)); break;
     case R_SUB: e_sub(rreg(d), rreg(a), rreg(b)); break;
     case R_MUL: e_mul(rreg(d), rreg(a), rreg(b)); break;
-    case R_DIV: e_div(rreg(d), rreg(a), rreg(b)); break;
+    case R_DIV: {
+        /* RV32's div raises no exception: x/0 gives -1, which disagrees with
+         * rvm and the ARM backend.  Guard zero the same way R_MOD does.
+         * INT_MIN / -1 already yields INT_MIN on RV32 hardware. */
+        int nz = new_label(), end = new_label();
+        e_branch_to(1, rreg(b), X_ZERO, nz);
+        e_li(rreg(d), 0);
+        e_j(end);
+        bind_label(nz);
+        e_div(rreg(d), rreg(a), rreg(b));
+        bind_label(end);
+        break;
+    }
     case R_MOD: {
         int nz = new_label(), end = new_label();
         e_branch_to(1, rreg(b), X_ZERO, nz);
