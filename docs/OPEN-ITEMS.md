@@ -526,7 +526,12 @@ RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040
 `configs/arm-rir.conf` 是 test-only 镜像（`rir = true`、`scripting = false`），
 任何发布配置都不要打开它。
 
-## 15. pinned 工具链副本单侧同步（2026-11-22）
+## 15. pinned 工具链副本单侧同步（2026-11-22，**已解决**）
+
+> **状态：2026-11-22 已修复。** 双方 pinned 源已同步完毕（TinyOS 侧到
+> `2731bcb`，`tinyos-script` 侧到 `04815b6`）；当前
+> `go test -count=1 ./...` 全绿，无需 `-skip`。以下保留问题当时的记录与
+> 复现方法，供以后两侧再次漂移时参照。
 
 `76408d1` 把 div 语义与 spill guard 的改动同步到了 TinyOS 侧的
 `user/{csc,rvm,rcc}`，但没有同步 `../tinyos-script/src/` 对应的四份源文件。
@@ -547,5 +552,5 @@ copy it across and commit both
 TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致性检查。
 
 修法：把 TinyOS 侧的四份改动同步回 `tinyos-script/src/`，两边各提交一次；
-不要为了让 T0 变绿而删除或放宽 `pinned_test.go`。在同步完成前，本地 T0 报告里
-要显式写出这条 FAIL 及基线证据，不能写成"T0 全绿"。
+不要为了让 T0 变绿而删除或放宽 `pinned_test.go`。**已按此完成**（2026-11-22）。
+以后若两侧再次漂移，本地 T0 报告要显式写出这条 FAIL 及基线证据，不能写成"T0 全绿"。
