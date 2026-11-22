@@ -179,3 +179,4 @@
 | 2026-11-22 | 窗口放置改为 buddy 优先/grain 兜底（#55 复核项） | `80ee7d2` | ESP32-C3（COM4） + 18 目标 + rv32/arm QEMU | T0/T1/T2 PASS；T3 PASS（cover 九行一致，accept 24/24）；T4 `NOT RUN` | [window two-pass](2026-11-22-window-place-twopass-80ee7d2.md) |
 | 2026-11-22 | pinned rvm 同步后的目标端修复（tos_stat）；脚本 fb80bdc 全测 | `b516695` | ESP32-C3（COM4） + 18 目标 + rv32/arm QEMU | T0/T1/T2 PASS；T3 PASS（cover 九行一致）；T4 `NOT RUN` | [pinned rvm stat](2026-11-22-pinned-rvm-stat-b516695.md) |
 | 2026-11-22 | tos_stat_t 统一（目标/host 同名类型）+ 目标端编译检查 | `2c03dcf` | ESP32-C3（COM4） + 18 目标 + QEMU | T0/T1/T2 PASS；T3 PASS（cover 九行，accept 24/24）；检查器负例可复现；T4 `NOT RUN` | [stat typedef](2026-11-22-stat-typedef-2c03dcf.md) |
+| 2026-11-22 | platform 接缝检查修正（#52 review）：名字池规则、扫头文件、plat_* 全量钉住 | `22c0ffe` | host / T0 | T0 PASS（新增负例 3 个）；T1/T2/T3/T4 `NOT RUN`（仅测试与基线） | [platform seam check](2026-11-22-platform-seam-check-22c0ffe.md) |
