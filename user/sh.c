@@ -9,13 +9,14 @@
  * does not grow anything - the reason for a pool instead of malloc(): the
  * shell's window declares no heap, and the pool's reuse is exact.
  * Only MAX_SOURCE layers are ever alive at once. */
-/* 3 KiB, and the number is not free: it sets the shell's window.  The window
- * is image + stack + guard rounded up to the 16 KiB grain, so sh lands in
- * 32 KiB only while its image stays within 20 KiB (20 + 8 + 4 = 32, and 21 KiB
- * of image would push it to 48).  Dropping the pool from 4 KiB to 3 was the
- * cheapest way to cross that line: cutting the stack instead (TOS_STACK(4K))
- * buys the same 32 KiB but leaves no room for the stack to grow into, and a
- * nested `source` promptly faulted at 4 KiB (measured 2026-11-06). */
+/* 3 KiB, and the number is not free: it keeps the full script shell's image
+ * at 28 KiB.  With the 4 KiB board default stack and the 4 KiB guard that is
+ * 36 KiB, rounded to the board grain (36 KiB on a 4 KiB grain, 48 KiB on the
+ * 16 KiB RP2350 RV32 grain).  This is the script engine's window; the small
+ * interactive shell (user/msh) is the one that promises 16 KiB.  A 4 KiB
+ * pool would add about a KiB to the image and push the 4 KiB-grain window to
+ * 40 KiB.  A `source` nest is the only recursion this stack carries;
+ * MAX_SOURCE caps it at 4. */
 #define POOL_MAX   3072
 #define MAX_LINES  64
 #define MAX_BLOCKS 8

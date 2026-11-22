@@ -70,11 +70,13 @@
         unsigned heap_bytes;                                                 \
     } tos_heap_note = { 7u, 4u, 2u, "TinyOS", (unsigned)(bytes) }
 
-/* How large a task window this program is allowed to need, when it must fit
- * one board grain (msh asks for one window so it stays 16 KiB on the C3 and
- * RP2040):
+/* How large a task window this program is allowed to need.  TOS_ONE_GRAIN()
+ * means one board grain; TOS_WINDOW(n) sets a fixed limit (msh uses
+ * TOS_WINDOW(16 KiB) on the small boards and TOS_ONE_GRAIN() on the 64 KiB
+ * QEMU/PC targets):
  *
- *     TOS_ONE_GRAIN();           -- at file scope, once per program
+ *     TOS_WINDOW(16 * 1024);     -- at file scope, once per program
+ *     TOS_ONE_GRAIN();
  *
  * The kernel ignores it; `tos build` computes image + stack + heap + guard
  * and fails the build when that no longer fits one grain (or the byte count
@@ -88,11 +90,11 @@
         unsigned window_bytes;                                               \
     } tos_window_note = { 7u, 4u, 3u, "TinyOS", (unsigned)(bytes) }
 
-/* The same note with 0, meaning "one board grain" (4 KiB on C3/RP2040/
- * RP2350, 64 KiB on the QEMU and PC targets).  The build passes the exact
- * value as TOS_APP_GRAIN so a program can choose between one grain and a
- * fixed minimum; the fallback only matters for a source-tree compile that
- * bypasses tos build. */
+/* The same note with 0, meaning "one board grain" (4 KiB on the C3, RP2040
+ * and RP2350 ARM; 16 KiB on the RP2350 RV32; 64 KiB on the QEMU and PC
+ * targets).  The build passes the exact value as TOS_APP_GRAIN so a program
+ * can choose between one grain and a fixed minimum; the fallback only
+ * matters for a source-tree compile that bypasses tos build. */
 #ifndef TOS_APP_GRAIN
 #define TOS_APP_GRAIN (16 * 1024)
 #endif
