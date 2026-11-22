@@ -28,7 +28,7 @@
  * The two reference counters are different: fd_clone() takes one while
  * exec() builds the child's table, outside proc_lock, so they have their
  * own leaf lock inside struct pipe.  Lock order is proc_lock then that one,
- * never the other way round. */
+ * never the other way round.  See docs/CONCURRENCY.md for the global table. */
 
 #define PIPE_SIZE 2048          /* bytes per pipe (heap allocated) */
 #define PIPE_EPIPE (-2)         /* no readers left                  */

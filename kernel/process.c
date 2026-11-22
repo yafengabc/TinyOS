@@ -381,7 +381,8 @@ extern void ktask_start_stub(void);
  *
  * Lock order, the only one in the kernel: proc_lock, then nothing.  Nothing
  * that blocks (console, pipe, timer wait) is ever called while holding it -
- * the scheduler hands the lock back before it idles.
+ * the scheduler hands the lock back before it idles.  See docs/CONCURRENCY.md
+ * for the global lock table this local rule belongs to.
  *
  * Every acquisition masks interrupts, because the timer tick takes this lock
  * itself (it reaps, it wakes console readers).  A section taken with them on

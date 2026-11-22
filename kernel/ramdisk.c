@@ -99,7 +99,8 @@ static int      ok;
  * interrupts stay on.
  *
  * Ordering: fs_lock -> heap_lock, because littlefs allocates through
- * kmalloc.  Nothing takes them the other way round. */
+ * kmalloc.  Nothing takes them the other way round.  See docs/CONCURRENCY.md
+ * for the global table. */
 static spin_t fs_lock = SPIN_INIT;
 
 static ofile_t openfiles[MAX_OPEN];
