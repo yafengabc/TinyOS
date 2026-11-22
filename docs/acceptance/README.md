@@ -171,3 +171,4 @@
 | 2026-11-22 | csa/pvm 改为 opt-in，默认镜像去掉旧 AMX 引擎 | `f7f962c` | rpi-pico2 + rv32 (QEMU) | T0/T1/T2 PASS（默认 43→41 文件、71→62 块，省 36 KiB；pvm 用 configs/pvm.conf 仍可跑）；T3/T4 `NOT RUN` | [scripting opt-in](2026-11-22-scripting-optin-f7f962c.md) |
 | 2026-11-22 | csc/rvm/rcc 默认进镜像；一条脚本覆盖三段 | `75ffb64` | rpi-pico2 + rv32 (QEMU) | T0/T1/T2 PASS（cover 9 行，rvm/native 一致）；T3/T4 `NOT RUN` | [rir default + cover](2026-11-22-rir-default-cover-75ffb64.md) |
 | 2026-11-22 | 锁顺序文档 + 持锁阻塞静态检查（#51） | `2b137a3` | host / go1.27.1 | 负例先红 PASS（`process.c:501`）；T0 排除基线 pinned 失败后全绿；T1/T2/T3 `NOT RUN`（docs-only） | [lock order](2026-11-22-lock-order-2b137a3-host.md) |
+| 2026-11-22 | 最小抽取 uaccess + checked math（#54） | `d0cfe8d` | host + 隔离 worktree；rv32/rv32smp/arm QEMU | 差分等价 PASS（4096+20000 组，负例红 4495 处）；T0 排除基线 pinned 失败后全绿；T1 18/18；T2 3/3 smoke；T3/T4 `NOT RUN` | [uaccess extract](2026-11-22-uaccess-extract-d0cfe8d-qemu.md) |
