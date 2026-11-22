@@ -680,7 +680,7 @@ static void const_add(const char *name, int val)
 
 static int new_temp(void)
 {
-    if (vreg >= VREG_MAX) die("out of virtual registers (spill not implemented)");
+    if (vreg >= VREG_MAX) die("out of virtual registers");
     return vreg++;
 }
 
@@ -1573,39 +1573,6 @@ enum {
     NAT_CAPTURE, NAT_READDIR, NAT_ISDIR
 };
 
-static int native_lookup(const char *name, int *nargs, int *hasret)
-{
-    static const struct { const char *name; int id, nargs, hasret; } tab[] = {
-        { "gpio_count", NAT_GPIO_COUNT, 0, 1 },
-        { "gpio_mode",  NAT_GPIO_MODE,  2, 0 },
-        { "gpio_write", NAT_GPIO_WRITE, 2, 0 },
-        { "gpio_read",  NAT_GPIO_READ,  1, 1 },
-        { "adc_count",  NAT_ADC_COUNT,  0, 1 },
-        { "adc_read",   NAT_ADC_READ,   1, 1 },
-        { "pwm_count",  NAT_PWM_COUNT,  0, 1 },
-        { "pwm_set",    NAT_PWM_SET,    3, 0 },
-        { "pwm_off",    NAT_PWM_OFF,    1, 0 },
-        { "sleep",      NAT_SLEEP,      1, 0 },
-        { "uptime",     NAT_UPTIME,     0, 1 },
-        { "run",        NAT_RUN,        1, 1 },
-        { "open",       NAT_OPEN,       1, 1 },
-        { "create",     NAT_CREATE,     1, 1 },
-        { "read",       NAT_READ,       3, 1 },
-        { "write",      NAT_WRITE,      3, 1 },
-        { "close",      NAT_CLOSE,      1, 1 },
-        { "unlink",     NAT_UNLINK,     1, 1 },
-        { "capture",    NAT_CAPTURE,    3, 1 },
-        { "readdir",    NAT_READDIR,    3, 1 },
-        { "isdir",      NAT_ISDIR,      1, 1 },
-    };
-    for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
-        if (!strcmp(name, tab[i].name)) {
-            *nargs = tab[i].nargs;
-            *hasret = tab[i].hasret;
-            return tab[i].id;
-        }
-    return -1;
-}
 
 static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
 {
