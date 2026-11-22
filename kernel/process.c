@@ -16,6 +16,7 @@
 #include "cpu.h"
 #include "tos.h"
 #include "u32math.h"
+#include "win_layout.h"
 
 /* Off by default; `exec_mock = true` in a test config defines it to 1. */
 #ifndef TOS_EXEC_MOCK
@@ -1383,14 +1384,13 @@ static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
     for (;;) {
         uint32_t next = end;
 
-        /* A window is made of power-of-two blocks, so its base has to be
-         * aligned to the largest one: two 16 KiB blocks, as a 20 KiB window
-         * needs, start on a 16 KiB boundary.  Aligning to the whole window
-         * instead would put every non-power-of-two size on a boundary no
-         * allocator can reach. */
-        align = 1u;
-        while (align * 2u <= bytes && align * 2u <= end - dom->base)
-            align *= 2u;
+        /* Align to the board's grain, never to the whole window.  A window
+         * is a run of grain steps, not a buddy block; the largest power of
+         * two below the window size used to waste up to 112 KiB here and
+         * made csc's 128 KiB window fail on the C3 (issue #55).  The grain
+         * already satisfies every backend's constraint - layout_check()
+         * guarantees it is a multiple of the stack size where that matters. */
+        align = win_align(bytes, end - dom->base, dom->grain);
         cand = align_up(cand, align);
         if (cand >= end)
             break;
@@ -1460,7 +1460,11 @@ static uint32_t win_largest_free(const struct mem_domain *dom)
             break;
     }
     plat_spin_unlock_irqrestore(&proc_lock, irq);
-    return best;
+    /* Report the largest window that can actually start in this gap.  The
+     * raw run length once said 224 KiB while a 128 KiB request still failed
+     * under window-sized alignment, sending the next person looking for a
+     * leak (issue #55).  Windows are whole grains, so round down. */
+    return best - (dom->grain ? best % dom->grain : 0u);
 }
 
 /* ---- creation -------------------------------------------------------- */
