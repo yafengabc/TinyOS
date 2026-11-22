@@ -2861,7 +2861,6 @@ static void gen_stmt(Node *n)
 /* ---- Register allocation: liveness intervals + linear scan + spill ---- */
 
 #define NPHYS 16
-#define NSPILL 16           /* rvm's fixed per-frame spill[]; see spec/rir2.md */
 #define NSCRATCH 3          /* physical 13,14,15 reserved for spill reloads/stores */
 
 static int func_phys[VREG_MAX];
@@ -3195,10 +3194,9 @@ static void allocate_func(int fi, int lo, int hi)
             reg_end[r] = last[v];
         } else {
             phys[v] = -1;
-            /* rvm has a fixed 16-slot spill area per frame; exceeding it
-             * used to silently corrupt the frame (issue #1). */
-            if (nspill >= NSPILL)
-                die("too many live variables: spill slots exceed 16");
+            /* rvm has a fixed 16-slot frame and will reject slots >= 16 at
+             * runtime; rcc sizes its frame from maxslot, so csc must NOT
+             * reject large functions here (large files use csc -> rcc). */
             slot[v] = nspill++;
         }
     }
