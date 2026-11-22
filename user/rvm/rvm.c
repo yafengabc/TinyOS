@@ -272,11 +272,27 @@ static int map_page(int pc)
     return 1;
 }
 
+/* rvm deliberately keeps a small window of globals, strings and frames so it
+ * fits on a board.  An image that overflows the window is still valid RIR2
+ * (csc -> rcc can build it), so name the limit instead of reporting a generic
+ * load failure. */
+static void limit_error(const char *what, int got, int max)
+{
+    puts("rvm: ");
+    puts(what);
+    puts(" ");
+    putint(got);
+    puts(" exceeds rvm limit ");
+    putint(max);
+    puts("; use csc -> rcc\n");
+}
+
 static int load_rir(const char *path)
 {
     uint32_t hdr[7];
     int m, gs, ss, as, i;
     long fsize;
+    int rc = -1;
 
     rir_fd = open(path);
     if (rir_fd < 0)
@@ -289,10 +305,22 @@ static int load_rir(const char *path)
     nfunc = (int)hdr[4];
     ss = (int)hdr[5];
     as = (int)hdr[6];
-    if (m <= 0 || m > IRMAX || gs < 0 || gs > GMAX ||
-        nfunc <= 0 || nfunc > FUNCMAX || ss < 0 || ss > SMAX ||
-        as < 0 || as > AMAX)
+    if (m <= 0 || gs < 0 || nfunc <= 0 || ss < 0 || as < 0)
         goto bad;
+    if (m > IRMAX || gs > GMAX || nfunc > FUNCMAX || ss > SMAX || as > AMAX) {
+        if (m > IRMAX)
+            limit_error("instructions", m, IRMAX);
+        else if (gs > GMAX)
+            limit_error("global words", gs, GMAX);
+        else if (nfunc > FUNCMAX)
+            limit_error("functions", nfunc, FUNCMAX);
+        else if (ss > SMAX)
+            limit_error("string pool bytes", ss, SMAX);
+        else
+            limit_error("arena bytes", as, AMAX);
+        rc = -2;
+        goto bad;
+    }
     /* The instruction array is not read here; only the tail sections are.
      * Refuse a header that claims more bytes than the file holds, so a
      * truncated image still fails at load time rather than mid-run. */
@@ -341,7 +369,7 @@ static int load_rir(const char *path)
 bad:
     close(rir_fd);
     rir_fd = -1;
-    return -1;
+    return rc;
 }
 
 int main(int argc, char **argv)
@@ -357,7 +385,11 @@ int main(int argc, char **argv)
     }
     verbose = (reps == 1);
     m = load_rir(argv[1]);
-    if (m < 0) { puts("rvm: bad or missing image\n"); return 1; }
+    if (m < 0) {
+        if (m != -2)            /* -2 already reported a specific limit */
+            puts("rvm: bad or missing image\n");
+        return 1;
+    }
 
     t0 = uptime();
     for (rep = 0; rep < reps; rep++) {
@@ -493,11 +525,11 @@ int main(int argc, char **argv)
                 pc = func_pc[q.a];
                 break;
             case R_LOADL:
-                if (q.a >= NSPILL) { puts("spill load out of range\n"); return 1; }
+                if ((unsigned)q.a >= NSPILL) { puts("spill load out of range\n"); return 1; }
                 r[q.d] = spillp[q.a];
                 break;
             case R_STOREL:
-                if (q.b >= NSPILL) { puts("spill store out of range\n"); return 1; }
+                if ((unsigned)q.b >= NSPILL) { puts("spill store out of range\n"); return 1; }
                 spillp[q.b] = r[q.a];
                 break;
             case R_LOADD: r[q.d] = g[r[q.a] + q.b]; break;
