@@ -29,7 +29,7 @@ python scripts/bench/compare.py --report
 | 引擎 | 需要的镜像/固件 |
 |---|---|
 | `rvm`, `rcc` | rir 镜像（csc+rvm+rcc），`bench.c` 在根目录 |
-| `pvm` | 默认镜像（csa+pvm，无 rir） |
+| `pvm` | 带 `[features] scripting = true` 的镜像（`configs/pvm.conf`），无 rir |
 | `clang` | 镜像里含 `/bin/benchclang`（见下节） |
 | `goc32` | 镜像里含 `/bin/benchgoc`（见下节） |
 | `micropython`, `-native` | 刷 MicroPython 固件（`--mpy`，在宿主跑 mpremote） |
@@ -64,11 +64,12 @@ python scripts/bench/compare.py --report
 
 ## 步骤
 
-`csa`/`pvm` 与 `csc`/`rvm`/`rcc` 在构建里互斥（`defaultUserExclude`），所以要分镜像：
+`csa`/`pvm` 与 `csc`/`rvm`/`rcc` 分别由 `[features] scripting` 和
+`[features] rir` 开关，默认镜像两个都不带，所以要分镜像：
 
 ```sh
-# 1) 默认镜像（csa + pvm）
-go run ./cmd/tos build -config configs/esp32c3.conf
+# 1) pvm 镜像（csa + pvm）
+go run ./cmd/tos build -config configs/esp32c3-pvm.conf
 python scripts/esp-c3/flash.py --full -p COM4
 cp bench/bench.c files.local/          # 已经由脚本自动 stage
 python scripts/bench/compare.py --port COM4 --engine pvm

@@ -10,10 +10,10 @@ Three engines run the same four integer kernels:
 MicroPython runs bench/bench.py (bytecode) and bench/bench_native.py
 (@micropython.native) and prints the same lines.
 
-Because `csa`/`pvm` ship in the default images and `csc`/`rvm`/`rcc` only in
-rir images, the TinyOS side needs two flashes:
+Because `csa`/`pvm` are now opt-in (`configs/pvm.conf`) and `csc`/`rvm`/`rcc`
+are opt-in via rir images, the TinyOS side chooses the image explicitly:
 
-    # image built without rir (default): pvm
+    # image built with configs/pvm.conf (or esp32c3-pvm.conf): pvm
     python scripts/bench/compare.py --port COM4 --engine pvm
 
     # image built with configs/esp32c3-rir.conf or configs/rv32-rir.conf
@@ -49,7 +49,7 @@ ALL_ENGINES = ["micropython", "micropython-native", "pvm", "rvm", "goc32",
 ENGINE_NEEDS = {
     "micropython": "MicroPython firmware (not the TinyOS image)",
     "micropython-native": "MicroPython firmware (not the TinyOS image)",
-    "pvm": "csa+pvm image (no rir feature)",
+    "pvm": "csa+pvm image (configs/pvm.conf)",
     "rvm": "rir image (csc+rvm)",
     "goc32": "a goc32-built /bin/benchgoc in the image",
     "rcc": "rir image (csc+rcc)",

@@ -320,8 +320,8 @@ func parseSize(s string) (int, error) {
 var defaultUserExclude = []string{"py", "csc", "rvm", "rcc"}
 
 // rirUserPrograms are the experimental AST -> register-IR toolchain.  They
-// are excluded unless a config asks for [features] rir = true, so the
-// supported csa + pvm images do not grow.
+// are excluded unless a config asks for [features] rir = true, so the default
+// images do not grow.
 var rirUserPrograms = []string{"csc", "rvm", "rcc"}
 
 // applyRirExclude is the same feature gate as applyScriptingExclude: called
@@ -339,10 +339,9 @@ func (b *Builder) applyRirExclude() {
 	}
 }
 
-// scriptingUserPrograms are the supported on-board scripting pair.  They are
-// optional because csa + pvm cost tens of kilobytes: boards that enable
-// [features] scripting carry them, the 300 KiB embedded images that do not
-// stay small.
+// scriptingUserPrograms are the legacy on-board scripting pair.  They are
+// opt-in now: the pair costs tens of kilobytes and is no longer a board
+// default, so configs/pvm.conf turns it on for the benchmark comparison.
 var scriptingUserPrograms = []string{"csa", "pvm"}
 
 // applyScriptingExclude keeps the scripting pair out of images whose board
