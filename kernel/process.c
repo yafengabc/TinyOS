@@ -1370,7 +1370,7 @@ int process_user_ok(uint32_t addr, uint32_t len)
  * each seeing a table that does not yet mention the other. */
 static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
 {
-    uint32_t cand, end, align;
+    uint32_t cand, end;
     int ok = 0;
 
     if (!dom || dom->grain == 0 || !(dom->flags & DOMAIN_EXEC))
@@ -1384,17 +1384,6 @@ static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
     for (;;) {
         uint32_t next = end;
 
-        /* Align to the board's grain, never to the whole window.  A window
-         * is a run of grain steps, not a buddy block; the largest power of
-         * two below the window size used to waste up to 112 KiB here and
-         * made csc's 128 KiB window fail on the C3 (issue #55).  The grain
-         * already satisfies every backend's constraint - layout_check()
-         * guarantees it is a multiple of the stack size where that matters. */
-        align = win_align(bytes, end - dom->base, dom->grain);
-        cand = align_up(cand, align);
-        if (cand >= end)
-            break;
-
         /* The nearest window at or above `cand` bounds the gap we are
            standing in. */
         for (int i = 0; i < MAX_PROCS; i++) {
@@ -1402,8 +1391,16 @@ static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
             if (q->win_size != 0 && q->win_base >= cand && q->win_base < next)
                 next = q->win_base;
         }
-        if (next - cand >= bytes) {
-            p->win_base = cand;
+
+        /* Prefer the alignment that needs the fewest protection blocks (the
+           largest power of two not exceeding the window); fall back to the
+           grain when that wastes too much.  The C3 needs the fallback for a
+           128 KiB window in a 224 KiB gap (issue #55); NAPOT/MPU boards get
+           the preferred placement so rcc keeps the SPLIT map.  See
+           win_layout.h for why both rules exist. */
+        uint32_t base = win_place(cand, next, bytes, dom->grain);
+        if (base != 0) {
+            p->win_base = base;
             p->win_size = bytes;
             ok = 1;
             break;
