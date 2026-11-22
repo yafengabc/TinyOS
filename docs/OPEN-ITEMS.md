@@ -530,17 +530,22 @@ RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040
 
 `76408d1` 把 div 语义与 spill guard 的改动同步到了 TinyOS 侧的
 `user/{csc,rvm,rcc}`，但没有同步 `../tinyos-script/src/` 对应的四份源文件。
-`TestPinnedToolchainSources` 因此从 `76408d1` 起在 T0 红：
+在有 `../tinyos-script` 检出的工作区里，`TestPinnedToolchainSources` 因此从
+`76408d1` 起在 T0 红：
 
 ```
 pinned_test.go:44: user/csc/csc.c differs from tinyos-script/src/csc.c;
 copy it across and commit both
 ```
 
-在干净 worktree（HEAD = `76408d1`，无任何本地改动）上已复现同一条失败，
-确认不是别的改动引入的。`go test -count=1 -skip TestPinnedToolchainSources ./...`
-全绿，所以影响面仅限这一对一致性检查。
+**限定条件**：该测试在找不到 `../tinyos-script` 时是 Skip（`pinned_test.go:23`），
+所以 CI 与单独 checkout 的 TinyOS 仍然是绿的；只有同时检出两个仓库的开发机上会红。
+这不是"CI 该红却绿"，而是本地一致性检查只在两棵树都在时生效。
+
+在干净 worktree（HEAD = `76408d1`，无任何本地改动，且兄弟仓库存在）上已复现
+同一条失败，确认不是别的改动引入的。`go test -count=1 -skip
+TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致性检查。
 
 修法：把 TinyOS 侧的四份改动同步回 `tinyos-script/src/`，两边各提交一次；
-不要为了让 T0 变绿而删除或放宽 `pinned_test.go`。在同步完成前，T0 报告里
+不要为了让 T0 变绿而删除或放宽 `pinned_test.go`。在同步完成前，本地 T0 报告里
 要显式写出这条 FAIL 及基线证据，不能写成"T0 全绿"。

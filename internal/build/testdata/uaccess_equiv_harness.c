@@ -25,8 +25,10 @@ static int old_user_range_ok(const struct old_view *v, uint32_t va, uint32_t len
         return 1;
     if (va < v->lo)
         return 0;
+#ifndef BREAK_OVERFLOW_BRANCH
     if (va + len < va) /* overflow */
         return 0;
+#endif
     return va + len <= v->hi;
 }
 
