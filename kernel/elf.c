@@ -2,6 +2,7 @@
 #include "platform.h"
 #include "string.h"
 #include "console.h"
+#include "uaccess.h"
 
 /* The flat model has no page tables, so "mapping" is a no-op and every
  * write is a plain store.  The window bounds live in elf_view_t: two cores
@@ -119,25 +120,11 @@ typedef struct {
 /* writes are plain stores: the flat model has no address translation  */
 /* ------------------------------------------------------------------ */
 
-/* The loader may only touch the task window it was handed.  Without an MMU a
- * corrupt or hostile image could otherwise overwrite the kernel through
- * p_vaddr / r_offset.  The bounds live in the per-call view: two cores can
- * exec() at the same time, and a file-static pair would let one image be
- * checked against the other's window. */
-static int user_range_ok(const elf_view_t *v, uint32_t va, uint32_t len)
-{
-    if (len == 0)
-        return 1;
-    if (va < v->lo)
-        return 0;
-    if (va + len < va) /* overflow */
-        return 0;
-    return va + len <= v->hi;
-}
-
+/* Range checks live in uaccess.c so host tests can compile the real logic
+ * without the loader; the bounds still travel in the per-call view. */
 static int zero_user(const elf_view_t *v, uint32_t va, uint32_t len)
 {
-    if (!user_range_ok(v, va, len))
+    if (!uaccess_range_ok(v->lo, v->hi, va, len))
         return -1;
     memset((void *)va, 0, len);
     return 0;
@@ -145,7 +132,7 @@ static int zero_user(const elf_view_t *v, uint32_t va, uint32_t len)
 
 static int read_u32(const elf_view_t *v, uint32_t va, uint32_t *out)
 {
-    if (!user_range_ok(v, va, 4))
+    if (!uaccess_range_ok(v->lo, v->hi, va, 4))
         return -1;
     memcpy(out, (const void *)va, 4);
     return 0;
@@ -153,7 +140,7 @@ static int read_u32(const elf_view_t *v, uint32_t va, uint32_t *out)
 
 static int write_u32(const elf_view_t *v, uint32_t va, uint32_t val)
 {
-    if (!user_range_ok(v, va, 4))
+    if (!uaccess_range_ok(v->lo, v->hi, va, 4))
         return -1;
     memcpy((void *)va, &val, 4);
     return 0;
@@ -638,7 +625,7 @@ static int load_view(elf_view_t *v, uint32_t load_base, uint32_t *entry_out)
         }
 
         uint32_t dst = ph->p_vaddr + bias;
-        if (!user_range_ok(v, dst, ph->p_memsz)) {
+        if (!uaccess_range_ok(v->lo, v->hi, dst, ph->p_memsz)) {
             kprintf("elf: segment %u outside app window (0x%x+0x%x)\n",
                     i, dst, ph->p_memsz);
             return -1;
@@ -654,7 +641,7 @@ static int load_view(elf_view_t *v, uint32_t load_base, uint32_t *entry_out)
         return -1;
 
     uint32_t entry = v->eh.e_entry + bias;
-    if (!user_range_ok(v, entry, 1)) {
+    if (!uaccess_range_ok(v->lo, v->hi, entry, 1)) {
         kprintf("elf: entry 0x%x outside app window\n", entry);
         return -1;
     }
