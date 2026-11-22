@@ -16,11 +16,11 @@ import (
 func TestTaskWindowHeap(t *testing.T) {
 	root, err := FindRoot()
 	if err != nil {
-		t.Skip("not in the source tree")
+		t.Fatal(err)
 	}
 	cc, err := hostCC()
 	if err != nil {
-		t.Skip(err)
+		t.Fatalf("%v (set TOS_CC; the host harness is part of T0)", err)
 	}
 
 	dir := t.TempDir()
