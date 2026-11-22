@@ -1,0 +1,29 @@
+# Multiword plat_* declarations already present in platform.h when #52 landed.
+# New ones must go to a narrow header under kernel/plat/.
+
+plat_adc_bits
+plat_adc_count
+plat_adc_read
+plat_adc_vref_mv
+plat_dcache_clean
+plat_dcache_invalidate
+plat_dma_memcpy
+plat_early_init
+plat_flash_exclusive_begin
+plat_flash_exclusive_end
+plat_gpio_configure
+plat_gpio_count
+plat_gpio_read
+plat_gpio_write
+plat_i2c_count
+plat_i2c_xfer
+plat_icache_sync
+plat_pio_release
+plat_pwm_count
+plat_pwm_off
+plat_pwm_set
+plat_spi_count
+plat_spi_xfer
+plat_uart_count
+plat_uart_read
+plat_uart_write

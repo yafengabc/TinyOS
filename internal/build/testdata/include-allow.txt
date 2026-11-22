@@ -1,0 +1,30 @@
+# Include-direction baseline for issue #52.
+# Format: path: pattern  # reason
+# Entries are existing violations, not new permission.  A stale entry (code
+# removed but the line left behind) fails the test, so reasons cannot rot.
+
+drivers/wifi/esp32c3/wifi_drv.c: #include "process.h"  # wifi driver calls proc_signal on RX; migration needs the driver/event seam
+drivers/wifi/esp32c3/wifi_drv.c: #include "heap.h"  # wifi rx buffers come from the kernel heap; allocation seam not built yet
+drivers/wifi/esp32c3/wifi_net.c: #include "process.h"  # net receive wakes the shell task through proc_signal
+drivers/wifi/esp32c3/wifi_osi.c: #include "process.h"  # OS abstraction shim forwards to proc_* for task context
+drivers/wifi/esp32c3/wifi_osi.c: #include "heap.h"  # OS shim allocates with kmalloc; allocation seam not built yet
+drivers/wifi/esp32c3/wifi_shim.c: #include "heap.h"  # fw download buffer from kmalloc; allocation seam not built yet
+drivers/display/st7789/lcd_st7789.c: #include "rp2350rv_memmap.h"  # SPI1 register base is board-specific; bus layer not extracted
+drivers/display/st7789/lcd_st7789.c: #include "arm_memmap.h"  # same SPI1 base for the ARM port; bus layer not extracted
+drivers/gpio/rp2040/gpio.c: #include "arm_memmap.h"  # direct SIO register access; GPIO bus seam is next-board work
+drivers/gpio/rp2350/gpio.c: #include "arm_memmap.h"  # direct SIO register access; GPIO bus seam is next-board work
+drivers/gpio/rp2350rv/gpio.c: #include "rp2350rv_memmap.h"  # direct SIO register access; GPIO bus seam is next-board work
+drivers/pio/rp2/pio.c: #include "arm_memmap.h"  # PIO register base per chip; PIO bus seam not extracted
+drivers/pio/rp2/pio.c: #include "rp2350rv_memmap.h"  # PIO register base for RV32; PIO bus seam not extracted
+drivers/spi/rp2350/spi.c: #include "arm_memmap.h"  # SPI register base per chip; SPI bus seam not extracted
+drivers/spi/rp2350rv/spi.c: #include "rp2350rv_memmap.h"  # SPI register base for RV32; SPI bus seam not extracted
+drivers/usb/rp2040/tusb_shim.c: #include "scs.h"  # SCB access for USB IRQ priming; arch seam not extracted
+drivers/usb/rp2040/tusb_shim.c: #include "arm_memmap.h"  # USBCTRL register base per chip; USB bus seam not extracted
+drivers/usb/rp2040/usb_cdc.c: #include "arm_memmap.h"  # USBCTRL register base per chip; USB bus seam not extracted
+drivers/usb/rp2040/usb_cdc.c: #include "scs.h"  # SCB access in the CDC driver; arch seam not extracted
+drivers/usb/rp2350/tusb_shim.c: #include "scs.h"  # SCB access for USB IRQ priming; arch seam not extracted
+drivers/usb/rp2350/tusb_shim.c: #include "arm_memmap.h"  # USBCTRL register base per chip; USB bus seam not extracted
+drivers/usb/rp2350/usb_cdc.c: #include "arm_memmap.h"  # USBCTRL register base per chip; USB bus seam not extracted
+drivers/usb/rp2350/usb_cdc.c: #include "scs.h"  # SCB access in the CDC driver; arch seam not extracted
+drivers/usb/rp2350rv/tusb_shim.c: #include "rp2350rv_memmap.h"  # USBCTRL register base for RV32; USB bus seam not extracted
+drivers/usb/rp2350rv/usb_cdc.c: #include "rp2350rv_memmap.h"  # USBCTRL register base for RV32; USB bus seam not extracted
