@@ -460,9 +460,16 @@ static Sym *sym_add(const char *name, int global)
     int i;
     if (nsyms >= SYM_MAX) die("symbol table full");
     h = str_hash(name);
-    for (i = 0; i < nsyms; i++)
+    for (i = 0; i < nsyms; i++) {
         if (syms[i].hash == h && strcmp(syms[i].name, name))
             die("identifier hash collision");
+        /* No block scope yet (issue #3): a second local of the same name
+         * would silently capture every earlier reference.  Reject it
+         * instead of computing with the wrong variable. */
+        if (!global && !syms[i].global && syms[i].hash == h &&
+            !strcmp(syms[i].name, name))
+            die("duplicate local variable (block scope not supported)");
+    }
     Sym *s = &syms[nsyms++];
     memset(s, 0, sizeof *s);
     strncpy(s->name, name, sizeof(s->name) - 1);
@@ -1638,6 +1645,11 @@ static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
 static void declare_locals(Node *n)
 {
     for (; n; n = n->next) {
+        /* Diagnostics from sym_add* should name the declaration, not the
+         * end of the function after the whole body was parsed. */
+        int saved_line = src_line;
+
+        src_line = n->line;
         switch (n->kind) {
         case N_BLOCK:
             declare_locals(n->body);
@@ -1676,6 +1688,7 @@ static void declare_locals(Node *n)
         default:
             break;
         }
+        src_line = saved_line;
     }
 }
 
