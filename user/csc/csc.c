@@ -3726,8 +3726,16 @@ int main(int argc, char **argv)
         return 2;
     }
     if (!strcmp(argv[ai], "-b")) {
+        if (argc < 5) {
+            puts("usage: csc [-b ir|mc] input output\n");
+            return 2;
+        }
         be = argv[ai + 1];
         ai += 2;
+    }
+    if (ai + 1 >= argc) {
+        puts("usage: csc [-b ir|mc] input output\n");
+        return 2;
     }
     in = argv[ai];
     out = argv[ai + 1];
