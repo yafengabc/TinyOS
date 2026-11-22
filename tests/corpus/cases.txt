@@ -1,0 +1,12 @@
+elf/accept/note-namesz-wrap
+elf/accept/one-grain-note
+elf/accept/stack-heap-window-note
+elf/reject/no-load-segment
+elf/reject/phoff-beyond-file
+elf/reject/span-overflow
+elf/reject/truncated-header
+lz4/accept/empty-input-empty-output
+lz4/accept/hello-literals
+lz4/reject/length-runs-off-end
+lz4/reject/match-before-output
+lz4/reject/truncated-literals
