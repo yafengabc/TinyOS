@@ -355,20 +355,28 @@ static int write_all_fd(int fd, const uint8_t *p, int n)
 
 static int lz4_token(int fd, int n)
 {
-    uint8_t hdr[256];
-    int hn = 0;
+    /* Stream the extended length one byte at a time.  A fixed 256-byte
+     * buffer overflowed once the output passed ~65 KB (issue #6): the token
+     * itself is 2 + (n-15)/255 bytes long. */
+    uint8_t b;
+    int rem;
+
     if (n < 15) {
-        hdr[hn++] = (uint8_t)(n << 4);
-    } else {
-        int rem = n - 15;
-        hdr[hn++] = 0xf0;
-        while (rem >= 255) {
-            hdr[hn++] = 255;
-            rem -= 255;
-        }
-        hdr[hn++] = (uint8_t)rem;
+        b = (uint8_t)(n << 4);
+        return write_all_fd(fd, &b, 1);
     }
-    return write_all_fd(fd, hdr, hn);
+    b = 0xf0;
+    if (write_all_fd(fd, &b, 1) < 0)
+        return -1;
+    rem = n - 15;
+    b = 255;
+    while (rem >= 255) {
+        if (write_all_fd(fd, &b, 1) < 0)
+            return -1;
+        rem -= 255;
+    }
+    b = (uint8_t)rem;
+    return write_all_fd(fd, &b, 1);
 }
 
 static int load_rir(const char *path)
@@ -477,6 +485,10 @@ static void generate(void)
     data_bss_size = bss;
 
     out_len = data_off + data_filesz;
+    /* The LZ4 header carries a 32-bit length, but generating a multi-GB
+     * image is a bug rather than a useful outcome. */
+    if (out_len > 64 * 1024 * 1024)
+        die("output too large (over 64 MiB)");
     span = align4k(data_va + data_filesz + bss);
     blen = lz4_size(out_len);
 
