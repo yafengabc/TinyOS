@@ -173,6 +173,7 @@ static int nconsts;
 static int nlocals;
 static int nglobals;
 static int gdata_next;
+#define GMAX 512            /* rvm's fixed global word array */
 
 static RIR ir[IR_MAX];
 static int nir;
@@ -288,9 +289,11 @@ static void next(void)
         }
         tok[n] = 0; tok_kind = 1;
     } else if (c >= '0' && c <= '9') {
-        int v = 0;
+        long long v = 0;
         while ((c = src_peek(0)) >= 0 && c >= '0' && c <= '9') {
             v = v * 10 + (c - '0');
+            if (v > 2147483647LL)
+                die("integer literal out of range");
             src_get();
         }
         if (src_peek(0) == '.' && src_peek(1) >= '0' && src_peek(1) <= '9') {
@@ -304,7 +307,9 @@ static void next(void)
                 }
                 src_get();
             }
-            tok_num = v * 65536 + (frac * 65536 + scale / 2) / scale;
+            if (v > 32767)
+                die("float literal out of range (Q16.16 max 32767)");
+            tok_num = (int)v * 65536 + (frac * 65536 + scale / 2) / scale;
             tok_kind = 5;
         } else {
             tok_num = v;
@@ -322,8 +327,9 @@ static void next(void)
                 else if (e == 'r') ch = '\r';
                 else if (e >= 0) ch = (char)e;
             }
-            if (strsize < (int)sizeof(strpool) - 1)
-                strpool[strsize++] = ch;
+            if (strsize >= (int)sizeof(strpool) - 1)
+                die("string pool full");
+            strpool[strsize++] = ch;
         }
         if (src_peek(0) == '"') src_get();
         if (strsize < (int)sizeof(strpool))
@@ -469,6 +475,8 @@ static Sym *sym_add(const char *name, int global)
 static Sym *sym_add_global(const char *name)
 {
     Sym *s = sym_add(name, 1);
+    if (gdata_next >= GMAX)
+        die("too many global words (max 512)");
     s->offset = gdata_next++;
     return s;
 }
