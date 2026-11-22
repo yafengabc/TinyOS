@@ -71,6 +71,9 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", relName(root, path), err)
 	}
+	if err := validateINI(relName(root, path), string(data), boardSchema); err != nil {
+		return nil, err
+	}
 	sections, err := parseINI(string(data))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", relName(root, path), err)

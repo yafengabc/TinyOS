@@ -89,6 +89,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateINI(path, string(data), configSchema); err != nil {
+		return nil, err
+	}
 	sections, err := parseINI(string(data))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

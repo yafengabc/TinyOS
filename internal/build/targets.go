@@ -85,6 +85,9 @@ func loadTargetFile(path string) (Target, error) {
 	if err != nil {
 		return Target{}, err
 	}
+	if err := validateINI(path, string(data), targetSchema); err != nil {
+		return Target{}, err
+	}
 	sections, err := parseINI(string(data))
 	if err != nil {
 		return Target{}, fmt.Errorf("%s: %w", path, err)
