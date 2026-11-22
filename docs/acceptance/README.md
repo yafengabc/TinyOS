@@ -176,3 +176,4 @@
 | 2026-11-22 | 窗口对齐上限改到板级 grain（#55） | `12d41c6` | host + 隔离 worktree；rv32/rv32smp/arm QEMU | 负例红 139 处（含 C3 两条核心断言）；T0 全绿；T1 18/18；T2 3/3 smoke；C3 真机 `NOT RUN`（无板） | [window align](2026-11-22-window-align-c3-27c4248-host.md) |
 | 2026-11-22 | #55 窗口对齐修复的 C3 真机复测 | `12d41c6` | ESP32-C3（COM4） + 18 目标 + rv32/arm QEMU | T0/T1/T2 PASS；T3 PASS（cover 九行 rvm/native 一致，accept 24/24）；T4 `NOT RUN` | [window align C3 verify](2026-11-22-window-align-c3-12d41c6-verify.md) |
 | 2026-11-22 | platform.h 拆四窄头 + include 约束（#52） | `963af77` | host + rv32/arm QEMU | 符号 107/107 等价；三个负例先红；T0 PASS；T1 18/18；T2 2/2 smoke；rv32 `.text` 逐字节相同、ARM 差 4 B（重定位，根因未定位）；T3/T4 `NOT RUN` | [narrow headers](2026-11-22-platform-narrow-headers-qemu.md) |
+| 2026-11-22 | 窗口放置改为 buddy 优先/grain 兜底（#55 复核项） | `80ee7d2` | ESP32-C3（COM4） + 18 目标 + rv32/arm QEMU | T0/T1/T2 PASS；T3 PASS（cover 九行一致，accept 24/24）；T4 `NOT RUN` | [window two-pass](2026-11-22-window-place-twopass-80ee7d2.md) |
