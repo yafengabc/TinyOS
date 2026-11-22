@@ -1,6 +1,6 @@
 # platform.h 拆四窄头 + include 方向约束（#52）
 
-- commit: `TBD`（交付时替换为已推送 sha）
+- commit: `963af77`（已推送 main）
 - 日期: 2026-11-22
 - 变更: `kernel/platform.h`（609 → 162 行）、新增 `kernel/plat/{console,irq,block,memprot}.h`、新增 `internal/build/include_test.go` 与 `testdata/include-allow.txt` / `testdata/platform-periph.txt`
 - 主机: Windows / go1.27.1 windows/amd64 / clang；QEMU rv32、arm
