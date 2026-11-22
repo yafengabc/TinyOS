@@ -266,6 +266,25 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 			bc.WindowStackAlign = 1
 		}
 	}
+	/* Mirror the two layout_check() conditions that do not need a link-time
+	 * address (kernel/process.c): a bad pair used to be a panic at boot, on
+	 * the board, after a flash.  The other two - APP_BASE grain alignment and
+	 * the minimum window against the user area - need constants from
+	 * layout.c and stay where they are. */
+	const page = 4096
+	if bc.WindowGrain&(bc.WindowGrain-1) != 0 {
+		return nil, fmt.Errorf("%s: [window] grain %d is not a power of two",
+			relName(root, path), bc.WindowGrain)
+	}
+	if bc.WindowStack&(bc.WindowStack-1) != 0 || bc.WindowStack < page {
+		return nil, fmt.Errorf("%s: [window] stack %d must be a power of two of at least %d bytes",
+			relName(root, path), bc.WindowStack, page)
+	}
+	if bc.WindowStackAlign != 0 && bc.WindowGrain%bc.WindowStack != 0 {
+		return nil, fmt.Errorf("%s: [window] grain %d is not a multiple of stack %d, "+
+			"and this board sets stack_align (the stack would drift off its own alignment)",
+			relName(root, path), bc.WindowGrain, bc.WindowStack)
+	}
 	return bc, nil
 }
 
