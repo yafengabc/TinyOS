@@ -642,7 +642,7 @@ int main(int argc, char **argv)
                         res = readdir_index(a0, (char *)(arena + a1), a2);
                     break;
                 case NAT_ISDIR: {
-                    struct stat st;
+                    struct tos_stat st;
                     if (a0 >= 0 && a0 < arena_size &&
                         stat((const char *)(arena + a0), &st) == 0)
                         res = st.type == 1;      /* TOS_FTYPE_DIR */
