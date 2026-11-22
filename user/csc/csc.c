@@ -253,6 +253,12 @@ static void src_rewind(void)
 static void next(void)
 {
     int c;
+    /* Windows editors save UTF-8 with a BOM; skip it once at file start
+     * instead of reporting "int expected at line 1" (issue #5). */
+    if (spos == 0 && src_peek(0) == 0xEF && src_peek(1) == 0xBB &&
+        src_peek(2) == 0xBF) {
+        src_get(); src_get(); src_get();
+    }
     for (;;) {
         c = src_peek(0);
         if (c < 0) { tok_kind = 0; tok[0] = 0; return; }
@@ -2730,6 +2736,8 @@ static void gen_stmt(Node *n)
             emit(R_PRINTN, off, len, 0, 0);
         } else {
             int v;
+            if (!n->args)
+                die_node(n, "printf conversion needs an argument");
             if (p > 0) emit(R_PRINTN, off, p, 0, 0);
             v = gen_value(n->args);
             if (conv == 'f') {
