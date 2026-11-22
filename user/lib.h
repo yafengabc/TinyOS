@@ -154,11 +154,11 @@ struct dirent {
 
 typedef struct DIR DIR;
 
-/* The pinned rvm (tinyos-script/port/tinyos/README.md) names the host shim's
- * stat type, because glibc's <fcntl.h> already owns `struct stat` there.  The
- * layouts are the same (include/tos_abi.h): this keeps the pinned copy
- * compiling against the board header without a second declaration. */
-#define tos_stat stat
+/* The pinned rvm names the stat type `tos_stat_t` because the host shim
+ * cannot define `struct stat` (glibc's <fcntl.h> owns it).  Same layout, one
+ * typedef here; the script repo checks this pairing with
+ * tools/check_target_build.py. */
+typedef struct stat tos_stat_t;
 
 DIR           *opendir(const char *path);
 struct dirent *readdir(DIR *d);
