@@ -1,0 +1,1 @@
+accept stack=8192 heap=4096 window=16384 span=0x1000
