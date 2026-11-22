@@ -13,8 +13,9 @@ import (
 /* The editable subset of a build config, plus the canonical writer.
  *
  * The INI files stay the source of truth; menuconfig loads one, edits this
- * state and writes it back in a stable form.  Unknown features are preserved,
- * so a config written by hand does not lose anything the menu does not show. */
+ * state and writes it back in a stable form.  The loader is strict now (an
+ * unknown section, key or feature is an error with a line number), so a file
+ * that loads cannot carry a setting the menu would silently drop. */
 
 const (
 	wifiDriverDir = "drivers/wifi/esp32c3"

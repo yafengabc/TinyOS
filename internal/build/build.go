@@ -893,6 +893,45 @@ func (b *Builder) writeBuildConfig() error {
 		"note        runtime grain/stack/guard are in board/*/layout.c; the",
 		"            check-* lines are the build-time TOS_WINDOW validation",
 	}
+	// Provenance: which layer set each effective value.  Kept as comments so
+	// the machine readers (goc32 reads the features line back) see the same
+	// file they always did.  A value that looks wrong on a board is almost
+	// always a layer question - "why is heap 8 KiB here?" - and the layer is
+	// the first thing to check.
+	src := func(set bool, cfgVal, targetVal string) string {
+		if set {
+			return "config:" + cfgVal
+		}
+		return targetVal
+	}
+	targetSrc := "target:targets/" + b.Target.Name + ".conf"
+	boardSrc := "board:board/" + b.Target.Board + "/board.conf"
+	featSrc := "board:board/" + b.Target.Board + "/board.conf"
+	cfgName := ""
+	if b.Config != nil && b.Config.Path != "" {
+		cfgName = relName(b.Root, b.Config.Path)
+	}
+	if b.Config != nil && len(b.Config.Features) > 0 {
+		featSrc += " + config:" + cfgName
+	}
+	prov := []string{
+		"",
+		"# provenance: the layer each effective value came from",
+		"#   target      " + targetSrc,
+		"#   board       " + boardSrc,
+		"#   cpus        " + targetSrc,
+		"#   rcc_arch    " + targetSrc,
+		"#   heap        " + src(b.HeapBytes != 0, cfgName, targetSrc),
+		"#   max_procs   " + src(b.MaxProcs != 0, cfgName, targetSrc),
+		"#   kstack      " + src(b.KStack != 0, cfgName, targetSrc),
+		"#   opt         " + src(b.Opt != "", cfgName, targetSrc),
+		"#   check-grain " + boardSrc,
+		"#   check-stack " + boardSrc,
+		"#   check-guard " + boardSrc,
+		"#   features    " + featSrc,
+	}
+	lines = append(lines, prov...)
+
 	out := filepath.Join(b.BuildDir, "build-config.txt")
 	data := []byte(strings.Join(lines, "\n") + "\n")
 	if err := os.WriteFile(out, data, 0o644); err != nil {

@@ -13,6 +13,20 @@ import (
 	"tinyos/internal/menu"
 )
 
+// printFeatureList is the tail of `tos build -check-config`: the sorted
+// feature set is what decides which programs and drivers exist, so a config
+// review reads it first.
+func printFeatureList(b *build.Builder) {
+	var on []string
+	for name, v := range b.Features {
+		if v {
+			on = append(on, name)
+		}
+	}
+	sort.Strings(on)
+	fmt.Printf("features: %s\n", strings.Join(on, ","))
+}
+
 func usage() {
 	fmt.Print(`TinyOS build tool
 
@@ -24,6 +38,8 @@ usage:
                             RP2 boards also emit build/tinyos-<target>.uf2.
                             -config selects features/drivers from a file; the
                             default is tos.conf when it exists (see configs/).
+                            -check-config parses all three layers and exits;
+                            unknown sections, keys and feature names fail.
   tos build all [-v]        build every target in targets/*.conf, one after
                             the other, and stop with a per-target summary if
                             any of them failed.  Config files are not applied:
@@ -103,9 +119,14 @@ func main() {
 		verbose := fs.Bool("v", false, "print full compiler command lines")
 		target := fs.String("target", "", "build target (default: config or x86)")
 		config := fs.String("config", "", "build config file (default: tos.conf)")
+		checkConfig := fs.Bool("check-config", false, "validate the config layers and exit without compiling")
 		fs.Parse(os.Args[2:])
 		b.Verbose = *verbose
 		if *target == "all" || (len(fs.Args()) == 1 && fs.Args()[0] == "all") {
+			if *checkConfig {
+				fmt.Fprintln(os.Stderr, "tos: -check-config does not apply to 'build all'")
+				os.Exit(2)
+			}
 			if *config != "" {
 				fmt.Fprintln(os.Stderr, "tos: build all does not take -config; run the target you want with its config")
 				os.Exit(2)
@@ -123,6 +144,12 @@ func main() {
 		if err := configure(b, root, *config, *target); err != nil {
 			fmt.Fprintln(os.Stderr, "tos:", err)
 			os.Exit(2)
+		}
+		if *checkConfig {
+			fmt.Printf("config ok: target %s, board %s, arch %s, %d features\n",
+				b.Target.Name, b.Target.Board, b.Target.Arch, len(b.Features))
+			printFeatureList(b)
+			return
 		}
 		if err := b.Build(); err != nil {
 			fmt.Fprintln(os.Stderr, "\ntos:", err)
