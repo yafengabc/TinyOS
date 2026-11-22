@@ -169,3 +169,4 @@
 | 2026-11-22 | Release 镜像瘦身（44 个 littlefs 块） | `79b9aad` | rpi-pico2 + rv32 (QEMU) | T0/T1/T2 PASS（43 文件/71 块 → 19/27 块，省 176 KiB）；T3/T4 `NOT RUN` | [release prune](2026-11-22-release-prune-79b9aad.md) |
 | 2026-11-22 | Release 镜像再去掉 hello / hello_printf | `2801153` | rpi-pico2 + rv32 (QEMU) | T0/T1（release 目标）/T2 PASS（17 文件/25 块，100 KiB；比默认省 184 KiB）；T3/T4 `NOT RUN` | [release prune 2](2026-11-22-release-prune2-2801153.md) |
 | 2026-11-22 | csa/pvm 改为 opt-in，默认镜像去掉旧 AMX 引擎 | `f7f962c` | rpi-pico2 + rv32 (QEMU) | T0/T1/T2 PASS（默认 43→41 文件、71→62 块，省 36 KiB；pvm 用 configs/pvm.conf 仍可跑）；T3/T4 `NOT RUN` | [scripting opt-in](2026-11-22-scripting-optin-f7f962c.md) |
+| 2026-11-22 | csc/rvm/rcc 默认进镜像；一条脚本覆盖三段 | `75ffb64` | rpi-pico2 + rv32 (QEMU) | T0/T1/T2 PASS（cover 9 行，rvm/native 一致）；T3/T4 `NOT RUN` | [rir default + cover](2026-11-22-rir-default-cover-75ffb64.md) |
