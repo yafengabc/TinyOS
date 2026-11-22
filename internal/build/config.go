@@ -339,9 +339,10 @@ func (b *Builder) applyRirExclude() {
 	}
 }
 
-// scriptingUserPrograms are the legacy on-board scripting pair.  They are
-// opt-in now: the pair costs tens of kilobytes and is no longer a board
-// default, so configs/pvm.conf turns it on for the benchmark comparison.
+// scriptingUserPrograms are the legacy on-board scripting pair.  Only the
+// comparison configs (configs/pvm.conf, configs/esp32c3-pvm.conf) set
+// [features] scripting; every other image leaves it off, so csa/pvm never
+// ship outside a PVM benchmark run.
 var scriptingUserPrograms = []string{"csa", "pvm"}
 
 // applyScriptingExclude keeps the scripting pair out of images whose board
