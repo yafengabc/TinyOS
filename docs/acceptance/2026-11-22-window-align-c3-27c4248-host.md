@@ -1,6 +1,6 @@
 # 窗口对齐上限改到板级 grain（#55）
 
-- commit: `27c4248`（已 rebase 到阶段 0 合并后；交付时以推送 sha 为准）
+- commit: `12d41c6`（已推送 main；rebase 到阶段 0 合并后的最终 sha）
 - 日期: 2026-11-22
 - 变更: `kernel/win_layout.h`（新）、`kernel/process.c`（win_alloc / win_largest_free）、`internal/build/winlayout_test.go`（新）、`internal/build/testdata/win_layout_harness.c`（新）
 - 主机: Windows / go1.27.1 windows/amd64 / clang；QEMU rv32、rv32smp、arm
