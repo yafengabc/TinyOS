@@ -308,6 +308,19 @@ static int write_file(const char *name, const char *src)
             rc = -1;
             goto out;
         }
+        /* Every port rejects these two in stack_request_ok() at exec time,
+           whatever the grain is: one NAPOT PMP entry or one MPU region can
+           only describe a power of two, and the stack has to hold the frame
+           that asks for it.  Fail the build instead of the board. */
+        if (stack != 0 && ((stack & (stack - 1)) != 0 || stack < 4096)) {
+            fprintf(stderr,
+                    "mklfs: %s asks for a %u-byte stack; the kernel only accepts "
+                    "a power of two of at least one page\n",
+                    name, (unsigned)stack);
+            free(comp);
+            rc = -1;
+            goto out;
+        }
         uint8_t hdr[LZ4_WRAP_HEADER_V1];
         memset(hdr, 0, sizeof(hdr));
         memcpy(hdr, "LZ4TOS", 6);
