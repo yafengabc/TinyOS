@@ -379,9 +379,12 @@ extern void ktask_start_stub(void);
  * critical sections are a sixteen-entry scan and a state store, so a finer
  * grain would cost more in bounds checks than it saves in contention.
  *
- * Lock order, the only one in the kernel: proc_lock, then nothing.  Nothing
- * that blocks (console, pipe, timer wait) is ever called while holding it -
- * the scheduler hands the lock back before it idles.
+ * Lock order: the kernel-wide picture is docs/CONCURRENCY.md.  Under
+ * proc_lock the only locks ever taken are a pipe's own reference lock
+ * (kernel/pipe.h: proc_lock then p->lock, never the reverse) and a process
+ * group's glock; nothing that blocks (console, timer wait, the filesystem,
+ * USB flush) is called while holding it - the scheduler hands the lock back
+ * before it idles, and TestLockDiscipline enforces the list.
  *
  * Every acquisition masks interrupts, because the timer tick takes this lock
  * itself (it reaps, it wakes console readers).  A section taken with them on
