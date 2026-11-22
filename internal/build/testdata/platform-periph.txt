@@ -1,5 +1,7 @@
-# Multiword plat_* declarations already present in platform.h when #52 landed.
-# New ones must go to a narrow header under kernel/plat/.
+# Every plat_* declaration still in kernel/platform.h, pinned by #52.
+# New declarations must go to a narrow header under kernel/plat/; this file
+# only shrinks as declarations move out.  The test fails in both directions:
+# a name here that no longer exists is stale and must be removed.
 
 plat_adc_bits
 plat_adc_count
@@ -18,6 +20,8 @@ plat_gpio_write
 plat_i2c_count
 plat_i2c_xfer
 plat_icache_sync
+plat_init
+plat_pio
 plat_pio_release
 plat_pwm_count
 plat_pwm_off
