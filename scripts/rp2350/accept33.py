@@ -220,6 +220,28 @@ def run_checks(con, image, results, opts, boot_text):
         check(results, "F smp -s two workers", con.cmd("smp -s 2 200", 30.0),
               want=("worker 1",))
 
+    # --- 33.4b: one C Script through csc -> rvm -> rcc ---
+    # The image carries /tests/cover.c (files/tests/cover.c).  The interpreter
+    # and the native image must both print tests/onboard/cover.expected; this
+    # is the single-script coverage of the on-board toolchain.
+    exp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "tests", "onboard", "cover.expected")
+    exp = [l.strip() for l in open(exp_path, encoding="utf-8") if l.strip()]
+    out = con.cmd("csc /tests/cover.c /tests/cover.rir", 60.0)
+    check(results, "G csc cover.c", out, want=("csc: /tests/cover.c",))
+    out = con.cmd("rvm /tests/cover.rir", 30.0)
+    rvm_lines = [l.strip() for l in out.splitlines()
+                 if l.strip() and not l.strip().startswith("result=")]
+    check_ok(results, "G rvm cover output", rvm_lines == exp,
+             "%d/%d lines" % (len(rvm_lines), len(exp)))
+    out = con.cmd("rcc /tests/cover.rir /bin/cover", 60.0)
+    check(results, "G rcc cover.rir", out, want=("rcc:",))
+    out = con.cmd("cover", 30.0)
+    nat_lines = [l.strip() for l in out.splitlines() if l.strip()]
+    check_ok(results, "G native cover output", nat_lines == exp,
+             "%d/%d lines" % (len(nat_lines), len(exp)))
+    check_ok(results, "G rvm == native", rvm_lines == nat_lines, "")
+
     # --- 29.1: the flash write path, optional because it is minutes ---
     if opts.dd_rounds:
         ok = 0

@@ -313,15 +313,15 @@ func parseSize(s string) (int, error) {
 	return n * mul, nil
 }
 
-// defaultUserExclude lists development-only programs.  They stay in user/
-// (and compile when named explicitly) but no target ships them: py is the
-// experimental interpreter and csc + rvm + rcc are the register-IR
-// experiment.
+// defaultUserExclude lists programs that are not shipped unless a feature
+// asks for them.  py is the experimental interpreter; csc/rvm/rcc are the
+// on-board C Script tools, which the board images enable through the rir
+// feature (a config that wants the legacy PVM image sets rir = false).
 var defaultUserExclude = []string{"py", "csc", "rvm", "rcc"}
 
-// rirUserPrograms are the experimental AST -> register-IR toolchain.  They
-// are excluded unless a config asks for [features] rir = true, so the default
-// images do not grow.
+// rirUserPrograms are the on-board C Script toolchain.  The board images set
+// [features] rir (see their board.conf); configs for the legacy PVM image set
+// rir = false, which puts them back in the exclude set.
 var rirUserPrograms = []string{"csc", "rvm", "rcc"}
 
 // applyRirExclude is the same feature gate as applyScriptingExclude: called

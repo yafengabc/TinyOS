@@ -1,0 +1,9 @@
+cover: start
+fib=55
+array=61
+struct=42
+while=55
+strlen=5
+strcmp=0
+float=3.00
+cover: ok
