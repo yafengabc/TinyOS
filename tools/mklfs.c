@@ -9,19 +9,31 @@
  * usage:
  *   mklfs <image> <size-bytes> <base-dir> <name> [<name> ...]
  *       create a littlefs image from base-dir/<name> for each name.
- *   mklfs -v <image>
- *       mount <image>, list the root directory, read every regular file
- *       and report name + size.  Fails (non-zero) on any error.
+ *   mklfs -v [--offset N] <image>
+ *       mount, list the directory tree, read every regular file and report
+ *       name + size.  Fails (non-zero) on any error.
+ *   mklfs -l [--offset N] <image>
+ *       list names and sizes only (no file contents).
+ *   mklfs -x [--offset N] <image> <outdir>
+ *       extract the tree into outdir.  Useful for seeing what an image
+ *       actually shipped without a board.
  *
- * The partition parameters must match kernel/ramdisk.c:
- *   block_size  = 4096
- *   block_count = size / 4096
+ *   --offset N puts the filesystem at byte N inside the file: 0 for
+ *   build/ramdisk-*.bin, 512 KiB (0x80000) for a whole tinyos-*.bin image.
+ *   The block parameters must match kernel/ramdisk.c:
+ *     block_size  = 4096
+ *     block_count = (file size - offset) / 4096
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 #include "lfs.h"
 
@@ -504,49 +516,259 @@ static int dump_dir(const char *prefix, int level, const char *unused)
     return rc;
 }
 
-static int verify(int argc, char **argv)
-{
-    if (argc < 3) {
-        fprintf(stderr, "usage: mklfs -v <image>\n");
-        return 1;
-    }
+/* ---- read-only views: list / verify / extract ------------------------- */
 
-    FILE *in = fopen(argv[2], "rb");
+/* Byte offset of the littlefs partition inside the file.  Zero for the
+   ramdisk images the build produces; a whole-flash image (tinyos-*.bin) has
+   the filesystem at the board's partition offset. */
+static long opt_offset;
+
+/* Map the image into memory and mount it.  Returns 0, or -1 with a message. */
+static int load_image(const char *path)
+{
+    FILE *in = fopen(path, "rb");
+    long total, size;
+
     if (!in) {
-        fprintf(stderr, "mklfs: cannot open %s\n", argv[2]);
-        return 1;
+        fprintf(stderr, "mklfs: cannot open %s\n", path);
+        return -1;
     }
-    fseek(in, 0, SEEK_END);
-    long size = ftell(in);
-    fseek(in, 0, SEEK_SET);
-    if (size <= 0 || size % BLOCK_SIZE != 0) {
-        fprintf(stderr, "mklfs: bad image size %ld\n", size);
+    if (fseek(in, 0, SEEK_END) != 0) {
         fclose(in);
-        return 1;
+        return -1;
+    }
+    total = ftell(in);
+    if (total <= 0 || opt_offset < 0 || opt_offset >= total) {
+        fprintf(stderr, "mklfs: bad image size %ld (offset %ld)\n", total, opt_offset);
+        fclose(in);
+        return -1;
+    }
+    size = total - opt_offset;
+    if (size % BLOCK_SIZE != 0) {
+        fprintf(stderr, "mklfs: %s: %ld bytes after the offset is not a multiple of %d\n",
+                path, size, BLOCK_SIZE);
+        fclose(in);
+        return -1;
+    }
+    if (fseek(in, opt_offset, SEEK_SET) != 0) {
+        fclose(in);
+        return -1;
     }
 
     disk = malloc((size_t)size);
     if (!disk || fread(disk, 1, (size_t)size, in) != (size_t)size) {
-        fprintf(stderr, "mklfs: cannot read %s\n", argv[2]);
+        fprintf(stderr, "mklfs: cannot read %s\n", path);
+        free(disk);
+        disk = NULL;
         fclose(in);
-        return 1;
+        return -1;
     }
     fclose(in);
 
     cfg_init((lfs_size_t)(size / BLOCK_SIZE));
-
     if (lfs_mount(&lfs, &cfg) < 0) {
-        fprintf(stderr, "mklfs: verify mount failed\n");
+        fprintf(stderr, "mklfs: mount failed (not a littlefs image, or the block size differs)\n");
         free(disk);
-        return 1;
+        disk = NULL;
+        return -1;
     }
+    return 0;
+}
 
-    int rc = dump_dir("", 0, "") < 0 ? 1 : 0;
-
-    if (lfs_unmount(&lfs) < 0)
-        rc = 1;
+static int unload_image(void)
+{
+    int rc = lfs_unmount(&lfs) < 0 ? -1 : 0;
 
     free(disk);
+    disk = NULL;
+    return rc;
+}
+
+static int skip_dot(const char *name)
+{
+    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
+}
+
+static void join_path(char *out, size_t cap, const char *prefix, const char *name)
+{
+    if (prefix[0] == '\0')
+        snprintf(out, cap, "%s", name);
+    else
+        snprintf(out, cap, "%s/%s", prefix, name);
+}
+
+/* Recursively print names and sizes without reading file contents. */
+static int list_dir(const char *prefix)
+{
+    char dirpath[512];
+    lfs_dir_t dir;
+    struct lfs_info info;
+    int rc = 0;
+
+    snprintf(dirpath, sizeof(dirpath), "/%s", prefix);
+    if (lfs_dir_open(&lfs, &dir, dirpath) < 0) {
+        fprintf(stderr, "mklfs: cannot open %s\n", dirpath);
+        return -1;
+    }
+    while (lfs_dir_read(&lfs, &dir, &info) > 0) {
+        char path[1024];
+
+        if (skip_dot(info.name))
+            continue;
+        join_path(path, sizeof(path), prefix, info.name);
+        if (info.type == LFS_TYPE_DIR) {
+            printf("%-40s <dir>\n", path);
+            if (list_dir(path) < 0)
+                rc = -1;
+        } else {
+            printf("%-40s %u bytes\n", path, (unsigned)info.size);
+        }
+    }
+    lfs_dir_close(&lfs, &dir);
+    return rc;
+}
+
+/* A name that cannot escape the output directory.  littlefs forbids '/', but
+   a hostile image can still ship ".." as an entry name. */
+static int safe_name(const char *name)
+{
+    return name[0] != '\0' && strcmp(name, ".") != 0 && strcmp(name, "..") != 0 &&
+           strchr(name, '/') == NULL && strchr(name, '\\') == NULL;
+}
+
+/* Extract every file under prefix into outdir/prefix. */
+static int extract_dir(const char *prefix, const char *outdir,
+                       unsigned *files, unsigned long *bytes)
+{
+    char dirpath[512];
+    lfs_dir_t dir;
+    struct lfs_info info;
+    int rc = 0;
+
+    snprintf(dirpath, sizeof(dirpath), "/%s", prefix);
+    if (lfs_dir_open(&lfs, &dir, dirpath) < 0) {
+        fprintf(stderr, "mklfs: cannot open %s\n", dirpath);
+        return -1;
+    }
+    while (lfs_dir_read(&lfs, &dir, &info) > 0) {
+        char path[1024], host[1200];
+
+        if (skip_dot(info.name))
+            continue;
+        if (!safe_name(info.name)) {
+            fprintf(stderr, "mklfs: refusing unsafe name %s\n", info.name);
+            rc = -1;
+            continue;
+        }
+        join_path(path, sizeof(path), prefix, info.name);
+        snprintf(host, sizeof(host), "%s/%s", outdir, path);
+
+        if (info.type == LFS_TYPE_DIR) {
+#ifdef _WIN32
+            _mkdir(host);
+#else
+            mkdir(host, 0777);
+#endif
+            if (extract_dir(path, outdir, files, bytes) < 0)
+                rc = -1;
+            continue;
+        }
+
+        lfs_file_t f;
+        struct lfs_file_config fc;
+        uint8_t fbuf[CACHE_SIZE];
+        memset(&fc, 0, sizeof(fc));
+        fc.buffer = fbuf;
+        if (lfs_file_opencfg(&lfs, &f, path, LFS_O_RDONLY, &fc) < 0) {
+            fprintf(stderr, "mklfs: cannot open %s\n", path);
+            rc = -1;
+            continue;
+        }
+        FILE *out = fopen(host, "wb");
+        if (!out) {
+            fprintf(stderr, "mklfs: cannot create %s\n", host);
+            lfs_file_close(&lfs, &f);
+            rc = -1;
+            continue;
+        }
+        uint8_t buf[4096];
+        lfs_ssize_t n;
+        unsigned long written = 0;
+        while ((n = lfs_file_read(&lfs, &f, buf, sizeof(buf))) > 0) {
+            if (fwrite(buf, 1, (size_t)n, out) != (size_t)n) {
+                fprintf(stderr, "mklfs: short write to %s\n", host);
+                rc = -1;
+                break;
+            }
+            written += (unsigned long)n;
+        }
+        if (n < 0) {
+            fprintf(stderr, "mklfs: read error in %s\n", path);
+            rc = -1;
+        }
+        fclose(out);
+        lfs_file_close(&lfs, &f);
+        (*files)++;
+        *bytes += written;
+    }
+    lfs_dir_close(&lfs, &dir);
+    return rc;
+}
+
+static int verify(int argc, char **argv)
+{
+    int rc;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: mklfs -v <image>\n");
+        return 1;
+    }
+    if (load_image(argv[1]) < 0)
+        return 1;
+    rc = dump_dir("", 0, "") < 0 ? 1 : 0;
+    if (unload_image() < 0)
+        rc = 1;
+    return rc;
+}
+
+static int listcmd(int argc, char **argv)
+{
+    int rc;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: mklfs -l [--offset N] <image>\n");
+        return 1;
+    }
+    if (load_image(argv[1]) < 0)
+        return 1;
+    rc = list_dir("") < 0 ? 1 : 0;
+    if (unload_image() < 0)
+        rc = 1;
+    return rc;
+}
+
+static int extract(int argc, char **argv)
+{
+    unsigned files = 0;
+    unsigned long bytes = 0;
+    int rc;
+
+    if (argc < 3) {
+        fprintf(stderr, "usage: mklfs -x [--offset N] <image> <outdir>\n");
+        return 1;
+    }
+    if (load_image(argv[1]) < 0)
+        return 1;
+#ifdef _WIN32
+    _mkdir(argv[2]);
+#else
+    mkdir(argv[2], 0777);
+#endif
+    rc = extract_dir("", argv[2], &files, &bytes) < 0 ? 1 : 0;
+    if (unload_image() < 0)
+        rc = 1;
+    if (rc == 0)
+        printf("extracted %u file(s), %lu bytes -> %s\n", files, bytes, argv[2]);
     return rc;
 }
 
@@ -556,11 +778,34 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage:\n"
                 "  mklfs [--grain N] <image> <size> <base-dir> <name> [name...]\n"
-                "  mklfs -v <image>\n");
+                "  mklfs -v [--offset N] <image>          list + read every file\n"
+                "  mklfs -l [--offset N] <image>          list only\n"
+                "  mklfs -x [--offset N] <image> <outdir>  extract files\n"
+                "\n"
+                "  --offset N  byte offset of the filesystem inside the file\n"
+                "              (0 for build/ramdisk-*.bin; 512 KiB for a whole\n"
+                "              tinyos-*.bin image)\n");
         return 1;
     }
-    if (strcmp(argv[1], "-v") == 0)
-        return verify(argc, argv);
+
+    int argi = 1;
+    (void)argi;
+    while (argc > 1 && strcmp(argv[1], "--offset") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "mklfs: --offset needs a number\n");
+            return 1;
+        }
+        opt_offset = atol(argv[2]);
+        argv += 2;
+        argc -= 2;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "-v") == 0)
+        return verify(argc - 1, argv + 1);
+    if (argc >= 2 && strcmp(argv[1], "-l") == 0)
+        return listcmd(argc - 1, argv + 1);
+    if (argc >= 2 && strcmp(argv[1], "-x") == 0)
+        return extract(argc - 1, argv + 1);
     if (strcmp(argv[1], "--grain") == 0 && argc > 3) {
         opt_grain = atol(argv[2]);
         argv += 2;
