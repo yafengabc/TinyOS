@@ -1,9 +1,9 @@
 #include "lib.h"
 
-/* One entry, formatted like the original: a type letter, the name (with a
- * trailing slash for directories), padded out to a fixed column, then the
- * size, or "<dir>" / "<dev>" for things that have no byte count.  printf has
- * no %Ns, so the padding is done by hand. */
+/* One entry in long form: a type letter, the name (with a trailing slash for
+ * directories), padded out to a fixed column, then the size, or "<dir>" /
+ * "<dev>" for things that have no byte count.  printf has no %Ns, so the
+ * padding is done by hand. */
 static void print_entry(const char *name, struct stat *st)
 {
     int isdir = (st->type == TOS_FTYPE_DIR);
@@ -23,18 +23,57 @@ static void print_entry(const char *name, struct stat *st)
         printf("  %u bytes\n", st->size);
 }
 
-/* `ls` with no argument lists the current working directory.  An argument is
- * either a single entry (printed on its own) or a directory (moved into with
- * chdir, after which readdir lists the cwd).  Because readdir lists the cwd,
- * `ls <dir>` needs no new syscall: chdir there, list, and the child's cwd
- * disappears when ls exits without disturbing the shell. */
+/* Default form: names run together, two spaces apart, wrapped at 78 columns.
+ * `column` is the current line length; a program runs once, so a static is
+ * enough. */
+static int column;
+
+static void print_name(const char *name, int isdir)
+{
+    int len = (int)strlen(name) + (isdir ? 1 : 0);
+
+    if (column != 0 && column + 2 + len > 78) {
+        putchar('\n');
+        column = 0;
+    }
+    if (column != 0) {
+        putchar(' ');
+        putchar(' ');
+        column += 2;
+    }
+    printf("%s%s", name, isdir ? "/" : "");
+    column += len;
+}
+
+/* `ls` lists the current directory; `ls <dir>` chdirs into it first (the
+ * child's cwd disappears when ls exits, so the shell is unaffected).
+ * `-l` selects the long form, one entry per line. */
 int main(int argc, char **argv)
 {
-    const char *target = (argc > 1) ? argv[1] : ".";
+    const char *target = ".";
+    int long_mode = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-l")) {
+            long_mode = 1;
+        } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            puts("ls: unknown option ");
+            puts(argv[i]);
+            puts("\n");
+            return 1;
+        } else {
+            target = argv[i];
+        }
+    }
 
     struct stat st;
     if (stat(target, &st) == 0 && st.type != TOS_FTYPE_DIR) {
-        print_entry(target, &st);
+        if (long_mode)
+            print_entry(target, &st);
+        else {
+            print_name(target, 0);
+            putchar('\n');
+        }
         return 0;
     }
 
@@ -53,7 +92,12 @@ int main(int argc, char **argv)
             break;
         if (stat(name, &es) != 0)
             continue;
-        print_entry(name, &es);
+        if (long_mode)
+            print_entry(name, &es);
+        else
+            print_name(name, es.type == TOS_FTYPE_DIR);
     }
+    if (!long_mode && column != 0)
+        putchar('\n');
     return 0;
 }
