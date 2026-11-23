@@ -142,7 +142,7 @@ class Board:
             chunk = self.s.read(512)
             if chunk:
                 buf += chunk
-                if buf.decode("utf-8", "replace").rstrip().endswith(PROMPT):
+                if buf.decode("utf-8", "replace").endswith(PROMPT):
                     break
         return buf.decode("utf-8", "replace")
 
@@ -286,9 +286,9 @@ def main():
 
         # 3. heap: the number is not asserted, but it must parse.
         free = b.cmd("free")
-        m = re.search(r"free[: ]+([0-9]+)", free)
+        m = re.search(r"kernel heap\s+(\d+)\s+(\d+)\s+(\d+)", free)
         check("heap reports a free size", bool(m),
-              m.group(0) if m else "no free line")
+              "kernel heap free=%s" % m.group(3) if m else "no kernel heap line")
 
         ls = b.cmd("ls /bin")
         check("filesystem read: ls /bin", "msh" in ls and "sh" in ls, "msh + sh")

@@ -321,9 +321,14 @@ def main():
             fw.flash(args.uf2, root, tick=lambda: con.pump(0.05))
             boot = con.prompt(args.first_boot)
         else:
+            # An idle shell only reprints its prompt after a newline.  Without
+            # this, --no-flash attaches to a running board and waits out the
+            # whole window with nothing to read, then reports "no prompt".
+            con.s.write(b"\r\n")
             boot = con.prompt(args.first_boot)
         check_ok(results, "0 boot to a shell", "tos>" in boot,
-                 "no prompt in %.0fs" % args.first_boot)
+                 "" if "tos>" in boot
+                 else "no prompt in %.0fs" % args.first_boot)
 
         run_checks(con, results, args)
 
