@@ -574,6 +574,22 @@ func (b *Builder) compile(src, obj string, includes []string, extra ...string) e
 	return nil
 }
 
+// withoutRVC drops the C extension from an ISA string ("rv32imac" ->
+// "rv32ima"), keeping any underscore-separated extension list.  Returns ""
+// when the string does not name RVC.
+func withoutRVC(march string) string {
+	base, ext, hasExt := strings.Cut(march, "_")
+	i := strings.IndexByte(base, 'c')
+	if i < 0 {
+		return ""
+	}
+	base = base[:i] + base[i+1:]
+	if hasExt {
+		return base + "_" + ext
+	}
+	return base
+}
+
 // linkViaDriver reports whether the link tool is a compiler driver (clang,
 // gcc, zig cc) that needs -Wl, to forward flags to the real linker, rather
 // than a bare linker that takes them directly.
@@ -1493,6 +1509,31 @@ func (b *Builder) buildUser() ([]string, error) {
 	userPIEFlags := append([]string{"-fPIC", fmt.Sprintf("-DTOS_APP_GRAIN=%d", grain)},
 		b.userDefines()...)
 
+	// Hazard3 (RP2350) faults on an instruction fetch that spans two PMP
+	// regions, even when both grant X, and user programs run in U-mode where
+	// the task's NAPOT map is page granular: an RVC-compressed stream puts
+	// 32-bit instructions at 2-byte offsets, so one occasionally starts at
+	// page_end-2 and straddles the boundary between two regions.  The task
+	// then dies with "instruction access fault" at an address ending in
+	// 0xffe (measured: rcc built at 0x20020000 dies at 0x20026ffe on
+	// `lui a0,0xd38`; a build 48 bytes larger dies at 0x20025ffe).  Build the
+	// user side without RVC: every instruction is then 4 bytes and 4-byte
+	// aligned, so no fetch can straddle a page and therefore none can
+	// straddle a region.  The kernel keeps RVC - it runs in M-mode, where
+	// these unlocked PMP entries do not apply.
+	chip := ""
+	if b.BoardConfig != nil {
+		chip = b.BoardConfig.Chip
+	}
+	userISAFix := []string{}
+	if b.Target.Arch == "rv32" && chip == "rp2350" {
+		if m := withoutRVC(b.Target.March); m != "" {
+			userISAFix = []string{"-march=" + m}
+		}
+	}
+	// -march is last on the command line, so this replaces the target's.
+	userCFlags := append(append([]string{}, userPIEFlags...), userISAFix...)
+
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
 	// aeabi.c supplies the EABI division helpers the Cortex-M0+ needs (it
@@ -1538,9 +1579,11 @@ func (b *Builder) buildUser() ([]string, error) {
 		obj := filepath.Join(b.BuildDir, "user", strings.TrimSuffix(name, filepath.Ext(name))+".o")
 		commonObjs = append(commonObjs, obj)
 		srcCopy, objCopy := src, obj
-		flags := userPIEFlags
+		flags := userCFlags
 		if strings.HasSuffix(name, ".S") {
-			flags = nil // assembler: no -fPIE, it just emits relative code
+			// assembler: no -fPIE, it just emits relative code; the ISA fix
+			// still applies, or the assembler would expand `j` to `c.j`
+			flags = append([]string{}, userISAFix...)
 		} else if sizeOpt[name] {
 			flags = append(append([]string{}, flags...), "-Oz")
 		}
@@ -1639,7 +1682,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		obj := filepath.Join(b.BuildDir, "user", prog+".o")
 		srcCopy, objCopy := src, obj
 		tasks = append(tasks, task{fn: func() error {
-			return b.compile(srcCopy, objCopy, incs, userPIEFlags...)
+			return b.compile(srcCopy, objCopy, incs, userCFlags...)
 		}})
 	}
 
@@ -1673,7 +1716,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		// because -Oz on RV32 is what makes QEMU's TCG re-translate every
 		// loop (see ccFlags) - that is a property of the emulator, not of
 		// the code, and the interpreter is not what runs the kernel.
-		flags := userPIEFlags
+		flags := userCFlags
 		if raw, err := os.ReadFile(filepath.Join(udir, dir, "opt")); err == nil {
 			if s := strings.TrimSpace(string(raw)); s != "" {
 				flags = append(append([]string{}, flags...), s)

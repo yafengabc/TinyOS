@@ -55,11 +55,18 @@
  * The default on the small boards is 8 KiB, and 8 192 + 8 192 + 4 096 =
  * 20 480, which takes a 24 KiB window on a 4 KiB grain. */
 TOS_STACK(4 * 1024);
-/* 16 KiB on the small boards (4 KiB grain), one 64 KiB grain on the larger
- * ones.  The build computes image + stack + heap + guard and fails when that
- * stops fitting, so this is a promise, not a hope. */
+/* 16 KiB on the small boards (4 KiB grain), 32 KiB where user code is built
+ * without RVC, one 64 KiB grain on the larger ones.  The build computes
+ * image + stack + heap + guard and fails when that stops fitting, so this is
+ * a promise, not a hope.
+ *
+ * Hazard3 (RP2350 RV32, the only 16 KiB-grain target) drops RVC from user
+ * programs - a 32-bit instruction on a page boundary would straddle two PMP
+ * regions - and the image passes 8 KiB, so the window is 32 KiB there. */
 #if TOS_APP_GRAIN >= 64 * 1024
 TOS_ONE_GRAIN();
+#elif TOS_APP_GRAIN >= 16 * 1024
+TOS_WINDOW(32 * 1024);
 #else
 TOS_WINDOW(16 * 1024);
 #endif
