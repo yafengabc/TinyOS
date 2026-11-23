@@ -554,3 +554,26 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 修法：把 TinyOS 侧的四份改动同步回 `tinyos-script/src/`，两边各提交一次；
 不要为了让 T0 变绿而删除或放宽 `pinned_test.go`。**已按此完成**（2026-11-22）。
 以后若两侧再次漂移，本地 T0 报告要显式写出这条 FAIL 及基线证据，不能写成"T0 全绿"。
+
+
+## 16. 结构性限制清单（2026-11-23）
+
+和“用户堆只增不减”同类的东西：不报错、不崩溃，用着用着才发现。按影响排序，
+每条给出证据位置；修不修、什么时候修由需求决定。
+
+| # | 限制 | 证据 | 表现 | 建议 |
+|---|---|---|---|---|
+| 16.1 | **任务窗口不可压缩**：每个窗口必须连续，释放只留空洞 | `kernel/process.c:1384`（`win_alloc` 扫空隙，无搬迁） | 混合大小的 exec churn 后，大窗口（C3 上 `csc` 要 128 KiB）可能在“总空闲够”时仍失败；退出任务或重启才恢复。错误会报最大空闲块 | 可用“大窗口从高端分配/尺寸分档”缓解；彻底解决需要 MMU。先记录，不修 |
+| 16.2 | **路径上限 64 字节**（含 NUL） | `kernel/syscall.c:330,342,354` 等（`char path[64]`） | 路径 ≥63 字符的 `open/stat/unlink/mkdir` 直接 -1；littlefs 本身支持 255 | 未改：需要统一常量并评估每个 syscall 的栈占用 |
+| 16.3 | ~~目录项名字 32 字节 + 点文件被吞~~ **已修（2026-11-23）** | `kernel/ramdisk.c`（`DENT_NAME 64`、只跳过 `.`/`..`） | 修前：`ls` 只显示 31 字符，点文件建得出来但列不出来。修后 C3 上 42 字符名字完整显示，`.hidden` 可建、可列、可读 | — |
+| 16.4 | ~~全局打开文件数 8，但每进程 FD 12~~ **已修（2026-11-23）** | `kernel/ramdisk.c`（`MAX_OPEN 12`） | 修前系统级第 9 个 open 失败；修后与 `MAX_FDS` 一致。代价：`.bss` +1088 B（含 16.3 的 640 B），`.text` +80 B | — |
+| 16.5 | **内核堆不可压缩** | `kernel/heap.c:6-12,104-140`（first-fit + 相邻合并） | 长期混合大小的分配（pipe 2 KiB、`argbuf = argc×256`、文件缓存）碎片化后，`kmalloc` 可能失败；只合并、不搬迁 | 当前规模可接受；压力测试里关注 `free` 的 peak/used |
+| 16.6 | **栈只能翻倍增长，且与堆争窗口** | `kernel/process.c:3231`（`process_stack_grow`） | 堆先涨到 guard 附近后，深递归无法再扩栈；只能靠 `TOS_STACK()` 预留。会打印明确提示 | 保持；文档已说明 |
+| 16.7 | **用户堆峰值不归还** | `user/heap.c:10-16` | `free` 合并后复用，但 brk 只增；一次性大分配永久抬高水位（空间仍可复用） | 设计如此；若需要可加“顶部整块回缩”，收益有限 |
+| 16.8 | **控制台输出会丢字节** | `kernel/console.c:102`（trylock 失败整块丢）、`drivers/usb/rp2350/usb_cdc.c:603`（环满丢） | 长输出在 SMP 竞争或 USB 单核下不完整；#46 是后者 | #46 用 USB kthread 修；UART 路径的丢弃是刻意的 |
+| 16.9 | 行输入 255 字符、raw 队列 512 B | `kernel/tty.h:23`、`kernel/tty.c:145` | 超长粘贴/命令行截断；`rx` 有流控所以不受影响 | 记录即可 |
+| 16.10 | 不 wait 的子进程退出码最多记 8 个 | `kernel/process.c:42`（`LAG_MAX 8`） | 父进程连续 spawn 超过 8 个不 wait，最早的退出码丢失 | 记录；需要时按需调大 |
+| 16.11 | `uptime` 32 位毫秒 | `board/*/platform.c` 的 `plat_uptime_ms`、`kernel/syscall.c:577` | 连续运行 49.7 天回绕；用它算的 `cpums` 会出错 | 若要长跑，改 64 位（syscall 返回仍 32 位的话另开 API） |
+| 16.12 | 文件位置/大小 32 位 | `user/lib.h:169`（`lseek(int off)`）、`include/tos_abi.h:22`（`size uint32_t`） | 单文件 >2 GiB 不能 seek，>4 GiB 大小溢出；与 FAT32 上限一致 | 若将来上 FAT/大文件再改 ABI |
+| 16.13 | littlefs 只增不缩 | `kernel/ramdisk.c` 的 `lfs_fs_grow` 路径 | 分区/镜像只能向大改；缩小要重刷 | 记录 |
+| 16.14 | 固定容量：`PIPE_SIZE` 2 KiB、mailbox 4 条、`MAX_PROCS` 16/18 | `kernel/pipe.h:33`、`kernel/mailbox.c:18`、`kernel/process.c:35` | 满了会阻塞/返回错误，属于显式行为 | 不需要改 |

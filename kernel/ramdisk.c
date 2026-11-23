@@ -20,7 +20,7 @@
  * board's layout.c), so the C3 can size its 4 MiB flash partition up
  * without changing every other board.  FS_BLOCK_SIZE stays shared. */
 #define FS_CACHE_SIZE  512
-#define MAX_OPEN       8               /* concurrent file handles (== MAX_FDS) */
+#define MAX_OPEN       12              /* concurrent file handles (== MAX_FDS) */
 
 /* The per-file 512 byte littlefs cache is allocated on open instead of
    living in .bss: an idle handle then costs ~120 bytes, and RAM is paid
@@ -58,7 +58,7 @@ static uint8_t bounce[FS_BLOCK_SIZE] __attribute__((aligned(4)));
    (8 s when QEMU's TCG has one of its slow days).  Any mutation drops the
    snapshot, so a listing can never go stale. */
 #define DENT_MAX  20
-#define DENT_NAME 32
+#define DENT_NAME 64            /* matches struct dirent.d_name */
 /* Names only: sizes come from stat(), which asks littlefs directly rather
    than a snapshot taken at an unknown time. */
 static char     dents[DENT_MAX][DENT_NAME];
@@ -287,7 +287,12 @@ static int enum_dir(const char *dirpath)
 
     struct lfs_info info;
     while (lfs_dir_read(&lfs, &dir, &info) > 0) {
-        if (info.name[0] == '.')
+        /* Skip the two synthetic entries, not every dotfile: a file named
+           ".profile" is a normal file, and hiding it from readdir made it
+           creatable but unlistable. */
+        if (info.name[0] == '.' &&
+            (info.name[1] == '\0' ||
+             (info.name[1] == '.' && info.name[2] == '\0')))
             continue;
 
         /* Record the bare entry name; the caller (ls) turns it into a
