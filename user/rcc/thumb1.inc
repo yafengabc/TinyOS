@@ -168,12 +168,22 @@ static void e_add_imm(int rd, int rn, int imm)
         return;
     }
     if (rn == ARM_SP) {
-        /* ADD Rd, SP, #imm8*4 */
+        /* ADD Rd, SP, #imm8*4 covers aligned offsets up to 1020.  Anything
+         * else cannot use the two-register ADD (SP is not a low register),
+         * so materialise SP into Rd first and add the remainder as an
+         * immediate.  ready.c reaches this with imm=6 for a struct field. */
         e_need_low("add", rd);
         if (imm % 4 == 0 && imm <= 1020) {
             e16((uint16_t)(0xA800 | (rd << 8) | (imm / 4)));
             return;
         }
+        e16((uint16_t)(0x4668 | rd));                      /* movs rd, sp */
+        while (imm > 0) {
+            int k = imm > 255 ? 255 : imm;
+            e16((uint16_t)(0x3000 | (rd << 8) | k));       /* adds rd, #k */
+            imm -= k;
+        }
+        return;
     }
     e_need_low("add", rd);
     e_need_low("add", rn);
@@ -205,6 +215,17 @@ static void e_sub_imm(int rd, int rn, int imm)
                 e16((uint16_t)(0xB080 | (k / 4)));
                 imm -= k;
             }
+        }
+        return;
+    }
+    if (rn == ARM_SP) {
+        /* There is no 16-bit SUB Rd, SP, #imm; stage SP in Rd first. */
+        e_need_low("sub", rd);
+        e16((uint16_t)(0x4668 | rd));                      /* movs rd, sp */
+        while (imm > 0) {
+            int k = imm > 255 ? 255 : imm;
+            e16((uint16_t)(0x3800 | (rd << 8) | k));       /* subs rd, #k */
+            imm -= k;
         }
         return;
     }
