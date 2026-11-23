@@ -183,6 +183,30 @@ def main():
              native_lines == exp, "%d/%d lines" % (len(native_lines), len(exp)))
     check_ok(results, "rvm and native agree", rvm_lines == native_lines, "")
 
+    # The same for the state-machine demo: csc's per-function ceilings (256
+    # AST / 256 IR on this build) are why the split-by-job pattern matters, so
+    # the demo ships and is compiled here too.
+    exp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "tests", "onboard", "state.expected")
+    exp_state = [l.strip() for l in open(exp_path, encoding="utf-8") if l.strip()]
+
+    out = b.cmd("csc /tests/state.c /tests/state.rir", timeout=60.0)
+    check(results, "csc compiles the state-machine demo", out,
+          want=("csc: /tests/state.c",))
+    out = b.cmd("rvm /tests/state.rir", timeout=30.0)
+    rvm_state = output_lines(out, "rvm /tests/state.rir")
+    check_ok(results, "rvm state output matches state.expected",
+             rvm_state == exp_state,
+             "%d/%d lines" % (len(rvm_state), len(exp_state)))
+    out = b.cmd("rcc /tests/state.rir /bin/state", timeout=60.0)
+    check(results, "rcc compiles the state-machine demo", out, want=("rcc:",))
+    out = b.cmd("state", timeout=30.0)
+    native_state = output_lines(out, "state")
+    check_ok(results, "native state output matches state.expected",
+             native_state == exp_state,
+             "%d/%d lines" % (len(native_state), len(exp_state)))
+    check_ok(results, "state: rvm and native agree", rvm_state == native_state, "")
+
     # ^C must reach the task blocked on the console.  "cat" with no argument
     # waits for input, so it is the reliable way to have somebody to signal.
     b.s.write(b"cat\r\n")
