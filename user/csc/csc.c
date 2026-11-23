@@ -1570,7 +1570,8 @@ enum {
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
     NAT_SLEEP, NAT_UPTIME, NAT_RUN,
     NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK,
-    NAT_CAPTURE, NAT_READDIR, NAT_ISDIR
+    NAT_CAPTURE, NAT_READDIR, NAT_ISDIR,
+    NAT_YIELD, NAT_READY
 };
 
 
@@ -1598,6 +1599,8 @@ static int native_lookup_hash(uint64_t h, int *nargs, int *hasret)
         { "capture",    NAT_CAPTURE,    3, 1 },
         { "readdir",    NAT_READDIR,    3, 1 },
         { "isdir",      NAT_ISDIR,      1, 1 },
+        { "yield",      NAT_YIELD,      0, 1 },
+        { "ready",      NAT_READY,      1, 1 },
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (str_hash(tab[i].name) == h) {

@@ -577,4 +577,4 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 | 16.12 | 文件位置/大小 32 位 | `user/lib.h:169`（`lseek(int off)`）、`include/tos_abi.h:22`（`size uint32_t`） | 单文件 >2 GiB 不能 seek，>4 GiB 大小溢出；与 FAT32 上限一致 | 若将来上 FAT/大文件再改 ABI |
 | 16.13 | littlefs 只增不缩 | `kernel/ramdisk.c` 的 `lfs_fs_grow` 路径 | 分区/镜像只能向大改；缩小要重刷 | 记录 |
 | 16.14 | 固定容量：`PIPE_SIZE` 2 KiB、mailbox 4 条、`MAX_PROCS` 16/18 | `kernel/pipe.h:33`、`kernel/mailbox.c:18`、`kernel/process.c:35` | 满了会阻塞/返回错误，属于显式行为 | 不需要改 |
-| 16.15 | **csc 的 native 表没有 `yield`/`poll`** | `src/csc.c` 的 `native_lookup_hash` 表；`rvm` 也只实现表内的调用 | 脚本里的合作式调度只能用 `sleep(ms)` 或阻塞 `read`；没有非阻塞 fd 等待 | 状态机写法仍可用（见 `files/tests/state.c`）；真需要 `yield`/`poll` 时再加两个 native 调用 |
+| 16.15 | ~~csc 的 native 表没有 `yield`/`poll`~~ **已加（2026-11-23）** | csc 表新增 `yield()` / `ready(fd)`；rvm 与 rcc 三个后端都实现 | `yield` 不再按 tick 量化；`ready` 是非阻塞 poll，事件循环可以只 step 就绪的 fd | 见 `files/tests/ready.c`；完整 `poll(fds,n,timeout)` 仍未暴露（csc 没有结构体指针） |

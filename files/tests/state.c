@@ -92,7 +92,7 @@ int main()
                 done_r = 1;
         }
         turns = turns + 1;
-        sleep(1);   /* csc has no yield(); sleep is the yield point */
+        yield();   /* cooperative: no timer quantum */
     }
 
     printf("turns=%d\n", turns);

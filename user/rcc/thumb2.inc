@@ -516,6 +516,22 @@ static void emit_native_argbuf(int id, int dst)
         e_li(0, 5);
         e_svc0();
         break;
+    case 21: /* yield() */
+        e_li(0, 13); e_svc0();
+        e_li(0, 0);
+        break;
+    case 22: /* ready(fd): one non-blocking poll */
+        e_la(0, data_argbuf);
+        e_ldr_imm(1, 0, 0);
+        e_sub_imm(ARM_SP, ARM_SP, 8);
+        e_str_imm(1, ARM_SP, 0);
+        e_li(1, 1); e_str_imm(1, ARM_SP, 4);
+        e_add_imm(1, ARM_SP, 0);
+        e_li(2, 1);
+        e_li(0, 37); e_svc0();
+        e_ldrb_imm(0, ARM_SP, 6);
+        e_add_imm(ARM_SP, ARM_SP, 8);
+        break;
     default:
         die("bad argbuf native");
     }

@@ -412,6 +412,24 @@ static void emit_native_argbuf(int id, int dst)
         bind_label(done);
         break;
     }
+    case 21: /* yield() */
+        e_li(X_A7, 13);
+        e_ecall();
+        e_li(X_A0, 0);
+        break;
+    case 22: /* ready(fd): one non-blocking poll */
+        e_arg_val(X_T0, 0);
+        e_addi(X_SP, X_SP, -8);
+        e_sw(X_T0, 0, X_SP);          /* fd */
+        e_li(X_T0, 1);
+        e_sw(X_T0, 4, X_SP);          /* events=POLLIN, revents=0 */
+        e_mv(X_A0, X_SP);
+        e_li(X_A1, 1);
+        e_li(X_A7, 37);               /* SYS_POLL */
+        e_ecall();
+        e_lbu(X_A0, 6, X_SP);         /* revents low byte */
+        e_addi(X_SP, X_SP, 8);
+        break;
     default:
         die("bad argbuf native");
     }

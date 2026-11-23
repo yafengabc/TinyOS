@@ -207,6 +207,30 @@ def main():
              "%d/%d lines" % (len(native_state), len(exp_state)))
     check_ok(results, "state: rvm and native agree", rvm_state == native_state, "")
 
+    # The scheduling natives: ready(fd) is one non-blocking poll, yield() gives
+    # up the CPU for a round.  /readme.txt is always in the image, so the
+    # descriptor is readable (ready=1) and yield returns 0.
+    exp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "tests", "onboard", "ready.expected")
+    exp_ready = [l.strip() for l in open(exp_path, encoding="utf-8") if l.strip()]
+
+    out = b.cmd("csc /tests/ready.c /tests/ready.rir", timeout=60.0)
+    check(results, "csc compiles the ready/yield demo", out,
+          want=("csc: /tests/ready.c",))
+    out = b.cmd("rvm /tests/ready.rir", timeout=30.0)
+    rvm_ready = output_lines(out, "rvm /tests/ready.rir")
+    check_ok(results, "rvm ready/yield matches ready.expected",
+             rvm_ready == exp_ready,
+             "%d/%d lines" % (len(rvm_ready), len(exp_ready)))
+    out = b.cmd("rcc /tests/ready.rir /bin/ready", timeout=60.0)
+    check(results, "rcc compiles the ready/yield demo", out, want=("rcc:",))
+    out = b.cmd("ready", timeout=30.0)
+    native_ready = output_lines(out, "ready")
+    check_ok(results, "native ready/yield matches ready.expected",
+             native_ready == exp_ready,
+             "%d/%d lines" % (len(native_ready), len(exp_ready)))
+    check_ok(results, "ready: rvm and native agree", rvm_ready == native_ready, "")
+
     # ^C must reach the task blocked on the console.  "cat" with no argument
     # waits for input, so it is the reliable way to have somebody to signal.
     b.s.write(b"cat\r\n")

@@ -25,7 +25,8 @@ enum {
     NAT_ADC_COUNT, NAT_ADC_READ, NAT_PWM_COUNT, NAT_PWM_SET, NAT_PWM_OFF,
     NAT_SLEEP, NAT_UPTIME, NAT_RUN,
     NAT_OPEN, NAT_CREATE, NAT_READ, NAT_WRITE, NAT_CLOSE, NAT_UNLINK,
-    NAT_CAPTURE, NAT_READDIR, NAT_ISDIR
+    NAT_CAPTURE, NAT_READDIR, NAT_ISDIR,
+    NAT_YIELD, NAT_READY
 };
 
 typedef struct { int op, a, b, c, d; } RIR;
@@ -648,6 +649,18 @@ int main(int argc, char **argv)
                         res = st.type == 1;      /* TOS_FTYPE_DIR */
                     break;
                 }
+                case NAT_YIELD:
+                    yield();
+                    res = 0;
+                    break;
+                case NAT_READY: {
+                    struct pollfd pf;
+                    pf.fd = a0;
+                    pf.events = POLLIN;
+                    pf.revents = 0;
+                    res = poll(&pf, 1, 0);   /* check now; no sleep */
+                    break;
+                }
                 case NAT_CAPTURE: {
                     /* run(path) with its stdout wired into a pipe.  The child
                      * inherits fd 1 at exec time, so the parent points fd 1 at
@@ -686,6 +699,19 @@ int main(int argc, char **argv)
                     res = n;
                     break;
                 }
+                }
+#else
+                /* Host build: target natives are stubs, but the two the script
+                 * language exposes for cooperative scheduling should behave
+                 * (yield succeeds, ready reports from the host poll stub). */
+                if (q.a == NAT_YIELD) {
+                    res = 0;
+                } else if (q.a == NAT_READY) {
+                    struct pollfd pf;
+                    pf.fd = argbuf[0];
+                    pf.events = POLLIN;
+                    pf.revents = 0;
+                    res = poll(&pf, 1, 0);
                 }
 #endif
                 if (q.b >= 0) r[q.b] = res;
