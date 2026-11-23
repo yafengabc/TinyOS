@@ -84,7 +84,7 @@ static int run(int count, unsigned iters, int out[2])
         args[2] = kb;
         args[3] = fb;
         args[4] = sb;
-        pid[i] = exec("bin/smpbench", args, 5);
+        pid[i] = exec("/bin/smpbench", args, 5);
         close(r);
         if (pid[i] < 0) {
             close(w);

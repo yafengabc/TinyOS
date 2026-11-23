@@ -141,7 +141,7 @@ int main(int argc, char *argv[])
         wargs[0] = "piperace";
         wargs[1] = "-w";
         wargs[2] = kb;
-        wpid[i] = exec("bin/piperace", wargs, 3);
+        wpid[i] = exec("/bin/piperace", wargs, 3);
         close(1);                   /* back to the console on our side */
         close(fds[1]);
 
@@ -151,7 +151,7 @@ int main(int argc, char *argv[])
             break;
         }
         char *rargs[2] = { "piperace", "-r" };
-        rpid[i] = exec("bin/piperace", rargs, 2);
+        rpid[i] = exec("/bin/piperace", rargs, 2);
         close(0);
         close(fds[0]);
         printf("  spawn p%d: w=%d r=%d\n", i, wpid[i], rpid[i]);

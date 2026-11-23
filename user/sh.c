@@ -265,18 +265,15 @@ static void print_prompt(void)
 
 /* ---- spawning programs ------------------------------------------------ */
 
-/* exec only spawns a child; the caller decides whether to wait for it. */
+/* exec only spawns a child; the caller decides whether to wait for it.
+ *
+ * No "bin/" prefix: exec() resolves a relative name against the cwd and looks
+ * a bare name up in the current directory first, then /bin.  The prefix only
+ * worked because the filesystem ignores the cwd; once exec() follows the same
+ * rules as open(), "bin/ls" from /tests would mean /tests/bin/ls. */
 static int spawn(char *argv[], int argc)
 {
-    char path[TOS_PATH_MAX];
-
-    strcpy(path, "bin/");
-    if (strlen(path) + strlen(argv[0]) >= sizeof(path)) {
-        puts("sh: name too long\n");
-        return -1;
-    }
-    strcpy(path + 4, argv[0]);
-    return exec(path, argv, argc);
+    return exec(argv[0], argv, argc);
 }
 
 static int run_program(char *argv[], int argc, int bg)

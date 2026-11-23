@@ -757,6 +757,8 @@ int main(int argc, char *argv[])
 
 然后 `tos build`。构建工具会自动编译 `user/*.c` 里除 `lib.c`/`syscall.c` 外的每个文件，
 链接成 ELF 并放进 littlefs 镜像的 `bin/foo`，shell 里直接输入 `foo` 就能运行。
+（`exec()` 的解析顺序和 `open()` 一样：带 `/` 的按 cwd 解析，裸名字先看当前目录、
+再找 `/bin`，所以 `./foo` 也认；细节见 `docs/SHELL-GUIDE.md`。）
 
 程序大到写不下一个文件时，把它拆成 `user/<name>/` 目录：目录里的每个 `.c` 是一部分，
 整个目录链接成**一个**程序 `bin/<name>`。这样解释器那样的几千行代码是一个任务，

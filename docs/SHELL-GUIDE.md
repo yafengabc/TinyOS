@@ -34,7 +34,7 @@ TinyOS shell commands:
                      drive, cat to read, `gpio dev` for ioctl
   cmd > file         send stdout to a file or a device
   A | B              send A's stdout to B's stdin
-  run <prog> [args]  run a program from /bin
+  run <prog> [args]  run a program (cwd first, then /bin)
   run <prog> ... &   run it in the background
   run sh <file>      run a script as a task
   source <file>      run a script in this shell
@@ -56,8 +56,19 @@ Script syntax (in a script file; see docs/SHELL-GUIDE.md):
 命令分三类：**内建**（`help`、`cd`、`pwd`、`rm`、`ps`、`exit`、`reboot`、
 `source`、`run`、`nice`、`prio`，以及脚本用的 `incr`、`true`、`false`）、
 **脚本内内建 + 控制台/后台程序**（`echo`、`sleep`）和**程序**（`bin/` 下的每个
-ELF：`ls`、`cat`、`uptime`……）。不是内建的名字会被当成 `bin/<名字>` 去
-exec，所以 `hello alpha` 和 `run hello alpha` 等价。
+ELF：`ls`、`cat`、`uptime`……）。
+
+名字怎么变成路径，由 `exec()` 决定，和 `open()`/`stat()` 同一套规则：
+
+1. 带 `/` 的按原样解析——`/h2` 是绝对路径，`./h3`、`src/prog`、`../bin/x` 都相对
+   当前目录（`cd` 改的就是它）；
+2. 不带 `/` 的先看当前目录，没有才去 `/bin`。所以你在放了新程序的目录里敲
+   `hello` 就跑那个，换个目录再敲 `hello` 仍然是 `/bin/hello`；`./hello` 与
+   `hello` 在这个目录下等价。
+
+shell 自己不再拼 `/bin`（`msh` 和 `sh` 都直接 `exec(argv[0])`），所以 `run`、
+脚本行和程序里的 `exec("名字")` 看到的顺序完全一致；名字找不到时内核报的是
+`/bin/<名字>`，那是它最后尝试的位置。
 
 **为什么 `sleep` 有两条路径**：脚本里每毫秒采样一次时，为一次 `sleep 1`
 付一次 exec + ELF 重定位是不可接受的。但内建会停住 shell 自己，而内核**明确拒绝
@@ -65,7 +76,7 @@ exec，所以 `hello alpha` 和 `run hello alpha` 等价。
 `process_ctrl_target()` 也跳过它），所以 `source` 脚本里的内建 sleep 一旦很长，
 `^C` 就再也收不回来了。因此条件很明确：**只在脚本里（`script_depth > 0`）、
 且不带 `&` 时内建**；控制台上敲 `sleep 3000`、`sleep 500 &`、
-`nice 2 sleep 500`、`run sleep 500` 全部仍是 `bin/sleep` 程序。控制台的前台
+`nice 2 sleep 500`、`run sleep 500` 全部仍是 `/bin/sleep` 程序。控制台的前台
 sleep 因此保住了 `^C`：shell 阻塞在 `wait()`，属于
 `foreground_job()` 能找到的目标，实测发 0x03 后立刻 `[pid N] killed` 并回到提示符。
 `echo` 也分两条路（不带 `&` 是内建），但它不阻塞，没有这层顾虑。
@@ -203,7 +214,7 @@ done
 
 选哪个的判断只有一条：**要不要多一个任务**。
 
-- `run sh <file>` = `exec("bin/sh", {"sh", file})`。脚本跑飞只会带走那个 sh，
+- `run sh <file>` = `exec("/bin/sh", {"sh", file})`。脚本跑飞只会带走那个 sh，
   shell 毫发无损；它也是一个普通任务，可以 `&` 进后台，退出码经 `wait()` 返回。
 - `source <file>` 是在 shell 自己的身体里读文件。没有隔离——脚本里一句 `reboot`
   就是真重启，一个 crash 也一样。它换来的是**不占任务窗口**。

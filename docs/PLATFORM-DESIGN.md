@@ -521,7 +521,7 @@ trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fau
 `run_command()`，区别只在输入源和要不要 `exec`：
 
 - `source` 把文件当成**当前进程**的输入源，递归调 `run_script()`。不占任务窗口。
-- `run sh <file>` 就是 `exec("bin/sh", {"sh", file})`：新任务、新 pid、独立窗口，
+- `run sh <file>` 就是 `exec("/bin/sh", {"sh", file})`：新任务、新 pid、独立窗口，
   崩溃不牵连父 shell，行尾 `&` 可用，退出码经 `wait()` 拿得到。
 
 为什么两条都要：C3 只有 **3 个任务窗口**（shell / 前台 / 备用）。`run sh a.sh`

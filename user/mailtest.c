@@ -56,7 +56,7 @@ int main(int argc, char **argv)
     args[1] = "-w";
     args[2] = pidbuf;
 
-    int pid = exec("bin/mailtest", args, 3);
+    int pid = exec("/bin/mailtest", args, 3);
     if (pid < 0) {
         puts("mailtest: cannot spawn worker\n");
         return 1;

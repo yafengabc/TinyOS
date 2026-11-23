@@ -204,18 +204,13 @@ static void expand(const char *in, char *out, int cap)
 
 static int spawn(char *argv[], int argc)
 {
-    char path[TOS_PATH_MAX];
-    if (strchr(argv[0], '/')) {
-        if (strlen(argv[0]) >= sizeof(path))
-            return -1;
-        strcpy(path, argv[0]);
-    } else {
-        if (strlen(argv[0]) + 6 >= sizeof(path))
-            return -1;
-        strcpy(path, "/bin/");
-        strcpy(path + 5, argv[0]);
-    }
-    return exec(path, argv, argc);
+    /* No /bin prefix and no copy: exec() resolves a relative name against the
+     * cwd and, for a bare name, looks in the current directory first and in
+     * /bin second.  So `hello` runs ./hello where one exists and /bin/hello
+     * otherwise, and `run ./prog` / `run sub/prog` work as written.  Keeping
+     * the order in the kernel gives scripts and ordinary programs the same
+     * answer as the prompt. */
+    return exec(argv[0], argv, argc);
 }
 
 static int run_script(const char *path);

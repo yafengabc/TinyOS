@@ -141,6 +141,18 @@ def main():
     check(results, "cat reads it back", b.cmd("cat accept.txt"),
           want=("abracadabra",))
 
+    # exec() path rules: a name with a slash is resolved against the cwd (so
+    # ./prog works), and a bare name looks in the cwd first, then /bin.  Copy
+    # a known program into the cwd and run it both ways; the bare name must
+    # find the copy, not the /bin original.
+    b.cmd("cat /bin/hello > acc_h")
+    check(results, "exec: ./name runs from the cwd", b.cmd("./acc_h"),
+          want=("hello from ring 3!",))
+    check(results, "exec: bare name finds the cwd copy", b.cmd("acc_h"),
+          want=("hello from ring 3!",))
+    check(results, "the cwd copy can be removed", b.cmd("rm acc_h"),
+          want=("tos>",))
+
     # Command files: the same parser with a file as its input source.  `source`
     # runs in this process on purpose - it costs no window at all, while a
     # shell that execs a script which execs a program spends one window per

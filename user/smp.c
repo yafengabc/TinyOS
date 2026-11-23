@@ -180,7 +180,7 @@ int main(int argc, char *argv[])
             args[1] = "-w";
             args[2] = idb;
             args[3] = msb;
-            pids[i] = exec("bin/smp", args, 4);
+            pids[i] = exec("/bin/smp", args, 4);
             codes[i] = -1;
         }
         for (int i = 0; i < n; i++)
@@ -220,7 +220,7 @@ int main(int argc, char *argv[])
         args[1] = "-w";
         args[2] = idb;
         args[3] = msb;
-        pids[i] = exec("bin/smp", args, 4);
+        pids[i] = exec("/bin/smp", args, 4);
         if (pids[i] < 0) {
             printf("smp: cannot start worker %d\n", i);
             n = i;

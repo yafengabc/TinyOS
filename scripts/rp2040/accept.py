@@ -3,9 +3,15 @@
 
 This is the board row of docs/TESTING.md section 5.3: identity, clock, heap,
 filesystem, exec, write-back, fault isolation, the long-output check issue #46
-was about, and two write/verify/unlink rounds.  Every item is a
-prompt-send-expect cycle, so a failure names the command instead of "the board
-did something odd".
+was about, two write/verify/unlink rounds, and the on-board toolchain
+(csc -> rvm -> rcc -> native for /tests/cover.c, /tests/state.c and
+/tests/ready.c, each compared against tests/onboard/*.expected).  Every item is
+a prompt-send-expect cycle, so a failure names the command instead of "the
+board did something odd".
+
+The toolchain chain is here on purpose: accept33.py runs it as "G" and the C3
+acceptance runs it per script, so leaving it out of the RP2040 row meant the
+board path was only covered when somebody remembered to type the four commands.
 
     python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
     python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico-smp.uf2 -p COM19
@@ -181,6 +187,24 @@ def tokens(text, echo):
     return [t for t in re.split(r"\s+", body) if t]
 
 
+def output_lines(text, echo):
+    """A command's own output: echo, prompt and rvm's timing trailer gone."""
+    lines = [l.strip() for l in text.replace("\r", "").splitlines()]
+    if lines and lines[0] == echo.strip():
+        lines = lines[1:]
+    return [l for l in lines
+            if l and not l.startswith("tos>") and not l.startswith("result=")]
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def expected_lines(name):
+    path = os.path.join(ROOT, "tests", "onboard", name)
+    with open(path, encoding="utf-8") as f:
+        return [l.strip() for l in f if l.strip()]
+
+
 def body_exact(text, echo):
     """A command's raw output, so the caller can compare byte counts.
 
@@ -302,6 +326,17 @@ def main():
         check("filesystem write-back", "x" in cat and PROMPT in rm,
               "wfile/cat/rm")
 
+        # 3b. exec() path rules: a relative name is resolved against the cwd
+        #     and a bare name looks there first, then in /bin.  Copy a program
+        #     into the cwd and run it both ways.
+        b.cmd("cat /bin/hello > acc_h")
+        dotted = b.cmd("./acc_h")
+        bare = b.cmd("acc_h")
+        b.cmd("rm acc_h")
+        check("exec: ./name and bare name run from the cwd",
+              "hello from ring 3!" in dotted and
+              "hello from ring 3!" in bare, "cwd exec")
+
         crash = b.cmd("crash")
         check("fault isolation", PROMPT in crash and "KERNEL PANIC" not in crash,
               "crash returned to prompt")
@@ -348,7 +383,33 @@ def main():
             check("dd/rm round %d" % rnd, ok,
                   "write+verify+unlink" if ok else "see transcript")
 
-        # 8. end where we started: the console is still a console.
+        # 8. the on-board toolchain, end to end: csc compiles the scripts that
+        #    ship in the image, rvm interprets the RIR, rcc compiles it to a
+        #    native image, and both have to print the expected file.  This is
+        #    the same chain accept33.py runs as "G" and the C3 acceptance runs
+        #    per script - it lives in the acceptance script because nobody
+        #    remembers to type it by hand on every board run.
+        for src in ("cover", "state", "ready"):
+            exp = expected_lines("%s.expected" % src)
+            out = b.cmd("csc /tests/%s.c /tests/%s.rir" % (src, src), 90.0)
+            check("csc compiles /tests/%s.c" % src,
+                  "csc: /tests/%s.c" % src in out, "csc")
+            out = b.cmd("rvm /tests/%s.rir" % src, 60.0)
+            rvm_lines = output_lines(out, "rvm /tests/%s.rir" % src)
+            check("rvm %s matches %s.expected" % (src, src),
+                  rvm_lines == exp,
+                  "%d/%d lines" % (len(rvm_lines), len(exp)))
+            out = b.cmd("rcc /tests/%s.rir /bin/%s" % (src, src), 90.0)
+            check("rcc compiles /bin/%s" % src, "rcc:" in out, "rcc")
+            out = b.cmd(src, 60.0)
+            native_lines = output_lines(out, src)
+            check("native %s matches %s.expected" % (src, src),
+                  native_lines == exp,
+                  "%d/%d lines" % (len(native_lines), len(exp)))
+            check("%s: rvm and native agree" % src,
+                  rvm_lines == native_lines, "")
+
+        # 9. end where we started: the console is still a console.
         end = b.cmd("uptime")
         transcript.append(end)
         check("console still answers", PROMPT in end, "uptime at the end")

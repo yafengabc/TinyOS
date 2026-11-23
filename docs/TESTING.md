@@ -239,9 +239,11 @@ python scripts/esp-c3/flash.py --full -p COM4
 python scripts/esp-c3/accept.py -p COM4
 ```
 
-- 验收是 29 项（含 `csc -> rvm -> rcc -> cover` 五项，脚本在镜像的
-  `/tests/cover.c`，与 `tests/onboard/cover.expected` 逐行比对）；本机 `tos.conf`
-  的 `[user] exclude` 若裁掉了 `hello` 等程序，会少几项。**必须说明缺的是哪一个、
+- 验收是 **42 项**：其中 `csc -> rvm -> rcc -> native` 三条脚本链路占 15 项
+  （`/tests/cover.c`、`state.c`、`ready.c`，各自与 `tests/onboard/*.expected`
+  逐行比对，且 rvm 与原生必须一致），另有 3 项是 `exec()` 的路径规则（`./名字`、
+  当前目录里的裸名字、能删掉）。本机 `tos.conf`
+  的 `[user] exclude` 若裁掉了 `hello`/`csc` 等程序，会少几项。**必须说明缺的是哪一个、
   因为配置排除**，不能把少项当全过。
 - 想跑满：用默认配置或临时配置（不要把 `tos.conf` 提交）。
 
@@ -292,8 +294,15 @@ python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-
 ```
 
 - 判据：末行 `ACCEPT OK n/n`、退出码 0。检查项是身份（`/proc/cpuinfo` 的 RP2040 + 板名）、
-  时钟、堆、`ls /bin`、`hello`、写回、`crash` 隔离、两处长输出（`ls /bin` 与
-  `wc` 对账；`cat /readme.txt` 按字节对账）、两轮 `dd`/`rm`、收尾仍应答、全程无 panic。
+  时钟、堆、`ls /bin`、`hello`、写回、`exec()` 路径（`./名字` 与当前目录裸名字）、
+  `crash` 隔离、两处长输出（`ls /bin` 与 `wc` 对账；`cat /readme.txt` 按字节对账）、
+  两轮 `dd`/`rm`、**板载工具链**
+  （`csc -> rvm -> rcc -> native` 各跑 `/tests/cover.c`、`state.c`、`ready.c`，逐行对
+  `tests/onboard/*.expected`）、收尾仍应答、全程无 panic。
+- 工具链这一段是脚本自己跑的，不靠人记：`accept33.py` 的 `G` 段和 C3 的每脚本链路是
+  同一个覆盖面，漏了它等于 RP2040 上的 csc/rvm/rcc 只在有人手敲时才有证据。镜像若在
+  `tos.conf` 的 `[user] exclude` 里裁掉了 `csc`/`rvm`/`rcc`，这几项会失败——必须说明
+  缺的是哪一个、因为配置排除，不能当全过。
 - **长输出必须在板载 CDC 上跑**：UART0 只覆盖 tty/UART 的节奏，覆盖不到 USB 那条
   （#46 就是 USB 的 ~192 B 截断）。只有 CH343 时脚本会打印 note，那次结果不能当
   USB 证据。

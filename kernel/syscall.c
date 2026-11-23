@@ -162,6 +162,36 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
         return r;
     }
 
+    /* exec() takes the same paths as open() and stat(): a relative name is
+     * joined onto the task's cwd, so `.` and `..` mean what they mean
+     * everywhere else.  A bare name (no '/') is then looked for in the
+     * current directory first and in /bin second - typing `h3` in the
+     * directory that holds it runs ./h3, and the same keystroke anywhere else
+     * still finds the shipped /bin/h3.  The shells used to add /bin
+     * themselves; doing it here gives `run`, script lines and every program
+     * that calls exec() the same order. */
+    char rpath[TOS_PATH_MAX];
+
+    resolve_path(path, rpath, sizeof(rpath));
+
+    if (!strchr(path, '/')) {
+        uint32_t size;
+        uint8_t type;
+        size_t n = strlen(path);
+        char alt[TOS_PATH_MAX];
+
+        if (n + 5 < sizeof(alt)) {
+            memcpy(alt, "/bin/", 5);
+            memcpy(alt + 5, path, n + 1);
+            /* The copy in the current directory wins when it is there;
+             * otherwise /bin is both what we try and the name the error
+             * message should show ("not found" naming /bin is what a shell
+             * user expects). */
+            if (path_stat(rpath, &size, &type) != 0)
+                strcpy(rpath, alt);
+        }
+    }
+
     if (argc > 0) {
         /* These strings used to sit in a static 12 x 256-byte array: 3 KiB
          * of .bss held for the whole uptime to serve a window that lasts
@@ -188,7 +218,7 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
         }
     }
 
-    int rc = process_exec(r, path, argv, argc);
+    int rc = process_exec(r, rpath, argv, argc);
     /* process_exec() lays the strings out in the new image's initial stack
      * before it returns, so the buffer is dead as soon as it does - on the
      * success path too, where the frame now describes the new program. */

@@ -141,6 +141,6 @@ void kmain(void)
     kprintf("\nstarting /bin/msh ...\n\n");
 #endif
     plat_boot_stage(11u);
-    process_start_shell("bin/msh");
+    process_start_shell("/bin/msh");
     panic("shell returned");
 }
