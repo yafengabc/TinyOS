@@ -235,8 +235,11 @@ python scripts/esp-c3/flash.py --full -p COM4
 python scripts/esp-c3/accept.py -p COM4
 ```
 
-- 验收是 24 项；本机 `tos.conf` 的 `[user] exclude` 若裁掉了 `hello` 等程序，会得到 23/24。**必须说明缺的是哪一个、因为配置排除**，不能把 23/24 当 24/24。
-- 想跑满 24 项：用默认配置或临时配置（不要把 `tos.conf` 提交）。
+- 验收是 29 项（含 `csc -> rvm -> rcc -> cover` 五项，脚本在镜像的
+  `/tests/cover.c`，与 `tests/onboard/cover.expected` 逐行比对）；本机 `tos.conf`
+  的 `[user] exclude` 若裁掉了 `hello` 等程序，会少几项。**必须说明缺的是哪一个、
+  因为配置排除**，不能把少项当全过。
+- 想跑满：用默认配置或临时配置（不要把 `tos.conf` 提交）。
 
 ### 5.2 ATK-DNRP2350AM（参考板，Cortex-M33 / Hazard3）
 
