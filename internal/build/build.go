@@ -1509,18 +1509,17 @@ func (b *Builder) buildUser() ([]string, error) {
 	userPIEFlags := append([]string{"-fPIC", fmt.Sprintf("-DTOS_APP_GRAIN=%d", grain)},
 		b.userDefines()...)
 
-	// Hazard3 (RP2350) faults on an instruction fetch that spans two PMP
-	// regions, even when both grant X, and user programs run in U-mode where
-	// the task's NAPOT map is page granular: an RVC-compressed stream puts
-	// 32-bit instructions at 2-byte offsets, so one occasionally starts at
-	// page_end-2 and straddles the boundary between two regions.  The task
-	// then dies with "instruction access fault" at an address ending in
-	// 0xffe (measured: rcc built at 0x20020000 dies at 0x20026ffe on
-	// `lui a0,0xd38`; a build 48 bytes larger dies at 0x20025ffe).  Build the
-	// user side without RVC: every instruction is then 4 bytes and 4-byte
-	// aligned, so no fetch can straddle a page and therefore none can
-	// straddle a region.  The kernel keeps RVC - it runs in M-mode, where
-	// these unlocked PMP entries do not apply.
+	// RISC-V allows an access only when a single PMP entry covers all of it,
+	// and a user task runs under a page-granular NAPOT map, so .text is split
+	// across several entries.  With RVC a 32-bit instruction can start at
+	// page_end-2 and one fetch then covers two entries: that fails even though
+	// both grant X, because neither entry covers the whole access.  Measured:
+	// rcc built at 0x20020000 dies at 0x20026ffe on `lui a0,0xd38`, and the
+	// same source 48 bytes further along dies at 0x20025ffe.  Build the user
+	// side without RVC: every instruction is then 4 bytes and 4-byte aligned,
+	// so no fetch can straddle a page and therefore none can straddle an
+	// entry.  The kernel keeps RVC - it runs in M-mode, where these unlocked
+	// PMP entries do not apply.
 	chip := ""
 	if b.BoardConfig != nil {
 		chip = b.BoardConfig.Chip
@@ -1528,7 +1527,13 @@ func (b *Builder) buildUser() ([]string, error) {
 	userISAFix := []string{}
 	if b.Target.Arch == "rv32" && chip == "rp2350" {
 		if m := withoutRVC(b.Target.March); m != "" {
-			userISAFix = []string{"-march=" + m}
+			userISAFix = []string{
+				"-march=" + m,
+				// User code can see why its image is bigger: without RVC
+				// msh passes 8 KiB and has to promise a larger window
+				// (see user/msh/msh.c).
+				"-DTOS_USER_NO_RVC=1",
+			}
 		}
 	}
 	// -march is last on the command line, so this replaces the target's.
