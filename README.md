@@ -116,11 +116,11 @@ A program is just a file in littlefs, so a one-line change does not need a new
 
 ```sh
 goc32 user/foo.c -target atk-dnr2350am -o build/foo.tos   # C -> LZ4TOS blob
-tosput-cli COM14 build/foo.tos /bin/foo            # base64 + CRC32 over the console
+tosput COM14 build/foo.tos /bin/foo            # base64 + CRC32 over the console
 tos> foo
 ```
 
-`tosput-cli` speaks the same line protocol as the on-board `rx` (raw mode,
+`tosput` speaks the same line protocol as the on-board `rx` (raw mode,
 stop-and-wait, CRC32 over what reached flash), so it works on any board with a
 console and needs no kernel support beyond `ttyraw()`. See
 [`docs/FILE-TRANSFER.md`](docs/FILE-TRANSFER.md) for the frame format and why

@@ -8,8 +8,8 @@ GUI 工具（`tools/tosput`）和板上的接收程序（`user/rx.c`，镜像里
 ## 用法
 
 ```
-tosput.exe            GUI：选串口、选文件、Send
-tosput-cli COM13 a.bin /a.bin     同一协议的无界面版（测试/脚本用）
+tosput-gui.exe         GUI：选串口、选文件、Send
+tosput COM13 a.bin /a.bin         同一协议的命令行版（测试/脚本用）
 ```
 
 板上等价物是 `rx /path`；GUI 自己发这条命令，不需要人在串口终端敲。
@@ -123,7 +123,7 @@ FAILED: board's rx does not report its chunk size (stale filesystem image): flas
 
 **未验证**：本机没有插原生 USB 口（只插了 CH343），所以 USJ 的两条中断路径
 （RX 中断、TX 环 + IN_EMPTY 中断）只做了代码级的对称实现，没在真机上跑到
-主机侧。插上原生 USB 后应当：`tosput-cli` 用新出现的 COM 口传一遍，并确认
+主机侧。插上原生 USB 后应当：`tosput` 用新出现的 COM 口传一遍，并确认
 控制台输出完整（`cat` 一个大文件不该缺字）。已记在 `OPEN-ITEMS`。
 
 ## 调过的坑（都是实测出来的）

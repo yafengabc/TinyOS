@@ -2,8 +2,9 @@
 
 package main
 
-// tosput - a Windows GUI that puts a file onto a TinyOS board over the
-// console serial line.
+// tosput-gui - a Windows GUI that puts a file onto a TinyOS board over the
+// console serial line.  The same source also builds tosput, the headless
+// CLI; only the executable name selects the face.
 //
 // Everything interesting lives in sender.go (the protocol) and, on the
 // other end of the wire, user/rx.c (the receiver).  This file is just the
@@ -27,8 +28,9 @@ type uiState struct {
 }
 
 func main() {
-	// The CLI build (tosput-cli.exe) and `-cli` both run headless.
-	if len(os.Args) > 1 && os.Args[1] == "-cli" || cliBuild() {
+	// tosput-gui.exe opens the window; `-cli` forces headless, and every
+	// other name (tosput, go run, tests) is the CLI.
+	if len(os.Args) > 1 && os.Args[1] == "-cli" || !guiBuild() {
 		os.Exit(runCli())
 	}
 

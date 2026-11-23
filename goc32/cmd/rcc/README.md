@@ -24,7 +24,7 @@ The `.tos` file is the LZ4TOS envelope expected by TinyOS.  On a board, upload
 it into `/bin`:
 
 ```sh
-tosput-cli COM4 output.tos /bin/prog
+tosput COM4 output.tos /bin/prog
 prog
 ```
 

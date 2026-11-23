@@ -223,7 +223,10 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o "dist/tools/tos${{ matrix.ext }}" ./cmd/tos
           go build -trimpath -ldflags "-s -w" -o "dist/tools/tostest${{ matrix.ext }}" ./cmd/tostest
           (cd goc32 && go build -trimpath -ldflags "-s -w" -o "../dist/tools/goc32${{ matrix.ext }}" .)
-          (cd tools/tosput && go build -trimpath -ldflags "-s -w" -o "../../dist/tools/tosput-cli${{ matrix.ext }}" .)
+          (cd tools/tosput && go build -trimpath -ldflags "-s -w" -o "../../dist/tools/tosput${{ matrix.ext }}" .)
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd tools/tosput && go build -trimpath -ldflags "-s -w -H windowsgui" -o ../../dist/tools/tosput-gui.exe .)
+          fi
           (cd rv32emu && go build -trimpath -ldflags "-s -w" -o "../dist/tools/rv32emu${{ matrix.ext }}" .)
           cat > dist/tools/README.txt <<'EOF'
           TinyOS host tools
@@ -238,9 +241,12 @@ jobs:
             Build a user program (no clang needed):
               goc32 -target esp32c3 -o hello.tos user/hello.c
 
-          tosput-cli
+          tosput
             Send a .tos to a running board over its console:
-              tosput-cli COM4 hello.tos /bin/hello
+              tosput COM4 hello.tos /bin/hello
+
+          tosput-gui (Windows only)
+            The same sender with a window: pick a port and a file, Send.
 
           tos, tostest
             Build images and run QEMU smoke tests.  These still need

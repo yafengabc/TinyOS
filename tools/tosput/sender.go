@@ -95,13 +95,22 @@ func OpenSender(name string, baud int,
 // never saw the newline; that forced 96 characters every 30 ms and a
 // ~1 KiB/s ceiling.  The kernel now hands console input to a blocked
 // reader from the receive interrupt (not the next tick) and the raw queue
-// is 4 KiB, so a chunk line can go out in a handful of writes.
+// is 4 KiB, so most targets accept much larger bursts.
+//
+// A USB CDC console is the exception: RP2040 reads one byte per syscall.
+// 256 B per 1 ms outruns it: 2 of 3 measured 42 KiB uploads died at chunk
+// 24-27 after repeated "NAK r5" (the decoded block is short by a byte).
+// 256 B per 2 ms is stable - 9 consecutive runs (42 KiB and 128 KiB) took
+// no NAK at all at 25-27 KiB/s.  That is already the protocol ceiling:
+// pacing at 128 KiB/s leaves the per-chunk ACK and littlefs write as the
+// bottleneck, so doubling the gap costs nothing and further speeding the
+// host cannot help.
 //
 // Every write is checked: the Windows driver may accept only part of a
 // buffer, and a silently short write costs a whole retransmitted chunk.
 func (s *Sender) writePaced(line []byte) error {
 	const piece = 256
-	const gap = 1 * time.Millisecond
+	const gap = 2 * time.Millisecond
 	for off := 0; off < len(line); off += piece {
 		end := off + piece
 		if end > len(line) {

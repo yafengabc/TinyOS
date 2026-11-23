@@ -99,11 +99,11 @@ go run ./cmd/tostest smoke -target rv32
 
 ```sh
 goc32 user/foo.c -target atk-dnr2350am -o build/foo.tos   # C -> LZ4TOS blob
-tosput-cli COM14 build/foo.tos /bin/foo            # base64 + CRC32，走控制台
+tosput COM14 build/foo.tos /bin/foo            # base64 + CRC32，走控制台
 tos> foo
 ```
 
-`tosput-cli` 和板上的 `rx` 说同一套行协议（raw 模式、停等流控、对**落盘字节**算
+`tosput` 和板上的 `rx` 说同一套行协议（raw 模式、停等流控、对**落盘字节**算
 CRC32），所以任何有控制台的板子都能用，内核侧只需要 `ttyraw()`。帧格式以及"为什么
 没有硬件流控的 UART 上停等是必须的"见
 [`docs/FILE-TRANSFER.md`](docs/FILE-TRANSFER.md)。

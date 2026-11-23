@@ -9,7 +9,7 @@ README 只留亮点和上手路径，长出来的部分写成一组文章放在�
 2. **自带编译器**——`goc32` 怎么把 C 编到 RV32IM/Thumb、为什么最后把 clang/ld.lld
    也从流水线里拿掉（两遍汇编器、PIE 链接器、`R_*_RELATIVE` 与 `--gc-sections`
    的等价物）、以及一个没有 libLLVM 的编译器在 40 KiB 的用户程序上够不够用。
-3. **十秒钟一轮**——`goc32` + `tosput-cli`/`rx` 把单个二进制从控制台送进 littlefs，
+3. **十秒钟一轮**——`goc32` + `tosput`/`rx` 把单个二进制从控制台送进 littlefs，
    为什么不重刷 300 KiB 镜像、为什么 UART 上停等流控是必须的（`FILE-TRANSFER.md`），
    以及"落盘字节 CRC32"这条为什么比"线路上算 CRC"更有用。
 4. **一个窗口就是一次交易**——为什么任务是 4 KiB 步长、镜像/栈/护栏洞/增长余量怎么

@@ -1,6 +1,6 @@
 package main
 
-// Headless mode for tests and scripting: tosput -cli <port> <local> [remote]
+// Headless mode for tests and scripting: tosput <port> <local> [remote]
 
 import (
 	"fmt"
@@ -10,22 +10,24 @@ import (
 	"time"
 )
 
-// cliBuild reports whether this binary was linked as tosput-cli.exe: the
+// guiBuild reports whether this binary was linked as tosput-gui.exe: the
 // same source builds both faces, and the name decides which one shows.
-func cliBuild() bool {
+// Every other name (tosput, `go run .`, a test binary) stays headless, so
+// a script that calls tosput can never pop a window.
+func guiBuild() bool {
 	exe := strings.ToLower(filepath.Base(os.Args[0]))
-	return strings.HasPrefix(exe, "tosput-cli")
+	return strings.HasPrefix(exe, "tosput-gui")
 }
 
 func runCli() int {
-	// Either "tosput-cli <port> <local>" or "tosput -cli <port> <local>":
-	// the -cli token shifts everything by one.
+	// tosput-gui -cli also lands here; the -cli token shifts everything
+	// by one.
 	off := 1
 	if len(os.Args) > 1 && os.Args[1] == "-cli" {
 		off = 2
 	}
 	if len(os.Args) < off+2 {
-		fmt.Fprintln(os.Stderr, "usage: tosput [-cli] <port> <local-file> [remote-path]")
+		fmt.Fprintln(os.Stderr, "usage: tosput <port> <local-file> [remote-path]")
 		return 2
 	}
 	port, local := os.Args[off], os.Args[off+1]
