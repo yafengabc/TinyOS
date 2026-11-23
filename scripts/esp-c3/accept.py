@@ -15,6 +15,7 @@ panic/trap/fault appears in its output.
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -74,6 +75,22 @@ def check(results, name, out, want=(), avoid=(), timeout_note=""):
     ok = not bad and not missing
     results.append((name, ok, text, missing, bad, timeout_note))
     return ok
+
+
+def check_ok(results, name, ok, note=""):
+    """For a condition the caller already computed (a line-by-line compare)."""
+    results.append((name, bool(ok), "", [] if ok else ["condition"], [], note))
+    return bool(ok)
+
+
+def output_lines(text, echo):
+    """The command's own output: drop the line the tty echoed, the prompt, and
+    rvm's timing trailer."""
+    lines = [l.strip() for l in text.replace("\r", "").splitlines()]
+    if lines and lines[0] == echo.strip():
+        lines = lines[1:]
+    return [l for l in lines
+            if l and not l.startswith("tos>") and not l.startswith("result=")]
 
 
 def main():
@@ -138,6 +155,33 @@ def main():
           want=("sh: cannot open nosuch",))
     check(results, "the boot script parses", b.cmd("run sh etc/rc"),
           want=("tos>",))
+
+    # The on-board toolchain, end to end: csc compiles the script that ships in
+    # the image (/tests/cover.c), rvm interprets the RIR, rcc compiles it to a
+    # native image, and both must print tests/onboard/cover.expected.  This is
+    # the same script scripts/rvm-cover.py runs on QEMU; the C3 is the board
+    # half of the coverage.
+    exp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "tests", "onboard", "cover.expected")
+    exp = [l.strip() for l in open(exp_path, encoding="utf-8") if l.strip()]
+
+    out = b.cmd("csc /tests/cover.c /tests/cover.rir", timeout=60.0)
+    check(results, "csc compiles /tests/cover.c", out,
+          want=("csc: /tests/cover.c",))
+
+    out = b.cmd("rvm /tests/cover.rir", timeout=30.0)
+    rvm_lines = output_lines(out, "rvm /tests/cover.rir")
+    check_ok(results, "rvm cover output matches cover.expected", rvm_lines == exp,
+             "%d/%d lines" % (len(rvm_lines), len(exp)))
+
+    out = b.cmd("rcc /tests/cover.rir /bin/cover", timeout=60.0)
+    check(results, "rcc compiles the native image", out, want=("rcc:",))
+
+    out = b.cmd("cover", timeout=30.0)
+    native_lines = output_lines(out, "cover")
+    check_ok(results, "native cover output matches cover.expected",
+             native_lines == exp, "%d/%d lines" % (len(native_lines), len(exp)))
+    check_ok(results, "rvm and native agree", rvm_lines == native_lines, "")
 
     # ^C must reach the task blocked on the console.  "cat" with no argument
     # waits for input, so it is the reliable way to have somebody to signal.

@@ -109,6 +109,17 @@ def check_ok(results, name, ok, note=""):
     return bool(ok)
 
 
+def cover_lines(text, echo):
+    """cover.c's own output: drop the echoed command, the prompt line and
+    rvm's timing trailer.  The tty echoes what was typed, so a raw splitline
+    compare would always carry one extra line."""
+    lines = [l.strip() for l in text.replace("\r", "").splitlines()]
+    if lines and lines[0] == echo.strip():
+        lines = lines[1:]
+    return [l for l in lines
+            if l and not l.startswith("tos>") and not l.startswith("result=")]
+
+
 def msh_wink(ps_text):
     """`wink` from the msh row: pid ppid prio state c cpu% cpums wink stk/sz name."""
     for line in ps_text.splitlines():
@@ -230,14 +241,13 @@ def run_checks(con, image, results, opts, boot_text):
     out = con.cmd("csc /tests/cover.c /tests/cover.rir", 60.0)
     check(results, "G csc cover.c", out, want=("csc: /tests/cover.c",))
     out = con.cmd("rvm /tests/cover.rir", 30.0)
-    rvm_lines = [l.strip() for l in out.splitlines()
-                 if l.strip() and not l.strip().startswith("result=")]
+    rvm_lines = cover_lines(out, "rvm /tests/cover.rir")
     check_ok(results, "G rvm cover output", rvm_lines == exp,
              "%d/%d lines" % (len(rvm_lines), len(exp)))
     out = con.cmd("rcc /tests/cover.rir /bin/cover", 60.0)
     check(results, "G rcc cover.rir", out, want=("rcc:",))
     out = con.cmd("cover", 30.0)
-    nat_lines = [l.strip() for l in out.splitlines() if l.strip()]
+    nat_lines = cover_lines(out, "cover")
     check_ok(results, "G native cover output", nat_lines == exp,
              "%d/%d lines" % (len(nat_lines), len(exp)))
     check_ok(results, "G rvm == native", rvm_lines == nat_lines, "")
