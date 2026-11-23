@@ -549,6 +549,20 @@ RVC，M 模式不受这些未加锁条目约束），4 字节对齐的 4 字节�
 31 098→39 432、`msh` 4 016→5 420、`hello` 464→684），msh 的窗口承诺因此正好是
 20 KiB（4 KiB 粒度板；16 KiB 粒度板分配时取整成 32 KiB）。
 
+硬件依据（不要再猜）：Hazard3 的 `PMP_GRAIN` 是 RISC-V 的 G 参数，**最小 region =
+1 << (G + 2)**，G > 0 时 NA4 写入会被强制成 OFF；RP2350 的实例化是 **G = 3**，即
+**32 字节最小粒度**、NAPOT only（TOR 关）、8 个可写 region（pico-sdk
+`runtime_init_stack_guard.c` 的注释与 RP2350 datasheet §3.8.3 一致）。所以：
+
+- 4 字节粒度**不可能**——不用再上板复验；`pmp_map.h` 的旧注释“sub-page NAPOT 不
+  生效”其实说的就是这条，已改成引用 G = 3。
+- 32 字节的“桥接条目”是可能的：在跨界的 32 字节 chunk（`[boundary-16,
+  boundary+16)`，天然 32 字节对齐）上放一个小 NAPOT RX region，跨界的指令就整个
+  落在它里面。代价是每个出问题的边界多占一个条目，而预算只有 7 个（rcc 本来就要
+  降级），所以只是**备选**，不替代去 RVC。
+- 另一个思路是让 code run 整个落在一个自然对齐的 2^k 块里（没有再切分就没有边界），
+  但只对小程序成立（把 code 补到 16 KiB 边界）。
+
 这条不再靠上板才发现：`internal/build/codepage.go` 的 `checkCodePages()` 在打包用户
 镜像时逐条走指令流（低两位 0b11 = 4 字节，否则 2 字节），任何指令跨 4 KiB 边界就
 直接**构建失败**并打印地址；它只对 `arch=rv32 && chip=rp2350` 生效（TOR 端口整段只有

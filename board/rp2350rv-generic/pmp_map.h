@@ -74,8 +74,12 @@ static inline uint32_t napot(uint32_t base, uint32_t size)
  *
  * Every block is at least one page and naturally aligned, and a block never
  * spills past top: overshooting would cover the guard hole below the stack and
- * a stack overflow would stop faulting.  Blocks are page-granular - measured
- * on the part, sub-page NAPOT blocks do not describe the intended range. */
+ * a stack overflow would stop faulting.  Page granularity is a budget decision,
+ * not a hardware limit: RP2350's Hazard3 runs with PMP_GRAIN = 3 (the Hazard3
+ * manual: minimum region = 1 << (G + 2) = 32 bytes; NA4 writes are forced to
+ * OFF), so 32-byte blocks are legal but a 12 KiB run would want hundreds of
+ * them and only 7 entries are free.  See the note in docs/OPEN-ITEMS.md about
+ * instructions that cross a block boundary. */
 static inline int pmp_cover(uint32_t base, uint32_t top, uint32_t perm,
                             uint32_t *addr, uint32_t *cfg, int next)
 {
