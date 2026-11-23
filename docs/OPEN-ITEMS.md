@@ -65,6 +65,20 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
   `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。（2026-11-23 已修，`ea2d89d`，待 Pico 2 复验，见本文件第 5b 节第 5 条）
 
+## 2c. RP2040 板级验收待跑（2026-11-23）
+
+RP2040（`rpi-pico` / `rpi-pico-smp`）从 2026-11-23 起重新是 T3 必跑项
+（`docs/TESTING.md` §5.3、`AGENTS.md` 的硬件验收策略）。入口是一条命令：
+
+```sh
+python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
+```
+
+**当前阻塞：测试台没有 RP2040**（只有 C3 的 CH343 在 COM4），所以本轮 `NOT RUN`。
+板子接上后，人工步骤只有"按键进 BOOTSEL"，其余由脚本判 PASS/FAIL；长输出那一项
+必须走板载 CDC（2e8a:000a），UART0 不算 USB 证据。见
+`docs/acceptance/2026-11-23-rp2040-back-in-matrix-1cc53c4.md`。
+
 ## 5b. USB：还有三件事
 
 0. **RV32 端口不能删 `usb_cdc_wait()`**（2026-11-19 已回退）。Hazard3 端口没有 USB

@@ -188,3 +188,4 @@
 | 2026-11-23 | csc 状态机模式 demo + 每函数上限实测 | `43ada9d` | ESP32-C3（COM4） + rv32 QEMU + 18 目标 | T0/T1 PASS；T2 PASS；T3 PASS（C3 accept 34/34，rvm/native 一致）；T4 `NOT RUN` | [state machine](2026-11-23-state-machine-43ada9d.md) |
 | 2026-11-23 | csc 增加 yield()/ready(fd)，rvm/rcc 三后端实现 | `0d16e55` | ESP32-C3（COM4） + rv32/arm QEMU + 18 目标 | T0/T1/T2 PASS；T3 PASS（C3 accept 39/39，ready=1/y=0）；T4 `NOT RUN` | [yield/ready](2026-11-23-yield-ready-0d16e55.md) |
 | 2026-11-23 | ARM USB CDC 长输出截断改为 PendSV 延迟泵（#46） | `ea2d89d` | rpi-pico2 / -smp / atk / rpi-pico 构建 + rv32/rv32smp/arm/x86 QEMU + C3（COM4） | T0/T1/T2 PASS（soak 3/3）；T3 C3 accept 39/39，RP2350 ARM/SMP `NOT RUN`（PendSV 路径由 QEMU arm 临时探针验证）；T4 `NOT RUN` | [deferred pump](2026-11-23-usb-deferred-pump-ea2d89d.md) |
+| 2026-11-23 | RP2040 重新进入 T3 矩阵 + 一键验收脚本 | `1cc53c4` | 文档 + 宿主机脚本；RP2040 板不在机 | T0 PASS；T1/T2 不需要（无固件改动）；T3 `NOT RUN`（OPEN-ITEMS §2c）；解析层与 C3 插桩跑通过 | [rp2040 matrix](2026-11-23-rp2040-back-in-matrix-1cc53c4.md) |
