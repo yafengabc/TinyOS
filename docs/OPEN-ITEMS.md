@@ -543,11 +543,17 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 映射是页粒度 NAPOT：一段 `.text` 会被 `pmp_cover()` 拆成几块，块边界就在页边界上。
 带 RVC 时 32 位指令可以落在 `page_end-2`，一条取指覆盖两个条目，于是 `rcc` 在
 `0x20026ffe` 报 `instruction access fault`（同一份源码挪 0x30 字节，崩点跟着变成
-`0x20025ffe`）。现在 rv32/rp2350 的用户代码统一用 `-march=rv32ima` 构建（内核仍带
-RVC，M 模式不受这些未加锁条目约束），4 字节对齐的 4 字节指令不可能跨页。代价是
-用户代码变大（同一份源码实测 +23%…+47%，合计 +26%：`csc` 47 900→58 784、`rcc`
-31 098→39 432、`msh` 4 016→5 420、`hello` 464→684），msh 的窗口承诺因此正好是
-20 KiB（4 KiB 粒度板；16 KiB 粒度板分配时取整成 32 KiB）。
+`0x20025ffe`）。修法不是给 build system 加板级分支，而是这几个目标的 ISA 本身：
+`targets/{rpi-pico2-rv32,rpi-pico2-rv32-smp,atk-dnr2350am-rv32,atk-dnr2350am-rv32-smp,rp2350rv-generic}.conf`
+写成 `march = rv32ima`（原来是 rv32imac，一个字母），构建器照常把 `march` 同时给内核和
+用户代码。新加一块同样“一段 code 被拆成多个 PMP 条目”的板子，只改它自己的 target conf，
+不用碰 Go。4 字节对齐的 4 字节指令不可能跨页。
+
+代价：用户代码变大（同一份源码实测 +23%…+47%，合计 +26%：`csc` 47 900→58 784、
+`rcc` 31 098→39 432、`msh` 4 016→5 420、`hello` 464→684）；内核也一起变大，但它跑在
+XIP flash（0x10000000），**只花 flash 不花 RAM**（.text+.rodata 164 032 B，实测 RAM 端
+只差 576 B）。msh 的窗口承诺因此正好是 20 KiB（4 KiB 粒度板；16 KiB 粒度板分配时取整成
+32 KiB），它用编译器的 `__riscv_compressed` 判断，而不是构建期宏。
 
 硬件依据（不要再猜）：Hazard3 的 `PMP_GRAIN` 是 RISC-V 的 G 参数，**最小 region =
 1 << (G + 2)**，G > 0 时 NA4 写入会被强制成 OFF；RP2350 的实例化是 **G = 3**，即
@@ -565,9 +571,11 @@ RVC，M 模式不受这些未加锁条目约束），4 字节对齐的 4 字节�
 
 这条不再靠上板才发现：`internal/build/codepage.go` 的 `checkCodePages()` 在打包用户
 镜像时逐条走指令流（低两位 0b11 = 4 字节，否则 2 字节），任何指令跨 4 KiB 边界就
-直接**构建失败**并打印地址；它只对 `arch=rv32 && chip=rp2350` 生效（TOR 端口整段只有
-一个条目，不受影响）。QEMU 的 rv32 目标带 RVC，正好可以验证这个检查会红：把门限临时
-放开后 `bin/edit` 在 `0x00000ffe` 被拦下。
+直接**构建失败**并打印地址。门限跟着 target 的 `march` 走：凡是 rv32 且 march 里没有
+`c` 的目标都检查（今天就是那 5 个 Hazard3 目标；`rv32nc` 也顺带被检查，它本来就没有
+压缩指令）。TOR 端口（QEMU/C3）带 RVC，不检查——它们一段只有一个条目，跨页无害。
+负例：往 `user/<prog>/opt` 里塞 `-march=rv32imac`（opt 追加在命令行最后）时，
+`bin/rcc` 在 `0x00000ffe` 被拦下；把门限临时放开到 QEMU 时 `bin/edit` 同样被拦。
 
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。板级验收现在是一条命令：

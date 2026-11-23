@@ -194,7 +194,8 @@ python scripts/rvm-cover.py --only cover
 - 这是 C3 / RP2040 板级验收里同一段链路的**上板前**版本；CI 的 `smoke` job 在 rv32
   上也会跑它（§11）。QEMU 只覆盖 TOR 端口，覆盖不到 Hazard3 的页粒度 NAPOT，所以
   跨 PMP 取指那类问题由**构建期**检查兜底：`internal/build/codepage.go` 在打包用户
-  镜像时拒绝任何跨 4 KiB 页边界的指令（仅 `arch=rv32 && chip=rp2350`）。
+  镜像时拒绝任何跨 4 KiB 页边界的指令。门限是 target 的 `march`：rv32 且不带 `c`
+  （Hazard3 的五个目标是 `rv32ima`）才检查，TOR 端口（QEMU/C3）带 RVC、不检查。
 - 判据：三行 `PASS: <name> csc -> rvm -> rcc -> native, N lines`，退出码 0。
 
 ## 5. T3：真机

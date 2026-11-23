@@ -574,22 +574,6 @@ func (b *Builder) compile(src, obj string, includes []string, extra ...string) e
 	return nil
 }
 
-// withoutRVC drops the C extension from an ISA string ("rv32imac" ->
-// "rv32ima"), keeping any underscore-separated extension list.  Returns ""
-// when the string does not name RVC.
-func withoutRVC(march string) string {
-	base, ext, hasExt := strings.Cut(march, "_")
-	i := strings.IndexByte(base, 'c')
-	if i < 0 {
-		return ""
-	}
-	base = base[:i] + base[i+1:]
-	if hasExt {
-		return base + "_" + ext
-	}
-	return base
-}
-
 // linkViaDriver reports whether the link tool is a compiler driver (clang,
 // gcc, zig cc) that needs -Wl, to forward flags to the real linker, rather
 // than a bare linker that takes them directly.
@@ -1509,35 +1493,15 @@ func (b *Builder) buildUser() ([]string, error) {
 	userPIEFlags := append([]string{"-fPIC", fmt.Sprintf("-DTOS_APP_GRAIN=%d", grain)},
 		b.userDefines()...)
 
-	// RISC-V allows an access only when a single PMP entry covers all of it,
-	// and a user task runs under a page-granular NAPOT map, so .text is split
-	// across several entries.  With RVC a 32-bit instruction can start at
-	// page_end-2 and one fetch then covers two entries: that fails even though
-	// both grant X, because neither entry covers the whole access.  Measured:
-	// rcc built at 0x20020000 dies at 0x20026ffe on `lui a0,0xd38`, and the
-	// same source 48 bytes further along dies at 0x20025ffe.  Build the user
-	// side without RVC: every instruction is then 4 bytes and 4-byte aligned,
-	// so no fetch can straddle a page and therefore none can straddle an
-	// entry.  The kernel keeps RVC - it runs in M-mode, where these unlocked
-	// PMP entries do not apply.
-	chip := ""
-	if b.BoardConfig != nil {
-		chip = b.BoardConfig.Chip
-	}
-	userISAFix := []string{}
-	if b.Target.Arch == "rv32" && chip == "rp2350" {
-		if m := withoutRVC(b.Target.March); m != "" {
-			userISAFix = []string{
-				"-march=" + m,
-				// User code can see why its image is bigger: without RVC
-				// msh passes 8 KiB and has to promise a larger window
-				// (see user/msh/msh.c).
-				"-DTOS_USER_NO_RVC=1",
-			}
-		}
-	}
-	// -march is last on the command line, so this replaces the target's.
-	userCFlags := append(append([]string{}, userPIEFlags...), userISAFix...)
+	// User code uses the target's ISA, as the kernel does.  A board whose
+	// protection map covers one code run with several entries needs user code
+	// without the C extension (RISC-V allows an access only when a single PMP
+	// entry covers all of it, and RVC lets a 32-bit instruction start at
+	// page_end-2); such a target says so once, in its own `march =`, next to
+	// the gpio/flash knobs it already owns.  Nothing here special-cases a
+	// board or a chip: rpi-pico2-rv32 and friends are `march = rv32ima`, and
+	// checkCodePages() below enforces the consequence.
+	userCFlags := append([]string{}, userPIEFlags...)
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).
@@ -1586,9 +1550,7 @@ func (b *Builder) buildUser() ([]string, error) {
 		srcCopy, objCopy := src, obj
 		flags := userCFlags
 		if strings.HasSuffix(name, ".S") {
-			// assembler: no -fPIE, it just emits relative code; the ISA fix
-			// still applies, or the assembler would expand `j` to `c.j`
-			flags = append([]string{}, userISAFix...)
+			flags = nil // assembler: no -fPIE, it just emits relative code
 		} else if sizeOpt[name] {
 			flags = append(append([]string{}, flags...), "-Oz")
 		}
