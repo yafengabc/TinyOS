@@ -75,11 +75,15 @@
  * LP/C6 lower only replaces the lower half.  0 = ok, -1 = the shape broke. */
 #define SYS_REMOTE_TEST   53
 
-/* Longest path the kernel accepts in one syscall, including the NUL.  It
- * matches littlefs's per-name limit (255), so any name the filesystem can
- * store is addressable.  Larger values cost TOS_PATH_MAX bytes per process
- * (the cwd) and per path-carrying syscall frame. */
-#define TOS_PATH_MAX      256
+/* Longest path the kernel accepts in one syscall, including the NUL.
+ *
+ * 64 is a deliberate embedded tradeoff, not an oversight.  The cwd lives in
+ * the process table and path-carrying syscalls keep a copy on the kernel
+ * stack; widening this to 256 measured +1696 B of .bss on the C3 (mostly
+ * MAX_PROCS x cwd) for names that do not occur in practice.  littlefs itself
+ * accepts 255 - a path past this cap is rejected with -1, never truncated.
+ * See docs/OPEN-ITEMS.md 16.2 for the measurements and when to revisit. */
+#define TOS_PATH_MAX      64
 
 
 #define PIO_LOAD     0   /* req.buf = u16 words, req.len = count          */
