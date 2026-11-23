@@ -8,7 +8,7 @@
 //
 //	tostest smoke   [-target x86|rv32|arm] [-commands "ls,cat ..."]
 //	tostest compat  [-targets x86,rv32,arm]
-//	tostest emu     build|test     (rv32emu-c submodule)
+//	tostest emu     build|test     (optional rv32emu-c checkout)
 //	tostest emutest
 //	tostest bench   [-qemu [port]] [payload]
 package main
@@ -28,7 +28,7 @@ usage:
   tostest compat [-targets x86,rv32] [-port 5570] [-no-build] [-verbose]
                    cross-target compatibility check (same commands, same output)
   tostest emu    build|test
-                   build the rv32emu-c submodule into build/rv32emu-c.exe, or
+                   build an rv32emu-c checkout into build/rv32emu-c.exe, or
                    boot the esp32c3 kernel on it and poke the shell
   tostest emutest
                    full functional test on RV32EMU-C (boot, user programs,

@@ -11,7 +11,7 @@ import (
 )
 
 // cmdEmu implements `tostest emu build|test`, the Go port of scripts/emu.py:
-// build the rv32emu-c submodule into build/rv32emu-c.exe, then boot the
+// build the rv32emu-c checkout into build/rv32emu-c.exe, then boot the
 // esp32c3 kernel on it and poke the shell.
 func cmdEmu(args []string) int {
 	action := "test"
@@ -40,12 +40,12 @@ func emuSubmoduleReady() bool {
 	return fileExists(filepath.Join(repoRoot(), "rv32emu-c", "src", "main.c"))
 }
 
-// emuBuild compiles the rv32emu-c submodule with its own Go build tool and
+// emuBuild compiles an rv32emu-c checkout with its own Go build tool and
 // copies the result into build/rv32emu-c.exe.  It reuses the compiler paths
 // tos already knows about (TOS_BIN, then the MSYS2 UCRT64 default).
 func emuBuild() bool {
 	if !emuSubmoduleReady() {
-		fmt.Fprintln(os.Stderr, "rv32emu-c/ submodule is missing; run:\n  git submodule update --init")
+		fmt.Fprintln(os.Stderr, "rv32emu-c/ is not part of this tree; to use the C emulator:\n  git submodule add https://github.com/yafengabc/RV32EMU-C rv32emu-c")
 		return false
 	}
 	cmd := exec.Command("go", "run", "./cmd/rv32emu-build", "emu")
@@ -61,7 +61,7 @@ func emuBuild() bool {
 			"PATH="+strings.Join(extra, string(os.PathListSeparator))+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "submodule build failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "rv32emu-c build failed: %v\n", err)
 		return false
 	}
 	src := filepath.Join(repoRoot(), "rv32emu-c", "build", exeName("rv32emu-c"))

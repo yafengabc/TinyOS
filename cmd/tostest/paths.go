@@ -34,8 +34,8 @@ func exeName(base string) string {
 	return base
 }
 
-// findEmu resolves the standard test runtime: $TOS_EMU, then the binary built
-// from the rv32emu-c submodule (build/rv32emu-c.exe, see cmdEmu build).
+// findEmu resolves the standard test runtime: $TOS_EMU, then an rv32emu-c
+// checkout built into build/rv32emu-c.exe (see cmdEmu build).
 func findEmu() string {
 	if p := os.Getenv("TOS_EMU"); p != "" {
 		return p

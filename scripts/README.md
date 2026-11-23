@@ -4,7 +4,7 @@ The emulator / QEMU test harness lives in `cmd/tostest` (Go), not here:
 
     tostest smoke    QEMU TCP-serial smoke (was scripts/smoke.ps1)
     tostest compat   cross-target compatibility (was scripts/compat.ps1)
-    tostest emu      build/smoke the rv32emu-c submodule (was scripts/emu.py)
+    tostest emu      build/smoke an rv32emu-c checkout (was scripts/emu.py)
     tostest emutest  full functional pass on RV32EMU-C (was scripts/esp-c3/emutest.py)
     tostest bench    guest bench timing on RV32EMU-C / QEMU (was scripts/bench.py + benchtime.py)
 

@@ -49,8 +49,8 @@ qemu-system-riscv32 -machine virt -m 256M -bios none \
 | `rv32nc`（无 RVC） | ✅ | 用来对比压缩指令的体积/性能，行为与 `rv32` 相同 |
 | WiFi/网络 | — | QEMU 上没有对应硬件，相关程序默认不打包 |
 
-`tostest smoke`、`tostest compat` 的 RV32 一侧都在这个目标上跑；`rv32emu-c/`
-子模块模拟的也是同一套 RV32IMC 指令，`tostest emu`/`emutest` 用它做全功能回归。
+`tostest smoke`、`tostest compat` 的 RV32 一侧都在这个目标上跑；本仓库的
+Go 模拟器 `rv32emu/` 模拟同一套 RV32IMC 指令，可在没有 QEMU 时做全功能回归。
 
 ## 已知限制
 

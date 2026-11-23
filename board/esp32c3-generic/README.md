@@ -44,8 +44,8 @@ esptool.py write-flash 0x80000 build/tinyos-ramdisk-esp32c3-generic.bin
 ```
 
 CH343 的 DTR/RTS 接了自动下载电路，不需要手按 BOOT。`-target esp32c3-generic` 没有 QEMU
-模型：功能回归走 `rv32emu-c`（`tostest emu` / `tostest emutest`），它模拟同一套
-RV32IMC。
+模型：功能回归走本仓库的 Go 模拟器 `rv32emu/`（对齐 ESP32-C3，支持 `-elf` 与
+`-flashimg`），它模拟同一套 RV32IMC。
 
 ## 配置
 
