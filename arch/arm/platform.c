@@ -402,8 +402,9 @@ regs_t *arm_handle_tick(regs_t *f)
      *    board/rp2350-generic/platform.c).  A core with no pump to serve
      *    would pay an exception per tick for nothing.
      *
-     * A pended SVC still wins over PendSV (0x40 against 0xff), so the pump
-     * then runs at the syscall's own return to user mode - also safe. */
+     * The pending-exception return above means a tick that raced a pended SVC
+     * leaves the pump to the next tick; the SVC itself must run first.
+     */
     if (plat_cpu_id() == 0 && board_poll_installed())
         arm_pend_deferred();
 
