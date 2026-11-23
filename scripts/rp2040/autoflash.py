@@ -20,6 +20,11 @@ Typical use:
 
 The UART port is opened BEFORE the UF2 copy so no boot characters are lost.
 Each round writes a timestamped transcript to build/rp2040-autoflash/.
+
+For the board-level pass/fail run use scripts/rp2040/accept.py: it does the
+same wait-and-copy, then drives the shell through the acceptance checks
+(identity, clock, heap, fs, exec, write-back, fault isolation, long output,
+dd/rm) and prints ACCEPT OK n/n.  This script only captures a transcript.
 """
 
 import argparse

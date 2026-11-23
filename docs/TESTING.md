@@ -223,8 +223,12 @@ native-only，`rvm` 分页后进入普通对照）。
   ATK-DNRP2350AM 继续支持、镜像继续构建，但不再是关闭门槛。
 - **ESP32-C3 由实现侧自测**（命令见 §5.1），结果写 `docs/acceptance/`，不外包、不另开
   issue。
-- **RP2040 不作为关闭依据**：目前没有自动 BOOTSEL 路径。确实需要 RP2040 证据的改动，
-  单独开一个 RP2040 专项 issue，由板主另行排期；不要写进别的 issue 的关闭条件。
+- **RP2040（`rpi-pico` / `rpi-pico-smp`）重新进入 T3 矩阵（2026-11-23）**：
+  改动 `arch/arm`、板级、驱动、内核、控制台或共享头时，必须在受影响的镜像上跑
+  `scripts/rp2040/accept.py`，并且**走板载 USB CDC 控制台**（2e8a:000a）
+  ——UART0 覆盖不到 USB 那条路径。BOOTSEL 仍要按键，这是唯一的人工步骤，不是
+  跳过运行的理由。改动上述路径的 issue，关闭条件里因此包含这一行；只涉及
+  RP2350 的改动仍以 Pico 2 的镜像关闭。
 - 镜像是板级的：ATK 的 24 项验收表不等于 Pico 2 的证据，反之亦然。
 
 ### 5.1 ESP32-C3
@@ -268,20 +272,35 @@ python scripts/rp2350/kthread_accept.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2
 - 启动日志至少要看到 `[A]/[B]/[C]/[D]/[E]`、`2 of 2 CPU(s) online`、USB CDC `2e8a:000a`。
 - 信号路径：`sh` 里 `sleep 3000` 后发 `^C`，控制台必须回到 `msh`，无 HardFault/死锁。
 
-### 5.3 RP2040
+### 5.3 RP2040（`rpi-pico` / `rpi-pico-smp`）
 
-> **不是关闭依据**（2026-11-17）：无自动 BOOTSEL 路径。需要 RP2040 证据时单开专项
-> issue，由板主排期。下面的命令仍保留给专项验收使用。
+> 2026-11-23 起重新是 T3 必跑项（§5.0.1）。BOOTSEL 只能按键，所以刷机那一步是人做的，
+> 其余一条命令。
 
 ```sh
-python scripts/rp2040/autoflash.py --uf2 build/tinyos-rpi-pico.uf2
+# 一条命令：等 BOOTSEL（按键）-> 刷机 -> 跑完全部检查
+python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
+
+# 已经跑着镜像时（板载 CDC 优先，端口不给就自动找）
+python scripts/rp2040/accept.py -p COM17 --dtr
+
+# 最低线（心跳 6/6）仍然单独可用
 python scripts/rp2040/heartbeat.py --port COM19
+
+# PIO 的 LED/灯带是目视项
 python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-pico-smp.uf2
 ```
 
-- RP2040 的窗口数字与守卫已在 2026-11-17 人工核对（`HISTORY.md` §43）：`wink=16`、`deep 3` 增长、`deep 6` kill；`deep 6 0 8` 也已验证会触发（`deep.c` 现在 sleep(0) 也进入 syscall）。
-- `scripts/rp2040/heartbeat.py --port COM19` 已在最终单核镜像上 **6/6**（启动、时间、fs 读、用户程序、fs 写回、crash 隔离）。
-- PIO 的 LED/灯带是目视项，必须写"看了/没看"，不能只写"PIO 通过"。
+- 判据：末行 `ACCEPT OK n/n`、退出码 0。检查项是身份（`/proc/cpuinfo` 的 RP2040 + 板名）、
+  时钟、堆、`ls /bin`、`hello`、写回、`crash` 隔离、两处长输出（`ls /bin` 与
+  `wc` 对账；`cat /readme.txt` 按字节对账）、两轮 `dd`/`rm`、收尾仍应答、全程无 panic。
+- **长输出必须在板载 CDC 上跑**：UART0 只覆盖 tty/UART 的节奏，覆盖不到 USB 那条
+  （#46 就是 USB 的 ~192 B 截断）。只有 CH343 时脚本会打印 note，那次结果不能当
+  USB 证据。
+- 身份检查失败直接退出（码 2）：台上只有一根 CH343 时它可能是 C3，脚本不会去碰那块板
+  的文件系统。
+- 历史基线：2026-11-17 的人工核对（`HISTORY.md` §43：`wink=16`、`deep 3` 增长、
+  `deep 6` kill）与 `heartbeat.py` 6/6 仍然有效；心跳是最低线，`accept.py` 是板级全项。
 
 ### 5.4 Pico 2（RP2350 验收门槛）
 
@@ -421,6 +440,8 @@ notes:
 - **x86 的发布资产**：它能在发行版工具链上构建并起机（HISTORY §60），但没有原始磁盘
   镜像的打包路径，所以只在 smoke 里跑，不进 Release（`OPEN-ITEMS.md` 已无此条）；
 - `rv32nc`：整个目标不在 CI 里构建（T1 本地跑）；
+- **RP2040 硬件**：镜像在 `build` matrix 里（`rpi-pico`/`rpi-pico-smp`），
+  但 BOOTSEL 要按键，CI 没有板；板级证据只能人工跑 `scripts/rp2040/accept.py`；
 - **`scripts/soak.py`**：2026-11-17 起从 CI 移出（它只是"冒烟的冒烟"）。soak 属于本地
   T2/T4，要带日志；
 - 任何真机、Pico 2、PIO 目视项。

@@ -525,7 +525,11 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 （必须降级）和 csc（必须保持完整保护）两组实测几何。
 
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
-只负责等待盘符并拷贝。
+只负责等待盘符并拷贝。板级验收现在是一条命令：
+`scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2`（等 BOOTSEL → 刷机 →
+身份/时钟/堆/文件系统/exec/写回/fault 隔离/长输出/两轮 dd+rm 全跑，末行
+`ACCEPT OK n/n`）。2026-11-23 起 RP2040 重新是 T3 必跑项（`docs/TESTING.md`
+§5.3），长输出那一项要走板载 CDC——UART0 覆盖不到 USB 路径（#46 就是那条）。
 
 ## 14. 用户态堆：first-fit 空闲链表（2026-11-21）
 

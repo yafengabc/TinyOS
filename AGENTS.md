@@ -50,10 +50,14 @@ Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
   supported and its images are still built, but it is no longer the gate.
 - **ESP32-C3 is tested by the implementation side.** Record it under
   `docs/acceptance/`; it is not delegated and does not need a separate issue.
-- **RP2040 is not a close criterion.** There is no automated BOOTSEL path
-  yet. If a change genuinely needs RP2040 evidence, open a dedicated RP2040
-  issue and it will be scheduled separately; do not put RP2040 into another
-  issue's close condition.
+- **RP2040 (`rpi-pico` / `rpi-pico-smp`) is part of the T3 matrix again
+  (2026-11-23).** A change to `arch/arm`, a board, a driver, the kernel, the
+  console or a shared header must show `scripts/rp2040/accept.py` on the image
+  it affects, run **over the board's own USB CDC console** (2e8a:000a) - the
+  UART0 path does not cover the USB one. BOOTSEL is still a physical button
+  press: that is the one manual step, not a reason to skip the run. Closing an
+  issue that changes one of those paths therefore includes this row; work that
+  is RP2350-specific still closes on the Pico 2 images alone.
 - Images are board-specific: never present an ATK run as Pico 2 evidence or
   the reverse. The same silicon is not the same board (LED/pins/flash).
 
