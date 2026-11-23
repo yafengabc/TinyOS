@@ -179,6 +179,24 @@ strings2 str globals2 mixed float3 fmt sa3 floatfold`，以及
 `bigcode 12829 / bigir 1325 / many100 20009`（这三个在 2026-11-21 之前是
 native-only，`rvm` 分页后进入普通对照）。
 
+### 4.6 脚本工具链的三条链（改 csc/rvm/rcc 或 rv32/thumb 后端时，上板前）
+
+镜像自带的 `/tests/cover.c`、`state.c`、`ready.c` 各走一遍
+`csc -> rvm -> rcc -> native`，rvm 与原生输出都要逐行等于
+`tests/onboard/*.expected`：
+
+```sh
+python scripts/rvm-cover.py                 # rv32，三条链
+python scripts/rvm-cover.py --target arm    # thumb2
+python scripts/rvm-cover.py --only cover
+```
+
+- 这是 C3 / RP2040 板级验收里同一段链路的**上板前**版本；CI 的 `smoke` job 在 rv32
+  上也会跑它（§11）。QEMU 只覆盖 TOR 端口，覆盖不到 Hazard3 的页粒度 NAPOT，所以
+  跨 PMP 取指那类问题由**构建期**检查兜底：`internal/build/codepage.go` 在打包用户
+  镜像时拒绝任何跨 4 KiB 页边界的指令（仅 `arch=rv32 && chip=rp2350`）。
+- 判据：三行 `PASS: <name> csc -> rvm -> rcc -> native, N lines`，退出码 0。
+
 ## 5. T3：真机
 
 端口、板子、镜像必须写进证据；下面是模板，`COMx` 换成实际端口。
@@ -442,6 +460,8 @@ notes:
   - `configs/rv32-fsro.conf` 的只读镜像构建（只编译，不起机；issue #14 的盲区）；
   - rv32 / rv32smp / arm / x86 各自构建 + 起机 + `ps`、`ls`、`piperace`、`prot stack`、
     `deep 3`、`rselftest`；
+  - rv32 上额外跑 `python scripts/rvm-cover.py`：`/tests/{cover,state,ready}.c` 各走
+    一遍 `csc -> rvm -> rcc -> native`（§4.6），这是脚本工具链的上板前门禁；
 - tag 触发的 Release（`release` 依赖 `[checks, build, smoke]`）。
 
 **不覆盖**：

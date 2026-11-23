@@ -538,6 +538,21 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 宿主机上编译真实头文件、枚举 32–192 KiB 的所有页粒度切分来验证，并固定了 rcc
 （必须降级）和 csc（必须保持完整保护）两组实测几何。
 
+**取指跨两个 PMP 条目的规则（2026-11-24）。** RISC-V 规定一次访问只有在**单个**条目
+覆盖它时才算匹配，所以一次取指横跨两个条目（即使两边都给 X）必须 fault。Hazard3 的
+映射是页粒度 NAPOT：一段 `.text` 会被 `pmp_cover()` 拆成几块，块边界就在页边界上。
+带 RVC 时 32 位指令可以落在 `page_end-2`，一条取指覆盖两个条目，于是 `rcc` 在
+`0x20026ffe` 报 `instruction access fault`（同一份源码挪 0x30 字节，崩点跟着变成
+`0x20025ffe`）。现在 rv32/rp2350 的用户代码统一用 `-march=rv32ima` 构建（内核仍带
+RVC，M 模式不受这些未加锁条目约束），4 字节对齐的 4 字节指令不可能跨页；代价是用户
+代码大 15–20%，msh 的窗口承诺因此在 4 KiB 粒度板上是 24 KiB、16 KiB 粒度板上 32 KiB。
+
+这条不再靠上板才发现：`internal/build/codepage.go` 的 `checkCodePages()` 在打包用户
+镜像时逐条走指令流（低两位 0b11 = 4 字节，否则 2 字节），任何指令跨 4 KiB 边界就
+直接**构建失败**并打印地址；它只对 `arch=rv32 && chip=rp2350` 生效（TOR 端口整段只有
+一个条目，不受影响）。QEMU 的 rv32 目标带 RVC，正好可以验证这个检查会红：把门限临时
+放开后 `bin/edit` 在 `0x00000ffe` 被拦下。
+
 RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040/autoflash.py`
 只负责等待盘符并拷贝。板级验收现在是一条命令：
 `scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2`（等 BOOTSEL → 刷机 →

@@ -1786,6 +1786,9 @@ func (b *Builder) buildFSImage(bins []string) error {
 		if err := b.checkWindow("bin/"+prog, data); err != nil {
 			return err
 		}
+		if err := b.checkCodePages("bin/"+prog, data); err != nil {
+			return err
+		}
 		files = append(files, RamFile{Name: "bin/" + prog, Data: data})
 	}
 

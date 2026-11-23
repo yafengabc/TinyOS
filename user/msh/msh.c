@@ -63,8 +63,9 @@ TOS_STACK(4 * 1024);
  * Hazard3 (RP2350 RV32) drops RVC from user programs - a 32-bit instruction
  * reaching across a page boundary would straddle two PMP regions, which
  * RISC-V requires to fault - and the image passes 8 KiB.  The sum is then
- * 12 + 4 + 4 = 20 KiB: 32 KiB on the 16 KiB-grain boards (rp2350rv-generic,
- * rpi-pico2-rv32), 24 KiB on the 4 KiB-grain ones (atk-dnr2350am-rv32).
+ * 12 + 4 + 4 = 20 KiB, which this promises exactly; a 16 KiB grain rounds
+ * the allocation up to 32 KiB (rp2350rv-generic, rpi-pico2-rv32), a 4 KiB
+ * grain keeps 20 KiB (atk-dnr2350am-rv32).
  * TOS_USER_NO_RVC comes from `tos build`, the same place that removed the C
  * extension. */
 #if TOS_APP_GRAIN >= 64 * 1024
@@ -72,7 +73,7 @@ TOS_ONE_GRAIN();
 #elif TOS_APP_GRAIN >= 16 * 1024
 TOS_WINDOW(32 * 1024);
 #elif defined(TOS_USER_NO_RVC)
-TOS_WINDOW(24 * 1024);
+TOS_WINDOW(20 * 1024);
 #else
 TOS_WINDOW(16 * 1024);
 #endif

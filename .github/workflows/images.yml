@@ -324,6 +324,15 @@ jobs:
             -commands "ps, ls /bin | wc, cat /proc/execfmt, piperace, prot stack, deep 3, rselftest" \
             -commandwait-ms 10000
 
+      # The on-board script toolchain, end to end: cover/state/ready through
+      # csc -> rvm -> rcc -> native, both backends compared line by line.  One
+      # target is enough (the chain is arch-independent), and doing it here
+      # means a broken rcc or a broken window geometry is caught before any
+      # board run.  See docs/TESTING.md section 4.6.
+      - name: Script toolchain chain (rv32)
+        if: matrix.target == 'rv32'
+        run: python3 scripts/rvm-cover.py
+
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/')

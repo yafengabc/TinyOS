@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
-"""Run the C Script trio (csc -> rvm -> rcc) against tests/onboard/cover.c.
+"""Run the C Script trio (csc -> rvm -> rcc -> native) on QEMU.
 
-The image carries the script as /tests/cover.c (files/tests/cover.c); this
-builds a QEMU target with the on-board tools and runs all three stages:
+The image carries the scripts as /tests/<name>.c (files/tests/); this builds a
+QEMU target with the on-board tools and runs all four stages for each of them:
 
-    csc /tests/cover.c /tests/cover.rir
-    rvm /tests/cover.rir
-    rcc /tests/cover.rir /bin/cover
-    cover
+    csc /tests/<name>.c /tests/<name>.rir
+    rvm /tests/<name>.rir
+    rcc /tests/<name>.rir /bin/<name>
+    <name>
 
 The interpreter's output (minus rvm's "result=..." trailer) and the native
-program's output must both equal tests/onboard/cover.expected, and therefore
-each other.  That is the end-to-end coverage: one script, both backends.
+program's output must both equal tests/onboard/<name>.expected, and therefore
+each other.  That is the end-to-end coverage: one script source, both backends.
 
-    python scripts/rvm-cover.py            # rv32 (default)
-    python scripts/rvm-cover.py --target arm
+This is the pre-board half of the same chain the C3 and RP2040 acceptance run:
+`cover` is the feature matrix, `state` the state-machine demo, `ready` the
+yield()/ready(fd) natives.  Run it before flashing a board.
+
+    python scripts/rvm-cover.py              # rv32 (default), all three scripts
+    python scripts/rvm-cover.py --target arm # thumb2 backend
+    python scripts/rvm-cover.py --only cover
 """
 import argparse
 import os
 import subprocess
 import sys
+
+SCRIPTS = ("cover", "state", "ready")
 
 
 def run(cmd, cwd):
@@ -52,13 +59,18 @@ def clean(lines):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", default="rv32", choices=("rv32", "arm"))
+    ap.add_argument("--only", default=None, choices=SCRIPTS,
+                    help="run one script instead of all three")
     ap.add_argument("--keep-log", action="store_true")
     args = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     config = os.path.join(root, "configs", args.target + "-rir.conf")
-    expected_path = os.path.join(root, "tests", "onboard", "cover.expected")
-    expected = [l.strip() for l in open(expected_path, encoding="utf-8") if l.strip()]
+    scripts = (args.only,) if args.only else SCRIPTS
+    expected = {}
+    for name in scripts:
+        path = os.path.join(root, "tests", "onboard", name + ".expected")
+        expected[name] = [l.strip() for l in open(path, encoding="utf-8") if l.strip()]
 
     rc, out = run(["go", "run", "./cmd/tos", "build", "-config", config], root)
     if rc != 0:
@@ -66,10 +78,11 @@ def main():
         print("FAIL: image build")
         return 1
 
-    cmds = ("csc /tests/cover.c /tests/cover.rir,"
-            "rvm /tests/cover.rir,"
-            "rcc /tests/cover.rir /bin/cover,"
-            "cover")
+    cmds = ",".join(
+        ["csc /tests/%s.c /tests/%s.rir" % (n, n) for n in scripts] +
+        ["rvm /tests/%s.rir" % n for n in scripts] +
+        ["rcc /tests/%s.rir /bin/%s" % (n, n) for n in scripts] +
+        list(scripts))
     rc, out = run(["go", "run", "./cmd/tostest", "smoke",
                    "-target", args.target, "-commands", cmds,
                    "-commandwait-ms", "120000"], root)
@@ -82,43 +95,42 @@ def main():
         return 1
 
     lines = out.splitlines()
-    rvm = block_after(lines, "rvm /tests/cover.rir")
-    nat = block_after(lines, "cover /")
-    # The native command's echo is exactly "tos> cover" with no argument.
-    if nat is None:
-        nat = block_after(lines, "cover")
-    if rvm is None or nat is None:
-        print(out[-5000:])
-        print("FAIL: could not find the rvm/native output blocks")
-        return 1
-
-    rvm_clean, nat_clean = clean(rvm), clean(nat)
     ok = True
-    if "csc: /tests/cover.c -> /tests/cover.rir" not in out:
-        print("FAIL: csc did not report the RIR output")
-        ok = False
-    if "rcc:" not in out:
-        print("FAIL: rcc did not report the native image")
-        ok = False
-    if rvm_clean != expected:
-        print("FAIL: rvm output differs from cover.expected")
-        print("  got:", rvm_clean)
-        print("  want:", expected)
-        ok = False
-    if nat_clean != expected:
-        print("FAIL: native output differs from cover.expected")
-        print("  got:", nat_clean)
-        print("  want:", expected)
-        ok = False
-    if rvm_clean != nat_clean:
-        print("FAIL: rvm and native outputs differ")
-        ok = False
+    for name in scripts:
+        want = expected[name]
+        rvm = block_after(lines, "rvm /tests/%s.rir" % name)
+        nat = block_after(lines, name)
+        if rvm is None or nat is None:
+            print("FAIL: %s: could not find the rvm/native output blocks" % name)
+            print(out[-5000:])
+            return 1
+        rvm_clean, nat_clean = clean(rvm), clean(nat)
+        if "csc: /tests/%s.c -> /tests/%s.rir" % (name, name) not in out:
+            print("FAIL: %s: csc did not report the RIR output" % name)
+            ok = False
+        if "rcc:" not in out:
+            print("FAIL: %s: rcc did not report the native image" % name)
+            ok = False
+        if rvm_clean != want:
+            print("FAIL: %s: rvm output differs from %s.expected" % (name, name))
+            print("  got:", rvm_clean)
+            print("  want:", want)
+            ok = False
+        if nat_clean != want:
+            print("FAIL: %s: native output differs from %s.expected" % (name, name))
+            print("  got:", nat_clean)
+            print("  want:", want)
+            ok = False
+        if rvm_clean != nat_clean:
+            print("FAIL: %s: rvm and native outputs differ" % name)
+            ok = False
+        if ok:
+            print("PASS: %-5s csc -> rvm -> rcc -> native, %d lines, both backends match"
+                  % (name, len(want)))
 
     if not ok:
         print(out[-5000:])
         return 1
-    print("PASS: csc -> rvm -> rcc -> native, %d lines, both backends match"
-          % len(expected))
     return 0
 
 
