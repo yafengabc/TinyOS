@@ -1559,7 +1559,12 @@ int plat_console_tx_room(void)
  * while a task waits for flash; letting it call usb_cdc_poll() was the RV32
  * port's boot hang (see the matching comment in board/rp2350rv-generic).  Run the
  * state machine from the scheduler's idle loop instead and let the console
- * read path touch only the completed-byte queue. */
+ * read path touch only the completed-byte queue.
+ *
+ * This is also the board's deferred-work hook (g_idle_poll), so arch/arm
+ * runs it from PendSV once per tick as well - the idle loop is not reached
+ * while a task is runnable, and that is exactly when a long console write
+ * has to keep draining (issue #46). */
 extern void (*g_idle_poll)(void);
 
 static void usb_idle_poll(void)
@@ -1698,9 +1703,12 @@ void plat_timer_tick(void)
     /* NO USB work in the tick.  plat_timer_tick() is the SysTick handler, so
      * anything it calls runs on the exception stack with interrupts masked;
      * TinyUSB's task needs the caller's stack and can take a while.  The
-     * controller interrupt still handles the SIE events themselves, and the
-     * task loop runs from plat_cpu_idle() and the console read path, both of
-     * which are ordinary thread context. */
+     * controller interrupt still handles the SIE events themselves; the task
+     * loop runs from plat_cpu_idle(), from the console read path, and from
+     * the deferred-work boundary arch/arm pends on every tick that
+     * interrupted user code (PendSV, see arm_handle_pendsv).  The last one is
+     * what keeps the console alive when some task is runnable all the time and
+     * the idle loop is never reached - issue #46. */
 
     /* Bring-up trace, one line per state change.  The host may take many
      * seconds to start enumerating and the tick is the only thing that

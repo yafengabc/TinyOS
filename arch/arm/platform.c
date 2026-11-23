@@ -299,6 +299,32 @@ static void arm_mask_probe(uint32_t site, void *ra)
 #define arm_mask_probe(site, ra) do { } while (0)
 #endif
 
+/* ---- deferred work ------------------------------------------------------ */
+
+/* Set PendSV.  One SCB write.  PendSV is parked at the lowest exception
+ * priority, so it runs only once every other handler has unwound - which is
+ * the whole point: it is where deferred device work is allowed to run. */
+static void arm_pend_deferred(void)
+{
+    mmio_write32(ARM_ICSR, ARM_ICSR_PENDSVSET);
+}
+
+/* PendSV: the trap-exit boundary.  The stub enters through arm_trap_enter()
+ * like every other handler and hands the frame back unchanged, so this
+ * behaves like a call made from Thread mode: no kernel lock is held (the
+ * scheduler and every syscall have already unwound), interrupts are enabled,
+ * and the USB controller interrupt at priority 0 can preempt it.  A long
+ * pump here therefore costs a slice of user time, never the system.
+ *
+ * This is the only place on the ARM port where such work can run while a
+ * task is runnable: the kernel itself is always Handler mode, and the idle
+ * loop is never reached when some task is ready. */
+regs_t *arm_handle_pendsv(regs_t *f)
+{
+    board_poll_deferred();
+    return f;
+}
+
 /* Called from the SysTick stub. */
 regs_t *arm_handle_tick(regs_t *f)
 {
@@ -356,6 +382,31 @@ regs_t *arm_handle_tick(regs_t *f)
             return f;
     }
 
+    /* Arm the deferred-work boundary on the way back out.  PendSV is below
+     * every exception, so it cannot preempt anything: the board's pump runs
+     * where the core is one exception return away from Thread mode - no
+     * kernel lock held, interrupts on, the USB interrupt free to preempt it.
+     * That is "thread context" in the sense kernel/plat/console.h and
+     * docs/PLATFORM-CONTRACT.md use, and the only such boundary this port
+     * has: the kernel itself always runs in Handler mode, and the idle loop
+     * is never reached while some task is runnable (issue #46: with USB CDC
+     * on the RP2350 a long console write stopped after about two packets).
+     *
+     * Three conditions, each load-bearing:
+     *  - only from a user frame: a tick that interrupted the kernel leaves a
+     *    half-finished syscall holding locks, and PendSV would run inside it;
+     *  - only after the pending-exception test above, otherwise our own
+     *    pended PendSV looks like a pended exception and suppresses the
+     *    switch this function is about to make;
+     *  - core 0, the console core by board contract (see
+     *    board/rp2350-generic/platform.c).  A core with no pump to serve
+     *    would pay an exception per tick for nothing.
+     *
+     * A pended SVC still wins over PendSV (0x40 against 0xff), so the pump
+     * then runs at the syscall's own return to user mode - also safe. */
+    if (plat_cpu_id() == 0 && board_poll_installed())
+        arm_pend_deferred();
+
     return process_resched(f);
 }
 
@@ -407,8 +458,10 @@ static void arm_exceptions_init(void)
        reschedules when the interrupted frame is a user frame, so a tick
        that lands in the middle of a kernel call just returns.
 
-       PendSV is parked at the lowest priority for a future deferred
-       context switch. */
+       PendSV is the deferred-work boundary: the tick (or a syscall the tick
+       landed inside) only sets its pending bit, and the work itself runs when
+       the core is one exception return away from Thread mode (see
+       arm_handle_pendsv). */
     mmio_write32(ARM_SHPR3, (plat_arm_systick_priority() << 24) |
                             (ARM_PRIO_PENDSV << 16));
     mmio_write32(ARM_SHPR2, ARM_PRIO_SVC << 24);

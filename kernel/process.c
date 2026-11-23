@@ -598,11 +598,30 @@ static int other_cpu_busy(void)
  * usbd_app_driver_get_cb). */
 void (*g_idle_poll)(void);
 
+/* Named for its first caller, the idle loop below, but it is the board's
+ * deferred-work hook: a port may also run it from the boundary where the
+ * kernel is about to return to Thread mode (ARM: PendSV, see
+ * arch/arm/platform.c).  That second caller is what keeps a polled
+ * controller alive while some task is runnable all the time - the idle loop
+ * never runs then, and with USB CDC on the RP2350 a long console write used
+ * to stop after about two packets because tud_task() was never reached
+ * (issue #46).  Both callers are kernel context with no lock held; the hook
+ * must not sleep or take the scheduler. */
+int board_poll_installed(void)
+{
+    return g_idle_poll != 0;
+}
+
+void board_poll_deferred(void)
+{
+    if (g_idle_poll)
+        g_idle_poll();
+}
+
 static void sched_idle(void)
 {
     plat_irq_enable();
-    if (g_idle_poll)
-        g_idle_poll();
+    board_poll_deferred();
 
     if (cpu_id() == 0) {
         /* This block runs masked, so a core that wedges between here and

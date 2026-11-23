@@ -36,11 +36,19 @@
  * endpoint.  That is 3 of the controller's 16 endpoints. */
 #define CFG_TUD_CDC_EP_BUFSIZE      64
 
-/* The FIFOs live in .bss and are pure overhead for a console: 128 bytes is
- * two full-speed packets, enough to cover one tick of output without
- * stalling the writer, and 256 bytes cheaper than the 512-byte default. */
+/* The FIFOs live in .bss and are pure overhead for a console.  RX keeps two
+ * full-speed packets: that covers one tick of typing and the echo path is
+ * paced by the UART anyway.
+ *
+ * TX is one 512-byte user buffer, not two packets.  The deferred pump cannot
+ * run inside the syscall that produces the bytes (PendSV is below SVCall), so
+ * a write larger than the FIFO is truncated no matter how often the pump
+ * runs: the endpoint is busy until the next frame and the bytes that do not
+ * fit are dropped, not queued.  console_write() passes at most one
+ * tos_vsnprintf() buffer (512) or one cat/read chunk (256), so 512 makes the
+ * largest single syscall in the tree fit. */
 #define CFG_TUD_CDC_RX_BUFSIZE      128
-#define CFG_TUD_CDC_TX_BUFSIZE      128
+#define CFG_TUD_CDC_TX_BUFSIZE      512
 
 /* No audio/HID/MSC/MIDI/vendor class is compiled in. */
 #define CFG_TUD_DFU                 0

@@ -39,6 +39,14 @@ void     process_console_kick(void);
 /* Trap exit: gives the CPU away if the slice is over. */
 regs_t  *process_resched(regs_t *r);
 
+/* Deferred device work: the board's pump (g_idle_poll).  The idle loop and a
+ * port's trap-exit boundary both call it, so a polled controller keeps being
+ * serviced while every task is runnable.  board_poll_installed() is what a
+ * port tests before arming its own mechanism, so a board without a pump pays
+ * nothing.  Both are C-class: kernel context, no locks held by the caller. */
+int      board_poll_installed(void);
+void     board_poll_deferred(void);
+
 /* The saved frame of a task that has not run yet.  proc_t is private to
  * process.c, so a secondary CPU starting its first task (kernel/cpu.c)
  * cannot reach the member itself; this is the one accessor it needs. */

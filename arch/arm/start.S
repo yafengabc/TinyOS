@@ -510,7 +510,9 @@ arm_usagefault:
 arm_pendsv:
     mov     r3, lr
     movs    r1, #14
-    b       arm_fault
+    bl      arm_trap_enter          /* r0 = kernel frame                */
+    bl      arm_handle_pendsv       /* deferred device work, no switch  */
+    tail_resume
 
     .thumb_func
 arm_default_handler:
