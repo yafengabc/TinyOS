@@ -1,4 +1,7 @@
 # csc 状态机模式：能否撑住、上限在哪（2026-11-23）
+> **后续（2026-11-23，`0d16e55`）**：`yield()` 和 `ready(fd)` 已加进 csc/rvm/rcc，
+> `state.c` 改用 `yield()`，输出不变。下面关于用 `sleep(1)` 作为让出点的说明保留为历史。
+
 
 ```text
 commit:            43ada9d（files/tests/state.c、state.expected、accept 检查）
