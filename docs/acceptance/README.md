@@ -182,3 +182,4 @@
 | 2026-11-22 | platform 接缝检查修正（#52 review）：名字池规则、扫头文件、plat_* 全量钉住 | `22c0ffe` | host / T0 | T0 PASS（新增负例 3 个）；T1/T2/T3/T4 `NOT RUN`（仅测试与基线） | [platform seam check](2026-11-22-platform-seam-check-22c0ffe.md) |
 | 2026-11-23 | 阶段 1 收尾：C3 验收加入 cover、平台接口契约、mklfs 抽取 | `adc9c60` | ESP32-C3（COM4） + x86/rv32/arm/rv32smp + 18 目标 | T0/T1 PASS；T2 soak 4/4 PASS；T3 C3 29/29 PASS；T4 `NOT RUN` | [stage 1 tail](2026-11-23-stage1-tail-c3-cover-adc9c60.md) |
 | 2026-11-23 | FS 静默限制修复（长名字/点文件/MAX_OPEN）+ 限制清单 | `c471965` | ESP32-C3（COM4） + 18 目标 + rv32/arm QEMU | T0/T1/T2 PASS；T3 PASS（C3 accept 29/29 + 长名字/点文件实测）；T4 `NOT RUN` | [fs limits](2026-11-23-fs-limits-c471965.md) |
+| 2026-11-23 | 路径上限 64 → 256（TOS_PATH_MAX），长名字可列 | `279509f` | ESP32-C3（COM4） + 18 目标 + rv32/arm QEMU | T0/T1/T2 PASS；T3 PASS（C3 accept 29/29 + 100 字符名字实测）；T4 `NOT RUN` | [path max](2026-11-23-path-max-279509f.md) |
