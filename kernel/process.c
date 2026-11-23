@@ -242,7 +242,7 @@ typedef struct proc {
     /* Current working directory (always absolute, no trailing slash unless
      * it is the root "/").  A child inherits the parent's cwd at exec time,
      * so a program run from a subdirectory sees the same directory. */
-    char     cwd[64];
+    char     cwd[TOS_PATH_MAX];
 
     /* ST_WAIT_PIPE: which channel we are waiting on, in which direction,
      * and for which user buffer.  The waker completes the transfer on our

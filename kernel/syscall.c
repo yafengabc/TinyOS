@@ -101,7 +101,7 @@ static void path_segments(char *norm, int cap, int *no, const char *src)
  * cwd.  '.' and '..' are collapsed, and '..' above the root stays at '/'. */
 static void resolve_path(const char *in, char *out, int outlen)
 {
-    char norm[128];
+    char norm[TOS_PATH_MAX];
     int no = 0;
 
     if (!in || in[0] != '/')
@@ -327,36 +327,36 @@ static regs_t *dispatch(regs_t *r)
         return do_exec(r, &sc);
 
     case SYS_OPEN: {
-        char upath[64];
+        char upath[TOS_PATH_MAX];
         if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        char path[64];
+        char path[TOS_PATH_MAX];
         resolve_path(upath, path, sizeof(path));
         plat_frame_set_ret(r, (uint32_t)process_fd_open(path));
         return r;
     }
 
     case SYS_CREATE: {
-        char upath[64];
+        char upath[TOS_PATH_MAX];
         if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        char path[64];
+        char path[TOS_PATH_MAX];
         resolve_path(upath, path, sizeof(path));
         plat_frame_set_ret(r, (uint32_t)process_fd_create(path));
         return r;
     }
 
     case SYS_UNLINK: {
-        char upath[64];
+        char upath[TOS_PATH_MAX];
         if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        char path[64];
+        char path[TOS_PATH_MAX];
         resolve_path(upath, path, sizeof(path));
         /* Device nodes and the two device directories are not files.  Refuse
          * explicitly: letting littlefs answer "no such file" for something
@@ -376,8 +376,8 @@ static regs_t *dispatch(regs_t *r)
 
     case SYS_READDIR: {
         uint32_t index = sc.a0, ptr = sc.a1, len = sc.a2;
-        char dir[64];
-        char name[96];
+        char dir[TOS_PATH_MAX];
+        char name[TOS_PATH_MAX];
         int n;
 
         strncpy(dir, process_cwd_str(), sizeof(dir) - 1);
@@ -410,7 +410,7 @@ static regs_t *dispatch(regs_t *r)
 
     case SYS_READDIR_AT: {
         struct tos_dirent_req req;
-        char upath[64], path[64], name[96];
+        char upath[TOS_PATH_MAX], path[TOS_PATH_MAX], name[TOS_PATH_MAX];
         uint32_t copy;
         int n;
 
@@ -495,12 +495,12 @@ static regs_t *dispatch(regs_t *r)
     }
 
     case SYS_STAT: {
-        char upath[64];
+        char upath[TOS_PATH_MAX];
         if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        char path[64];
+        char path[TOS_PATH_MAX];
         resolve_path(upath, path, sizeof(path));
         uint32_t ptr = sc.a1;          /* struct stat * in user space */
         uint32_t size = 0;
@@ -759,12 +759,12 @@ static regs_t *dispatch(regs_t *r)
         plat_reboot();
 
     case SYS_CHDIR: {
-        char upath[64];
+        char upath[TOS_PATH_MAX];
         if (!copy_user_string(upath, sc.a0, sizeof(upath))) {
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        char path[64];
+        char path[TOS_PATH_MAX];
         resolve_path(upath, path, sizeof(path));
         /* The root always exists and is a directory; for anything else ask
          * path_stat, so "/dev" and "/proc" are enterable exactly when they

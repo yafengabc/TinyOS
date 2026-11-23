@@ -70,7 +70,7 @@ static int      dent_overflow;     /* does not fit: walk every time  */
 static int      enum_target;
 static int      enum_index;
 static int      enum_hit;
-static char     enum_name[96];
+static char     enum_name[TOS_PATH_MAX];
 static int      ok;
 
 /* One lock for the whole filesystem, held for the duration of an API call.
@@ -301,7 +301,9 @@ static int enum_dir(const char *dirpath)
         if (info.type == LFS_TYPE_DIR) {
             /* List the directory itself, but do not descend. */
             if (dent_active) {
-                if (dent_fill < DENT_MAX) {
+                if (strlen(info.name) >= DENT_NAME) {
+                    dent_overflow = 1;      /* long name: use the walk path */
+                } else if (dent_fill < DENT_MAX) {
                     strncpy(dents[dent_fill], info.name, DENT_NAME - 1);
                     dents[dent_fill][DENT_NAME - 1] = '\0';
                 }
@@ -323,7 +325,9 @@ static int enum_dir(const char *dirpath)
             continue;
 
         if (dent_active) {
-            if (dent_fill < DENT_MAX) {
+            if (strlen(info.name) >= DENT_NAME) {
+                dent_overflow = 1;          /* long name: use the walk path */
+            } else if (dent_fill < DENT_MAX) {
                 strncpy(dents[dent_fill], info.name, DENT_NAME - 1);
                 dents[dent_fill][DENT_NAME - 1] = '\0';
             }
@@ -369,7 +373,7 @@ static int dent_build(void)
     enum_dir("/");
     dent_active = 0;
 
-    if (dent_fill > DENT_MAX) {
+    if (dent_fill > DENT_MAX || dent_overflow) {
         dent_overflow = 1;
         return -1;
     }

@@ -363,7 +363,7 @@ void free(void *p)
 /* ---- directory streams ------------------------------------------------ */
 
 struct DIR {
-    char          path[64];   /* absolute, so a later chdir() cannot move it */
+    char          path[TOS_PATH_MAX];  /* absolute: a later chdir() cannot move it */
     int           index;
     int           used;
     struct dirent ent;
@@ -421,7 +421,7 @@ DIR *opendir(const char *path)
         }
         memcpy(d->path, path, (size_t)n + 1);
     } else {
-        char cwd[64];
+        char cwd[TOS_PATH_MAX];
 
         if (getcwd(cwd, sizeof(cwd)) <= 0 ||
             dir_join(cwd, path, d->path, (int)sizeof(d->path)) < 0) {

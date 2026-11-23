@@ -254,7 +254,7 @@ static void cmd_help(void)
  * still recognise the prompt. */
 static void print_prompt(void)
 {
-    char buf[64];
+    char buf[TOS_PATH_MAX];
     if (getcwd(buf, sizeof(buf)) > 0 && strcmp(buf, "/") != 0) {
         puts(buf);
         puts(" tos> ");
@@ -268,7 +268,7 @@ static void print_prompt(void)
 /* exec only spawns a child; the caller decides whether to wait for it. */
 static int spawn(char *argv[], int argc)
 {
-    char path[64];
+    char path[TOS_PATH_MAX];
 
     strcpy(path, "bin/");
     if (strlen(path) + strlen(argv[0]) >= sizeof(path)) {

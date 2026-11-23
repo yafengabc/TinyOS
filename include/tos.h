@@ -75,6 +75,13 @@
  * LP/C6 lower only replaces the lower half.  0 = ok, -1 = the shape broke. */
 #define SYS_REMOTE_TEST   53
 
+/* Longest path the kernel accepts in one syscall, including the NUL.  It
+ * matches littlefs's per-name limit (255), so any name the filesystem can
+ * store is addressable.  Larger values cost TOS_PATH_MAX bytes per process
+ * (the cwd) and per path-carrying syscall frame. */
+#define TOS_PATH_MAX      256
+
+
 #define PIO_LOAD     0   /* req.buf = u16 words, req.len = count          */
 #define PIO_START    1
 #define PIO_STOP     2

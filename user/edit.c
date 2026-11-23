@@ -44,7 +44,7 @@ static int  top;                /* first line on screen              */
 static int  hscroll;            /* first column shown, cursor's line */
 static int  dirty;
 static int  quit_armed;
-static char fname[64];
+static char fname[TOS_PATH_MAX];
 static char msg[56];
 
 static void set_msg(const char *s)

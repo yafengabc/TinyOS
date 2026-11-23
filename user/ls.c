@@ -45,7 +45,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    char name[64];
+    char name[TOS_PATH_MAX];
     struct stat es;
     for (int i = 0;; i++) {
         int n = readdir_index(i, name, sizeof(name));

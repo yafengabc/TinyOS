@@ -197,7 +197,7 @@ static void expand(const char *in, char *out, int cap)
 
 static int spawn(char *argv[], int argc)
 {
-    char path[64];
+    char path[TOS_PATH_MAX];
     if (strchr(argv[0], '/')) {
         if (strlen(argv[0]) >= sizeof(path))
             return -1;
@@ -434,7 +434,7 @@ static int run_command(char *s)
         return ac > 1 ? atoi(args[1]) & 255 : 0;
     }
     if (!strcmp(args[0], "source")) {
-        char name[64];
+        char name[TOS_PATH_MAX];
         if (ac < 2) {
             err("usage: source <file>\n");
             last_status = 1;
@@ -530,7 +530,7 @@ static int run_command(char *s)
         return -1;
     }
     if (!strcmp(args[0], "pwd")) {
-        char cwd[64];
+        char cwd[TOS_PATH_MAX];
 
         if (getcwd(cwd, sizeof(cwd)) > 0) {
             puts(cwd);
