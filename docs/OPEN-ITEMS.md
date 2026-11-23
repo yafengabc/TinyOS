@@ -63,7 +63,7 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
   `smpbench` 2.00x。
 - **atk-dnr2350am-smp**（2026-11-17，`7453bd6`，ATK-DNRP2350AM Cortex-M33）：UART0 上
   10 轮并发 exec **20/20 ok**、10 轮 `dd`+`rm` bad=0、heartbeat 6/6；
-  `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。
+  `smpbench` 2.06x。USB CDC 长输出（`ls`/`crash`）会截断，本轮以 UART0 为准。（2026-11-23 已修，`ea2d89d`，待 Pico 2 复验，见本文件第 5b 节第 5 条）
 
 ## 5b. USB：还有三件事
 
@@ -251,6 +251,30 @@ PIO 驱动坏了。脚本已把 RP2040 的 ws2812 改到 PIO0 SM3，详见 HISTO
    - 仍然成立的两条经验：**单槽标记会被下一次启动覆盖**（`WATCHDOG_SCRATCH(3)` 的
      `prev_phase` 往往是恢复启动留下的）；**ROM 自己在用 `WATCHDOG_SCRATCH(4..7)`**，
      自记只能用 0..3 或干脆用 `.noinit`。
+
+5. **ARM（RP2350）USB CDC 长输出截断 —— 已修，待 Pico 2 复验（#46，2026-11-23）**：
+   现象是在 ~192 B 处停住、后面全丢（128 B FIFO + 已交给端点的 64 B 包）。根因是
+   `tud_task()` 只挂在 idle 钩子上：有任务一直 runnable 时 `sched_idle` 不进，
+   CDC 端点不再被重新武装，`tud_cdc_write_available()` 恒为 0，`usb_cdc_putc()`
+   逐字节丢。
+
+   修法（`ea2d89d`）：tick 只 `PENDSVSET`；`arm_handle_pendsv()` 在"回到 Thread mode
+   前的那一个边界"跑 `board_poll_deferred()`（PendSV 优先级 0xE0，抢不了调度器和
+   系统调用，所以没有内核锁、USB IRQ 仍可抢占）。只在**用户帧 + pending-exception
+   检查之后 + core 0** 置位。idle 泵保留作兜底。TX FIFO 128 → 512 B：泵跑不进
+   产生字节的那个系统调用，512 覆盖树里最大的单次控制台写。
+
+   T2 证据：QEMU arm 上用临时探针（数 IPSR==14，未提交）跑两个并发 spinner，
+   ~5 s 内 2534 次 PendSV、每 tick 一次、无 fault，之后 shell 正常。**T3 未做**：
+   Pico 2 / ATK 都不在机。上板判据见
+   `docs/acceptance/2026-11-23-usb-deferred-pump-ea2d89d.md`：`ls /bin`、`ls -l /`、
+   `cat`、`help` 完整；`run bench &` 期间敲键有回显；单核与 SMP 各一次
+   `heartbeat 6/6`。若仍截断，先查 PendSV 有没有真被置位（`g_usb_irq_count`、
+   `arm_handle_pendsv` 打点），再查 FIFO 512 与 `usb_cdc_putc()` 的 flush 边界。
+
+   仍然不做的：ARM kernel thread（只为 1 ms 泵不划算）、USB IRQ 里跑 `tud_task`
+   （历史上第一次中断就死锁）、在系统调用内部跑泵（PendSV 低于 SVCall）。因此单次
+   >512 B 的控制台写仍会被截，这是有界丢字节，不是停摆。
 
 ## 6. goc32：工具链已自包含，剩下前端缺口
 

@@ -53,6 +53,23 @@ XIP 常量）。
   `plat_enter_user`（不返回）、`plat_set_kernel_stack`；
 - 终止：`plat_reboot`、`plat_shutdown`、`plat_panic_halt`（都不返回）。
 
+### D. 延迟工作钩子（`g_idle_poll`）
+
+板子可以安装一个设备泵（`kernel/process.c` 的 `g_idle_poll`，经
+`board_poll_deferred()` 调用）。它**不是** A 类：里面可以跑设备状态机、可以取自己的
+锁、可以被抢占，但**不能**睡眠、不能调调度器、不能拿内核锁（调用者不持有）。
+两个调用点都是"内核上下文、无锁"：
+
+- 调度器 idle 循环（`sched_idle`，中断已开）；
+- 端口的"回到 Thread mode 之前"边界：ARM 是 PendSV（最低优先级，只能抢占用户态，
+  所以调度器和系统调用都早已退出），RV32/x86 目前没有，`board_poll_installed()`
+  让没有泵的板子不付代价。
+
+这条边界存在的理由：内核自己不跑在 Thread mode，任务一直 runnable 时 idle 循环永远
+不进入。轮询式控制器（RP2350 的 USB CDC）必须在这条边界上被泵到，否则它的端点不会
+被重新武装（#46，见 `docs/OPEN-ITEMS.md` 第 5b 节第 5 条）。**不要**把它塞进 tick /
+USB ISR：那里的栈和中断屏蔽状态都不是状态机该待的地方（历史上第一次中断就死锁）。
+
 ## 2. 跨接口的不变量
 
 1. **中断状态**：能用 `plat_irq_save/restore` 就不要用 `disable/enable` 配对。
