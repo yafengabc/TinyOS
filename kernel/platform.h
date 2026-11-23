@@ -9,7 +9,11 @@
  * kernel/core/ may only call these functions; it must never touch port I/O,
  * control registers, CSR registers or any other architecture specific state.
  * Each arch/ port implements this header, and each board/ supplies the
- * memory layout constants. */
+ * memory layout constants.
+ *
+ * Call-context rules (what may run in an ISR, under a lock, or with
+ * interrupts off) are in docs/PLATFORM-CONTRACT.md; the header comments here
+ * carry the per-interface detail. */
 
 /* ---- memory layout (provided by the board) --------------------------- */
 
