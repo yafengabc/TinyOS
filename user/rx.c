@@ -10,8 +10,9 @@
  * flow control - every chunk is answered before the next one is sent -
  * because that is the only flow control a bare UART has: while this task
  * is inside write() programming a flash block, the sender must not be
- * sending, or the tty's 256-byte raw queue would drop bytes on the erase
- * stall.  The cost is throughput (~6 KiB/s at 115200), which is fine for
+ * sending, or the tty's raw queue (512 bytes, 511 usable) would drop bytes
+ * on the erase stall.  The cost is throughput (~6 KiB/s at 115200), which is
+ * fine for
  * config files, scripts and firmware images; the tty cannot do better
  * without hardware handshaking.
  *

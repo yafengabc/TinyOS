@@ -559,6 +559,45 @@ void usb_cdc_unlock(uint32_t primask)
  * out of patience after the first descriptor and reset the port in a loop.
  * So the interrupt path runs both, with a guard against re-entering the task
  * when the interrupt lands inside the tick's own tud_task() call. */
+/* Bytes the state machine has completed, waiting for the console.
+ *
+ * tud_cdc_read_char() is TinyUSB code, and the console poll reaches the read
+ * path with interrupts masked (tty_poll runs in the tick and in sched_idle).
+ * Nothing in that path may wait or take a cross-core lock: the other core can
+ * hold the USB gate for a whole state-machine pass, and the masked core would
+ * stop ticking while it waits (the ARM SMP console deadlock).  So the task -
+ * which already runs here, under the lock, on core 0 - moves the bytes out
+ * into this ring, and the masked reader only pops a byte array.
+ *
+ * Both sides run on core 0: the USB interrupt is only enabled in core 0's
+ * NVIC, tty_poll is called from core 0's tick and idle loop.  The pop runs
+ * masked, so the interrupt cannot preempt it.  That makes this a single-core
+ * producer/consumer pair with no atomics needed.
+ */
+#define USB_RX_Q 256
+static volatile uint8_t  usb_rxq[USB_RX_Q];
+static volatile uint16_t usb_rxq_head, usb_rxq_tail;   /* head = next write */
+
+static void usb_rxq_fill(void)
+{
+    int32_t c;
+
+    /* Look before reading: tud_cdc_read_char() consumes, so checking for a
+     * full ring after it has returned a byte would drop that byte.  A full
+     * ring leaves the rest in TinyUSB, where the next pass picks it up. */
+    while (tud_cdc_available() > 0) {
+        uint16_t n = (uint16_t)((usb_rxq_head + 1u) % USB_RX_Q);
+
+        if (n == usb_rxq_tail)
+            return;                 /* full: the rest stays in TinyUSB */
+        c = tud_cdc_read_char();
+        if (c < 0)
+            return;
+        usb_rxq[usb_rxq_head] = (uint8_t)c;
+        usb_rxq_head = n;
+    }
+}
+
 static void usb_task_run(int from_isr)
 {
     uint32_t primask = usb_cdc_lock();
@@ -576,6 +615,8 @@ static void usb_task_run(int from_isr)
         g_task_calls++;
         tud_task();
     }
+
+    usb_rxq_fill();
 
     g_in_task = 0;
     usb_cdc_unlock(primask);
@@ -697,15 +738,18 @@ void usb_cdc_flush(void)
 
 int usb_cdc_getchar(void)
 {
-    uint32_t primask;
-    int32_t c;
+    int c;
 
     if (!g_hw_ready)
         return -1;
-    primask = usb_cdc_lock();
-    c = tud_cdc_read_char();
-    usb_cdc_unlock(primask);
-    return (c < 0) ? -1 : (int)c;
+
+    /* Only the completed-byte ring: this runs with interrupts masked, on
+     * core 0, and must never wait for the USB lock or enter TinyUSB. */
+    if (usb_rxq_tail == usb_rxq_head)
+        return -1;
+    c = usb_rxq[usb_rxq_tail];
+    usb_rxq_tail = (uint16_t)((usb_rxq_tail + 1u) % USB_RX_Q);
+    return c;
 }
 
 int usb_cdc_configured(void)

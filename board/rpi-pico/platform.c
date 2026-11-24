@@ -667,7 +667,11 @@ int plat_console_getchar(void)
     if (c >= 0)
         return c;
 
-    usb_cdc_poll();
+    /* Only the driver's completed-byte ring: this function runs from
+     * tty_poll(), which is called with interrupts masked (the tick and the
+     * idle loop).  The state machine itself runs from the USB interrupt and
+     * from the tick, never here - entering TinyUSB from a masked console read
+     * is what deadlocked the other ARM port under SMP. */
     return usb_cdc_getchar();
 }
 

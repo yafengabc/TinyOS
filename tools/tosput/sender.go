@@ -97,14 +97,23 @@ func OpenSender(name string, baud int,
 // reader from the receive interrupt (not the next tick) and the raw queue
 // is 4 KiB, so most targets accept much larger bursts.
 //
-// A USB CDC console is the exception: RP2040 reads one byte per syscall.
-// 256 B per 1 ms outruns it: 2 of 3 measured 42 KiB uploads died at chunk
-// 24-27 after repeated "NAK r5" (the decoded block is short by a byte).
-// 256 B per 2 ms is stable - 9 consecutive runs (42 KiB and 128 KiB) took
-// no NAK at all at 25-27 KiB/s.  That is already the protocol ceiling:
-// pacing at 128 KiB/s leaves the per-chunk ACK and littlefs write as the
-// bottleneck, so doubling the gap costs nothing and further speeding the
-// host cannot help.
+// A USB CDC console used to be the exception.  On the RP2040 port the console
+// read path entered the USB state machine *per byte* (usb_cdc_poll() plus the
+// cross-core lock around tud_cdc_read_char()), from the 1 ms tick with
+// interrupts masked.  Draining one tick's worth therefore cost longer than a
+// tick: 256 B per 1 ms outran it, the 511-byte raw queue filled, the byte that
+// did not fit was dropped, and base64 turned that into "NAK r5" (the decoded
+// block is short by a byte) - 2 of 3 measured 42 KiB uploads died at chunk
+// 24-27.  At 256 B per 2 ms the drain fits: 9 consecutive runs (42 KiB and
+// 128 KiB) took no NAK at all at 25-27 KiB/s.
+//
+// The RP2040 driver now hands completed bytes to the console through its own
+// ring, so the masked drain is a byte-array pop and the state machine runs
+// once per interrupt instead of once per byte.  The 1 ms pacing is worth
+// re-testing on that image; 2 ms stays the default until a board run at 1 ms
+// is clean, because throughput is already at the protocol ceiling (the
+// per-chunk ACK plus the littlefs write, ~26 KiB/s), so the extra gap costs
+// nothing.
 //
 // Every write is checked: the Windows driver may accept only part of a
 // buffer, and a silently short write costs a whole retransmitted chunk.
