@@ -57,7 +57,8 @@ SecureFault 的向量是 `arm_default_handler` → `arm_fault` → `arm_handle_f
 - T0 PASS（`go test -count=1 ./...`）、T1 PASS（18/18）、T2 PASS
   （`tostest smoke -target arm`；`soak.py --cycles 2 --targets rv32,arm` 2/2）。
 - 6 个 RP2 目标 + `arm`（Cortex-M3）单独构建 PASS——两个 `#ifdef` 分支都走了一遍。
-- **T3 NOT RUN**：优先级写入与 IPSR 读取都要在板上确认。建议在 ATK 上重跑
+- **T3 NOT RUN**：按 [docs/OPEN-ITEMS.md](../OPEN-ITEMS.md) 的 5d 节交给板主。
+  优先级写入与 IPSR 读取都要在板上确认。建议在 ATK 上重跑
   `docs/acceptance/2026-11-24-atk-smp-memmanage-tick-starvation.md` 的同一套
   hammer（SMP 20 轮 + 单核 10 轮），并确认 `[SELF]`/STALL 里 `sh1` 变成
   `0x40404040`。

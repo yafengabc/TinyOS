@@ -323,6 +323,25 @@ arm QEMU smoke、soak 2/2）与构建，**板级一律未跑**。背景、代价
 若 (a) 出现 `N > 0` 或 (b) 仍截断，先看 `/proc/usbboot` 的 `handed` 是否还在增长：
 增长说明泵在工作、问题在主机/端点；停住说明泵没被调度，回到 §5b 第 5 条的 PendSV 检查。
 
+## 5d. ARM 异常优先级/向量号补丁（`87ede23`）的板上待跑两项（2026-11-25）
+
+状态：**NOT RUN**，交板主。补丁内容：SHPR1 的 `[31:24]` 在 ARMv8-M 上是 SecureFault
+（不是保留字节），也按 `ARM_PRIO_FAULT` 写；`arm_default_handler` 改成 `mrs r1, ipsr`，
+不再把所有非常规向量都报成 `vec 0`。本机 T0/T1/T2 与 6 个 RP2 目标 + `arm`(M3) 构建
+PASS，板级未跑。背景与推导：`docs/acceptance/2026-11-24-arm-securefault-priority.md`。
+
+- **a. Pico 2 ARM（M33）**：重刷 `build/tinyos-rpi-pico2-smp.uf2`（`rpi-pico2` 同看）。
+  随便触发一次 `prot heap`（或 `run prot heap`），读故障转储那一行：
+  **判据** `shpr1=0x40404040`（父提交 `05a0e18` 上实测是 `0x00404040`，
+  见 `docs/acceptance/2026-11-24-pico2-matrix-05a0e18.md`）。SecureFault **不需要**
+  构造，只核寄存器值；同时确认 MemManage 打印后仍回到提示符（`prot` 五例）。
+  ATK 的 ARM 两镜像同理，顺手看一眼即可，但不是关闭门槛。
+- **b. RP2040（M0+）**：`start.S` 与 `arch/arm/platform.c` 的 `#ifdef` 之外的部分是
+  RP2040 共用的，`arm_default_handler` 的 IPSR 读取在 M0+ 上同样生效，所以按
+  `AGENTS.md` 要跑 `scripts/rp2040/accept.py`，`rpi-pico` 与 `rpi-pico-smp` 各一次。
+  **判据**：末行 `ACCEPT OK n/n`，含 `fault isolation` 一项（`crash` 之后回到提示符）。
+  没有板主代跑，这一项就是 `NOT RUN`，不能在收口时写成 PASS。
+
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在
