@@ -584,6 +584,48 @@ func linkViaDriver(ld []string) bool {
 		strings.HasPrefix(base, "clang") || strings.HasSuffix(base, "-gcc")
 }
 
+// withoutRVC drops the C extension from an ISA string ("rv32imac" ->
+// "rv32ima"), keeping any underscore-separated extension list.  Returns ""
+// when the string does not name RVC.
+func withoutRVC(march string) string {
+	base, ext, hasExt := strings.Cut(march, "_")
+	i := strings.IndexByte(base, 'c')
+	if i < 0 {
+		return ""
+	}
+	base = base[:i] + base[i+1:]
+	if hasExt {
+		return base + "_" + ext
+	}
+	return base
+}
+
+// userRVCMode is the board's [user] rvc policy, or "" for "plain target ISA":
+//
+//	""      compressed instructions as the target allows
+//	"no"    never use them
+//	"auto"  use them unless the linked image would straddle a page boundary
+//
+// A board only states the policy; the build decides per program.
+func (b *Builder) userRVCMode() string {
+	if b.BoardConfig == nil {
+		return ""
+	}
+	return b.BoardConfig.UserRVC
+}
+
+// userISA returns the -march flag that turns RVC off for user code, or nil
+// when the target has no compressed instructions to begin with.
+func (b *Builder) userISANoC() []string {
+	if b.Target.Arch != "rv32" {
+		return nil
+	}
+	if m := withoutRVC(b.Target.March); m != "" {
+		return []string{"-march=" + m}
+	}
+	return nil
+}
+
 func (b *Builder) link(objs []string, script, out string, extra ...string) error {
 	var args []string
 	var tool string
@@ -1494,13 +1536,22 @@ func (b *Builder) buildUser() ([]string, error) {
 		b.userDefines()...)
 
 	// User code uses the target's ISA, as the kernel does.  A board whose
-	// protection map covers one code run with several entries needs user code
-	// without the C extension (RISC-V allows an access only when a single PMP
-	// entry covers all of it, and RVC lets a 32-bit instruction start at
-	// page_end-2); such a target says so once, in its own `march =`, next to
-	// the gpio/flash knobs it already owns.  Nothing here special-cases a
-	// board or a chip: rpi-pico2-rv32 and friends are `march = rv32ima`, and
-	// checkCodePages() below enforces the consequence.
+	// protection map can cover one code run with several entries needs user
+	// code without the C extension (RISC-V allows an access only when a single
+	// PMP entry covers all of it, and RVC lets a 32-bit instruction start at
+	// page_end-2).  The board states the policy with `[user] rvc` - "no" for
+	// all programs, "auto" to fall back per program - and nothing here names a
+	// board or a chip.  checkCodePages() below is the invariant either way.
+	rvcMode := b.userRVCMode()
+	isaNoC := b.userISANoC()
+	if rvcMode != "" && isaNoC == nil {
+		return nil, fmt.Errorf("[user] rvc is set but %s has no C extension to remove",
+			b.Target.March)
+	}
+	autoRVC := rvcMode == "auto"
+	if rvcMode == "no" {
+		userPIEFlags = append(userPIEFlags, isaNoC...)
+	}
 	userCFlags := append([]string{}, userPIEFlags...)
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
@@ -1541,24 +1592,6 @@ func (b *Builder) buildUser() ([]string, error) {
 	sizeOpt := map[string]bool{
 		"softfloat32.c": true, "floatprint.c": true, "fix16.c": true,
 	}
-	var commonObjs []string
-	var tasks []task
-	for _, name := range common {
-		src := filepath.Join(udir, name)
-		obj := filepath.Join(b.BuildDir, "user", strings.TrimSuffix(name, filepath.Ext(name))+".o")
-		commonObjs = append(commonObjs, obj)
-		srcCopy, objCopy := src, obj
-		flags := userCFlags
-		if strings.HasSuffix(name, ".S") {
-			flags = nil // assembler: no -fPIE, it just emits relative code
-		} else if sizeOpt[name] {
-			flags = append(append([]string{}, flags...), "-Oz")
-		}
-		tasks = append(tasks, task{fn: func() error {
-			return b.compile(srcCopy, objCopy, incs, flags...)
-		}})
-	}
-
 	entries, err := os.ReadDir(udir)
 	if err != nil {
 		return nil, err
@@ -1644,96 +1677,166 @@ func (b *Builder) buildUser() ([]string, error) {
 	sort.Strings(progs)
 	sort.Strings(dirs)
 
-	for _, prog := range progs {
-		src := filepath.Join(udir, prog+".c")
-		obj := filepath.Join(b.BuildDir, "user", prog+".o")
-		srcCopy, objCopy := src, obj
-		tasks = append(tasks, task{fn: func() error {
-			return b.compile(srcCopy, objCopy, incs, userCFlags...)
-		}})
+	optFlags := map[string]string{}
+	for _, dir := range dirs {
+		if raw, err := os.ReadFile(filepath.Join(udir, dir, "opt")); err == nil {
+			if v := strings.TrimSpace(string(raw)); v != "" {
+				optFlags[dir] = v
+				b.logf("      OPT %s %s\n", dir, v)
+			}
+		}
 	}
 
-	// One object per source in the directory.  The object path carries the
-	// directory name so two programs cannot overwrite each other's objects
-	// (the same bug that once made esp32c3 and rv32 share one .o).
-	dirObjs := map[string][]string{}
-	for _, dir := range dirs {
-		srcs, err := filepath.Glob(filepath.Join(udir, dir, "*.c"))
+	commonA, progsA, err := b.compileUserTree(udir, incs, userCFlags, "user",
+		common, progs, dirs, sizeOpt, optFlags)
+	if err != nil {
+		return nil, err
+	}
+	commonB, progsB := commonA, progsA
+	if autoRVC {
+		commonB, progsB, err = b.compileUserTree(udir, incs,
+			append(append([]string{}, userCFlags...), isaNoC...),
+			filepath.Join("user", "noc"), common, progs, dirs, sizeOpt, optFlags)
 		if err != nil {
 			return nil, err
 		}
-		if len(srcs) == 0 {
-			continue // not a program directory; nothing to link
+	}
+
+	var bins []string
+	for _, name := range append(append([]string{}, progs...), dirs...) {
+		if len(progsA[name]) == 0 {
+			continue // a program directory with no sources in this build
 		}
-		sort.Strings(srcs)
-		outDir := filepath.Join(b.BuildDir, "user", dir)
-		// The objects of a directory program go in a directory of their
-		// own, so create it before the compile tasks run.
-		if err := os.MkdirAll(outDir, 0o755); err != nil {
+		out := filepath.Join(b.BuildDir, "user", "bin", name)
+		if err := b.linkPIE(append(append([]string{}, commonA...), progsA[name]...),
+			filepath.Join(udir, "user.ld"), out); err != nil {
 			return nil, err
 		}
-
-		// A program may ask for its own optimisation level by putting one
-		// in an "opt" file next to its sources.  The flag goes after the
-		// default in the command line, and the last -O wins.
-		//
-		// The Python interpreter asks for -Oz: its image is tens of
-		// kilobytes and has to fit in a task window on a microcontroller
-		// whose whole user area is 192 KiB.  The kernel stays at -O2,
-		// because -Oz on RV32 is what makes QEMU's TCG re-translate every
-		// loop (see ccFlags) - that is a property of the emulator, not of
-		// the code, and the interpreter is not what runs the kernel.
-		flags := userCFlags
-		if raw, err := os.ReadFile(filepath.Join(udir, dir, "opt")); err == nil {
-			if s := strings.TrimSpace(string(raw)); s != "" {
-				flags = append(append([]string{}, flags...), s)
-				b.logf("      OPT %s %s\n", dir, s)
+		if autoRVC && imageStraddles(out) {
+			// The compressed form put a 32-bit instruction across a page
+			// boundary (a PMP entry boundary on this board): relink this one
+			// program from the no-RVC tree.  Four-byte instructions cannot
+			// cross a page, so a single pass always suffices.
+			if err := b.linkPIE(append(append([]string{}, commonB...), progsB[name]...),
+				filepath.Join(udir, "user.ld"), out); err != nil {
+				return nil, err
 			}
+			if imageStraddles(out) {
+				return nil, fmt.Errorf(
+					"bin/%s: still crosses a page boundary after rebuilding without RVC", name)
+			}
+			b.logf("      RVC bin/%s: rebuilt without compressed instructions\n", name)
 		}
+		b.logf("      LD  bin/%s\n", name)
+		bins = append(bins, name)
+	}
+	return bins, nil
+}
 
+// compileUserTree compiles the common runtime and every program of one ISA
+// variant.  base is the shared user flag set (the target's march included;
+// for the no-RVC variant its -march is repeated at the end so it wins).  sub
+// is the object directory, which keeps the two variants apart.
+func (b *Builder) compileUserTree(udir string, incs, base []string, sub string,
+	common, progs, dirs []string, sizeOpt map[string]bool,
+	optFlags map[string]string) ([]string, map[string][]string, error) {
+
+	outRoot := filepath.Join(b.BuildDir, sub)
+	if err := os.MkdirAll(outRoot, 0o755); err != nil {
+		return nil, nil, err
+	}
+	obj := func(name string) string { return filepath.Join(outRoot, name+".o") }
+
+	var tasks []task
+	var commonObjs []string
+	for _, name := range common {
+		o := obj(strings.TrimSuffix(name, filepath.Ext(name)))
+		commonObjs = append(commonObjs, o)
+		flags := append(append([]string{}, base...), isaFrom(base)...)
+		if strings.HasSuffix(name, ".S") {
+			// assembler: no -fPIE, it just emits relative code.  The ISA flag
+			// still matters, or clang expands `j` to `c.j`.
+			flags = isaFrom(base)
+		} else if sizeOpt[name] {
+			flags = append(flags, "-Oz")
+		}
+		srcCopy, objCopy, flagsCopy := filepath.Join(udir, name), o, flags
+		tasks = append(tasks, task{fn: func() error {
+			return b.compile(srcCopy, objCopy, incs, flagsCopy...)
+		}})
+	}
+
+	progObjs := map[string][]string{}
+	for _, prog := range progs {
+		o := obj(prog)
+		progObjs[prog] = []string{o}
+		flags := append(append([]string{}, base...), isaFrom(base)...)
+		srcCopy, objCopy, flagsCopy := filepath.Join(udir, prog+".c"), o, flags
+		tasks = append(tasks, task{fn: func() error {
+			return b.compile(srcCopy, objCopy, incs, flagsCopy...)
+		}})
+	}
+	for _, dir := range dirs {
+		srcs, err := filepath.Glob(filepath.Join(udir, dir, "*.c"))
+		if err != nil {
+			return nil, nil, err
+		}
+		sort.Strings(srcs)
+		if len(srcs) == 0 {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(outRoot, dir), 0o755); err != nil {
+			return nil, nil, err
+		}
+		flags := append(append([]string{}, base...), isaFrom(base)...)
+		if extra := optFlags[dir]; extra != "" {
+			flags = append(flags, extra)
+		}
 		for _, src := range srcs {
-			base := strings.TrimSuffix(filepath.Base(src), ".c")
-			obj := filepath.Join(outDir, base+".o")
-			dirObjs[dir] = append(dirObjs[dir], obj)
-			srcCopy, objCopy, flagsCopy := src, obj, flags
+			baseName := strings.TrimSuffix(filepath.Base(src), ".c")
+			o := filepath.Join(outRoot, dir, baseName+".o")
+			progObjs[dir] = append(progObjs[dir], o)
+			srcCopy, objCopy, flagsCopy := src, o, flags
 			tasks = append(tasks, task{fn: func() error {
 				return b.compile(srcCopy, objCopy, incs, flagsCopy...)
 			}})
 		}
 	}
-
 	if err := b.runTasks(tasks); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return commonObjs, progObjs, nil
+}
 
-	var bins []string
-	for _, prog := range progs {
-		obj := filepath.Join(b.BuildDir, "user", prog+".o")
-		out := filepath.Join(b.BuildDir, "user", "bin", prog)
-		objs := append(append([]string{}, commonObjs...), obj)
-		// -pie makes the image ET_DYN so the kernel can relocate it to any
-		// APP_BASE (this is what lets one binary run on QEMU and on the
-		// real MCU); --gc-sections drops unused libc; -s strips symbols.
-		if err := b.linkPIE(objs, filepath.Join(udir, "user.ld"), out); err != nil {
-			return nil, err
+// isaFrom returns the last -march flag of a user flag set.  The last -march on
+// the command line wins, so re-appending it after the shared flags is how the
+// no-RVC variant overrides the target's.  Empty for ARM and x86.
+func isaFrom(flags []string) []string {
+	for i := len(flags) - 1; i >= 0; i-- {
+		if strings.HasPrefix(flags[i], "-march=") {
+			return []string{flags[i]}
 		}
-		b.logf("      LD  bin/%s\n", prog)
-		bins = append(bins, prog)
 	}
-	for _, dir := range dirs {
-		objs := dirObjs[dir]
-		if len(objs) == 0 {
-			continue
-		}
-		out := filepath.Join(b.BuildDir, "user", "bin", dir)
-		all := append(append([]string{}, commonObjs...), objs...)
-		if err := b.linkPIE(all, filepath.Join(udir, "user.ld"), out); err != nil {
-			return nil, err
-		}
-		b.logf("      LD  bin/%s\n", dir)
-		bins = append(bins, dir)
+	return nil
+}
+
+// imageStraddles reports whether an instruction in the image's executable
+// segment reaches across a 4 KiB page boundary.
+func imageStraddles(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
 	}
-	return bins, nil
+	segs, err := executableSegments(data)
+	if err != nil {
+		return false
+	}
+	for _, s := range segs {
+		if _, _, ok := instructionStraddle(s.code, uint32(s.vaddr)); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Builder) buildFSImage(bins []string) error {

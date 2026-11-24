@@ -543,17 +543,21 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 映射是页粒度 NAPOT：一段 `.text` 会被 `pmp_cover()` 拆成几块，块边界就在页边界上。
 带 RVC 时 32 位指令可以落在 `page_end-2`，一条取指覆盖两个条目，于是 `rcc` 在
 `0x20026ffe` 报 `instruction access fault`（同一份源码挪 0x30 字节，崩点跟着变成
-`0x20025ffe`）。修法不是给 build system 加板级分支，而是这几个目标的 ISA 本身：
-`targets/{rpi-pico2-rv32,rpi-pico2-rv32-smp,atk-dnr2350am-rv32,atk-dnr2350am-rv32-smp,rp2350rv-generic}.conf`
-写成 `march = rv32ima`（原来是 rv32imac，一个字母），构建器照常把 `march` 同时给内核和
-用户代码。新加一块同样“一段 code 被拆成多个 PMP 条目”的板子，只改它自己的 target conf，
-不用碰 Go。4 字节对齐的 4 字节指令不可能跨页。
+`0x20025ffe`）。修法是一条**板级策略**，不是 build system 里的板级分支：
+`board/rp2350rv-generic`、`rpi-pico2-rv32`、`atk-dnr2350am-rv32` 的 `board.conf` 写
+`[user] rvc = auto`，意思是“先按 target 的 ISA（带 C）编，哪个程序链接出来会跨页，就只
+把那一个程序换成不带 C 重新链接”。新加一块同样的板子只加这一行；Go 里没有任何板名/芯片
+名。`rvc = no` 则是整镜像不用 C，`rvc` 不写就是今天的默认（允许 C）。
 
-代价：用户代码变大（同一份源码实测 +23%…+47%，合计 +26%：`csc` 47 900→58 784、
-`rcc` 31 098→39 432、`msh` 4 016→5 420、`hello` 464→684）；内核也一起变大，但它跑在
-XIP flash（0x10000000），**只花 flash 不花 RAM**（.text+.rodata 164 032 B，实测 RAM 端
-只差 576 B）。msh 的窗口承诺因此正好是 20 KiB（4 KiB 粒度板；16 KiB 粒度板分配时取整成
-32 KiB），它用编译器的 `__riscv_compressed` 判断，而不是构建期宏。
+落点是 `internal/build/build.go` 的 `compileUserTree()`：默认对象树在 `build/user/`，
+auto 时另编一份 `build/user/noc/`（不带 C，公共运行库也在里面），链接完用
+`checkCodePages()` 的判断器读一遍镜像；跨页的程序用 noc 那份重链一次（4 字节指令不可能
+跨页，所以一遍就够），并在构建日志打印 `RVC bin/xxx: rebuilt without compressed
+instructions`。`buildFSImage()` 里的同一个检查是最后的门禁。
+
+实测（rpi-pico2-rv32）：`edit/pio/sh/csc/rcc/rvm` 六个程序被换成 no-RVC，其余（含
+`msh`、`hello`）保留 C；**内核也没动（仍带 C）**。因此 `msh` 的窗口回到 16 KiB（不再
+是 20/32 KiB），只有被换掉的程序变大（同一份源码 no-RVC 比带 C 大 +23%…+47%）。
 
 硬件依据（不要再猜）：Hazard3 的 `PMP_GRAIN` 是 RISC-V 的 G 参数，**最小 region =
 1 << (G + 2)**，G > 0 时 NA4 写入会被强制成 OFF；RP2350 的实例化是 **G = 3**，即
@@ -571,9 +575,9 @@ XIP flash（0x10000000），**只花 flash 不花 RAM**（.text+.rodata 164 032 
 
 这条不再靠上板才发现：`internal/build/codepage.go` 的 `checkCodePages()` 在打包用户
 镜像时逐条走指令流（低两位 0b11 = 4 字节，否则 2 字节），任何指令跨 4 KiB 边界就
-直接**构建失败**并打印地址。门限跟着 target 的 `march` 走：凡是 rv32 且 march 里没有
-`c` 的目标都检查（今天就是那 5 个 Hazard3 目标；`rv32nc` 也顺带被检查，它本来就没有
-压缩指令）。TOR 端口（QEMU/C3）带 RVC，不检查——它们一段只有一个条目，跨页无害。
+直接**构建失败**并打印地址。门限是那条板级策略：`[user] rvc` 非空（`auto`/`no`）的
+rv32 目标才检查。TOR 端口（QEMU/C3）没有这条策略，它们的映射一段只有一个条目，跨页
+无害，所以不检查、也不因此变大。
 负例：往 `user/<prog>/opt` 里塞 `-march=rv32imac`（opt 追加在命令行最后）时，
 `bin/rcc` 在 `0x00000ffe` 被拦下；把门限临时放开到 QEMU 时 `bin/edit` 同样被拦。
 

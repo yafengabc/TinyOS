@@ -5,7 +5,6 @@ import (
 	"debug/elf"
 	"fmt"
 	"io"
-	"strings"
 )
 
 // A 4 KiB page is the granularity at which the Hazard3 port covers a task's
@@ -81,13 +80,12 @@ func executableSegments(data []byte) ([]execSegment, error) {
 // hand-written .S with c.* or a stray -march fails the build instead of the
 // board).
 func (b *Builder) checkCodePages(prog string, data []byte) error {
-	// The invariant is "an ISA without RVC cannot cross a page", so the check
-	// follows the target's march rather than naming a board: a target that
-	// builds user code without the C extension must keep every instruction
-	// whole across a page boundary.  Targets that keep RVC (QEMU, the C3) are
-	// not checked - their map covers a run with one entry, so a straddle is
-	// harmless there.
-	if b.Target.Arch != "rv32" || strings.Contains(b.Target.March, "c") {
+	// Only a board that asked for the no-RVC policy has this invariant to
+	// keep, and the policy is one board fact: "" means the port's map cannot
+	// split a code run (TOR: QEMU, the C3), so a straddle is harmless there.
+	// With "auto" the build has already relinked the offenders, so this is
+	// the gate that proves the fallback worked.
+	if b.Target.Arch != "rv32" || b.userRVCMode() == "" {
 		return nil
 	}
 	segs, err := executableSegments(data)

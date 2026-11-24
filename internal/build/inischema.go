@@ -84,7 +84,7 @@ var boardSchema = iniSchema{
 			"xip_flash_base": true, "xip_map_base": true, "drivers": true,
 			"features": true, "flash_bytes": true, "lfs_offset": true,
 		},
-		"user":   {"exclude": true},
+		"user":   {"exclude": true, "rvc": true},
 		"window": {"grain": true, "stack": true, "guard": true, "stack_align": true},
 	},
 }

@@ -117,6 +117,41 @@ func TestBoardUserExcludes(t *testing.T) {
 	}
 }
 
+// TestBoardUserRVCPolicy pins which boards trade RVC for instruction safety.
+// The policy is a board fact (one line in board.conf) because it describes the
+// port's protection map, not the ISA or the chip; a board that forgets it would
+// still build, and its user programs would fault on a straddling fetch.
+func TestBoardUserRVCPolicy(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skip("not in the source tree")
+	}
+	auto := []string{"rp2350rv-generic", "rpi-pico2-rv32", "atk-dnr2350am-rv32"}
+	for _, board := range auto {
+		bc, err := LoadBoardConfig(root, board)
+		if err != nil {
+			t.Errorf("%s: %v", board, err)
+			continue
+		}
+		if bc.UserRVC != "auto" {
+			t.Errorf("%s: [user] rvc = %q, want auto", board, bc.UserRVC)
+		}
+	}
+	// Everything else keeps the C extension: their maps cover a run with one
+	// entry (TOR), or the board is not a RISC-V port at all.
+	for _, board := range []string{"esp32c3-generic", "qemu-virt", "qemu-mps2",
+		"rpi-pico", "rpi-pico2", "rp2350-generic", "atk-dnr2350am"} {
+		bc, err := LoadBoardConfig(root, board)
+		if err != nil {
+			t.Errorf("%s: %v", board, err)
+			continue
+		}
+		if bc.UserRVC != "" {
+			t.Errorf("%s: [user] rvc = %q, want the default", board, bc.UserRVC)
+		}
+	}
+}
+
 func TestTargetsMatchChipFacts(t *testing.T) {
 	root, err := FindRoot()
 	if err != nil {

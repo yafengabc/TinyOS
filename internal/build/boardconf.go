@@ -30,6 +30,19 @@ type BoardConfig struct {
 	Bases       []string
 	Peripherals map[string]bool
 	UserExclude []string
+	// UserRVC selects the user ISA policy for a port whose protection map can
+	// cover one code run with several entries (RISC-V allows an access only
+	// when a single PMP entry covers all of it, so a 32-bit instruction at
+	// page_end-2 would fault where both entries grant X):
+	//
+	//   "" / "yes"  compressed instructions allowed (the default)
+	//   "no"        user programs are built without them
+	//   "auto"      try with them, and rebuild a program without them only
+	//               when its linked image would straddle a page boundary
+	//
+	// "auto" keeps msh and most other programs small; the build check decides
+	// per program, so a board only states the policy, never the list.
+	UserRVC string
 	// Board-layer build facts.  ensureBoardConfig() copies these into the
 	// Target, so Targets only names the board and the image knobs.
 	FSBacking      string
@@ -159,6 +172,17 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	 * list; ApplyConfig adds them together. */
 	if u := sections["user"]; u != nil {
 		bc.UserExclude = splitList(u["exclude"])
+		switch strings.TrimSpace(u["rvc"]) {
+		case "", "1", "yes", "on":
+			bc.UserRVC = ""
+		case "0", "no", "off":
+			bc.UserRVC = "no"
+		case "auto":
+			bc.UserRVC = "auto"
+		default:
+			return nil, fmt.Errorf("%s: [user] rvc must be auto, 0 or 1 (got %q)",
+				relName(root, path), u["rvc"])
+		}
 	}
 	bc.FSBacking = strings.TrimSpace(s["fs_backing"])
 	switch bc.FSBacking {
