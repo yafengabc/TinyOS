@@ -5727,10 +5727,15 @@ CDC 正常、心跳 **6/6**（连 ARM 单核才有的 #46 截断都没有）、`
 `plat_timer_tick()` 里，约 2 s 后看门狗复位。这同时解释了 `q0=4`、`tc0` 冻结、
 `seq0/i0` 照涨，以及 `mask=1` 只是采样点落在短临界区的假象。
 
-修复（工作区，未提交）：SHPR1 写成 `0x00404040`，MemManage 回到 `bits[7:0]`；
+修复（`05a0e18`）：SHPR1 写成 `0x00404040`，MemManage 回到 `bits[7:0]`；
 `scs.h` 里写反的 SHPR1 位域注释一并更正。
 
 验证：修复前 20 轮 1 次 STALL+复位；修复后带插桩 30/30 干净；清理插桩后的干净
 构建 SMP 20/20、单核 10/10 干净（`heap_fault=True deep_ok=True stall=False`，
 无 banner 即无复位），ATK 四镜像全部 `build ok`。验收卡见
 `docs/acceptance/2026-11-24-atk-smp-memmanage-tick-starvation.md`。
+
+同一修复的板级回归：RP2040 两镜像 `accept.py` 各 30/30；Pico 2 四镜像
+heartbeat 6/6、CSC 3/3，两个 SMP 镜像 smptest 11/11、dd 200/200、
+smpbench 2.05x / 2.00x、reboot 20/20，ARM 侧 `shpr1=0x00404040`。Pico 2 的
+完整矩阵见 `docs/acceptance/2026-11-24-pico2-matrix-05a0e18.md`。
