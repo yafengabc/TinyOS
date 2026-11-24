@@ -62,6 +62,25 @@ SecureFault 的向量是 `arm_default_handler` → `arm_fault` → `arm_handle_f
   hammer（SMP 20 轮 + 单核 10 轮），并确认 `[SELF]`/STALL 里 `sh1` 变成
   `0x40404040`。
 
+## 硬件旁证（Pico 2，父提交）
+
+同一天 Pico 2 的四镜像回归
+（[`2026-11-24-pico2-matrix-05a0e18.md`](2026-11-24-pico2-matrix-05a0e18.md)）跑的是
+`05a0e18`，真机 M33 上读到的就是：
+
+```text
+shpr1=0x00404040 shpr2=0x40000000 shpr3=0x20e00000
+```
+
+`[31:24] = 0x00` —— 也就是本提交要改的那一个字节：SecureFault 停在复位值、高于
+SysTick（`0x20`），和 MemManage 修复前是同一个形状。刷本提交（`87ede23`）之后同一行
+应变成 `shpr1=0x40404040`。SecureFault 本身在板上不容易触发，所以这条只需核对寄存器值，
+不需要专门构造安全违例。
+
+`arm_default_handler` 改成读 IPSR 之后 `start.S` 也变了，RP2040（M0+）共用这个文件，
+并且 `arch/arm/platform.c` 里 `#ifdef` 之外的部分也一起变，所以 RP2040 的
+`scripts/rp2040/accept.py` 仍在待跑清单里。
+
 ## 附：为什么第 7 号向量要单独命名
 
 `vec_name()` 的默认分支返回 “exception”，而 `fault_addr()` 用 `f->vec` 判断
