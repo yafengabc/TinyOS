@@ -7,6 +7,13 @@ void console_init(void);
 void console_clear(void);
 void console_putc(char c);
 void console_write(const char *s, size_t n);
+/* Same output path, but stops where the sink stops taking bytes: returns how
+ * many of the n bytes were consumed.  The write() syscall for the console
+ * uses this so a program that is faster than the console (a bulk `cat` into
+ * a 256-byte USB ring) gets a short count and retries, instead of the tail
+ * being dropped inside plat_console_putc().  Kernel printing keeps using
+ * console_write(), where a dropped byte must never stall the caller. */
+size_t console_write_some(const char *s, size_t n);
 /* Echo from the input side: printed whole, never inside a program's line. */
 void console_echo(const char *s, size_t n);
 void console_echo_tick(void);

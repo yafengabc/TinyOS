@@ -1559,6 +1559,19 @@ int plat_console_tx_room(void)
     return (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF) ? 0 : 16;
 }
 
+int plat_console_can_take(int need)
+{
+    /* The CDC mirror drops whatever does not fit its ring, so the console
+     * write() path has to come back short while it is full.  Only once the
+     * host has configured the port: before that putc() drops anyway and the
+     * ring is not a sink whose room means anything.  console_write_some()
+     * bounds how long the callers may keep waiting on a host that never
+     * drains, so this stays a pure "is there room right now" answer. */
+    if (g_usb_ready && usb_cdc_configured() && usb_cdc_tx_room() < need)
+        return 0;
+    return 1;
+}
+
 /* TinyUSB's state machine needs real thread context.  tty_poll() is also
  * called with interrupts masked, from the tick and from the block device
  * while a task waits for flash; letting it call usb_cdc_poll() was the RV32

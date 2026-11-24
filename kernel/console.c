@@ -4,6 +4,7 @@
 #include "process.h"
 #include "cpu.h"
 #include "string.h"
+#include "plat/irq.h"
 
 /* Architecture independent console: formatting + routing to the platform's
  * character output.  The VGA text buffer, UART or any other device lives
@@ -416,6 +417,59 @@ void console_write(const char *s, size_t n)
     for (size_t i = 0; i < n; i++)
         out_char_as(s[i], who);
     out_lock_give();
+}
+
+/* Boards with a second sink that drops instead of blocking (the USB CDC
+ * mirror) override this to say whether one more character fits.  The default
+ * keeps every other platform on the old "putc always takes it" contract. */
+__attribute__((weak)) int plat_console_can_take(int need)
+{
+    (void)need;
+    return 1;
+}
+
+size_t console_write_some(const char *s, size_t n)
+{
+    static uint64_t stall_t0;   /* tick of the first full-sink answer, 0 = no */
+    static int      stall_drop; /* sink stopped moving: drop, don't wait      */
+    size_t i = 0;
+
+    if (!out_lock_take())
+        return 0;
+    echo_drain_locked(-1);
+    int who = process_current_pid();
+    if (stall_drop && plat_console_can_take(1))
+        stall_drop = 0;         /* the sink drained: wait again */
+    for (; i < n; i++) {
+        /* '\n' leaves as CR LF, so ask for room for both: a one-byte answer
+         * would split the pair across two syscalls and drop the LF when the
+         * mirror happens to fill in between. */
+        int need = (s[i] == '\n') ? 2 : 1;
+
+        if (!stall_drop && !plat_console_can_take(need)) {
+            uint64_t now = plat_ticks();
+
+            if (stall_t0 == 0)
+                stall_t0 = now + 1;         /* 0 means "not stalled"       */
+            /* Waiting is only worth it while the sink moves, and it only
+             * moves from the deferred pump - which cannot run while this
+             * syscall sits in Handler mode.  So the wait belongs to the
+             * caller: report a short count, let write_all() yield, and come
+             * back when the pump has drained the ring.  A host that never
+             * drains must not turn that into an endless loop, hence the
+             * quarter-second cut-off, after which the rest of the block is
+             * dropped exactly as putc() used to do. */
+            if ((uint32_t)(now - (stall_t0 - 1u)) < 250u)
+                break;
+            stall_drop = 1;
+            stall_t0 = 0;
+        }
+        out_char_as(s[i], who);
+    }
+    if (i > 0)
+        stall_t0 = 0;           /* progress: the clock restarts next time */
+    out_lock_give();
+    return i;
 }
 
 void panic(const char *fmt, ...)

@@ -17,8 +17,16 @@ int write_all(int fd, const void *buf, int len)
     while (done < len) {
         int n = write(fd, p + done, len - done);
 
-        if (n <= 0)
-            return n < 0 ? n : done;    /* error, or the reader hung up */
+        if (n < 0)
+            return n;                   /* error, or the reader hung up */
+        if (n == 0) {
+            /* The stream is behind, not gone: the RP2350 console reports 0
+             * while its USB ring is full so the writer can yield and let the
+             * deferred pump drain it.  Spinning here would starve that pump,
+             * because it only runs in Thread mode. */
+            yield();
+            continue;
+        }
         done += n;
     }
     return done;

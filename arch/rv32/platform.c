@@ -97,7 +97,37 @@ regs_t *trap_handler(regs_t *f)
 
         plat_timer_tick();
         process_tick(f);
-        return process_resched(f);
+        {
+            int user = from_user(f);
+            regs_t *r = process_resched(f);
+
+            /* This port's PendSV.  A board with a polled controller (the
+             * RP2350's USB CDC) has work that must run in thread context, and
+             * the idle loop never runs while some task is runnable - so a
+             * program that keeps writing stops the pump and its tail is
+             * dropped (OPEN-ITEMS §5c on the ARM ports, whose answer is
+             * PendSV).
+             * The tick returning to U-mode is the same boundary: the
+             * scheduler and every syscall have unwound, no kernel lock is
+             * held, and the frame about to be resumed is user code.
+             *
+             * Interrupts are turned on for the duration because the pump can
+             * take longer than one tick: with MIE clear a nested tick would be
+             * latched and only serviced afterwards, and plat_timer_tick()
+             * re-arms the comparator from the time it finally runs, so every
+             * pump would steal time from the clock.  A nested trap here is
+             * safe: it comes from M-mode, so process_resched() refuses to
+             * switch tasks on its frame (only a frame that interrupted user
+             * code may), and the USB critical sections mask interrupts
+             * themselves, so this hart cannot deadlock against its own tick's
+             * usb_cdc_tx_kick(). */
+            if (user && plat_cpu_id() == 0 && board_poll_installed()) {
+                plat_irq_enable();
+                board_poll_deferred();
+                plat_irq_disable();
+            }
+            return r;
+        }
     }
 
     if (cause == RV_MCAUSE_ECALL_U) {

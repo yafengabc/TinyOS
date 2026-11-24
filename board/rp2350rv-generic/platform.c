@@ -724,6 +724,21 @@ int plat_console_tx_room(void)
     return (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF) ? 0 : 16;
 }
 
+/* Same contract as board/rp2350-generic: the CDC sink drops when its buffer is
+ * full, so the console write() path has to come back short while it is.  The
+ * pump that empties it now runs at the tick's return to U-mode (see the
+ * "PendSV" comment in arch/rv32/platform.c), which is what makes pacing pay
+ * off here.  The room query on this port reports the TinyUSB FIFO - the ring
+ * is refilled from it by the tick's usb_cdc_tx_kick() - and that is the
+ * tighter of the two, so a writer paced on it never reaches the ring's
+ * drop-on-full threshold. */
+int plat_console_can_take(int need)
+{
+    if (g_usb_ready && usb_cdc_configured() && usb_cdc_tx_room() < need)
+        return 0;
+    return 1;
+}
+
 extern void (*g_idle_poll)(void);       /* kernel/process.c: idle hook */
 
 /* Runs the polled USB controller's state machine from the scheduler's idle

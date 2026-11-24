@@ -3863,8 +3863,14 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
 
     switch (f->type) {
     case FD_CONSOLE:
-        console_write((const char *)ubuf, len);
-        return done(r, len);
+        /* A short count means "the sink is behind, ask again", not an error:
+         * the USB CDC mirror drops when its ring is full, so console_write_some()
+         * stops there and lets the caller yield - the deferred pump only runs
+         * in Thread mode, which this syscall is not in.  write_all() in the
+         * user library retries on a short count and gives up only on a
+         * negative one; a host that never drains is handled inside by a
+         * quarter-second cut-off after which the block is written anyway. */
+        return done(r, (uint32_t)console_write_some((const char *)ubuf, len));
 
     case FD_FILE: {
         int n = ramdisk_write(f->fh, (const void *)ubuf, len);

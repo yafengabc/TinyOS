@@ -42,6 +42,14 @@ void plat_console_putc(char c);
  * line time (about 115 bytes at 115200) then overruns a 128-byte receive
  * FIFO and characters are lost.  Return 0 when nothing fits. */
 int  plat_console_tx_room(void);
+/* Whether the console can take `need` more characters without anything being
+ * dropped.  This is for the console write() path, which reports a short count
+ * when it says no: boards with a buffered secondary sink (the USB CDC mirror,
+ * which drops on a full ring) return 0 while that ring is full, so a bulk
+ * writer is paced instead of losing its tail.  The default is "yes" - putc()
+ * on a plain UART blocks for a bounded time and never drops, so pacing there
+ * would only add syscalls. */
+int  plat_console_can_take(int need);
 /* Wait until everything written has actually been transmitted.  Called once
  * on the way down: the device may buffer, and the CPU is about to stop.
  * Bounded for the same reason as putc(). */
