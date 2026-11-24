@@ -51,7 +51,7 @@ class Board:
             chunk = self.s.read(512)
             if chunk:
                 buf += chunk
-                if buf.rstrip().endswith(MARK):
+                if buf.endswith(MARK):
                     break
         return buf.decode("utf-8", "replace")
 
