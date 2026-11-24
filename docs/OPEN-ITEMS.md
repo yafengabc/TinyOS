@@ -290,6 +290,39 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
    （历史上第一次中断就死锁）、在系统调用内部跑泵（PendSV 低于 SVCall）。因此单次
    >512 B 的控制台写仍会被截，这是有界丢字节，不是停摆。
 
+## 5c. USB 控制台“每核 TX 环 + 有界锁”之后，板上待跑的三项（2026-11-25，`694945a`）
+
+状态：**NOT RUN**，交板主。这一轮把写方向也搬出了锁（`putc()` 只入本核 256 B 环，
+泵在锁内搬进 TinyUSB），并把“抢门超时 → 永久无锁”改成“计数 + 跳过本次操作”，
+RP2040 的 `usb_cdc_lock()` 也从无界自旋改成有界获取。本机只做了 T0/T1/T2（18 目标、
+arm QEMU smoke、soak 2/2）与构建，**板级一律未跑**。背景、代价与验证清单：
+`docs/acceptance/2026-11-25-usb-tx-ring-bounded-lock.md`。
+
+三项都请走 **CDC 控制台**（UART0 上那一路不经过这段代码，测了不算数）。
+
+- **a. 计数器**：跑完下面 b 的长输出，以及一次
+  `run prot heap`（等 4 s）+ `deep 3`（等 8 s）之后，`cat /proc/usbboot`。
+  新增的最后两行是
+  `lock timeouts N  ungated=U` 和 `console tx dropped=D  handed=H`。
+  **判据**：`N = 0`、`U = 0`、`D = 0`，`H` 随输出字节数增长。
+  `U = 1` 说明这块板的 SIO 三个候选门一个都没拿到（只有 boot 期探测失败才会如此，
+  等于整个启动无锁运行）；`N > 0` 说明确实有路径在锁上卡了 ~20 ms，把当时的
+  命令和前后行一起记下来——那表示还有一条没人想到的长临界区。
+- **b. #46 回归（单次 >16 KiB 输出不截断）**：`cat` 一个 ≥16 KiB 的文件（或
+  `ls -l /bin` 反复拼接），比较行数/字节数与源文件。**判据**：完整、结尾有换行、
+  中途没有空洞。注意第 5 条已定的边界仍在：单次 >512 B 的系统调用写是有界丢字节，
+  这轮没有改变它；验的是“连续输出不再在 ~192 B 停住”。
+- **c. RP2040**：`python scripts/rp2040/accept.py`（先刷 `build/tinyos-rpi-pico*.uf2`，
+  两个镜像各一次），**判据**：末行 `ACCEPT OK n/n`，且 `cat /proc/usbboot` 的
+  `D = 0`。然后把 `tools/tosput/sender.go` 的 `writePaced` gap 临时从 2 ms 改回
+  1 ms，42 KiB 与 128 KiB 各传 3 次，**判据**：`NAK` 计数为 0、CRC 通过、
+  `D = 0`。若仍有 `NAK`，记下 chunk 号与 `D`：`D > 0` 是环满（时序不够），
+  `D = 0` 则说明丢在别处（TinyUSB FIFO 或主机侧），两条路的下一步不同。
+  跑完把 gap 改回 2 ms，别把实验值提交。
+
+若 (a) 出现 `N > 0` 或 (b) 仍截断，先看 `/proc/usbboot` 的 `handed` 是否还在增长：
+增长说明泵在工作、问题在主机/端点；停住说明泵没被调度，回到 §5b 第 5 条的 PendSV 检查。
+
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
 `goc32` 不再调用 clang/ld.lld：汇编器在 `goc32/internal/as`，链接器在

@@ -60,7 +60,8 @@ RP2040 的驱动是同一份形状，而且更糟：`usb_cdc_lock()` 是**无界
 
 - T0 PASS、T1 18/18、T2 `arm` smoke PASS、soak rv32+arm 2/2 PASS。
 - 6 个 RP2 目标与 `arm`(M3) 单独构建 PASS（两套 `#ifdef` 分支都编到）。
-- **T3 NOT RUN**：本机无板。板上要看的是：
+- **T3 NOT RUN**：本机无板。待跑清单同时写在
+  [docs/OPEN-ITEMS.md](../OPEN-ITEMS.md) 的 5c 节，交板主执行。板上要看的是：
 
   1. Pico 2 / ATK（CDC 控制台）跑完长输出与 `prot heap`×16 + `deep 3` 之后
      `cat /proc/usbboot`：`lock timeouts 0  ungated=0`，`console tx dropped`
