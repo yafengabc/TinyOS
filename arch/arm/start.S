@@ -517,7 +517,7 @@ arm_pendsv:
     .thumb_func
 arm_default_handler:
     mov     r3, lr
-    movs    r1, #0
+    mrs     r1, ipsr                /* which vector really got us here     */
 
 arm_fault:
     bl      arm_trap_enter

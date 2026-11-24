@@ -37,7 +37,9 @@
  * ARMv6-M (Cortex-M0+) has no SHPR1: its only fault is HardFault, whose
  * priority is fixed at -1, so the configurable fault priorities are M3
  * and up.  SHPR1 packs UsageFault in [23:16], BusFault in [15:8] and
- * MemManage in [7:0]. */
+ * MemManage in [7:0].  ARMv8-M (Cortex-M33) puts SecureFault in [31:24];
+ * on ARMv7-M that byte is reserved and must be written zero (the M3 and
+ * the M33 build share this file, so platform.c decides by macro). */
 #define ARM_PRIO_SYSTICK 0x00u   /* above SVCall (0x40): a long console
                                   * write must not swallow ticks */
 #define ARM_PRIO_SVC     0x40u

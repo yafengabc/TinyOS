@@ -70,6 +70,18 @@ RP2040（Cortex-M0+，同一份 `arch/arm/platform.c`）回归：
 提示符），说明 MemManage 优先级调整没有改变 M0+ 上的故障路径行为。RP2040 的
 USB CDC 未接，`#46` 长输出检查只覆盖了 UART。RV32 两镜像本轮未上板，只验证了构建。
 
+## 复核（另一台机器，2026-11-24）
+
+- T0 PASS（`go test -count=1 ./...`）、T1 PASS（`tos build all`，18/18）、
+  T2 PASS（`tostest smoke -target arm`，`soak.py --cycles 2 --targets rv32,arm`
+  2/2）。这三项作者本轮未跑，由复核侧补齐，板上结论不变。
+- 位域核对：SHPR1 为 `[31:24] SecureFault`(v8-M) / `[23:16] UsageFault` /
+  `[15:8] BusFault` / `[7:0] MemManage`，`0x00404040` 的三字节位置正确，
+  `sh1=40404000` → `sh1=00404040` 与 `[SELF]` 采样一致。
+- 发现同一类还留着两处（SecureFault 字节、`arm_default_handler` 的向量号），
+  另起一次提交修掉，见
+  [`2026-11-24-arm-securefault-priority.md`](2026-11-24-arm-securefault-priority.md)。
+
 ## 注
 
 1. 本轮插桩（`[SELF]`、`[STALL2]`、`g_proc_lock_owner`、`LKOWN/LKREL` 等）已

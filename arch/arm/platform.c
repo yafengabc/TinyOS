@@ -56,6 +56,7 @@ static const char *vec_name(uint32_t vec)
     case 4:  return "MemManage";
     case 5:  return "BusFault";
     case 6:  return "UsageFault";
+    case 7:  return "SecureFault";
     case 11: return "SVCall";
     case 14: return "PendSV";
     case 15: return "SysTick";
@@ -495,10 +496,25 @@ static void arm_exceptions_init(void)
      * fault handler *above* SysTick (0x20 on the RP2350): idling from inside
      * MemManage then cost the core every following tick, and since the
      * watchdog is fed from the boot core's tick the board reset about two
-     * seconds later. */
-    mmio_write32(ARM_SHPR1, ARM_PRIO_FAULT << 16 |   /* UsageFault  */
+     * seconds later.
+     *
+     * ARMv8-M also has a SecureFault in [31:24], and it has exactly the same
+     * shape: the vector is arm_default_handler, so a user-mode security
+     * violation takes the user-frame path in arm_handle_fault(), which ends
+     * in process_exit() -> sched_switch() -> sched_idle().  At its 0x00 reset
+     * value no tick can preempt that either, so it gets the fault priority
+     * too.  ARMv7-M (the M3) has no SecureFault and that byte is reserved:
+     * write zero there. */
+#ifdef TOS_ARM_MPU_V8
+#define SHPR1_SECUREFault (ARM_PRIO_FAULT << 24)
+#else
+#define SHPR1_SECUREFault 0u
+#endif
+    mmio_write32(ARM_SHPR1, SHPR1_SECUREFault      |   /* SecureFault (v8-M) */
+                            ARM_PRIO_FAULT << 16 |   /* UsageFault  */
                             ARM_PRIO_FAULT << 8  |   /* BusFault    */
                             ARM_PRIO_FAULT);         /* MemManage   */
+#undef SHPR1_SECUREFault
 #endif
 
 #ifndef TOS_ARM_M0P
