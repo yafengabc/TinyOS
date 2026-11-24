@@ -39,6 +39,36 @@ var hostHarnesses = []hostHarness{
 		shim: map[string]string{"types.h": "#include <stdint.h>\n#include <stddef.h>\n"},
 	},
 	{
+		// The panel text layer: tab expansion, wrapping, scrolling and the
+		// last-column TAB that lived forever on the ATK board (5260d28).
+		// The harness's stub panel counts cells and exits on a runaway, so
+		// that regression fails instead of hanging T0.
+		name: "screen_harness.c",
+		srcs: []string{"kernel/screen.c"},
+		shim: map[string]string{
+			"types.h": "#include <stdint.h>\n#include <stddef.h>\n",
+			"cpu.h":   "typedef int spin_t;\n#define SPIN_INIT 0\n" +
+				"void spin_lock(spin_t *s);\nvoid spin_unlock(spin_t *s);\n",
+			// screen.c reaches the panel only through these (kernel/hwdev.h);
+			// the harness implements them.
+			"hwdev.h": "#include <stdint.h>\n" +
+				"int plat_display_count(void);\n" +
+				"int plat_display_info(int idx, int *w, int *h, int *cw, int *ch);\n" +
+				"int plat_display_cell(int idx, int col, int row, char c, uint16_t fg, uint16_t bg);\n" +
+				"int plat_display_row(int idx, int row, const char *chars, int ncols, uint16_t fg, uint16_t bg);\n" +
+				"int plat_display_clear(int idx, uint16_t color);\n" +
+				"int plat_display_backlight(int idx, int on);\n" +
+				"int plat_display_backlight_get(int idx);\n" +
+				"void plat_display_sync(int idx);\n",
+			"console.h":  "",
+			"platform.h": "",
+			"string.h": "#include <stddef.h>\n" +
+				"void *memmove(void *d, const void *s, size_t n);\n" +
+				"void *memcpy(void *d, const void *s, size_t n);\n" +
+				"void *memset(void *d, int c, size_t n);\n",
+		},
+	},
+	{
 		name: "pipe_harness.c",
 		srcs: []string{"kernel/pipe.c"},
 		hdrs: []string{"kernel/pipe.h"},
