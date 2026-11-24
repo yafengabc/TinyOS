@@ -5695,3 +5695,42 @@ CDC 正常、心跳 **6/6**（连 ARM 单核才有的 #46 截断都没有）、`
 真正的差异得从 ARM 单核与其它三者（ARM SMP、RV32 单核、RV32 SMP）在
 探测之后到 banner 之间的路径去找，尤其是 CPU 数相关的分支和 CDC 初始化。
 本条不再猜测根因。
+
+## 107. 2026-11-24 ATK ARM SMP `[STALL]`：MemManage 压在 SysTick 之上
+
+拉取 `b0a4e04` 后常规验收全过（SMP `accept33` 21/21、heartbeat 6/6），但
+`atk-dnr2350am-smp` 跑 `prot heap` + `deep 3` 的 hammer 仍间歇性 `[STALL]` 并复位
+（一轮 20 次里 4 次）。把 `6fefed7` 的 `usb_rxq_fill` 顺序回退做对照，签名完全一样，
+说明与本轮拉取无关，是既有竞态。
+
+现象本身是矛盾的：`[STALL] live=1 dead=0`，`[STALL2]` 里死核 `seq0` +446k、
+`i0` +22k，`tc0` 却只 +1——CPU0 在跑（空闲循环、掩码/解掩码），但收不到 tick；
+空闲快照恒为 `q0=4`（MemManage）、`q1=11`（SVCall）。已排除：tick 源被关
+（`cs0/cs1=7`）、静默 halt（无 `[HALT]`）、长关中断段（无 `[LONG]`）、SIO 门泄漏
+（无 `[GATE]`）、USB 锁超时（无 `[ULK!]`）、CDC flush 自旋（源码无等待）。
+
+关键证据来自受害核自己的采样（PRIMASK/ICSR/SHPR 都是 per-core PPB，另一个核读不到）：
+
+```text
+[SELF] c=0 ip=4 pm=0 ic=0440f804 sh1=40404000 sh3=20e00000
+```
+
+`ip=4` 说明空闲循环在 MemManage 里；`pm=0` 说明不是 PRIMASK 挡住；
+`ic=0440f804` 的 PENDSTSET=1、VECTPENDING=15 说明 SysTick **一直 pending**；
+`sh3=20e00000` 是 SysTick 0x20，而 `sh1=40404000` 的 MemManage 字节（`bits[7:0]`）
+是 **0x00**。根因就在 `arm_exceptions_init()` 的 SHPR1 写入：三个故障优先级写成
+`<<24 / <<16 / <<8`，其中 `<<8` 是 BusFault 的字节，MemManage 一直停在复位值
+0x00，于是它比 SysTick（0x20）还高。
+
+`run prot heap` 的 MemManage 处理器走 `process_exit() → sched_switch()`，没有可运行
+任务时在 `sched_idle()` 里空转；此时 tick 永远抢不进来，而喂狗只在 boot 核的
+`plat_timer_tick()` 里，约 2 s 后看门狗复位。这同时解释了 `q0=4`、`tc0` 冻结、
+`seq0/i0` 照涨，以及 `mask=1` 只是采样点落在短临界区的假象。
+
+修复（工作区，未提交）：SHPR1 写成 `0x00404040`，MemManage 回到 `bits[7:0]`；
+`scs.h` 里写反的 SHPR1 位域注释一并更正。
+
+验证：修复前 20 轮 1 次 STALL+复位；修复后带插桩 30/30 干净；清理插桩后的干净
+构建 SMP 20/20、单核 10/10 干净（`heap_fault=True deep_ok=True stall=False`，
+无 banner 即无复位），ATK 四镜像全部 `build ok`。验收卡见
+`docs/acceptance/2026-11-24-atk-smp-memmanage-tick-starvation.md`。

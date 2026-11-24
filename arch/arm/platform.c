@@ -488,10 +488,17 @@ static void arm_exceptions_init(void)
      * 0x00 by reset, so a tick at 0x00 could not interrupt it, and a fault
      * that left no runnable task parked the machine for good (measured on
      * the RP2350: `run prot heap &` went silent after the fault report).
-     * At 0x40 the tick outranks a fault handler just as it outranks SVC. */
-    mmio_write32(ARM_SHPR1, ARM_PRIO_FAULT << 24 |   /* UsageFault  */
-                            ARM_PRIO_FAULT << 16 |   /* BusFault    */
-                            ARM_PRIO_FAULT << 8);    /* MemManage   */
+     * At 0x40 the tick outranks a fault handler just as it outranks SVC.
+     *
+     * SHPR1 is [23:16] UsageFault, [15:8] BusFault, [7:0] MemManage.  The
+     * MemManage byte used to be left at its 0x00 reset value, which put a
+     * fault handler *above* SysTick (0x20 on the RP2350): idling from inside
+     * MemManage then cost the core every following tick, and since the
+     * watchdog is fed from the boot core's tick the board reset about two
+     * seconds later. */
+    mmio_write32(ARM_SHPR1, ARM_PRIO_FAULT << 16 |   /* UsageFault  */
+                            ARM_PRIO_FAULT << 8  |   /* BusFault    */
+                            ARM_PRIO_FAULT);         /* MemManage   */
 #endif
 
 #ifndef TOS_ARM_M0P
