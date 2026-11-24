@@ -293,9 +293,10 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
 
 ## 5c. USB 控制台“每核 TX 环 + 有界锁”之后，板上待跑的三项（2026-11-25，`694945a`）
 
-状态：**Pico 2 已跑（2026-11-25，`d7a3c8a`）：(a) 部分达标、(b) NOT MET、(c) 未跑**；
-ATK 与 RP2040 仍待板主。实测记录见
-`docs/acceptance/2026-11-25-usb-tx-ring-pico2-d7a3c8a.md`。
+状态：**Pico 2 已跑（2026-11-25，`d7a3c8a`）：(a) 部分达标、(b) 原 NOT MET，
+按“写路径反压 + 短写重试”修复后 ARM 两镜像已 MET；随后补上 RV32 的 PendSV
+等价边界，RV32 两镜像也 MET；(c) 未跑**；ATK 与 RP2040 仍待板主。实测记录见
+`docs/acceptance/2026-11-25-usb-tx-ring-pico2-d7a3c8a.md`（含修复后复测一节）。
 
 **已在 Pico 2 上测到的结论（先看这里，别重复跑）**：四镜像重建 4/4；
 `cat` 21 200 B 文本经 CDC 的结果是 ARM 单核 0/3 完整（只出 255–271 B）、
@@ -306,6 +307,18 @@ RV32 SMP 3/3 完整；UART0 四条都完整。计数器：`N = 0`、`U = 0`，
 `drivers/usb/rp2350rv`，不在 `694945a` 的改动范围内，它的计数恒 0 是
 “没有这套计数器”。另：`/proc/usbboot` 自己 330 B 的输出在 CDC 上经常丢
 最后一行，计数要从 UART0 读。
+
+**修复后复测（2026-11-25，本提交；四镜像 + 四个 RV32 目标重建通过）**：
+`cat` 21 200 B 经 CDC 的结果是 ARM 单核 9/9、ARM SMP 3/3、RV32 单核 9/9、
+RV32 SMP 9/9 全部完整（均为 21 621 B、首尾行与提示符齐全）。四条镜像 CDC 口
+关闭时 heartbeat 仍 6/6；把 CDC 口打开但不读（Windows 侧缓冲写满）后，UART0 上
+的 `cat` 仍完整、提示符 2.19 s 回来，250 ms 截止路径不会把 shell 卡死。
+做法是三层 + 一个 RV32 边界：板级 `plat_console_can_take()` 报 CDC 余量
+（默认弱符号恒 1）、内核 `console_write_some()` 满时短写并在 250 ms 后转为
+“照旧丢弃”、用户库 `write_all()` 把 0 字节当作背压并 `yield()` 重试；RV32 因为
+没有 PendSV，在 `arch/rv32` 的 tick 返回用户态处补了一个等价边界（开中断调用
+`board_poll_deferred()`，tick 仍是 1 kHz、时间不漂）。细节与逐轮数据见验收卡
+“方案 1”与“方案 1 扩展到 RV32”两节。
 
 这一轮把写方向也搬出了锁（`putc()` 只入本核 256 B 环，
 泵在锁内搬进 TinyUSB），并把“抢门超时 → 永久无锁”改成“计数 + 跳过本次操作”，
@@ -319,7 +332,7 @@ arm QEMU smoke、soak 2/2）与构建；板级由 Pico 2 先跑（结果见上�
 （“putc may drop … blocking on a peer would stall every other core's output”），
 而且把“谁推进泵”塞回了写路径。
 
-**方案 B（采用，另一侧实施中）：`write` 如实返回短计数** —— `putc` 环满即失败，
+**方案 B（已实施）：`write` 如实返回短计数** —— `putc` 环满即失败，
 `console_write()` 在第一个失败处停下并返回实际接受的用户字节数，`process_write()`
 的 `FD_CONSOLE` 返回它，用户态 `write_all()` 重试（`n == 0` 时 `yield()` 后重试，
 **不能把 0 当终止**）。`cat` 的循环会被 tick 抢占，泵每 1 ms 排空，最终写完。
@@ -329,6 +342,15 @@ fault/panic 没有重试语义，仍按契约丢。(b) 的判据因此是“**�
 细节：`docs/acceptance/2026-11-25-usb-tx-flow-control.md`。
 RV32 的 `drivers/usb/rp2350rv`（1 KiB 环、泵只在 CPU 0）用同一机制即可，
 它的 `usb_cdc_tx_room()` 要从“tud 空闲”改成“环空闲”。
+
+**实际落地的是“预判 + 短写”，不是改 `putc` 的返回值**：新增板级弱钩子
+`plat_console_can_take(need)`（默认 1；ARM 报本核环余量，RV32 报 TinyUSB FIFO
+余量；未枚举时恒 1，所以不会把“没主机”误判成“满”），`console_write_some()`
+在钩子说不行时停下并返回已写字节数，250 ms 拿不到空间就转回“照旧丢弃”，
+`write_all()` 对 0 字节 `yield()` 重试。这样不用改 18 个目标的 `putc` 签名；
+代价是同核的 tick echo 在检查与 `putc` 之间抢进环时，那一个字节仍会丢（不是截断，
+且 echo 本来就是可丢的）。RV32 的 `usb_cdc_tx_room()` 语义没动，预判用 FIFO 余量
+（比环更紧，生产者不会走到环的丢弃阈值）。
 
 三项都请走 **CDC 控制台**（UART0 上那一路不经过这段代码，测了不算数）。
 
