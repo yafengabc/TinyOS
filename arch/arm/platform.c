@@ -91,6 +91,19 @@ static uint32_t fault_addr(const regs_t *f)
 /* Called from every fault stub.  Returns the frame to resume with. */
 regs_t *arm_handle_fault(regs_t *f)
 {
+#if TOS_DIAG
+    /* Name this in the stall record.  Everything the handler prints goes
+     * through the console, whose lock the other core may be holding, so a
+     * core that dies here looks exactly like one wedged in the scheduler:
+     * same frozen mask site, same stale PC.  A distinct site (and a sequence
+     * bump, so "frozen" means frozen *inside* the handler) tells them apart. */
+    {
+        uint32_t id = (uint32_t)plat_cpu_id() & 1u;
+
+        g_mask_site[id] = TOS_MASKSITE_FAULT;
+        g_mask_seq[id]++;
+    }
+#endif
     if (frame_is_user(f)) {
         uint32_t addr = fault_addr(f);
 #ifdef TOS_SYSCALL_TRACE
@@ -757,15 +770,30 @@ static inline uint32_t sio_gate_irq_save(void)
 
 /* Bounded gate acquisition.  An unbounded spin here is the worst possible
  * failure mode: interrupts are already masked, so the core stops ticking,
- * prints nothing, and the board only recovers through the watchdog.  If the
- * gate really is lost (its holder took a fault or was reset mid-window),
- * saying so on the wire is worth more than another silent 2 s stall. */
+ * prints nothing, and the board only recovers through the watchdog.  A gate
+ * that is still taken after a full timeout has no live owner - the holder
+ * took a fault or halted inside the three-instruction window - so take it
+ * back and carry on; only a second timeout means something is really wrong. */
 static int sio_gate_claim_bounded(void)
 {
+    int forced = 0;
+
     for (uint32_t i = 0; ; i++) {
         if (sio_gate_claim())
             return 1;
-        if ((i & 0x3fffffu) == 0x3fffffu) {
+        if ((i & 0x3fffffu) == 0x3fffffu && !forced) {
+            /* The gate protects a three-instruction window with interrupts
+             * masked, so a live owner cannot hold it for anything close to
+             * this long.  Whoever took it is gone (a core that halted inside
+             * the window), and waiting for it only converts one dead core into
+             * two.  Release it and try once more; only a gate that comes back
+             * taken a second time is a real problem. */
+            raw_puts("\r\n[GATE] cpu ");
+            raw_putdec((uint32_t)plat_cpu_id());
+            raw_puts(" lost gate, forcing release\r\n");
+            sio_gate_free();
+            forced = 1;
+        } else if ((i & 0x3fffffu) == 0x3fffffu) {
             raw_puts("\r\n[GATE!] cpu ");
             raw_putdec((uint32_t)plat_cpu_id());
 #if TOS_DIAG

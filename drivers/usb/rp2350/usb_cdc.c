@@ -532,6 +532,35 @@ void usb_cdc_unlock(uint32_t tok)
  * when the interrupt lands inside the tick's own tud_task() call. */
 static volatile int g_in_task;
 
+/* Bytes the state machine has completed, waiting for the console.
+ *
+ * tud_cdc_read_char() is TinyUSB code, and the console poll reaches the read
+ * path with interrupts masked (tty_poll, from sched_idle and from the block
+ * device while a task waits for flash).  Nothing in that path may wait: it has
+ * no tick to fall back on and the other core may hold the USB lock for a whole
+ * state-machine pass.  So the task - which already runs here, under the lock,
+ * on core 0 - moves the bytes out into this ring, and the masked reader only
+ * pops a byte array.  Both the fill and the pop happen on core 0; the reader
+ * runs masked, so the fill cannot be running at the same time.
+ */
+#define USB_RX_Q 256
+static volatile uint8_t  usb_rxq[USB_RX_Q];
+static volatile uint16_t usb_rxq_head, usb_rxq_tail;   /* head = next write */
+
+static void usb_rxq_fill(void)
+{
+    int32_t c;
+
+    while ((c = tud_cdc_read_char()) >= 0) {
+        uint16_t n = (uint16_t)((usb_rxq_head + 1u) % USB_RX_Q);
+
+        if (n == usb_rxq_tail)
+            return;                 /* full: the rest stays in TinyUSB */
+        usb_rxq[usb_rxq_head] = (uint8_t)c;
+        usb_rxq_head = n;
+    }
+}
+
 static void usb_task_run(int from_isr)
 {
     uint32_t primask = usb_cdc_lock();
@@ -548,6 +577,8 @@ static void usb_task_run(int from_isr)
     else
         tud_task();
     US(6);
+
+    usb_rxq_fill();
 
     g_in_task = 0;
     usb_cdc_unlock(primask);
@@ -653,15 +684,18 @@ void usb_cdc_flush(void)
 
 int usb_cdc_getchar(void)
 {
-    uint32_t primask;
-    int32_t c;
+    int c;
 
     if (!g_hw_ready)
         return -1;
-    primask = usb_cdc_lock();
-    c = tud_cdc_read_char();
-    usb_cdc_unlock(primask);
-    return (c < 0) ? -1 : (int)c;
+
+    /* Only the completed-byte ring: this runs with interrupts masked, on
+     * core 0, and must never wait for the USB lock or enter TinyUSB. */
+    if (usb_rxq_tail == usb_rxq_head)
+        return -1;
+    c = usb_rxq[usb_rxq_tail];
+    usb_rxq_tail = (uint16_t)((usb_rxq_tail + 1u) % USB_RX_Q);
+    return c;
 }
 
 int usb_cdc_configured(void)

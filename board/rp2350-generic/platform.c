@@ -1379,6 +1379,11 @@ static void live_stall_check(int id)
     diag_kx(" from=", g_spin_caller[o]);
     diag_kv(" n=", g_spin_count[o]);
     diag_kv(" park=", g_park_in[o]);
+    /* SPINLOCK_ST (0x5C), not SPINLOCK[31]: reading a spinlock register
+     * claims it, so sampling it here would wedge the system we are trying
+     * to report on.  Bit 31 set means the kernel's SIO gate was taken at
+     * this instant. */
+    diag_kx(" greg=", *(volatile uint32_t *)(0xD0000000u + 0x5Cu));
     diag_kv(" ph=", g_park_phase);
     diag_kv(" idle=", g_idle_site);
     diag_kv(" usb=", g_usb_site[o]);

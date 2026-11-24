@@ -40,6 +40,9 @@
 #define TOS_MASKSITE_SPIN_TRY_GATE 3u
 #define TOS_MASKSITE_SPIN_GATE     4u
 #define TOS_MASKSITE_FLASH_PARK    5u
+/* Not a masked section: the core is inside the fault handler.  A stall dump
+ * that names this site means the core died there, not in the scheduler. */
+#define TOS_MASKSITE_FAULT         6u
 
 #if TOS_DIAG
 
