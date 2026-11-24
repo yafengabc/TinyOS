@@ -359,7 +359,7 @@ func (b *Builder) ensureBoardConfig() error {
 		return err
 	}
 	b.BoardConfig = bc
-	return nil
+	return b.checkLayoutMatchesConf()
 }
 
 // applyBoard fills the derived fields from board.conf and the chip table.

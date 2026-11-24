@@ -516,6 +516,14 @@ RP2040 大约翻倍。因此测试可以只 stage 84 KiB 的 `.c`，在板上依
 直到板子的分区上限（仅 `fs_backing = flash`；disk/embedded 保持固定，因为镜像要
 原样进 RAM）。所以 44 个测试镜像可以直接 stage，RP2040 和 Pico 2 都不用手改板子。
 
+**2026-11-24 追加：这条当时漏了 ATK 的 RISC-V 半边。** `0b5e224` 只改了
+`board/rp2350rv-generic` 的 conf 与 layout，`board/atk-dnr2350am-rv32` 仍写着
+`grain = 4k` 且没有 `stack_align`——它继承的 `layout.c` 却是 16 KiB，于是
+`board_config_check()` 在 `kmain` 里直接 panic。没有 QEMU 模型、ATK 又不是门槛，
+所以一直没人看见。现在 ATK 的 conf 是 16 KiB + `stack_align = 1`，并且
+`internal/build/layoutcheck.go` 在**构建期**比较 conf 与要链接的 `layout.c` 的三个
+数（grain/stack/guard），不一致直接拒绝构建，不用等上板。
+
 **RP2350 RV32 的窗口粒度是 16 KiB，不是 4 KiB。** PMP 端口把栈放在独立的
 NAPOT 区域，`stack_request_ok()` 要求栈提示整除 `PLAT_APP_GRAIN`，而板上工具
 （csc/rcc）要 16 KiB 栈。所以 `board/rp2350rv-generic/layout.c` 覆盖 ARM 基线

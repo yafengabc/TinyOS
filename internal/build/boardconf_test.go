@@ -152,6 +152,36 @@ func TestBoardUserRVCPolicy(t *testing.T) {
 	}
 }
 
+// TestLayoutAgreesWithBoardConf runs the build-time equivalent of the kernel's
+// board_config_check() over every board: the window numbers live in board.conf
+// and again in layout.c, and a mismatch panics at boot - which no emulator here
+// would ever see for the RP2350 boards.
+func TestLayoutAgreesWithBoardConf(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skip("not in the source tree")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "board"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		bc, err := LoadBoardConfig(root, e.Name())
+		if err != nil {
+			t.Errorf("%s: %v", e.Name(), err)
+			continue
+		}
+		b := &Builder{Root: root, Target: Target{Board: e.Name()}}
+		b.BoardConfig = bc
+		if err := b.checkLayoutMatchesConf(); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
 func TestTargetsMatchChipFacts(t *testing.T) {
 	root, err := FindRoot()
 	if err != nil {
