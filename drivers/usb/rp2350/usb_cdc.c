@@ -551,11 +551,17 @@ static void usb_rxq_fill(void)
 {
     int32_t c;
 
-    while ((c = tud_cdc_read_char()) >= 0) {
+    /* Look before reading: tud_cdc_read_char() consumes, so checking for a
+     * full ring after it has returned a byte would drop that byte.  A full
+     * ring leaves the rest in TinyUSB, where the next pass picks it up. */
+    while (tud_cdc_available() > 0) {
         uint16_t n = (uint16_t)((usb_rxq_head + 1u) % USB_RX_Q);
 
         if (n == usb_rxq_tail)
             return;                 /* full: the rest stays in TinyUSB */
+        c = tud_cdc_read_char();
+        if (c < 0)
+            return;
         usb_rxq[usb_rxq_head] = (uint8_t)c;
         usb_rxq_head = n;
     }

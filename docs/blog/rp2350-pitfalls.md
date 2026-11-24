@@ -104,6 +104,46 @@ C3 那边完全是另一个世界：USB-Serial/JTAG 加上 esptool，自动进�
 SWD 不是没用——真要看某条指令执行时的寄存器，它还是最快的。但它救不了“系统级”的 bug。
 RP2350 上真正省时间的，是**多留一条独立的控制台，让固件自己说话**。
 
+## 5. 一把锁、两条核、一个“关中断的读”
+
+ATK-DNR2350AM SMP 上，跑十六轮 `prot heap` 再叠一个 `deep 3`，板子停住：UART 一个字节
+都没有，最后是看门狗把它拉回来的。现场只有一份“死得很安静”的镜像。
+
+根因是三条同时成立：
+
+1. `sched_idle` 是先 `plat_irq_disable()` 再调 `tty_poll()` 的——tty 的队列不是可重入的，
+   所以那段必须关中断（[`kernel/process.c`](../../kernel/process.c)）；
+2. `tty_poll()` 一路走到 `plat_console_getchar()` → `usb_cdc_getchar()`，而它当时要**取
+   USB 锁并进入 TinyUSB**（[`drivers/usb/rp2350/usb_cdc.c`](../../drivers/usb/rp2350/usb_cdc.c)）；
+3. 另一核正握着那把锁跑一整趟状态机。
+
+于是关中断的核对着一把跨核的锁自旋，tick 再也不来，整个系统只剩看门狗。
+
+修了三处：
+
+- **驱动自有的 RX 环**。`tud_task()` 本来就在锁内、在 core 0 上跑，让它把已完成的字节搬进
+  一个 256 字节的环；`usb_cdc_getchar()` 只从环里出队，不取锁、不碰 TinyUSB。这其实不是
+  “绕开死锁”，而是把 `kernel/plat/console.h` 里 console 的 A 类契约真正恢复了——那一条
+  写的是“`getchar()` 每次最多一次寄存器读，因为它跑在 `tty_poll()` 里、中断已关”。
+- **SIO 门首次超时可恢复**：门只保护三条指令的窗口，超时说明持有者已经不在了；打印
+  `[GATE] cpu N lost gate, forcing release` 后释放并重试，第二次超时才 panic。
+- **STALL 的 `greg=` 改读 `SPINLOCK_ST`**：读 `SPINLOCK[31]` 这个动作本身就会把门**抢走**，
+  诊断不能干扰它要诊断的系统（顺便把这个寄存器名挪进了 `arm_memmap.h`）。
+
+附带一条诊断改进：fault handler 进来时记一个 `site 6`，这样“死在 handler 里”和“卡在
+调度器里”在 stall 记录里能分开。
+
+复盘时还发现一个小问题：RX 环满时，原来的写法是先从 TinyUSB 取出一个字节、再判断环满，
+那个字节就丢了。改成先看 `tud_cdc_available()` 再取——控制台输入里丢一个字节，可能正好
+丢掉一个换行。
+
+还没修的：RP2040 的驱动（[`drivers/usb/rp2040/usb_cdc.c`](../../drivers/usb/rp2040/usb_cdc.c)）
+仍是“取锁 + 进 TinyUSB”的老写法，它在 `rpi-pico-smp` 上有同一类风险；修法完全相同，但
+要在板上验过才算数。
+
+这一节和“192 字节”那节其实是同一件事的两面：USB 驱动里凡是“**被别的上下文从锁外调用**”
+的入口，都必须是只碰内存的；一旦它想拿锁、跑状态机，就会在 SMP 上把另一条时间线拖死。
+
 ## 证据索引
 
 | 现象 | 仓库里的位置 |
@@ -115,6 +155,7 @@ RP2350 上真正省时间的，是**多留一条独立的控制台，让固件�
 | 三种“静默”的区分 | `scripts/rp2350/stall_probe.py` |
 | 死前现场（复位不清） | `kernel/cpu.c` 的 `TOS_NOINIT` 计数器 |
 | 跨 PMP 条目取指的完整推导与上游 v1.1 的放宽 | `docs/OPEN-ITEMS.md`（RP2350 RV32 一节） |
+| “关中断的读”与 USB 锁的 SMP 死锁（三处修 + 一个丢字节的补丁） | `docs/acceptance/2026-11-24-atk-arm-usb-console-deadlock-6b15b8b.md`、`drivers/usb/rp2350/usb_cdc.c` |
 
 ## 还没写的
 

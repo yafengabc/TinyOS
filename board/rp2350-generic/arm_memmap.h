@@ -211,6 +211,10 @@
 #define SIO_GPIO_OE      (SIO_BASE + 0x030u)
 #define SIO_GPIO_OE_SET  (SIO_BASE + 0x038u)
 #define SIO_GPIO_OE_CLR  (SIO_BASE + 0x040u)
+/* One bit per hardware spinlock, read-only: bit n set means lock n is taken.
+ * Read this, never SPINLOCK[n] itself - reading a spinlock register claims it,
+ * and a diagnostic must not take the gate it is reporting on. */
+#define SIO_SPINLOCK_ST  (SIO_BASE + 0x05cu)
 
 /* SPI (PL022).  The block kept its register layout from the RP2040; only
  * the base address moved.  Frame size is DSS+1 bits, so 8-bit frames are
