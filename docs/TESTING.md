@@ -281,6 +281,15 @@ python scripts/rp2350/flash.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2 --smoke 
 python scripts/rp2350/accept33.py --image atk-dnr2350am-smp --no-flash -p COM17 --dd-rounds 1000
 python scripts/rp2350/accept33.py --image atk-dnr2350am-rv32-smp --no-flash -p COM17 --dd-rounds 100
 
+# 同一份检查跑 Pico 2 四镜像：littlefs 总量按各自 board.conf 取（4 MiB 板
+# 3670016、8 MiB 板 7864320），镜像里没有的程序按 skipped 记，不算失败。
+python scripts/rp2350/accept33.py --image rpi-pico2-smp --no-flash -p COM27
+python scripts/rp2350/accept33.py --image rpi-pico2-rv32-smp --no-flash -p COM27
+
+# 同一套 hammer 也跑两块板（--image 只影响日志标签；命令表按 ls /bin 过滤）
+python scripts/rp2350/soak_board.py -p COM17 -n 20 --image atk-dnr2350am-smp
+python scripts/rp2350/soak_board.py -p COM19 -n 20 --image rpi-pico2-smp
+
 # PIO（自动部分 + 需要人看的 LED/灯带用 --visual --strip）
 python scripts/rp2350/pio_accept.py --image atk-dnr2350am-smp --no-flash -p COM17
 python scripts/rp2350/pio_accept.py --image atk-dnr2350am-smp --no-flash -p COM17 --visual --strip

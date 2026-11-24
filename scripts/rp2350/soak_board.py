@@ -11,7 +11,15 @@ Same load, same assertion: `free` before and after must match except the
 heap's peak watermark.
 
     scripts/rp2350/soak_board.py COM14 8 [log]
+    scripts/rp2350/soak_board.py -p COM19 -n 20 --image rpi-pico2-smp
+
+Both boards run the same cycle.  The list is filtered against `ls /bin` first,
+so a program this image does not carry is skipped with a note instead of
+turning into a failed check - the Pico 2 has no `screen`/`lcdconsole`, and a
+run there must still be comparable to the ATK one.  `--no-filter` restores the
+old behaviour (send everything, let the shell answer).
 """
+import argparse
 import io
 import re
 import sys
@@ -19,12 +27,31 @@ import time
 
 import serial
 
-PORT = sys.argv[1] if len(sys.argv) > 1 else "COM14"
-CYCLES = int(sys.argv[2]) if len(sys.argv) > 2 else 8
-LOG = sys.argv[3] if len(sys.argv) > 3 else "build/soak-board.log"
+ap = argparse.ArgumentParser()
+ap.add_argument("port", nargs="?", default=None)
+ap.add_argument("cycles", nargs="?", type=int, default=None)
+ap.add_argument("log", nargs="?", default=None)
+ap.add_argument("-p", "--port", dest="port_opt", metavar="PORT", default=None)
+ap.add_argument("-n", "--cycles", dest="cycles_opt", type=int, metavar="N",
+                default=None)
+ap.add_argument("-l", "--log", dest="log_opt", metavar="FILE", default=None)
+ap.add_argument("--image", default="", help="label for the log, e.g. rpi-pico2-smp")
+ap.add_argument("--no-filter", action="store_true",
+                help="send every command, even ones this image may not carry")
+args = ap.parse_args()
+
+PORT = args.port_opt or args.port or "COM14"
+CYCLES = args.cycles_opt or args.cycles or 8
+LOG = args.log_opt or args.log or "build/soak-board.log"
+IMAGE = args.image or PORT
 
 CYCLE = ["deep 3", "mem", "wheap", "piperace", "ls /bin | wc",
          "prot rodata", "prot heap", "prot stack", "prot null", "ps"]
+
+# Commands the shell answers itself; everything else in CYCLE is a program in
+# /bin and has to exist in the image under test.
+BUILTINS = {"ls", "ps", "free", "mem", "uptime", "help", "cat", "echo",
+            "df", "rm", "cd", "pwd", "run", "wheap"}
 
 FREE = re.compile(
     r"kernel heap\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+).*?"
@@ -95,6 +122,40 @@ def run(cmd, sec=40):
     return t
 
 
+def image_programs():
+    """Programs in /bin of the image under test, so one cycle serves both."""
+    names = set()
+    for line in run("ls /bin").replace("\r", "").splitlines():
+        for tok in line.split():
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", tok):
+                names.add(tok)
+    return names
+
+
+cycle = list(CYCLE)
+if not args.no_filter:
+    have = image_programs()
+    if not have:
+        say("could not list /bin: running the unfiltered cycle")
+    else:
+        kept = []
+        for cmd in cycle:
+            head = cmd.split()[0]
+            if head in BUILTINS or head in have:
+                kept.append(cmd)
+            else:
+                say("skip %r: this image has no %r" % (cmd, head))
+        cycle = kept
+        if not cycle:
+            say("ABORT: none of the cycle is in this image")
+            out.close()
+            s.close()
+            sys.exit(2)
+
+deep_present = "deep 3" in cycle
+race_present = "piperace" in cycle
+
+
 free_before = run("free")
 say("free before:")
 for ln in free_before.strip().splitlines():
@@ -103,7 +164,7 @@ for ln in free_before.strip().splitlines():
 deep_ok = race_ok = 0
 died = None
 for c in range(CYCLES):
-    for cmd in CYCLE:
+    for cmd in cycle:
         try:
             t = run(cmd)
         except serial.SerialException as e:
@@ -140,13 +201,14 @@ if len(rows) < 2:
     problems.append("could not parse both free reports")
 elif rows[0] != rows[-1]:
     problems.append("free drifted %s -> %s" % (rows[0], rows[-1]))
-if deep_ok < CYCLES:
+if deep_present and deep_ok < CYCLES:
     problems.append("deep 3 grew the stack %d/%d times" % (deep_ok, CYCLES))
-if race_ok < CYCLES:
+if race_present and race_ok < CYCLES:
     problems.append("piperace ok %d/%d" % (race_ok, CYCLES))
 
 say("")
-say("%-8s %s  (%d cycles)" % (PORT, "PASS" if not problems else "FAIL", CYCLES))
+say("%-24s %s  (%d cycles, %d commands)" %
+    (IMAGE, "PASS" if not problems else "FAIL", CYCLES, len(cycle)))
 for p in problems:
     say("    " + p)
 for ln in (ps + uptime).strip().splitlines()[-6:]:

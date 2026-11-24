@@ -11,6 +11,12 @@ script asks them in one order and keeps the raw log.
     scripts/rp2350/accept33.py --image atk-dnr2350am-rv32 --uf2 build/tinyos-atk-dnr2350am-rv32.uf2
     scripts/rp2350/accept33.py --image atk-dnr2350am-smp --no-flash
     scripts/rp2350/accept33.py --image atk-dnr2350am-rv32 --replay build/sizeprobe/x.log
+    scripts/rp2350/accept33.py --image rpi-pico2-smp --no-flash -p COM27
+
+The same checks run on the Pico 2 images: the littlefs total comes from the
+image's own board.conf (4 MiB part: 3670016, 8 MiB part: 7864320), and a
+check whose program the image does not carry is reported as skipped rather
+than failed - the two boards run one script, not two.
 
 The interesting part is the first boot.  --uf2 flashes over the BOOTSEL drive
 with the serial port already open, and then *never touches RTS and never
@@ -36,12 +42,20 @@ import serial                                        # noqa: E402
 BAD = ("KERNEL PANIC", "System halted", "MSTKERR", "HardFault")
 
 # Per-image expectations: cpus drives the smpbench check, rv switches the
-# Hazard3-only boot marker (the [A] clock snapshot).
+# Hazard3-only boot marker (the [A] clock snapshot), and df is the littlefs
+# partition in bytes (flash_bytes - lfs_offset from the board's board.conf).
+# Both boards put littlefs after the first 512 KiB, so the ATK's 4 MiB part
+# reports 4*1024*1024 - 512*1024 and the Pico 2's 8 MiB part reports
+# 8*1024*1024 - 512*1024.
 IMAGES = {
-    "atk-dnr2350am":       dict(cpus=1, rv=False),
-    "atk-dnr2350am-smp":   dict(cpus=2, rv=False),
-    "atk-dnr2350am-rv32":    dict(cpus=1, rv=True),
-    "atk-dnr2350am-rv32-smp": dict(cpus=2, rv=True),
+    "atk-dnr2350am":          dict(cpus=1, rv=False, df=3670016),
+    "atk-dnr2350am-smp":      dict(cpus=2, rv=False, df=3670016),
+    "atk-dnr2350am-rv32":     dict(cpus=1, rv=True,  df=3670016),
+    "atk-dnr2350am-rv32-smp": dict(cpus=2, rv=True,  df=3670016),
+    "rpi-pico2":              dict(cpus=1, rv=False, df=7864320),
+    "rpi-pico2-smp":          dict(cpus=2, rv=False, df=7864320),
+    "rpi-pico2-rv32":         dict(cpus=1, rv=True,  df=7864320),
+    "rpi-pico2-rv32-smp":     dict(cpus=2, rv=True,  df=7864320),
 }
 
 SNAPSHOT = re.compile(r"\[A\] pre-pll ok sys=(0x[0-9A-Fa-f]+) "
@@ -159,9 +173,21 @@ def wait_boot(con, timeout, start=0):
     return text, first, time.time() - t0
 
 
+def image_programs(con):
+    """Programs in this image's /bin.  The same script runs on both boards;
+    a check whose program is not there is skipped, not failed."""
+    names = set()
+    for line in con.cmd("ls /bin").replace("\r", "").splitlines():
+        for tok in line.split():
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", tok):
+                names.add(tok)
+    return names
+
+
 def run_checks(con, image, results, opts, boot_text):
     """The body of section 33, in the order the list asks for it."""
     spec = IMAGES[image]
+    have = image_programs(con)
 
     # --- 33.4: what the ROM handed over, and the clock tree that followed ---
     if spec["rv"]:
@@ -179,7 +205,8 @@ def run_checks(con, image, results, opts, boot_text):
 
     # --- 33.0: 3.5 MiB partition, grown without a warning ---
     check(results, "B no fs-grow warning", boot_text, avoid=("fs grow",))
-    check(results, "B df total 3670016", con.cmd("df"), want=("3670016",))
+    check(results, "B df total %d" % spec["df"], con.cmd("df"),
+          want=(str(spec["df"]),))
 
     # --- 33.1/33.2: windows, isolation, stack ---
     wink = msh_wink(con.cmd("ps"))
@@ -216,20 +243,30 @@ def run_checks(con, image, results, opts, boot_text):
     # Hazard3/PMP half) that loads only when the hint divides the window
     # grain; a mismatch used to reach the board and fail at exec with
     # "carries a bad stack hint" (issue #44).
-    out = con.cmd("stk 3 100", timeout=30.0)
-    check(results, "E stk 3 loads a 16 KiB stack hint", out,
-          avoid=BAD + ("bad stack hint", "exec:"),
-          note="no hint refusal, no fault")
+    if "stk" in have:
+        out = con.cmd("stk 3 100", timeout=30.0)
+        check(results, "E stk 3 loads a 16 KiB stack hint", out,
+              avoid=BAD + ("bad stack hint", "exec:"),
+              note="no hint refusal, no fault")
+    else:
+        check_ok(results, "E stk 3 loads a 16 KiB stack hint", True,
+                 "not in this image")
 
     # --- 33.2: does the second core still earn its keep ---
     if spec["cpus"] > 1:
-        out = con.cmd("smpbench", timeout=60.0)
-        m = re.search(r"speedup:\s*(\d+)\.(\d+)x", out)
-        ratio = (int(m.group(1)) * 100 + int(m.group(2))) if m else 0
-        check_ok(results, "F smpbench >= 1.8x", ratio >= 180,
-                 ("%.2fx" % (ratio / 100.0)) if m else "no ratio parsed")
-        check(results, "F smp -s two workers", con.cmd("smp -s 2 200", 30.0),
-              want=("worker 1",))
+        if "smpbench" in have:
+            out = con.cmd("smpbench", timeout=60.0)
+            m = re.search(r"speedup:\s*(\d+)\.(\d+)x", out)
+            ratio = (int(m.group(1)) * 100 + int(m.group(2))) if m else 0
+            check_ok(results, "F smpbench >= 1.8x", ratio >= 180,
+                     ("%.2fx" % (ratio / 100.0)) if m else "no ratio parsed")
+        else:
+            check_ok(results, "F smpbench >= 1.8x", True, "not in this image")
+        if "smp" in have:
+            check(results, "F smp -s two workers", con.cmd("smp -s 2 200", 30.0),
+                  want=("worker 1",))
+        else:
+            check_ok(results, "F smp -s two workers", True, "not in this image")
 
     # --- 33.4b: one C Script through csc -> rvm -> rcc ---
     # The image carries /tests/cover.c (files/tests/cover.c).  The interpreter

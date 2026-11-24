@@ -31,7 +31,7 @@
 `docs/acceptance/2026-11-18-pico2-boot-rp2350-cff442f.md`、`TESTING.md` §5.4。
 
 仍未做：Pico 2 的 SMP / RV32 镜像真机验证；GP25 上的 1 Hz 心跳不亮（`led_set()` 仍
-硬编码 GP3，见 issue #27）；`accept33.py` 的 24 项表只覆盖 ATK 四个镜像。
+硬编码 GP3，见 issue #27）；`accept33.py` 的 24 项表原先只覆盖 ATK 四个镜像，2026-11-25 起也带 Pico 2 四镜像（littlefs 总量按各自 board.conf 取、镜像里没有的程序记 skipped）；两条镜像都还没用新参数在板上跑过，第一次结果要回填这一节。。
 
 ## 2. PIO 的"眼睛两项"（已关闭 2026-11-17）
 
