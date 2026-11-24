@@ -325,20 +325,22 @@ arm QEMU smoke、soak 2/2）与构建，**板级一律未跑**。背景、代价
 
 ## 5d. ARM 异常优先级/向量号补丁（`87ede23`）的板上待跑两项（2026-11-25）
 
-状态：**NOT RUN**，交板主。补丁内容：SHPR1 的 `[31:24]` 在 ARMv8-M 上是 SecureFault
-（不是保留字节），也按 `ARM_PRIO_FAULT` 写；`arm_default_handler` 改成 `mrs r1, ipsr`，
-不再把所有非常规向量都报成 `vec 0`。本机 T0/T1/T2 与 6 个 RP2 目标 + `arm`(M3) 构建
-PASS，板级未跑。背景与推导：`docs/acceptance/2026-11-24-arm-securefault-priority.md`。
+状态：**a 已 PASS（2026-11-25），b 仍 NOT RUN**。补丁内容：SHPR1 的 `[31:24]` 在
+ARMv8-M 上是 SecureFault（不是保留字节），也按 `ARM_PRIO_FAULT` 写；`arm_default_handler`
+改成 `mrs r1, ipsr`，不再把所有非常规向量都报成 `vec 0`。本机 T0/T1/T2 与 6 个 RP2
+目标 + `arm`(M3) 构建 PASS。背景与推导：
+`docs/acceptance/2026-11-24-arm-securefault-priority.md`。
 
-- **a. Pico 2 ARM（M33）**：重刷 `build/tinyos-rpi-pico2-smp.uf2`（`rpi-pico2` 同看）。
-  随便触发一次 `prot heap`（或 `run prot heap`），读故障转储那一行：
-  **判据** `shpr1=0x40404040`（父提交 `05a0e18` 上实测是 `0x00404040`，
-  见 `docs/acceptance/2026-11-24-pico2-matrix-05a0e18.md`）。SecureFault **不需要**
-  构造，只核寄存器值；同时确认 MemManage 打印后仍回到提示符（`prot` 五例）。
-  ATK 的 ARM 两镜像同理，顺手看一眼即可，但不是关闭门槛。
-- **b. RP2040（M0+）**：`start.S` 与 `arch/arm/platform.c` 的 `#ifdef` 之外的部分是
-  RP2040 共用的，`arm_default_handler` 的 IPSR 读取在 M0+ 上同样生效，所以按
-  `AGENTS.md` 要跑 `scripts/rp2040/accept.py`，`rpi-pico` 与 `rpi-pico-smp` 各一次。
+- **a. Pico 2 ARM（M33）——已 PASS（2026-11-25，`d7a3c8a`）**：板上重跑 `0a30b69`
+  （含 `87ede23`），两块 ARM 镜像的故障转储都读到 `shpr1=0x40404040`（SecureFault
+  字节由 `0x00` 变 `0x40`，MemManage 仍在 `bits[7:0]`）；`rpi-pico2` heartbeat 6/6 +
+  五例 `prot` 全 MemManage，`rpi-pico2-smp` heartbeat 6/6、smptest 11/11、dd 50/50、
+  smpbench 2.05x。父提交 `05a0e18` 上同一行是 `0x00404040`，见
+  `docs/acceptance/2026-11-24-pico2-matrix-05a0e18.md` 注 5。ATK 板不在场，ARM hammer
+  未重跑（不是关闭门槛，保持 `NOT RUN`）。
+- **b. RP2040（M0+）——仍 NOT RUN**：`start.S` 与 `arch/arm/platform.c` 的 `#ifdef`
+  之外的部分是 RP2040 共用的，`arm_default_handler` 的 IPSR 读取在 M0+ 上同样生效，
+  所以按 `AGENTS.md` 要跑 `scripts/rp2040/accept.py`，`rpi-pico` 与 `rpi-pico-smp` 各一次。
   **判据**：末行 `ACCEPT OK n/n`，含 `fault isolation` 一项（`crash` 之后回到提示符）。
   没有板主代跑，这一项就是 `NOT RUN`，不能在收口时写成 PASS。
 

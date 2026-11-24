@@ -9,7 +9,9 @@ toolchain:         go 1.27.1 windows/amd64；clang 23.1.4
 T0:                PASS
 T1:                PASS — 18/18
 T2:                PASS — arm smoke；soak rv32+arm 2/2
-T3:                NOT RUN
+T3:                部分 PASS - Pico 2 ARM 两块镜像均读到
+                   shpr1=0x40404040 (`d7a3c8a`); RP2040 accept.py
+                   与 ATK hammer 仍 NOT RUN
 T4:                NOT RUN
 ```
 
@@ -57,11 +59,11 @@ SecureFault 的向量是 `arm_default_handler` → `arm_fault` → `arm_handle_f
 - T0 PASS（`go test -count=1 ./...`）、T1 PASS（18/18）、T2 PASS
   （`tostest smoke -target arm`；`soak.py --cycles 2 --targets rv32,arm` 2/2）。
 - 6 个 RP2 目标 + `arm`（Cortex-M3）单独构建 PASS——两个 `#ifdef` 分支都走了一遍。
-- **T3 NOT RUN**：按 [docs/OPEN-ITEMS.md](../OPEN-ITEMS.md) 的 5d 节交给板主。
-  优先级写入与 IPSR 读取都要在板上确认。建议在 ATK 上重跑
-  `docs/acceptance/2026-11-24-atk-smp-memmanage-tick-starvation.md` 的同一套
-  hammer（SMP 20 轮 + 单核 10 轮），并确认 `[SELF]`/STALL 里 `sh1` 变成
-  `0x40404040`。
+- **T3 部分**：Pico 2 ARM 已确认 —— 两块镜像的转储都是 `shpr1=0x40404040`
+  （2026-11-25，`d7a3c8a`，见
+  [`2026-11-24-pico2-matrix-05a0e18.md`](2026-11-24-pico2-matrix-05a0e18.md) 注 5）。
+  RP2040 的 `accept.py`（IPSR 读取在 M0+ 上同样生效）与 ATK 的 hammer 仍是
+  `NOT RUN`，清单在 [`docs/OPEN-ITEMS.md`](../OPEN-ITEMS.md) 的 5d 节。
 
 ## 硬件旁证（Pico 2，父提交）
 
@@ -74,9 +76,12 @@ shpr1=0x00404040 shpr2=0x40000000 shpr3=0x20e00000
 ```
 
 `[31:24] = 0x00` —— 也就是本提交要改的那一个字节：SecureFault 停在复位值、高于
-SysTick（`0x20`），和 MemManage 修复前是同一个形状。刷本提交（`87ede23`）之后同一行
-应变成 `shpr1=0x40404040`。SecureFault 本身在板上不容易触发，所以这条只需核对寄存器值，
-不需要专门构造安全违例。
+SysTick（`0x20`），和 MemManage 修复前是同一个形状。SecureFault 本身在板上不容易触发，
+所以这条只需核对寄存器值，不需要专门构造安全违例。
+
+**复测（2026-11-25，`d7a3c8a`）**：刷含本提交的镜像后，`rpi-pico2` 与
+`rpi-pico2-smp` 的转储都变成 `shpr1=0x40404040`，MemManage 仍在 `bits[7:0]`；
+五例 `prot`、heartbeat 6/6、smptest 11/11、dd 50/50、smpbench 2.05x 全部通过。
 
 `arm_default_handler` 改成读 IPSR 之后 `start.S` 也变了，RP2040（M0+）共用这个文件，
 并且 `arch/arm/platform.c` 里 `#ifdef` 之外的部分也一起变，所以 RP2040 的
