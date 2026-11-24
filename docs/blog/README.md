@@ -3,6 +3,10 @@
 README 只留亮点和上手路径，长出来的部分写成一组文章放在这里。计划中的篇目，按
 "读者拿到手会先问什么"排序：
 
+- **[RP2350 踩坑笔记](rp2350-pitfalls.md)**（进行中）——为什么是 RP2350、M33 与
+  Hazard3 的差异、一开始要频繁 BOOTSEL、以及 SWD 买了 DAPLink/PicoProbe 最后还是靠
+  UART。每段都带仓库里的复现脚本或代码位置。
+
 1. **一个 clang 构建整个系统**——没有 pico-sdk、没有 ESP-IDF、没有厂商构建系统：
    boot2 桩、ROM 函数表、pad 寄存器、TinyUSB 要的那层 pico-sdk 门面，分别为什么
    能 vendored 进 `third_party/`，以及"加一块板子是加一个目录"意味着什么。
