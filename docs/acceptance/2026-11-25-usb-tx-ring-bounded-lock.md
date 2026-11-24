@@ -56,6 +56,17 @@ RP2040 的驱动是同一份形状，而且更糟：`usb_cdc_lock()` 是**无界
 - `flush()` 在门被占时不再等：字节不丢，但要等到下一趟泵；如果板子随后 halt
   （panic），那一行可能没出去。这是“不在关中断的路径上等锁”的直接代价。
 
+## 板测结果（2026-11-25，Pico 2 `d7a3c8a`）
+
+- `lock timeouts / ungated` = **0 / 0**：有界锁这半边成立。
+- `cat` 21 200 B：**`rpi-pico2` 3/3 只到 255–271 B**（`-smp` 1/3 失败），
+  `/proc/usbboot` 自身也丢最后一行；3 次后 `dropped +64 263`、`handed +1 783`。
+  同一命令走 UART 21 621 B 完整。
+- 结论：256 B 环把“一次系统调用能缓冲的量”从 TinyUSB 的 512 B 压到 255 B，
+  而泵在一次长写里跑不了（PendSV `0xE0` 抢不过 SVCall `0x40`）。
+  修法与复测清单见
+  [`2026-11-25-usb-tx-flow-control.md`](2026-11-25-usb-tx-flow-control.md)。
+
 ## 验证
 
 - T0 PASS、T1 18/18、T2 `arm` smoke PASS、soak rv32+arm 2/2 PASS。

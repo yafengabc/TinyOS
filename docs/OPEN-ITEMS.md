@@ -287,8 +287,9 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
    `arm_handle_pendsv` 打点），再查 FIFO 512 与 `usb_cdc_putc()` 的 flush 边界。
 
    仍然不做的：ARM kernel thread（只为 1 ms 泵不划算）、USB IRQ 里跑 `tud_task`
-   （历史上第一次中断就死锁）、在系统调用内部跑泵（PendSV 低于 SVCall）。因此单次
-   >512 B 的控制台写仍会被截，这是有界丢字节，不是停摆。
+   （历史上第一次中断就死锁）、**无条件**在系统调用内部跑泵（PendSV 低于 SVCall，
+   泵本来就进不来）。唯一的例外是写者自己被环满卡住时主动推一趟，见 §5c 与
+   `docs/acceptance/2026-11-25-usb-tx-flow-control.md`。
 
 ## 5c. USB 控制台“每核 TX 环 + 有界锁”之后，板上待跑的三项（2026-11-25，`694945a`）
 
@@ -313,13 +314,24 @@ arm QEMU smoke、soak 2/2）与构建；板级由 Pico 2 先跑（结果见上�
 仍未跑。背景、代价与验证清单：
 `docs/acceptance/2026-11-25-usb-tx-ring-bounded-lock.md`。
 
+**已改（`27ee880`，待复测）**：环满时按上下文区分 —— Thread/SVCall 且中断开
+（程序自己的输出）就**等**，循环里调用 `usb_cdc_poll()` 自己推泵，两次 poll 之间
+中断开着，USB 中断完成传输释放空间；tick、fault、panic、任何 PRIMASK=1 的上下文
+照旧丢。放弃等待后置 `stalled`，环排空才允许再等；计数器加 `waited` / `stalled`。
+这个改法把“单次系统调用能缓冲多少”这个上限换成“主机速率”，(b) 的目标才有可能达成。
+背景、代价与风险：`docs/acceptance/2026-11-25-usb-tx-flow-control.md`。
+注意它只覆盖 `drivers/usb/rp2350` 与 `drivers/usb/rp2040`；RV32 用的
+`drivers/usb/rp2350rv` 是另一套写路径，仍是原来的丢弃语义。
+
 三项都请走 **CDC 控制台**（UART0 上那一路不经过这段代码，测了不算数）。
 
 - **a. 计数器**：跑完下面 b 的长输出，以及一次
   `run prot heap`（等 4 s）+ `deep 3`（等 8 s）之后，`cat /proc/usbboot`。
   新增的最后两行是
   `lock timeouts N  ungated=U` 和 `console tx dropped=D  handed=H`。
-  **判据**：`N = 0`、`U = 0`、`D = 0`，`H` 随输出字节数增长。
+  **判据**：`N = 0`、`U = 0`、`D = 0`，`H` 随输出字节数增长；新增
+  `waited=W  stalled=S` 后，长输出期间 `W > 0` 是正常的（背压在起作用），
+  `S` 应为 0（除非真拔了主机）。`694945a` 实测：`N=U=0` 但 `D +64 263`。
   `U = 1` 说明这块板的 SIO 三个候选门一个都没拿到（只有 boot 期探测失败才会如此，
   等于整个启动无锁运行）；`N > 0` 说明确实有路径在锁上卡了 ~20 ms，把当时的
   命令和前后行一起记下来——那表示还有一条没人想到的长临界区。
