@@ -578,6 +578,19 @@ rcc 这种）。
 所有情况下 `msh` 都保留 C（窗口 **16 KiB**），内核也保留 C。只有被换掉的
 程序变大（同一份源码 no-RVC 比带 C 大 +23%…+47%）。
 
+**这条上游已经改过（2026-11-24 补记）。** Hazard3 **v1.1** 的 release notes，
+“General Improvements” 里写着：
+
+> Relax PMP X permission checking to allow instructions to straddle two PMP regions
+> which both have the necessary permissions.
+
+同版本还把取指权限查表从“两个半字”改成“自然对齐的取指字”（PPA optimisations）。
+也就是说“跨条目必 fault”是 **v1.1 之前的实现选择**：规范允许实现更严格，但上游自己
+把它放宽了，所以按“坑/bug”写是有依据的。RP2350 用的是更早的版本（v1.0.1 的 notes 里
+“It is not present on the Hazard3 version used on RP2350” 也印证了这一点），所以这块板
+仍然需要 `[user] rvc = auto`；将来换到 v1.1 及以后的实例，那一行可以直接去掉，压缩
+指令和体积都回来——策略是板级事实，不需要改构建器。
+
 硬件依据（不要再猜）：Hazard3 的 `PMP_GRAIN` 是 RISC-V 的 G 参数，**最小 region =
 1 << (G + 2)**，G > 0 时 NA4 写入会被强制成 OFF；RP2350 的实例化是 **G = 3**，即
 **32 字节最小粒度**、NAPOT only（TOR 关）、8 个可写 region（pico-sdk
