@@ -563,17 +563,19 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 即够），日志打印 `RVC bin/xxx: rebuilt without compressed instructions`。
 `buildFSImage()` 里的同一个检查是最后的门禁。
 
-**边界是 grain 的倍数，不是每个页。** `pmp_cover()` 从 grain 对齐的窗口基址出发，块大小
-至少一个 grain，所以块边界只能落在 grain 的倍数上（不足一个 grain 的余块总是最后一块）。
-因此“code run 装得下一个 grain 的程序永远不会跨界”——检查器按这条判断（16 KiB 粒度看
-16 KiB 线，4 KiB 粒度才看每页）。实测：
+**边界按页算，不按 grain 算。** 曾经以为“块边界只落在 grain 的倍数上”，于是把检查收紧
+到只看 16 KiB 线——**这是错的，而且正好放过了 rcc**：RX run 的结尾是
+`page_down(.data 起点)`（那一页因为不能拆，整页变成 RWX），这个边界是**页**的倍数，
+不一定是 grain 的倍数。实测 rcc 的 code run 是 0x7000（28 KiB），崩点
+`0x20026ffe` 就是 28 KiB−2，正是这个边界。所以检查器看每一个 4 KiB 页边界（保守：
+有些页边界落在同一个 NAPOT 块内部，本来不会 fault；宁可多回退一个程序，也不漏掉
+rcc 这种）。
 
-- 16 KiB 粒度的 `rpi-pico2-rv32` / `-rv32-smp` / `rp2350rv-generic`：只有 `csc`（52 KiB）
-  被换，`edit`/`rvm`（8 KiB）`rcc`（32 KiB）`sh`（16 KiB）**都保留 C**；
-- 4 KiB 粒度的 `atk-dnr2350am-rv32` / `-smp`：`edit pio sh csc rcc rvm` 六个被换
-  （每页都是边界，和 QEMU 侧的扫描一致）。
+实测（16 KiB 粒度的 `rpi-pico2-rv32` / `-rv32-smp` / `rp2350rv-generic`，与 4 KiB
+粒度同样）：`edit pio sh csc rcc rvm` 六个程序被换成 no-RVC；`msh` 的 `code run`
+只有 4 KiB，没有内部页边界，保留 C。
 
-两种情况 `msh`（8 KiB run）都保留 C，窗口回到 **16 KiB**；内核也保留 C。只有被换掉的
+所有情况下 `msh` 都保留 C（窗口 **16 KiB**），内核也保留 C。只有被换掉的
 程序变大（同一份源码 no-RVC 比带 C 大 +23%…+47%）。
 
 硬件依据（不要再猜）：Hazard3 的 `PMP_GRAIN` 是 RISC-V 的 G 参数，**最小 region =

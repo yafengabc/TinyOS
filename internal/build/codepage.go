@@ -7,34 +7,32 @@ import (
 	"io"
 )
 
-// codePageBytes is the page the user linker aligns segments to.  Protection
-// block boundaries are every window-grain multiple, which for a 4 KiB-grain
-// port is exactly one page; the tests use this constant as their base.
+// codePageBytes is the page the user linker aligns segments to, and the only
+// granularity at which the protection map can put a boundary inside a code
+// run.  It is not enough to look at window-grain multiples: the RX run ends at
+// the page that contains the start of .data (that page becomes RWX, because a
+// page cannot be split), and that page start is a page multiple, not a grain
+// multiple.  rcc on rpi-pico2-rv32 is the measured case: its code run is
+// 0x7000 bytes (28 KiB) and the fault was at 0x6ffe, exactly there.
 const codePageBytes = 4096
 
 // instructionStraddle walks an instruction stream and reports the first
-// instruction that reaches across a protection-block boundary.
+// instruction that reaches across a page boundary.
 //
 // RISC-V allows an access only when a single PMP entry covers all of it, so a
-// fetch that covers bytes in two entries fails even when both grant X.  With
-// RVC a 32-bit instruction can start two bytes before a boundary and one fetch
-// then covers two entries; without RVC every instruction is four bytes and
-// four-byte aligned, which cannot happen.
-//
-// The boundaries are every multiple of `grain`, which is what the port's map
-// produces: pmp_cover() starts at a grain-aligned window base and emits
-// naturally aligned power-of-two blocks of at least one grain, so its block
-// boundaries can only fall on grain multiples (a smaller remainder block is
-// always last).  A code run that fits inside one grain therefore has no
-// boundary to cross at all.  Grain comes from the board's [window] grain, so a
-// 4 KiB-grain port checks every page and a 16 KiB-grain port only every 16 KiB.
+// fetch that covers bytes in two entries fails even when both grant X.  The
+// entries are page-granular here (page-granular NAPOT blocks for the RX run,
+// a separate entry from the page that holds the first writable bytes), so any
+// 32-bit instruction that starts two bytes before a page boundary can straddle
+// two of them; without RVC every instruction is four bytes and four-byte
+// aligned, which cannot happen.  Checking every page is conservative (some
+// page boundaries inside one NAPOT block could not fault) and that is on
+// purpose: the alternative needs the exact block decomposition, which depends
+// on the runtime window base.
 //
 // base is the offset the code is linked at inside the window.  The first two
 // bits of a halfword give the length: 0b11 means 32-bit, anything else 16.
-func instructionStraddle(code []byte, base, grain uint32) (addr uint32, size int, ok bool) {
-	if grain < 8 {
-		grain = 8
-	}
+func instructionStraddle(code []byte, base uint32) (addr uint32, size int, ok bool) {
 	for off := 0; off+2 <= len(code); {
 		hw := uint32(code[off]) | uint32(code[off+1])<<8
 		size = 2
@@ -45,7 +43,7 @@ func instructionStraddle(code []byte, base, grain uint32) (addr uint32, size int
 			return 0, 0, false
 		}
 		va := base + uint32(off)
-		if va%grain+uint32(size) > grain {
+		if va/codePageBytes != (va+uint32(size)-1)/codePageBytes {
 			return va, size, true
 		}
 		off += size
@@ -102,9 +100,8 @@ func (b *Builder) checkCodePages(prog string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", prog, err)
 	}
-	grain, _, _ := b.Target.WindowGeometry()
 	for _, s := range segs {
-		addr, size, ok := instructionStraddle(s.code, uint32(s.vaddr), uint32(grain))
+		addr, size, ok := instructionStraddle(s.code, uint32(s.vaddr))
 		if !ok {
 			continue
 		}

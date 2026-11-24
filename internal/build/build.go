@@ -1708,7 +1708,7 @@ func (b *Builder) buildUser() ([]string, error) {
 			filepath.Join(udir, "user.ld"), out); err != nil {
 			return nil, err
 		}
-		if autoRVC && imageStraddles(out, grain) {
+		if autoRVC && imageStraddles(out) {
 			straddlers = append(straddlers, name)
 		}
 		b.logf("      LD  bin/%s\n", name)
@@ -1738,7 +1738,7 @@ func (b *Builder) buildUser() ([]string, error) {
 				filepath.Join(udir, "user.ld"), out); err != nil {
 				return nil, err
 			}
-			if imageStraddles(out, grain) {
+			if imageStraddles(out) {
 				return nil, fmt.Errorf(
 					"bin/%s: still crosses a protection-block boundary after rebuilding without RVC", name)
 			}
@@ -1836,9 +1836,8 @@ func isaFrom(flags []string) []string {
 }
 
 // imageStraddles reports whether an instruction in the image's executable
-// segment reaches across a protection-block boundary (every multiple of the
-// board's window grain; see instructionStraddle).
-func imageStraddles(path string, grain int) bool {
+// segment reaches across a page boundary (see instructionStraddle).
+func imageStraddles(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -1848,7 +1847,7 @@ func imageStraddles(path string, grain int) bool {
 		return false
 	}
 	for _, s := range segs {
-		if _, _, ok := instructionStraddle(s.code, uint32(s.vaddr), uint32(grain)); ok {
+		if _, _, ok := instructionStraddle(s.code, uint32(s.vaddr)); ok {
 			return true
 		}
 	}
