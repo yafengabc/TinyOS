@@ -314,14 +314,21 @@ arm QEMU smoke、soak 2/2）与构建；板级由 Pico 2 先跑（结果见上�
 仍未跑。背景、代价与验证清单：
 `docs/acceptance/2026-11-25-usb-tx-ring-bounded-lock.md`。
 
-**已改（`27ee880`，待复测）**：环满时按上下文区分 —— Thread/SVCall 且中断开
-（程序自己的输出）就**等**，循环里调用 `usb_cdc_poll()` 自己推泵，两次 poll 之间
-中断开着，USB 中断完成传输释放空间；tick、fault、panic、任何 PRIMASK=1 的上下文
-照旧丢。放弃等待后置 `stalled`，环排空才允许再等；计数器加 `waited` / `stalled`。
-这个改法把“单次系统调用能缓冲多少”这个上限换成“主机速率”，(b) 的目标才有可能达成。
-背景、代价与风险：`docs/acceptance/2026-11-25-usb-tx-flow-control.md`。
-注意它只覆盖 `drivers/usb/rp2350` 与 `drivers/usb/rp2040`；RV32 用的
-`drivers/usb/rp2350rv` 是另一套写路径，仍是原来的丢弃语义。
+**方案 A 已撤回（`ba657e4` → 本提交）**：曾让环满时的写者自己循环调
+`usb_cdc_poll()` 等主机。撤回的理由是它违反 `kernel/plat/console.h` 的契约
+（“putc may drop … blocking on a peer would stall every other core's output”），
+而且把“谁推进泵”塞回了写路径。
+
+**方案 B（采用，另一侧实施中）：`write` 如实返回短计数** —— `putc` 环满即失败，
+`console_write()` 在第一个失败处停下并返回实际接受的用户字节数，`process_write()`
+的 `FD_CONSOLE` 返回它，用户态 `write_all()` 重试（`n == 0` 时 `yield()` 后重试，
+**不能把 0 当终止**）。`cat` 的循环会被 tick 抢占，泵每 1 ms 排空，最终写完。
+计数必须精确到 `plat_console_putc()` 的返回值，不能用 `plat_console_tx_room()`
+预判（SMP 会竞争；“没枚举”要区别于“环满”）。已知边界：`kprintf`、tick echo、
+fault/panic 没有重试语义，仍按契约丢。(b) 的判据因此是“**短计数 + 重试后完整**”。
+细节：`docs/acceptance/2026-11-25-usb-tx-flow-control.md`。
+RV32 的 `drivers/usb/rp2350rv`（1 KiB 环、泵只在 CPU 0）用同一机制即可，
+它的 `usb_cdc_tx_room()` 要从“tud 空闲”改成“环空闲”。
 
 三项都请走 **CDC 控制台**（UART0 上那一路不经过这段代码，测了不算数）。
 
@@ -329,9 +336,8 @@ arm QEMU smoke、soak 2/2）与构建；板级由 Pico 2 先跑（结果见上�
   `run prot heap`（等 4 s）+ `deep 3`（等 8 s）之后，`cat /proc/usbboot`。
   新增的最后两行是
   `lock timeouts N  ungated=U` 和 `console tx dropped=D  handed=H`。
-  **判据**：`N = 0`、`U = 0`、`D = 0`，`H` 随输出字节数增长；新增
-  `waited=W  stalled=S` 后，长输出期间 `W > 0` 是正常的（背压在起作用），
-  `S` 应为 0（除非真拔了主机）。`694945a` 实测：`N=U=0` 但 `D +64 263`。
+  **判据**：`N = 0`、`U = 0`，长输出后 `D` 很小或为 0（短计数 + 重试生效时不该
+  有大量丢弃），`H` 随输出字节数增长。`694945a` 实测：`N=U=0` 但 `D +64 263`。
   `U = 1` 说明这块板的 SIO 三个候选门一个都没拿到（只有 boot 期探测失败才会如此，
   等于整个启动无锁运行）；`N > 0` 说明确实有路径在锁上卡了 ~20 ms，把当时的
   命令和前后行一起记下来——那表示还有一条没人想到的长临界区。

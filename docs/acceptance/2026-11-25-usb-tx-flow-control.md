@@ -1,11 +1,11 @@
 # USB 控制台写方向：环满时由写者自己等，而不是丢（2026-11-25）
 
 ```text
-TinyOS commit:     本提交（`694945a` 的板测后续修）
+TinyOS commit:     本提交（撤回 `ba657e4` 的等待方案，记录结论）
 target/config:     atk-dnr2350am / -smp、rpi-pico2 / -smp、rpi-pico / -smp、
                    arm（Cortex-M3，QEMU）构建；18 目标；arm QEMU smoke + soak
-board/port:        Pico 2 / RP2040 / ATK 上本次改动 NOT RUN（结论来自上一条
-                   694945a 的板测，本提交待复测）
+board/port:        Pico 2 / RP2040 / ATK 上 NOT RUN（结论来自 `694945a` 的
+                   板测；短计数由另一侧实施并测试）
 toolchain:         go 1.27.1 windows/amd64；clang 23.1.4
 T0:                PASS
 T1:                PASS — 18/18
@@ -59,44 +59,57 @@ RV32 有一套 1 KiB 环 + 自己的 `usb_tx_drain()`，由 CPU 0 的 `usb_cdc_p
 两个驱动**；RV32 那套要按它自己的模型（泵只在 CPU 0、可能在另一颗 hart 上写）单独改，
 本轮不动，§5c(b) 在 RV32 镜像上仍是 NOT MET。
 
-## 改法
+## 试过的两个方案
 
-`usb_cdc_putc()` 在环满时按**调用者上下文**决定：
+### 方案 A（已撤回）：环满时由写者等
 
-- **Thread 或 SVCall、且中断已开**（程序自己的输出）→ 等，而不是丢：循环里调用
-  `usb_cdc_poll()`，泵把环搬进 TinyUSB、flush，两个 poll 之间中断是开的，USB 中断
-  完成传输释放空间。这样 `cat` 被主机速率（~64 KB/s）压住，21 KB 约 0.3 s 走完。
-- **tick / fault handler / panic / 任何 PRIMASK=1 的上下文** → 维持原样：丢，计数。
-  这些路径的延迟比一行日志重要；而且 PRIMASK 同时是递归保护——泵里（TinyUSB 回调、
-  故障打印）再进 `putc` 一定是关中断的，不会再次调用泵。
-- 放弃等待后置 `g_usb_tx_stalled`，直到环排空才允许再等：主机被拔掉时，代价是
-  每次突发付一次 ~10 ms，而不是每字节一次。
+`putc` 在环满、调用者是 Thread/SVCall 且中断开着时，自己循环调用
+`usb_cdc_poll()` 推泵，直到环里有位置。**已撤回**，两个理由：
 
-`/proc/usbboot` 的 `console tx` 行因此变成
-`dropped=D  handed=H  waited=W  stalled=S`（`W` = 被压住的写次数，`S` = 放弃次数）。
+1. `kernel/plat/console.h` 的契约写得很明白：*"putc() may drop … blocking on a
+   peer would stall every other core's output with it"*，而且"每个等待都必须有界"。
+   在 `putc` 里等主机是违约的——`console_write()` 还持着 `out_lock`，SMP 上另一核的
+   打印会跟着等。
+2. 它把"谁推进泵"这个问题塞回了写路径，而这正是 `#46` 花了两轮才拆掉的东西
+   （`tud_task` 不能进中断、不能无条件进系统调用）。
+
+### 方案 B（采用）：`write` 如实返回短计数
+
+- `putc` 环满时**返回失败**，不做任何等待；
+- `console_write()` 在第一个失败的字符处停下，返回**实际接受的用户字节数**；
+- `process_write()` 的 `FD_CONSOLE` 分支返回这个数，不再无脑 `done(r, len)`；
+- 用户态 `write_all()` 重试；`cat` 的循环因此会在 tick 之间被抢占，泵每 1 ms
+  把环排空，最终写完。
+
+这个方案把"丢字节"从**静默**变成**可见且可重试**，符合 console 契约，也没有锁嵌套
+风险。落地时需要三处一起改，否则 `cat` 会在第一次环满就退出：
+
+| 位置 | 现状 | 要改成 |
+|---|---|---|
+| `user/lib.c` `write_all()` | `if (n <= 0) return n < 0 ? n : done;` —— **0 也当成终止** | 只有 `n < 0` 才失败；`n == 0` 时 `yield()` 后重试 |
+| `kernel/process.c` `process_write()` `FD_CONSOLE` | `console_write(...); return done(r, len);` | `return done(r, (uint32_t)console_write(...));` |
+| `kernel/console.c` `console_write()` | `void` | 返回接受数，第一个失败就停 |
+
+计数必须**精确**：由 `con_putc()`/`plat_console_putc()` 返回是否接受（板级 6 个实现 +
+`kernel/plat/console.h`，共享头要带 goc32 样例编译），不要用 `plat_console_tx_room()`
+预判——room 在 SMP 上会与另一个生产者竞争，而且"CDC 没有枚举"必须区分于"环满"
+（前者在纯 UART 板上意味着"无限"，不是 0）。
+
+已知边界：`kprintf`、tick echo、fault/panic 没有重试语义，仍按契约丢弃——`(b)` 的判据
+因此是"**短计数 + 重试后完整**"，不是"内核假装写完整"。
 
 ## 代价与风险
 
-- 一次 `write()` 在主机慢时会被拉长（最大约 400 次 poll ≈ 10 ms 后放弃），并且
-  `console_write()` 是**持 `out_lock`** 调用的：SMP 上另一核的打印会跟着等，
-  但 `spin_lock` 不关中断、tick 与 USB 中断照常跑，等待是有界的。echo 路径用的是
-  trylock，不受影响。
-- 这是“在系统调用内部跑泵”的一个**受控例外**（只在写者被阻塞时跑一趟）。§5b 第 5 条
-  里“不在系统调用内跑泵”的理由是 PendSV 抢不过 SVCall，所以泵本来就进不来；这里不是
-  把泵塞进所有系统调用，而是让**被卡的写者**自己推一次。
-- 仍不做的：为 USB 泵加 kernel thread；把 `tud_task` 放进 USB 中断。
+- 不额外占用内核栈、不在写路径里跑状态机；一次 `write()` 只返回它真正交出去的字节。
+- 不走 `write_all` 的程序（直接调 `write`）必须自己处理 0，否则仍然会截断——这是短写
+  语义的正常要求，需要在 `write(2)` 的说明里写清楚。
+- 换行展开：`out_char_as('\n')` 先发 `'\r'` 再发 `'\n'`。环在两者之间满时，用户字节
+  不算接受、但 `'\r'` 已经出去，重试会多一个 CR。无害，记录在案。
 
-## 验证
+## 验证（本提交只有撤回）
 
 - T0 PASS、T1 18/18、T2 `arm` smoke PASS、soak rv32+arm 2/2。
 - 6 个 RP2 目标 + `arm`(M3) 构建 PASS。
-- **T3 NOT RUN**：需要板上复测（清单同时写在 `docs/OPEN-ITEMS.md` §5c）：
-
-  1. `cat` 21 200 B：`rpi-pico2` 与 `-smp` 各 3 次，字节数/行数与源文件一致，结尾
-     提示符在；`/proc/usbboot` 的 `dropped` 应为 0（`waited` 明显大于 0 是正常的，
-     说明背压在起作用）。
-  2. `cat /proc/usbboot` 自身（约 330 B）不应再丢最后一行。
-  3. 拔掉/暂停主机再 `cat`：应在 `stalled` 上记一次、随后丢字节但不挂死；插回后
-     恢复正常（`stalled` 归零）。
-  4. RP2040 的 `accept.py` 与 1 ms gap 的 tosput 复测（输入方向不受本次影响，但要
-     确认长输出与 `#46` 老用例没被写路径改动带坏）。
+- **T3 NOT RUN**：短计数由另一侧实现并测试；板上判据见
+  `docs/OPEN-ITEMS.md` §5c —— `cat` 21 200 B 完整、`/proc/usbboot` 自身不丢尾行、
+  `dropped = 0`（重试生效时 `dropped` 应很小甚至为 0），以及 RV32 两个镜像。

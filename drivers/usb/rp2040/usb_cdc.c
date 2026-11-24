@@ -689,13 +689,7 @@ static void usb_rxq_fill(void)
 static volatile uint8_t  usb_txq[USB_TX_CORES][USB_TX_Q];
 static volatile uint16_t usb_txq_head[USB_TX_CORES], usb_txq_tail[USB_TX_CORES];
 
-/* How many pump passes a blocked writer will pay for before it gives up on
- * the host (~10-30 us each).  A dead or parked port then costs one stall per
- * burst instead of one per byte; the flag clears when the rings drain. */
-#define USB_TX_WAIT_POLLS 400u
-static volatile int g_usb_tx_stalled;
-
-/* 1 = stored, 0 = the ring is full (the caller decides whether to wait). */
+/* 1 = stored, 0 = the ring is full. */
 static int usb_txq_put(uint32_t id, uint8_t c)
 {
     uint16_t h, n;
@@ -711,24 +705,6 @@ static int usb_txq_put(uint32_t id, uint8_t c)
     __asm__ volatile("dmb" ::: "memory");   /* the byte before the head */
     usb_txq_head[id] = n;
     return 1;
-}
-
-/* Whether a console write may wait for the host.
- *
- * Only from Thread mode or an SVCall - a program's own output, and the one
- * place where the tick and the USB interrupt can still run and drain the
- * ring.  A tick, a fault handler or a panic must never wait: those are the
- * paths whose latency matters, and the board may already be dying.  PRIMASK
- * is the recursion guard as well: putc from inside the pump runs masked and
- * therefore never re-enters the pump.
- */
-static int putc_may_wait(void)
-{
-    uint32_t ipsr, primask;
-
-    __asm__ volatile("mrs %0, ipsr" : "=r"(ipsr));
-    __asm__ volatile("mrs %0, primask" : "=r"(primask));
-    return primask == 0u && (ipsr == 0u || ipsr == 11u);
 }
 
 /* Move queued bytes into TinyUSB.  Lock held, core 0.  tud_cdc_write_flush()
@@ -756,13 +732,6 @@ static void usb_txq_drain(void)
     if (moved || tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
         tud_cdc_write_flush();
     g_usb_stat[3] += moved;
-
-    /* Rings empty: a writer that gave up waiting may wait again. */
-    for (uint32_t id = 0; id < USB_TX_CORES; id++) {
-        if (usb_txq_tail[id] != usb_txq_head[id])
-            return;
-    }
-    g_usb_tx_stalled = 0;
 }
 
 static void usb_task_run(int from_isr)
@@ -858,41 +827,23 @@ void usb_cdc_poll(void)
 
 void usb_cdc_putc(char c)
 {
-    uint32_t id = (uint32_t)plat_cpu_id() & 1u;
-    uint32_t spins = 0;
-
     /* Nothing is written before the host has configured the port.  A
      * "buffer it anyway" version of this (so a late host still got the
      * banner) made the RP2040 stop mid-boot on the UART as well: every
      * console byte then took the cross-core USB lock and pushed into a
      * FIFO that could not drain until enumeration, and the boot visibly
-     * waited for Windows. */
+     * waited for Windows.  Dropping is the contract here - see
+     * kernel/plat/console.h. */
     if (!g_hw_ready || !tud_mounted())
         return;
 
-    /* No lock on the happy path: append to this core's ring (see
-     * usb_txq_put).  When it is full, the caller's context decides what
-     * happens next - see the RP2350 port for the measurements behind this:
-     * a program's own output waits for the host, everything that runs in an
-     * interrupt or masked keeps the old drop rule. */
-    for (;;) {
-        if (usb_txq_put(id, (uint8_t)c))
-            return;
-        if (!putc_may_wait() || g_usb_tx_stalled) {
-            g_usb_stat[2]++;            /* full: this byte is lost */
-            return;
-        }
-        if (spins++ == 0)
-            g_usb_stat[4]++;            /* a write had to wait for the host */
-        if (spins >= USB_TX_WAIT_POLLS) {
-            g_usb_tx_stalled = 1;       /* host is not draining: stop paying */
-            g_usb_stat[5]++;
-            g_usb_stat[2]++;
-            return;
-        }
-        usb_cdc_poll();                 /* pump + drain, frees ring space */
-    }
+    /* No lock, no TinyUSB, no waiting: append to this core's ring and let
+     * the pump move it out.  A full ring drops the byte and counts it; a
+     * caller that must not lose output gets a short write() and retries. */
+    if (!usb_txq_put((uint32_t)plat_cpu_id() & 1u, (uint8_t)c))
+        g_usb_stat[2]++;
 }
+
 
 int usb_cdc_tx_room(void)
 {
