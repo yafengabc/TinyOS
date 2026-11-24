@@ -47,6 +47,16 @@ volatile uint32_t g_cdc_diag[6];
 /* Filled in by the CDC driver's usb_cdc_init(); see /proc/usbboot. */
 volatile uint32_t g_usb_boot[8];
 
+/* Live counters updated by the CDC driver (zero on boards without one):
+ *   [0] USB lock acquires that timed out (the operation was dropped)
+ *   [1] 1 when boot found no hardware spinlock and runs the driver ungated
+ *   [2] TX bytes dropped because a console ring was full
+ *   [3] TX bytes handed to TinyUSB
+ * They exist because both failure modes used to be silent: the first one
+ * switched the driver to "no lock at all" for the rest of the boot, and the
+ * second one looks exactly like a console that is simply slow. */
+volatile uint32_t g_usb_stat[4];
+
 /* Append formatted text, returning the new offset.  kvsnprintf is what the
  * kernel already prints with, so /proc output and the boot log cannot drift
  * apart in their number formatting. */
@@ -97,6 +107,8 @@ static uint32_t fmt_usbboot(char *b, uint32_t cap)
 
     for (int i = 0; i < 8; i++)
         any |= g_usb_boot[i];
+    for (int i = 0; i < 4; i++)
+        any |= g_usb_stat[i];
     if (!any)
         return put(b, cap, 0, "usbboot: no USB controller on this board\n");
     return put(b, cap, 0,
@@ -104,12 +116,16 @@ static uint32_t fmt_usbboot(char *b, uint32_t cap)
                "  resets_at_entry  %08x  usbctrl_released=%u\n"
                "  sie pre-tud_init %08x  sie_ctrl=%08x\n"
                "  sie after pads   %08x  after retrigger=%08x\n"
-               "  dplus drop       %s  sie while down=%08x\n",
+               "  dplus drop       %s  sie while down=%08x\n"
+               "  lock timeouts    %u  ungated=%u\n"
+               "  console tx       dropped=%u  handed=%u\n",
                g_usb_boot[0], g_usb_boot[1],
                g_usb_boot[2], g_usb_boot[3],
                g_usb_boot[4], g_usb_boot[5],
                g_usb_boot[6] ? "ran (200 ms)" : "skipped",
-               g_usb_boot[7]);
+               g_usb_boot[7],
+               g_usb_stat[0], g_usb_stat[1],
+               g_usb_stat[2], g_usb_stat[3]);
 }
 
 static uint32_t fmt_cdc_state(char *b, uint32_t cap)

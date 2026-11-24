@@ -32,9 +32,18 @@ void usb_cdc_flush(void);
 /* Cross-core USB critical section (SIO hardware spinlock 30 + PRIMASK).
  * Everything that touches TinyUSB state must hold it; the shim's IRQ
  * trampoline wraps the controller handler with it too.  The returned word
- * is the saved PRIMASK and must be given back to usb_cdc_unlock(). */
+ * is the saved PRIMASK and must be given back to usb_cdc_unlock().
+ *
+ * The acquire is bounded.  When it gives up it returns a token that fails
+ * USB_LK_OK(), and the caller MUST skip the operation: carrying on unlocked
+ * corrupts TinyUSB's queues on the other core, which is worse than dropping
+ * one update.  usb_cdc_trylock() is the same thing with a single attempt, for
+ * callers that are masked and must never wait. */
 uint32_t usb_cdc_lock(void);
+uint32_t usb_cdc_trylock(void);
 void usb_cdc_unlock(uint32_t primask);
+#define USB_LK_FAILED 0x20000000u
+#define USB_LK_OK(tok) (((tok) & USB_LK_FAILED) == 0u)
 int  usb_cdc_getchar(void);
 
 int  usb_cdc_configured(void);   /* 1 once the host has SET_CONFIGURATION */

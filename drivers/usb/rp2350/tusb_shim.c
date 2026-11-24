@@ -66,7 +66,10 @@ static void usb_irq_trampoline(void)
      * SysTick - can never spin on a lock held by the thread it just
      * pre-empted: a lock holder is always interrupt-masked. */
     lk = usb_cdc_lock();
-    if (s_usb_isr)
+    /* No gate this time: leave the controller alone.  Its interrupt sources
+     * stay latched in the SIE, so the next pass (or the tick's fallback)
+     * services the same event instead of losing it. */
+    if (USB_LK_OK(lk) && s_usb_isr)
         s_usb_isr();
     usb_cdc_unlock(lk);
 }

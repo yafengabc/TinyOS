@@ -77,7 +77,10 @@ static void usb_irq_trampoline(void)
      * thread it just pre-empted: a lock holder is always interrupt-masked. */
     {
         uint32_t lk = usb_cdc_lock();
-        if (s_usb_isr)
+        /* No gate this time: leave the controller alone.  Its interrupt
+         * sources stay latched in the SIE, so the next pass (or the tick's
+         * fallback) services the same event instead of losing it. */
+        if (USB_LK_OK(lk) && s_usb_isr)
             s_usb_isr();        /* dcd_int_handler(): latch SIE events */
         usb_cdc_unlock(lk);
     }

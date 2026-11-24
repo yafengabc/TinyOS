@@ -137,9 +137,29 @@ ATK-DNR2350AM SMP 上，跑十六轮 `prot heap` 再叠一个 `deep 3`，板子�
 那个字节就丢了。改成先看 `tud_cdc_available()` 再取——控制台输入里丢一个字节，可能正好
 丢掉一个换行。
 
-还没修的：RP2040 的驱动（[`drivers/usb/rp2040/usb_cdc.c`](../../drivers/usb/rp2040/usb_cdc.c)）
-仍是“取锁 + 进 TinyUSB”的老写法，它在 `rpi-pico-smp` 上有同一类风险；修法完全相同，但
-要在板上验过才算数。
+RP2040 的驱动（[`drivers/usb/rp2040/usb_cdc.c`](../../drivers/usb/rp2040/usb_cdc.c)）
+当时还是“取锁 + 进 TinyUSB”的老写法，而且更糟：`plat_console_getchar()` **每个字节**都
+调一次 `usb_cdc_poll()`（整趟状态机）、`putc()` 每个字节取一次锁、`usb_cdc_lock()` 还是
+**无界自旋**。后来按同一套改掉了（自有 RX 环、TX 环、有界获取），这是同一课的第二遍。
+
+### 写方向：把“打印一行”从锁里拿出来
+
+读方向修完，写方向仍然在锁里：`putc()` 和 `flush()` 都要取跨核 SIO 门，而它们从 tick、
+echo 和 fault handler 进来（全都关中断）。`prot heap`×16 叠 `deep 3` 恰好是“大量 fault
++ 大量打印”，只要另一核正握着门跑状态机，这一核就在打印路径上排队。
+
+现在每核一个 256 字节的 TX 环：`putc()` 只入环——不取锁、不进 TinyUSB、满了记数丢弃；
+泵（锁内、core 0）把字节搬进 TinyUSB 并 flush。**为什么不是一个环加一把小锁**：单环要
+跨核原子，而 M33 的 LDREX/STREX 只有本核语义（`OPEN-ITEMS §24.4` 已经因此出过事）；
+每核一个环把每个生产者/消费者对变成单侧，发布顺序“字节 → `dmb` → head”就够了。泵按快照
+取，所以“泵自己在 fault 里打印”只是把字节推到下一趟。
+
+第二条是更危险的：抢门超时的旧代码执行 `usb_lk_reg = 0`，此后整个启动剩余时间的 USB
+访问都变成无锁，只留一行 `[ULK!]`。这不是挂死，是**静默损坏**——两个核同时进 tu_fifo，
+症状是偶发丢字节、看不出原因的 panic。现在超时只记数并返回 `USB_LK_FAILED`，调用方用
+`USB_LK_OK()` 判断后跳过本次操作；`flush()` 改成 `trylock`，门忙就把字节留给下一次泵，
+panic 路径也不再等另一核。两个计数器（`lock timeouts`、`console tx dropped`）露在
+`/proc/usbboot` 里，下一次失败自己会说话。
 
 这一节和“192 字节”那节其实是同一件事的两面：USB 驱动里凡是“**被别的上下文从锁外调用**”
 的入口，都必须是只碰内存的；一旦它想拿锁、跑状态机，就会在 SMP 上把另一条时间线拖死。
@@ -156,6 +176,7 @@ ATK-DNR2350AM SMP 上，跑十六轮 `prot heap` 再叠一个 `deep 3`，板子�
 | 死前现场（复位不清） | `kernel/cpu.c` 的 `TOS_NOINIT` 计数器 |
 | 跨 PMP 条目取指的完整推导与上游 v1.1 的放宽 | `docs/OPEN-ITEMS.md`（RP2350 RV32 一节） |
 | “关中断的读”与 USB 锁的 SMP 死锁（三处修 + 一个丢字节的补丁） | `docs/acceptance/2026-11-24-atk-arm-usb-console-deadlock-6b15b8b.md`、`drivers/usb/rp2350/usb_cdc.c` |
+| 写方向的自有 TX 环、锁超时不再降级无锁（两处计数器在 `/proc/usbboot`） | `docs/acceptance/2026-11-25-usb-tx-ring-bounded-lock.md`、`drivers/usb/rp2350/usb_cdc.c` |
 
 ## 还没写的
 

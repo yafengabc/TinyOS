@@ -45,9 +45,10 @@
 #define SIO_LK(n) ((volatile uint32_t *)(0xD0000000u + 0x100u + 4u * (n)))
 
 /* Return token bits.  PRIMASK is a single bit, so the upper bits are free to
- * carry state:
+ * carry state (USB_LK_FAILED lives in usb_cdc.h because the shim tests it):
  *   bit31 - this call only bumped a depth counter, the outer section locks
- *   bit30 - the section ran with no lock at all (degraded, reported once) */
+ *   bit30 - no spinlock was offered at boot: run without one (reported)
+ *   bit29 - the bounded acquire gave up: the caller must skip the work */
 #define USB_LK_NESTED 0x80000000u
 #define USB_LK_NONE   0x40000000u
 /* ~20 ms at 150 MHz: long enough that a normal cross-core hold never trips
@@ -394,6 +395,11 @@ static uint32_t           usb_lk_bit;      /* its bit in the status word */
 static volatile uint32_t  usb_depth[2];
 volatile uint32_t         g_usb_lock_fail;
 
+/* Live counters for /proc/usbboot: [0] lock timeouts, [1] "booted with no
+ * spinlock" (1 = yes), [2] TX bytes dropped because a ring was full,
+ * [3] TX bytes handed to TinyUSB. */
+extern volatile uint32_t  g_usb_stat[4];
+
 /* A read of a SIO spinlock register *is* an acquire attempt.  Measured on an
  * RP2350: the answer is not "1 = mine" as the RP2040 datasheet's wording
  * suggests, it is one-hot - lock N answers with bit N set (read 31 and you get
@@ -432,6 +438,7 @@ static void usb_lk_select(void)
         }
     }
     usb_lk_reg = 0;
+    g_usb_stat[1] = 1;      /* /proc/usbboot: this boot runs ungated */
     BM("[lk-none]");
 }
 
@@ -452,12 +459,27 @@ static void usb_lk_select(void)
  * holds the lock - an ISR that spins on a lock held by the thread it just
  * pre-empted would never make progress.  Hold times are bounded: tud_task()
  * returns once the event queue is drained, and nothing inside these
- * sections waits on the other core. */
-uint32_t usb_cdc_lock(void)
+ * sections waits on the other core.
+ *
+ * Two rules keep a single wedged path from spreading:
+ *   - giving up does NOT drop the gate for good.  An earlier version set
+ *     usb_lk_reg = 0 on the first timeout, so one unlucky section turned
+ *     every later USB access on that boot into an unguarded one: silent
+ *     FIFO corruption on the other core, not a visible hang.
+ *   - every caller tests USB_LK_OK() and skips its work instead, so a
+ *     timeout costs one dropped update, and /proc/usbboot counts them. */
+static inline int usb_lk_claim(void)
 {
-    uint32_t id  = (uint32_t)plat_cpu_id() & 1u;
+    if (!(*usb_lk_reg & usb_lk_bit))
+        return 0;
+    __asm__ volatile("dmb" ::: "memory");
+    return 1;
+}
+
+uint32_t usb_cdc_trylock(void)
+{
+    uint32_t id = (uint32_t)plat_cpu_id() & 1u;
     uint32_t pm;
-    uint32_t n;
 
     /* Nested section on the SAME core: the hardware lock is not recursive and
      * the outer section already masked interrupts, so just bump a depth
@@ -477,13 +499,31 @@ uint32_t usb_cdc_lock(void)
     if (!usb_lk_reg)
         return pm | USB_LK_NONE;
 
-    /* Bounded: a lock that never comes free is a bug elsewhere, and turning
-     * that into "boot stops for ever with no output" costs a flash cycle per
-     * guess.  Report it once, then stop paying the timeout on every call. */
+    if (!usb_lk_claim())
+        return pm | USB_LK_FAILED;
+    usb_depth[id] = 1;
+    return pm;
+}
+
+uint32_t usb_cdc_lock(void)
+{
+    uint32_t id  = (uint32_t)plat_cpu_id() & 1u;
+    uint32_t pm;
+    uint32_t n;
+
+    if (usb_depth[id]) {
+        usb_depth[id]++;
+        return USB_LK_NESTED;
+    }
+
+    __asm__ volatile("mrs %0, primask\n cpsid i" : "=r"(pm) :: "memory");
+
+    if (!usb_lk_reg)
+        return pm | USB_LK_NONE;
+
     US(8);
     for (n = 0; ; n++) {
-        if (*usb_lk_reg & usb_lk_bit) {
-            __asm__ volatile("dmb" ::: "memory");
+        if (usb_lk_claim()) {
             usb_depth[id] = 1;
             US(9);
             return pm;
@@ -493,9 +533,8 @@ uint32_t usb_cdc_lock(void)
             BM("[ULK!]");
             plat_boot_mark_u32(id);
 #endif
-            g_usb_lock_fail++;
-            usb_lk_reg = 0;
-            return pm | USB_LK_NONE;
+            g_usb_stat[0] = ++g_usb_lock_fail;
+            return pm | USB_LK_FAILED;
         }
     }
 }
@@ -509,7 +548,7 @@ void usb_cdc_unlock(uint32_t tok)
             usb_depth[id]--;
         return;                         /* outer section still owns it */
     }
-    if (tok & USB_LK_NONE) {
+    if (tok & (USB_LK_NONE | USB_LK_FAILED)) {
         __asm__ volatile("msr primask, %0" :: "r"(tok & 1u) : "memory");
         return;
     }
@@ -567,13 +606,84 @@ static void usb_rxq_fill(void)
     }
 }
 
+/* Bytes the console has written, waiting for the state machine.
+ *
+ * putc is called from the tick, from the echo path and from a fault handler -
+ * always with interrupts masked, sometimes on the core that is already inside
+ * an exception.  It must not take the USB lock (the other core can hold it for
+ * a whole state-machine pass - the SMP console deadlock) and it must not enter
+ * TinyUSB at all.
+ *
+ * One ring per core makes each producer/consumer pair single-ended even in the
+ * SMP build: a core appends and advances only its own head, the pump (under
+ * the lock, on core 0) is the only reader.  The head is published with a
+ * barrier after the byte is stored, and the drain works from a snapshot, so a
+ * producer that keeps writing - including putc called from inside the pump,
+ * e.g. a panic print in a TinyUSB callback - only ever defers bytes to the
+ * next pass. */
+#if defined(TOS_MAX_CPUS) && TOS_MAX_CPUS > 1
+#define USB_TX_CORES 2
+#else
+#define USB_TX_CORES 1
+#endif
+#define USB_TX_Q 256
+static volatile uint8_t  usb_txq[USB_TX_CORES][USB_TX_Q];
+static volatile uint16_t usb_txq_head[USB_TX_CORES], usb_txq_tail[USB_TX_CORES];
+
+static void usb_txq_put(uint32_t id, uint8_t c)
+{
+    uint16_t h, n;
+
+    if (id >= USB_TX_CORES)
+        id = 0;                         /* a core with no ring of its own */
+    h = usb_txq_head[id];
+    n = (uint16_t)((h + 1u) % USB_TX_Q);
+
+    if (n == usb_txq_tail[id]) {
+        g_usb_stat[2]++;                /* full: this byte is lost */
+        return;
+    }
+    usb_txq[id][h] = c;
+    __asm__ volatile("dmb" ::: "memory");   /* the byte before the head */
+    usb_txq_head[id] = n;
+}
+
+/* Move queued bytes into TinyUSB.  Lock held, core 0.  Flushing here is what
+ * puts a packet on the wire; tud_cdc_write_flush() only hands what is queued
+ * to the endpoint, it never waits for the host, so this stays bounded. */
+static void usb_txq_drain(void)
+{
+    uint32_t moved = 0;
+
+    for (uint32_t id = 0; id < USB_TX_CORES; id++) {
+        uint16_t h = usb_txq_head[id];          /* snapshot */
+
+        __asm__ volatile("dmb" ::: "memory");
+        while (usb_txq_tail[id] != h) {
+            if (!tud_cdc_write_available()) {
+                tud_cdc_write_flush();
+                if (!tud_cdc_write_available())
+                    break;                      /* host behind: keep the rest */
+            }
+            tud_cdc_write_char((char)usb_txq[id][usb_txq_tail[id]]);
+            usb_txq_tail[id] = (uint16_t)((usb_txq_tail[id] + 1u) % USB_TX_Q);
+            moved++;
+        }
+    }
+    /* Flush what this pass queued, and anything a previous pass left in
+     * TinyUSB's own buffer (that is the old poll-time flush). */
+    if (moved || tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
+        tud_cdc_write_flush();
+    g_usb_stat[3] += moved;
+}
+
 static void usb_task_run(int from_isr)
 {
     uint32_t primask = usb_cdc_lock();
 
-    if (g_in_task) {
+    if (g_in_task || !USB_LK_OK(primask)) {
         usb_cdc_unlock(primask);
-        return;                     /* the outer call will drain the queue */
+        return;                     /* outer call, or no lock this pass */
     }
     g_in_task = 1;
 
@@ -585,6 +695,7 @@ static void usb_task_run(int from_isr)
     US(6);
 
     usb_rxq_fill();
+    usb_txq_drain();
 
     g_in_task = 0;
     usb_cdc_unlock(primask);
@@ -625,8 +736,8 @@ void usb_cdc_poll(void)
     US(1);
     primask = usb_cdc_lock();
     US(2);
-    if (usb_hw->ints)
-        dcd_int_handler(0);
+    if (USB_LK_OK(primask) && usb_hw->ints)
+        dcd_int_handler(0);         /* still latched: retried next pass */
     US(3);
     usb_cdc_unlock(primask);
 
@@ -635,8 +746,8 @@ void usb_cdc_poll(void)
 
     US(7);
     primask = usb_cdc_lock();
-    if (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
-        tud_cdc_write_flush();
+    if (USB_LK_OK(primask))
+        usb_txq_drain();
     usb_cdc_unlock(primask);
     US(0);
 }
@@ -645,47 +756,52 @@ void usb_cdc_poll(void)
 
 void usb_cdc_putc(char c)
 {
-    uint32_t primask;
-
     /* Nothing is written before the host has configured the port: a
      * "buffer it anyway" variant made the RP2040 stop mid-boot on the UART
      * too, because every console byte then took the cross-core USB lock and
      * pushed into a FIFO that could not drain until enumeration.  Dropping
-     * is the contract here - putc is called from the tick and the echo path
-     * and must never block.  usb_cdc_tx_room() lets callers pace. */
+     * is the contract here - putc is called from the tick, from the echo path
+     * and from fault handlers, and must never block.  usb_cdc_tx_room() lets
+     * callers pace. */
     if (!g_hw_ready || !tud_mounted())
         return;
     US(10);
-    primask = usb_cdc_lock();
-    /* A full TX ring used to drop every byte until the next 1 ms poll; a
-     * long `ls` therefore lost everything after roughly two packets.  Flush
-     * the full packet here so the next byte has room.  This is still bounded
-     * and does not wait for the host; if the host is not draining, the byte
-     * is dropped as before. */
-    if (tud_cdc_write_available() == 0)
-        tud_cdc_write_flush();
-    if (tud_cdc_write_available() != 0)
-        tud_cdc_write_char(c);
-    usb_cdc_unlock(primask);
+    /* No lock, no TinyUSB: append to this core's ring and return.  The pump
+     * moves it out (see usb_txq_put). */
+    usb_txq_put((uint32_t)plat_cpu_id() & 1u, (uint8_t)c);
 }
 
 int usb_cdc_tx_room(void)
 {
+    uint32_t id;
+
     if (!g_hw_ready)
         return 0;
-    return (int)tud_cdc_write_available();
+    id = (uint32_t)plat_cpu_id() & 1u;
+    if (id >= USB_TX_CORES)
+        id = 0;
+    /* What this core's ring can still take, not TinyUSB's free space: reading
+     * the state machine's FIFO without the lock is exactly what this design
+     * avoids, and the two differ by at most one pump pass. */
+    return (int)((USB_TX_Q - 1u) -
+                 ((usb_txq_head[id] + USB_TX_Q - usb_txq_tail[id]) % USB_TX_Q));
 }
 
 void usb_cdc_flush(void)
 {
-    uint32_t primask;
+    uint32_t tok;
 
     if (!g_hw_ready)
         return;
     US(11);
-    primask = usb_cdc_lock();
-    tud_cdc_write_flush();
-    usb_cdc_unlock(primask);
+    /* Callers include the panic path, which runs masked: take the section
+     * only if it is free.  When the other core holds it the bytes are not
+     * lost, they go out on the pump's next pass (PendSV/tick, 1 ms).  Waiting
+     * here is the deadlock this driver was rewritten to remove. */
+    tok = usb_cdc_trylock();
+    if (USB_LK_OK(tok))
+        usb_txq_drain();
+    usb_cdc_unlock(tok);
 }
 
 int usb_cdc_getchar(void)
@@ -735,10 +851,12 @@ void usb_cdc_replug(int on)
     if (!g_hw_ready)
         return;
     primask = usb_cdc_lock();
-    if (on)
-        dcd_connect(0);
-    else
-        dcd_disconnect(0);
+    if (USB_LK_OK(primask)) {
+        if (on)
+            dcd_connect(0);
+        else
+            dcd_disconnect(0);
+    }
     usb_cdc_unlock(primask);
 }
 
