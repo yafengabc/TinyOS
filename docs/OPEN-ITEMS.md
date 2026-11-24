@@ -295,8 +295,18 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
 
 状态：**Pico 2 已跑（2026-11-25，`d7a3c8a`）：(a) 部分达标、(b) 原 NOT MET，
 按“写路径反压 + 短写重试”修复后 ARM 两镜像已 MET；随后补上 RV32 的 PendSV
-等价边界，RV32 两镜像也 MET；(c) 未跑**；ATK 与 RP2040 仍待板主。实测记录见
-`docs/acceptance/2026-11-25-usb-tx-ring-pico2-d7a3c8a.md`（含修复后复测一节）。
+等价边界，RV32 两镜像也 MET。ATK-DNRP2350AM 四镜像已板测（2026-11-25，
+`cat` 21 200 B 两路逐字节一致、各 3 轮，见本卡“ATK 四镜像板测”一节）。(c) RP2040
+仍未跑**。实测记录见 `docs/acceptance/2026-11-25-usb-tx-ring-pico2-d7a3c8a.md`
+（含修复后复测与 ATK 两节）。
+
+**ATK 板测顺带修掉一个面板镜像的挂死**（`kernel/screen.c` `putc_locked()` 的
+TAB 展开：光标在最后一列时 `stop == cols`，换行把 `cx` 归零后条件仍成立 →
+无限重画，控制台静默、看门狗 ~33 s 复位；只在面板镜像开启且输出里出现
+“行尾 TAB”时触发）。修法是按格数计数而不是与目标列比较。这条只在
+ATK（有 ST7789 面板）上可见，Pico 2 没有面板、该分支不可达，所以 Pico 2
+不用重跑。别再把 `[S] site=` 的最后一条当成“卡在这里”的直接证据：每画一格
+96 B 就有数百条探针，16 条环里永远只剩最后一次写。
 
 **已在 Pico 2 上测到的结论（先看这里，别重复跑）**：四镜像重建 4/4；
 `cat` 21 200 B 文本经 CDC 的结果是 ARM 单核 0/3 完整（只出 255–271 B）、

@@ -128,8 +128,12 @@ static void putc_locked(char c)
         return;
     }
     if (c == '\t') {
-        int stop = (cx + 4) & ~3;
-        while (cx < stop && cx < cols)
+        /* Count cells, do not compare against the stop column: when the
+         * stop is the last column the wrap resets cx to 0, the comparison
+         * keeps passing and the tab repaints the screen forever. */
+        int n = 4 - (cx & 3);
+
+        while (n-- > 0)
             putc_locked(' ');
         return;
     }
