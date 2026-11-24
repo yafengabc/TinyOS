@@ -549,15 +549,24 @@ guard hole，`prot heap`/`prot stack` 不再触发）在开机时提示一次；
 把那一个程序换成不带 C 重新链接”。新加一块同样的板子只加这一行；Go 里没有任何板名/芯片
 名。`rvc = no` 则是整镜像不用 C，`rvc` 不写就是今天的默认（允许 C）。
 
-落点是 `internal/build/build.go` 的 `compileUserTree()`：默认对象树在 `build/user/`，
-auto 时另编一份 `build/user/noc/`（不带 C，公共运行库也在里面），链接完用
-`checkCodePages()` 的判断器读一遍镜像；跨页的程序用 noc 那份重链一次（4 字节指令不可能
-跨页，所以一遍就够），并在构建日志打印 `RVC bin/xxx: rebuilt without compressed
-instructions`。`buildFSImage()` 里的同一个检查是最后的门禁。
+落点是 `internal/build/build.go` 的 `compileUserTree()`：默认树在 `build/user/`；链接
+完全部程序后，用 `checkCodePages()` 的同一个指令遍历器读镜像，只把**跨界的那几个**程序
+（连同公共运行库的一份）编到 `build/user/noc/` 并重链一次（4 字节指令不可能跨界，一遍
+即够），日志打印 `RVC bin/xxx: rebuilt without compressed instructions`。
+`buildFSImage()` 里的同一个检查是最后的门禁。
 
-实测（rpi-pico2-rv32）：`edit/pio/sh/csc/rcc/rvm` 六个程序被换成 no-RVC，其余（含
-`msh`、`hello`）保留 C；**内核也没动（仍带 C）**。因此 `msh` 的窗口回到 16 KiB（不再
-是 20/32 KiB），只有被换掉的程序变大（同一份源码 no-RVC 比带 C 大 +23%…+47%）。
+**边界是 grain 的倍数，不是每个页。** `pmp_cover()` 从 grain 对齐的窗口基址出发，块大小
+至少一个 grain，所以块边界只能落在 grain 的倍数上（不足一个 grain 的余块总是最后一块）。
+因此“code run 装得下一个 grain 的程序永远不会跨界”——检查器按这条判断（16 KiB 粒度看
+16 KiB 线，4 KiB 粒度才看每页）。实测：
+
+- 16 KiB 粒度的 `rpi-pico2-rv32` / `-rv32-smp` / `rp2350rv-generic`：只有 `csc`（52 KiB）
+  被换，`edit`/`rvm`（8 KiB）`rcc`（32 KiB）`sh`（16 KiB）**都保留 C**；
+- 4 KiB 粒度的 `atk-dnr2350am-rv32` / `-smp`：`edit pio sh csc rcc rvm` 六个被换
+  （每页都是边界，和 QEMU 侧的扫描一致）。
+
+两种情况 `msh`（8 KiB run）都保留 C，窗口回到 **16 KiB**；内核也保留 C。只有被换掉的
+程序变大（同一份源码 no-RVC 比带 C 大 +23%…+47%）。
 
 硬件依据（不要再猜）：Hazard3 的 `PMP_GRAIN` 是 RISC-V 的 G 参数，**最小 region =
 1 << (G + 2)**，G > 0 时 NA4 写入会被强制成 OFF；RP2350 的实例化是 **G = 3**，即

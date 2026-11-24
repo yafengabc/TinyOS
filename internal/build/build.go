@@ -1692,17 +1692,13 @@ func (b *Builder) buildUser() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	commonB, progsB := commonA, progsA
-	if autoRVC {
-		commonB, progsB, err = b.compileUserTree(udir, incs,
-			append(append([]string{}, userCFlags...), isaNoC...),
-			filepath.Join("user", "noc"), common, progs, dirs, sizeOpt, optFlags)
-		if err != nil {
-			return nil, err
-		}
+	isDir := map[string]bool{}
+	for _, d := range dirs {
+		isDir[d] = true
 	}
 
 	var bins []string
+	var straddlers []string
 	for _, name := range append(append([]string{}, progs...), dirs...) {
 		if len(progsA[name]) == 0 {
 			continue // a program directory with no sources in this build
@@ -1712,23 +1708,42 @@ func (b *Builder) buildUser() ([]string, error) {
 			filepath.Join(udir, "user.ld"), out); err != nil {
 			return nil, err
 		}
-		if autoRVC && imageStraddles(out) {
-			// The compressed form put a 32-bit instruction across a page
-			// boundary (a PMP entry boundary on this board): relink this one
-			// program from the no-RVC tree.  Four-byte instructions cannot
-			// cross a page, so a single pass always suffices.
+		if autoRVC && imageStraddles(out, grain) {
+			straddlers = append(straddlers, name)
+		}
+		b.logf("      LD  bin/%s\n", name)
+		bins = append(bins, name)
+	}
+
+	if len(straddlers) > 0 {
+		// Compile the no-RVC tree only for the offenders: the common runtime
+		// once (the straddle can be in libc) and their own sources.
+		var noProgs, noDirs []string
+		for _, name := range straddlers {
+			if isDir[name] {
+				noDirs = append(noDirs, name)
+			} else {
+				noProgs = append(noProgs, name)
+			}
+		}
+		commonB, progsB, err := b.compileUserTree(udir, incs,
+			append(append([]string{}, userCFlags...), isaNoC...),
+			filepath.Join("user", "noc"), common, noProgs, noDirs, sizeOpt, optFlags)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range straddlers {
+			out := filepath.Join(b.BuildDir, "user", "bin", name)
 			if err := b.linkPIE(append(append([]string{}, commonB...), progsB[name]...),
 				filepath.Join(udir, "user.ld"), out); err != nil {
 				return nil, err
 			}
-			if imageStraddles(out) {
+			if imageStraddles(out, grain) {
 				return nil, fmt.Errorf(
-					"bin/%s: still crosses a page boundary after rebuilding without RVC", name)
+					"bin/%s: still crosses a protection-block boundary after rebuilding without RVC", name)
 			}
 			b.logf("      RVC bin/%s: rebuilt without compressed instructions\n", name)
 		}
-		b.logf("      LD  bin/%s\n", name)
-		bins = append(bins, name)
 	}
 	return bins, nil
 }
@@ -1821,8 +1836,9 @@ func isaFrom(flags []string) []string {
 }
 
 // imageStraddles reports whether an instruction in the image's executable
-// segment reaches across a 4 KiB page boundary.
-func imageStraddles(path string) bool {
+// segment reaches across a protection-block boundary (every multiple of the
+// board's window grain; see instructionStraddle).
+func imageStraddles(path string, grain int) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -1832,7 +1848,7 @@ func imageStraddles(path string) bool {
 		return false
 	}
 	for _, s := range segs {
-		if _, _, ok := instructionStraddle(s.code, uint32(s.vaddr)); ok {
+		if _, _, ok := instructionStraddle(s.code, uint32(s.vaddr), uint32(grain)); ok {
 			return true
 		}
 	}
