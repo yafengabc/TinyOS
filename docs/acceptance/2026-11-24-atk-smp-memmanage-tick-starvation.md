@@ -1,20 +1,22 @@
 # ATK-DNR2350AM ARM SMP `[STALL]`：MemManage 优先级压在 SysTick 之上
 
 ```text
-commit: 工作区（基于 b0a4e04，未提交）
+commit: 05a0e18
 change: 定位并修复 atk-dnr2350am-smp 在 prot heap + deep 3 负载下的
         [STALL] / 看门狗复位；arm_exceptions_init() 的 SHPR1 未写 MemManage 字节
 baseline: none
 target/config: atk-dnr2350am、atk-dnr2350am-smp、atk-dnr2350am-rv32、
-               atk-dnr2350am-rv32-smp / defaults
+               atk-dnr2350am-rv32-smp、rpi-pico、rpi-pico-smp / defaults
 board/port/image: ATK-DNR2350AM (RP2350) / UART COM14 (CH343)、USB CDC COM26
-                  / build/tinyos-atk-*.uf2
+                  / build/tinyos-atk-*.uf2；Pico (RP2040) / UART0 COM19 (CH343)
+                  / build/tinyos-rpi-pico*.uf2
 toolchain: go 1.27.1 windows/amd64, clang 23.1.4, python 3.14.9
 host: Windows（Asia/Shanghai）
 T0: NOT RUN（本轮未跑 go test/go vet）
-T1: PASS（ATK 四 target 全部 build ok）
+T1: PASS（ATK 四 target + rpi-pico 两 target 全部 build ok）
 T2: NOT RUN（无 QEMU）
-T3: PASS（SMP：hammer 20/20 无 STALL；单核：hammer 10/10 无 STALL）
+T3: PASS（SMP：hammer 20/20 无 STALL；单核：hammer 10/10 无 STALL；
+    rpi-pico / rpi-pico-smp：accept 30/30、30/30）
 T4: NOT RUN（本轮只做 hammer 压测，未跑 dd/smpbench/reboot soak）
 logs: $env:TEMP\hammer_clean_raw.txt、hammer_single_raw.txt（未入库）
 ```
@@ -55,10 +57,21 @@ boot 核的 tick 中，于是看门狗复位。
 | hammer 10 轮 | 10/10 无 STALL、无复位 | — |
 
 每一轮都是 `heap_fault=True deep_ok=True stall=False`；`banner=False` 表示
-中途没有重启（正常状态）。RV32 两镜像本轮未上板，只验证了构建。
+中途没有重启（正常状态）。
+
+RP2040（Cortex-M0+，同一份 `arch/arm/platform.c`）回归：
+
+| 项 | rpi-pico | rpi-pico-smp |
+|---|---|---|
+| 构建 | build ok | build ok |
+| `scripts/rp2040/accept.py` | ACCEPT 30/30 | ACCEPT 30/30 |
+
+两次都是 UART0（CH343 COM19）控制台，含 `fault isolation` 一项（`crash` 之后回到
+提示符），说明 MemManage 优先级调整没有改变 M0+ 上的故障路径行为。RP2040 的
+USB CDC 未接，`#46` 长输出检查只覆盖了 UART。RV32 两镜像本轮未上板，只验证了构建。
 
 ## 注
 
 1. 本轮插桩（`[SELF]`、`[STALL2]`、`g_proc_lock_owner`、`LKOWN/LKREL` 等）已
-   全部清理，工作区只剩上面两处修复。
+   全部清理，提交里只有上面两处修复。
 2. 修复只改异常优先级配置，不触碰调度器、USB 或 SIO 门。
