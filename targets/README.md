@@ -15,6 +15,7 @@ cpus = 2              # optional, 1 when absent
 heap = 60k            # kernel heap, bytes or k/m suffix
 max_procs = 8         # optional
 kstack = 8k           # optional; per-arch default otherwise
+opt = -Oz             # optional kernel C optimisation; -O2 when absent
 ```
 
 Adding an image is a new file here.  Adding a board is a `board/<name>/`
@@ -33,6 +34,12 @@ have to read them from somewhere anyway.
 
 ## Notes worth keeping
 
+- **opt**: per image, not per board - the same silicon can want `-Oz` where
+  the image is short of flash and `-O2` where the hot loops decide throughput.
+  A config's `[build] opt` and `TOS_OPT` still win, so experiments do not edit
+  this list.  Only `esp32c3-generic` sets it today: 5 reps of `dd` (400K
+  write / read+verify / 800K write) and `csc` came out within noise of `-O2`
+  on COM4 while the app image went 100.7 -> 81.6 KiB (issue #56).
 - **heap**: the kernel heap holds one decompressed program image at a time and
   littlefs's working set.  Since exec() streams the LZ4 block straight into
   the task window, the peak is much smaller than it used to be; the numbers

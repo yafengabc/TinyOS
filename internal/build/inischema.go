@@ -95,7 +95,7 @@ var targetSchema = iniSchema{
 		"target": {
 			"name": true, "aliases": true, "board": true, "arch": true,
 			"march": true, "rcc_arch": true, "cpus": true, "heap": true,
-			"kstack": true, "max_procs": true,
+			"kstack": true, "max_procs": true, "opt": true,
 		},
 	},
 }

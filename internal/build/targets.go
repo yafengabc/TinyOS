@@ -107,6 +107,13 @@ func loadTargetFile(path string) (Target, error) {
 		Arch:    strings.TrimSpace(s["arch"]),
 		March:   strings.TrimSpace(s["march"]),
 		RCCArch: strings.TrimSpace(s["rcc_arch"]),
+		Opt:     strings.TrimSpace(s["opt"]),
+	}
+	switch t.Opt {
+	case "", "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz":
+	default:
+		return Target{}, fmt.Errorf("%s: opt must be one of -O0..-O3, -Os, -Oz (got %q)",
+			path, t.Opt)
 	}
 	if t.Board == "" {
 		return Target{}, fmt.Errorf("%s: board is required", path)

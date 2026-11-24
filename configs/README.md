@@ -38,7 +38,8 @@ exclude = ping,net,dhcp
   target's value: `heap = 81920` (kernel arena in bytes, `80k` works too),
   `max_procs = 8` (process table slots), `kstack = 16384` (per-CPU kernel
   stack, 8192/16384/32768; the linker pool and `kernel/cpu.h` read the same
-  define) and `opt = -Oz` (compiler optimisation; `TOS_OPT` still wins).
+  define) and `opt = -Oz` (compiler optimisation).  For `opt` the order is
+  `TOS_OPT` > this file > the target's own `[target] opt` > `-O2`.
   `boot_trace = 0` compiles the boot-progress traces and the `TOS_DIAG`
   diagnostics out in one step (the menuconfig item is "Boot traces +
   diagnostics"); the default is on because `scripts/rp2350/accept33.py` reads

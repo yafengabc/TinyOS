@@ -59,6 +59,13 @@ type Target struct {
 	// share a core.
 	RCCArch string
 
+	// Opt is the kernel's C optimisation flag ("" = -O2).  Per image, not
+	// per board: the same silicon may want -Oz where the image is short of
+	// flash and -O2 where the hot loops decide throughput.  A config file's
+	// [build] opt and the TOS_OPT environment variable still win, so an
+	// experiment does not have to edit the target list.
+	Opt string
+
 	// How the filesystem reaches the kernel:
 	//   disk      PC: written into the boot disk after the kernel
 	//   embedded  rv32: linked into the kernel image as a RAM disk
@@ -357,6 +364,9 @@ func (b *Builder) ccFlags(includes []string, extra ...string) []string {
 	opt := os.Getenv("TOS_OPT")
 	if opt == "" {
 		opt = b.Opt
+	}
+	if opt == "" {
+		opt = b.Target.Opt
 	}
 	if opt == "" {
 		opt = "-O2"
@@ -894,8 +904,12 @@ func (b *Builder) writeBuildConfig() error {
 	}
 	opt := b.Opt
 	if opt == "" {
-		opt = "-O2 (kernel) / -Oz (size-opt programs)"
+		opt = b.Target.Opt
 	}
+	if opt == "" {
+		opt = "-O2"
+	}
+	opt = opt + " (kernel) / -Oz (size-opt programs)"
 	cpus := b.Target.CPUs
 	if cpus == 0 {
 		cpus = 1
@@ -956,6 +970,15 @@ func (b *Builder) writeBuildConfig() error {
 	if b.Config != nil && len(b.Config.Features) > 0 {
 		featSrc += " + config:" + cfgName
 	}
+	// opt has three layers: TOS_OPT, the config, then the target's own
+	// choice (see Target.Opt).  The effective value is already in `opt`;
+	// this only records which layer supplied it.
+	optSrc := "built-in:-O2"
+	if b.Opt != "" {
+		optSrc = "config:" + cfgName
+	} else if b.Target.Opt != "" {
+		optSrc = targetSrc
+	}
 	prov := []string{
 		"",
 		"# provenance: the layer each effective value came from",
@@ -966,7 +989,7 @@ func (b *Builder) writeBuildConfig() error {
 		"#   heap        " + src(b.HeapBytes != 0, cfgName, targetSrc),
 		"#   max_procs   " + src(b.MaxProcs != 0, cfgName, targetSrc),
 		"#   kstack      " + src(b.KStack != 0, cfgName, targetSrc),
-		"#   opt         " + src(b.Opt != "", cfgName, targetSrc),
+		"#   opt         " + optSrc,
 		"#   check-grain " + boardSrc,
 		"#   check-stack " + boardSrc,
 		"#   check-guard " + boardSrc,
