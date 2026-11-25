@@ -685,23 +685,19 @@ static void usb_rxq_fill(void)
 #else
 #define USB_TX_CORES 1
 #endif
-/* Bytes buffered per core.  It has to hold one whole console burst written
- * between two pumps, and on this port the pump is the 1 kHz tick (no PendSV
- * like the RP2350).  This board also does not implement
- * plat_console_can_take(), so console_write_some() never returns a short
- * count here: the writer is not paced, the ring absorbs instead.
+/* Bytes buffered per core: one pump pass (the tick moves up to this much per
+ * millisecond).  The writer is paced, not the ring enlarged - board/rpi-pico
+ * implements plat_console_can_take(), so console_write_some() returns a short
+ * count when the ring is full and write_all() yields, exactly like the RP2350.
+ * Same size as that port and for the same reason: the ring is a cushion
+ * between two 1 ms pumps, not a place to park a file.  (It was 1536 for a
+ * while, sized to swallow `cat /readme.txt` un-paced - which only holds until
+ * the next file is bigger.)
  *
- * The number comes from the acceptance run, not from the fault dump: `cat
- * /readme.txt` is 1402 bytes and 1439 with the console's CRLF expansion, all
- * produced in a few milliseconds, so a 256-byte ring truncated it over CDC
- * while UART0 (controller-clocked, needs no pump) stayed complete.
- *
- * Fault and panic reports no longer come through this ring at all - the M0+
- * runs HardFault above every interrupt, so nothing could drain them while the
- * handler printed, and plat_console_mirror() now sends those reports to UART0
- * only (see board/rpi-pico/platform.c).  If the board ever gains a
- * plat_console_can_take() the ring can drop back to 256. */
-#define USB_TX_Q 1536
+ * Fault and panic reports do not come through here at all: the M0+ runs
+ * HardFault above every interrupt, so nothing could drain them while the
+ * handler printed; plat_console_mirror() sends those reports to UART0 only. */
+#define USB_TX_Q 256
 static volatile uint8_t  usb_txq[USB_TX_CORES][USB_TX_Q];
 static volatile uint16_t usb_txq_head[USB_TX_CORES], usb_txq_tail[USB_TX_CORES];
 

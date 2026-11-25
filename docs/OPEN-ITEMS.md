@@ -407,7 +407,9 @@ RV32 的 `drivers/usb/rp2350rv`（1 KiB 环、泵只在 CPU 0）用同一机制�
   不再镜像到 CDC"。理由就是上面这段：M0+ 的 HardFault 高于所有 IRQ，dump 期间
   USB 完成中断和 tick 泵都进不来，镜像只能收到半份报告。`scripts/rp2040/accept.py`
   在 CDC 控制台上把 `fault isolation` 记为 **skipped**（仍要求提示符返回、无 panic），
-  UART0 行保持严格检查。1536 B 的 CDC 环保留，但它不是这个问题的修法。
+  UART0 行保持严格检查。CDC 环回到 **256 B**，背压改由板级 `plat_console_can_take()`
+  提供（与 RP2350 同款：环满 → 短计数 → `write_all` 让出 → tick 泵）；按文件大小
+  定环不可持续。
   卡片：`docs/acceptance/2026-11-25-rp2040-fault-uart0.md`。
 
   **2026-11-25 定位更新（两个候选补丁均已撤回，修复未落地）**：在 ATK-DNRP2350AM ARM SMP

@@ -559,9 +559,29 @@ void plat_console_flush(void)
 
 int plat_console_tx_room(void)
 {
-    /* Only the UART paces the kernel.  Asking the CDC FIFO for room would
-     * deadlock the boot whenever no host is attached. */
+    /* Only the UART paces the kernel's echo.  Asking the CDC FIFO for room
+     * would deadlock the boot whenever no host is attached; the console
+     * write() path uses plat_console_can_take() below instead, which answers
+     * 1 when there is no host. */
     return (mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF) ? 0 : 16;
+}
+
+/* Same contract as board/rp2350-generic: the CDC mirror drops whatever does
+ * not fit its ring, so the console write() path has to come back short while
+ * it is full and let write_all() yield - which is what gives the 1 kHz tick a
+ * chance to pump the ring.  Sizing the ring to fit "one file" instead is not a
+ * design: the next file is larger.  Only once the host has configured the
+ * port: before that putc() drops anyway and the ring is not a sink whose room
+ * means anything.  console_write_some() bounds how long a caller may keep
+ * waiting on a host that never drains, so this stays a pure "is there room
+ * right now" answer. */
+int plat_console_can_take(int need)
+{
+    /* usb_cdc_configured() already means "hardware ready and the host has
+     * mounted us" (g_hw_ready && tud_mounted in the driver). */
+    if (usb_cdc_configured() && usb_cdc_tx_room() < need)
+        return 0;
+    return 1;
 }
 
 int plat_console_getchar(void)
