@@ -200,6 +200,22 @@ soak 2/2；`configs/rv32-kthreads.conf` 与 `configs/arm-kthreads.conf` 上
 `kthreadtest` 全过（200 次循环堆不增长、472/405 次兄弟切换 0 次重编程）、
 `threadbench` 正常；`configs/rpi-pico2-rv32-usbpump.conf` 仍可构建。
 
+## 2h. SMP：sbrk() 的读改写必须原子（2026-11-25）
+
+- 新用例（`kthreadtest`）：4 个线程各 400 次 `sbrk(16)`，比较最终 brk 与返回偏移
+  之和（每次成功调用应返回 0,16,32,... 的一个唯一值）。修之前 rv32smp 上三次运行
+  得到 **25,200 / 25,088 / 25,264 字节**（应为 25,600），偏移和也偏小——两个 CPU
+  同时进 `process_sbrk()`，读到同一个 `brk`，一块内存被发了两次。
+- 修法：读-判-写放进 `group_lock(current)`。这是系统调用上下文，中断已屏蔽，所以
+  用和 fd 表一样的普通自旋锁，不是 irqsave 对。`apply_protection()` 放在锁外：它读
+  的是组**当前**的 `brk`，兄弟把 break 推得更远只会让本 CPU 的区域变大。
+- 用例本身也修了 SMP 上的两个假设：yielder 从 2 个改成 4 个（2 个时两颗核各跑一个，
+  切换数会掉到个位数）；“保护重编程 0 次”放宽到 ≤2 次，因为另一颗核可能带着一份
+  sbrk 之前的缓存，重编程一次是正确的。
+- 验证：rv32、rv32smp、arm 三个 kthreads 配置各跑 10 次 `kthreadtest`，全部
+  `all ok`；rv32smp 每次都是 25,600 字节 / 偏移和 1,279,200；soak rv32+arm
+  **10 轮** 2/2。
+
 ## 3. 不进 main 的理由
 
 - S2 保持"**槽死即窗口释放**"不变：资源块和槽同生命周期，按槽索引，领槽即清。

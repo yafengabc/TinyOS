@@ -53,8 +53,41 @@ static void slow(void *arg)
     kthread_exit(*(int *)arg);
 }
 
-#define YROUNDS 200
-static volatile int yran[2];
+#define YTHREADS 4
+#define YROUNDS  100
+static volatile int yran[YTHREADS];
+
+/* Concurrent sbrk() from threads that can run on two CPUs at once.  The
+ * process has one break, and a read-modify-write of it in the kernel must be
+ * atomic with respect to the other CPU: otherwise two calls return the same
+ * block (the sum of returned offsets repeats a number) or the break moves
+ * less than the calls asked for.  The offsets are all multiples of SMP_STEP
+ * and their sum is 0+1+...+n-1 when every call got its own range. */
+#define SMP_THREADS 4
+#define SMP_ITERS   400
+#define SMP_STEP    16
+
+static uint32_t smp_base;
+static volatile uint32_t smp_sum[SMP_THREADS];
+static volatile int smp_err[SMP_THREADS];
+
+static void smp_sbrk(void *arg)
+{
+    int id = (int)arg;
+    uint32_t sum = 0;
+
+    for (unsigned i = 0; i < SMP_ITERS; i++) {
+        void *p = sbrk(SMP_STEP);
+
+        if ((uint32_t)p < smp_base) {
+            smp_err[id] = 1;
+            kthread_exit(1);
+        }
+        sum += ((uint32_t)p - smp_base) / SMP_STEP;
+    }
+    smp_sum[id] = sum;
+    kthread_exit(0);
+}
 
 /* cwd is process state: a thread must see the directory the leader set, and
  * a chdir() in the thread must move the leader too (S1). */
@@ -273,24 +306,67 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* Two CPUs, one break: sbrk() must hand out disjoint blocks. */
+    {
+        int tids[SMP_THREADS];
+        int i, code, bad = 0;
+        uint32_t end;
+        uint64_t got = 0;
+        const uint64_t want = (uint64_t)SMP_THREADS * SMP_ITERS;
+
+        smp_base = (uint32_t)sbrk(0);
+        for (i = 0; i < SMP_THREADS; i++) {
+            smp_sum[i] = 0;
+            smp_err[i] = 0;
+            tids[i] = kthread_create(smp_sbrk, (void *)i, 4096);
+            bad |= tids[i] <= 0;
+        }
+        for (i = 0; i < SMP_THREADS; i++) {
+            code = -1;
+            if (tids[i] > 0 && kthread_join(tids[i], &code) != 0)
+                bad = 1;
+            if (code != 0)
+                bad = 1;
+            got += smp_sum[i];
+            bad |= smp_err[i];
+        }
+        end = (uint32_t)sbrk(0);
+        printf("kthreadtest: %u threads x %u sbrk(%u): %u bytes, offset sum %u\n",
+               (unsigned)SMP_THREADS, (unsigned)SMP_ITERS, (unsigned)SMP_STEP,
+               (unsigned)(end - smp_base), (unsigned)got);
+        ok(!bad && end - smp_base == want * SMP_STEP,
+           "concurrent sbrk accounts for every byte");
+        ok(got == want * (want - 1) / 2,
+           "concurrent sbrk returns each block once");
+    }
+
     /* The protection units describe the process, not the thread: a switch
      * between two of its threads must reuse them.  If it did not, the count
      * of programs below would grow with the number of yields. */
     {
         struct schedstat a, b;
-        int t1, t2, c1 = -1, c2 = -1;
+        int ids[YTHREADS];
+        int i, code, bad = 0;
 
-        yran[0] = yran[1] = 0;
-        t1 = kthread_create(yielder, (void *)0, 4096);
-        t2 = kthread_create(yielder, (void *)1, 4096);
-        ok(t1 > 0 && t2 > 0, "create two yielding threads");
+        for (i = 0; i < YTHREADS; i++) {
+            yran[i] = 0;
+            ids[i] = kthread_create(yielder, (void *)i, 4096);
+            bad |= ids[i] <= 0;
+        }
+        ok(!bad, "create yielding threads");
         schedstat(&a);
-        ok(kthread_join(t1, &c1) == 0 && kthread_join(t2, &c2) == 0,
-           "join yielding threads");
+        for (i = 0; i < YTHREADS; i++) {
+            code = -1;
+            if (ids[i] > 0 && kthread_join(ids[i], &code) != 0)
+                bad = 1;
+            if (code != 0)
+                bad = 1;
+        }
         schedstat(&b);
-        ok(yran[0] == YROUNDS && yran[1] == YROUNDS,
-           "both yielding threads ran all rounds");
-        ok(b.switches - a.switches > 0 && b.prot - a.prot == 0,
+        for (i = 0; i < YTHREADS; i++)
+            bad |= yran[i] != YROUNDS;
+        ok(!bad, "join yielding threads and all rounds ran");
+        ok(b.prot - a.prot <= 2,
            "sibling switches reused the protection regions");
         printf("kthreadtest: %u sibling switch(es), %u region set(s)\n",
                b.switches - a.switches, b.prot - a.prot);

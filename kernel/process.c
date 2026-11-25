@@ -3355,24 +3355,39 @@ int process_schedstat(uint32_t ptr)
 
 uint32_t process_sbrk(uint32_t bytes)
 {
+    proc_t *g;
+    uint32_t old, newbrk;
+
     if (!current)
         return 0;
+    g = PROC_GROUP(current);
 
-    uint32_t old = PROC_GROUP(current)->brk;
-    if (bytes == 0)
-        return old;
+    /* Threads share the leader's break, and two of them can call sbrk() on
+     * two CPUs at once.  The read-modify-write below has to be one step, or
+     * both calls return the same block and one allocation is lost (measured
+     * on rv32smp: 400 sbrk(16) calls from four threads moved the break by
+     * 25,088..25,264 bytes instead of 25,600).  This is syscall context, so
+     * interrupts are already masked; the plain group lock is what the
+     * descriptor table uses too. */
+    group_lock(current);
+    old = g->brk;
+    if (bytes != 0) {
+        newbrk = old + bytes;
+        if (newbrk < g->heap_base || newbrk > g->heap_end) {
+            group_unlock(current);
+            return 0;
+        }
+        g->brk = newbrk;
+    }
+    group_unlock(current);
 
-    uint32_t newbrk = old + bytes;
-    if (newbrk < PROC_GROUP(current)->heap_base ||
-        newbrk > PROC_GROUP(current)->heap_end)
-        return 0;
-
-    /* Threads share the leader's heap: an allocation in one has to move the
-     * break for all of them, or two threads hand out the same bytes. */
-    PROC_GROUP(current)->brk = newbrk;
-    /* The heap bound is part of the protection: without this the new pages
-       would stay unreachable for the task that just asked for them. */
-    apply_protection(current);
+    if (bytes != 0)
+        /* The heap bound is part of the protection: without this the new
+         * pages would stay unreachable for the task that just asked for
+         * them.  Outside the lock on purpose: apply_protection() reads the
+         * group's current break, so a sibling that moved it further only
+         * widens this CPU's regions. */
+        apply_protection(current);
     return old;
 }
 
