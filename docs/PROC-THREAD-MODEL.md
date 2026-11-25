@@ -24,12 +24,14 @@
 
 ```c
 struct proc {                        /* EPROC：资源 + 进程身份 */
+    uint8_t  state;                  /* 0=free 1=owned；E2-B2 换成状态机 */
     int      pid;                    /* 进程 id；线程的 tgid 由它派生   */
-    char     name[10];               /* 进程名，ps 的进程行             */
-    int      state;                  /* FREE/NEW/LIVE/DYING             */
+    char     name[12];               /* 进程名，ps 的进程行             */
     struct proc *parent;
+    struct thread *main;             /* 主线程；它退出后为 NULL          */
     int      exit_code;              /* wait() 拿到的退出码             */
-    int      live_threads;           /* 还有多少线程没退出              */
+    uint16_t live_threads;           /* 还有多少工作线程没退出           */
+    int      stop_pending;           /* SIGSTOP：停整个进程              */
     spin_t   glock;                  /* brk + fd 表                     */
 
     /* 地址空间与堆 */
@@ -43,17 +45,13 @@ struct proc {                        /* EPROC：资源 + 进程身份 */
     /* 子进程/退出码记忆；等待目标在每个等待线程上 */
     int      lag_pid[LAG_MAX], lag_code[LAG_MAX];
     uint8_t  lag_n;
-
-    /* 进程级停止：stop/cont 作用于全部线程，避免半停 */
-    int      stop_pending;
 };
 
 struct thread {                      /* ETHREAD：调度 */
     struct proc *proc;               /* NULL = 内核线程                 */
     int      tid;                    /* 调度 id                          */
     int      state;                  /* 见 §2.2                         */
-    int      prio, home_cpu, cpu;
-    uint8_t  is_main;                /* 进程的主线程                    */
+    int      prio, home_cpu, cpu;    /* 主线程由 proc->main 指出        */
 
     regs_t   saved;                  /* trap 帧 / 初始帧                 */
     regs_t  *kframe;
@@ -83,7 +81,8 @@ struct thread {                      /* ETHREAD：调度 */
 | 归属 | 内容 |
 |---|---|
 | 进程 | 窗口/堆/brk、fds、cwd、父进程、子进程/退出码记忆、live_threads、glock、name、stop |
-| 线程 | 帧、栈、state、prio/cpu/统计、等待对象、mutex、kill、exit_code、is_main |
+| 线程 | 帧、栈、state、prio/cpu/统计、等待对象、mutex、kill、exit_code |
+| 主线程 | `proc->main` 指向它；`thread_is_main(t)` 即 `t->proc->main == t`，未在主线程上留标志位（切换路径要 O(1) 找到主线程的栈边界） |
 | 派生 | `current` 是 `thread *`；`current_proc = current->proc`；内核线程为 NULL |
 | 不复制 | 线程不再有 heap/brk/cwd/fds 的拷贝；所有访问走 `t->proc` |
 | 一次性的 | `entry`、初始 `user_esp` 只在 `process_exec()` 构造初始帧时用，属于局部变量，**不进 proc** |
@@ -104,7 +103,7 @@ struct thread {                      /* ETHREAD：调度 */
 1. **调度只认线程**：`sched_pick()` 遍历 `threads[]`；`proc` 不进运行队列。
 2. **进程存活 = 至少一个线程**：主线程 + 其它线程；最后一个线程退出时才回收
    窗口、fd 表、cwd 和 `proc` 槽。
-3. **主线程退出 = 进程退出**：`t->is_main` 退出，其余线程被终止（现有
+3. **主线程退出 = 进程退出**：`proc->main` 退出，其余线程被终止（现有
    `begin_group_exit` 语义），最后一个线程做清理。
 4. **保护按进程**：`apply_protection()` 的 key 是进程的窗口形状（S3a）；内核线程
    不编程。切线程不切组就跳过。
@@ -145,7 +144,7 @@ struct thread {                      /* ETHREAD：调度 */
 应当 `join` 它们，或让主线程等到最后；如果将来确实需要 `pthread_exit` 式语义，
 再加一个显式的 `thread_exit_main_keep()`（单独设计、单独测试），**不作为默认**。
 
-实现落点（E2）：`t->is_main` 退出 → `proc->state = DYING`，其余线程置
+实现落点（E2）：`proc->main` 退出 → `proc->state = DYING`，其余线程置
 `kill_pending` 并唤醒；最后一个线程在 `thread_retire` 里释放窗口/fd/`proc`。
 内核线程没有 `proc`，退出直接回收，不参与这条。
 
@@ -253,7 +252,8 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | **E1b-1** ✅ `948d5b6` | 拆 `procs[]`/`threads[]`；`t->proc`、`PROC_RES`/`PFD` 改指针；`current`/`cpu_take_task` 改线程；exec 分配 proc+主线程、线程共享 proc、ktask `proc == NULL` 并补齐空指针分支；退休只由主线程释放 proc | T0/T1/T2、kthreadtest ×3、ktest UP/SMP、C3 真机 |
 | **E1b-2** ✅ `fd16196` | 身份（pid/name/parent/exit/live/stop/lag）搬到 `proc`；wait 交给真正等待的线程；SIGSTOP/SIGCONT 作用于整个进程；内核线程名进栈池；ps 打进程 id + 进程名（tid 列留给 E2） | T0/T1/T2、kthreadtest ×3、ktest UP/SMP、C3 真机 |
 | **E2-A** ✅ `9f41f18` | ps 加 `tid` 列（每行一个线程）；新增 `/proc/threads` 机器视图；`emutest`/`accept33` 解析同步 | T0/T1/T2、C3 真机 |
-| **E2-B** | 生命周期收口：`proc->state`（FREE/NEW/LIVE/DYING）、信号归属（kill 落到进程）、删掉线程槽里的残留（`leader`→`is_main`、`wait_pid` 拆 `join_tid`/`wait_child`、`is_ktask` 与 `proc == NULL` 合并） | 同上 + 现有 ps 解析脚本 |
+| **E2-B1** ✅ `f6949ab` | 线程槽只留线程自己的东西：`wait_pid` 拆 `wait_child`/`join_tid`、`leader` → `proc->main`、`is_ktask` 删除（`proc == NULL` 就是内核线程） | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
+| **E2-B2** | `proc->state`（FREE/NEW/LIVE/DYING）状态机与信号归属（kill 落到进程） | 同上 + 现有 ps 解析脚本 |
 | **E3** | ARM 内核线程（#58）+ USB 泵迁移 | M3 QEMU + M33/RP2040 板测 |
 | **E4** | 全端口矩阵：rv32/rv32smp、C3、M3/M33、RP2040、x86；删旧模型残留 | 全 T3 + 板卡 |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
