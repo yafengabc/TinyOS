@@ -24,7 +24,7 @@
 
 ```c
 struct proc {                        /* EPROC：资源 + 进程身份 */
-    uint8_t  state;                  /* 0=free 1=owned；E2-B2 换成状态机 */
+    uint8_t  state;                  /* FREE/NEW/LIVE/DYING（§2.2）      */
     int      pid;                    /* 进程 id；线程的 tgid 由它派生   */
     char     name[12];               /* 进程名，ps 的进程行             */
     struct proc *parent;
@@ -253,7 +253,7 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | **E1b-2** ✅ `fd16196` | 身份（pid/name/parent/exit/live/stop/lag）搬到 `proc`；wait 交给真正等待的线程；SIGSTOP/SIGCONT 作用于整个进程；内核线程名进栈池；ps 打进程 id + 进程名（tid 列留给 E2） | T0/T1/T2、kthreadtest ×3、ktest UP/SMP、C3 真机 |
 | **E2-A** ✅ `9f41f18` | ps 加 `tid` 列（每行一个线程）；新增 `/proc/threads` 机器视图；`emutest`/`accept33` 解析同步 | T0/T1/T2、C3 真机 |
 | **E2-B1** ✅ `f6949ab` | 线程槽只留线程自己的东西：`wait_pid` 拆 `wait_child`/`join_tid`、`leader` → `proc->main`、`is_ktask` 删除（`proc == NULL` 就是内核线程） | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
-| **E2-B2** | `proc->state`（FREE/NEW/LIVE/DYING）状态机与信号归属（kill 落到进程） | 同上 + 现有 ps 解析脚本 |
+| **E2-B2** ✅ `35f0118` | `proc->state`（FREE/NEW/LIVE/DYING）状态机 + KASSERT；ps//proc/threads 跳过 NEW；kthreadtest 新增“线程表满时 exec 失败不漏进程条目”与“表清空后 exec 恢复”两条 | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
 | **E3** | ARM 内核线程（#58）+ USB 泵迁移 | M3 QEMU + M33/RP2040 板测 |
 | **E4** | 全端口矩阵：rv32/rv32smp、C3、M3/M33、RP2040、x86；删旧模型残留 | 全 T3 + 板卡 |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
