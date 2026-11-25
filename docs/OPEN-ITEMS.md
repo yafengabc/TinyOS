@@ -879,3 +879,16 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 ① 把 x86 的 `ramdisk_sectors` 从 600 提到 800（+100 KiB，PC 上不心疼）；
 ② 或从 x86 的默认程序表里去掉 `coremark`/`pio` 之类的大件；
 ③ 或先只记录，等下次动 x86 时一起处理。
+
+## 18. exp/thread-sched：rv32 QEMU 上 `threadbench` 挂起（2026-11-25，pre-existing）
+
+在 `exp/thread-sched` 上用临时的 `kthreads = true` 配置构建 `rv32`，`threadbench`
+在 QEMU 上没有任何输出、也不返回提示符（等 22 s）；同一镜像里 `hello`、`kthreadtest`
+正常，`kthreadtest` 的 488 次兄弟切换/0 次保护重编程也通过。用 **2ec7d57（S1）**
+的 worktree 跑同一配置，`threadbench` 同样挂起，所以不是 S3a 引入的。
+
+- 影响：只有这个基准程序在 rv32 QEMU 上；ARM QEMU（`configs/arm-kthreads.conf`）上
+  `threadbench` 正常，`kthreadtest` 在 rv32/arm 都正常。
+- 没做的事：没有 bisect，也没在真机上复现；C3 kthreads 镜像需要板。
+- 处理方向：先用 `-d int`/`gdb` 看是卡在 `sched_pick` 还是用户循环；如果只是 TCG 太慢，
+  把 `ITERS` 调小或加一个 `threadbench small` 入口。

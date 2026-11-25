@@ -1,6 +1,7 @@
 # 线程调度实验（分支 `exp/thread-sched`）
 
-> 状态：**实验分支**，不进 main。S0–S2 已完成（测量、资源接缝、资源块）。
+> 状态：**实验分支**，不进 main。S0–S2、S3a 已完成（测量、资源接缝、资源块、
+> 按组重编程保护）；S3b 起是把线程栈也纳入边界。
 > 目标不是"把 ktask 的栈改小"，而是**调度单位换成线程、进程只管资源**。
 
 ## 0. 为什么开这个分支
@@ -45,7 +46,9 @@ C3（`esp32c3-generic`，`max_procs = 8`，rv32，`-Oz`，`TOS_KEEP_SYMS=1` 后�
 | **S0** ✅ | ktask 栈 paint + 高水位；`/proc/ktask`（槽、已用、高水位）；`KTASK_STACK_BYTES` 可覆盖 | 无 | T0/T1；QEMU `cat /proc/ktask` |
 | **S1** ✅ | **资源接缝**：`PROC_OF(p)` 定义 + `cwd` 改走它；`ps` 的 `wink`、栈增长消息改读组的字段 | `chdir` 变成组级（修 bug） | T0/T1/T2；两个 kthreads 配置构建 |
 | **S2** ✅ | **资源块**：`fds`+`cwd` 迁到 `proc_res[]`（按组长槽索引）；`PROC_RES(p)`；领槽时清块；线程不再拷贝 cwd | 无（cwd 语义 S1 已修） | T0/T1/T2；`kthreadtest` 的 fd 共享项；`free`/`ps` |
-| **S3** | **按线程调度**：run queue/优先级/quantum 以线程为单位；切组时才重编程保护（`plat_board_task_protect(PROC_OF(next))`）；`ps` 两级显示 | 语义明确化 | 全 T3 矩阵（含 `*-kthreads`） |
+| **S3a** ✅ | **保护按组重编程**：`cpu_t.prot` 缓存窗口的 6 个输入，相同就跳过 `plat_task_protect()`；`schedstat.prot` 计量。调度本来就是按槽（每个线程一个槽、自己的 prio/quantum），这次只是把"切谁才要重编程"写清楚 | 无 | T0/T1/T2；kthreads QEMU 的兄弟切换 0 次重编程 |
+| **S3b** | **线程栈边界**：`SYS_THREAD_CREATE` 传 `stack_size`，线程槽记录自己的栈范围；线程栈溢出只能被杀（内存来自用户堆，不能像进程栈那样向空洞里长）；`ps` 的 `stk/sz` 分母对线程生效 | 线程栈有了边界与统计 | T0/T1/T2 + T3 |
+| **S3c** | `ps` 两级显示 | 显示 | 暂缓：列格式被 `cmd/tostest/emutest.go` 与 `scripts/rp2350/accept33.py` 解析，且 `ppid` 已经指向组长 |
 | **S4** | **第一个真实客户：USB 泵做成 ktask**（先在 RV32 上，ktask 机制只在那里） | 去掉 PendSV/短写协议 | `cat 21 KB`、`ls /bin`、`crash`、`heartbeat`、`smpbench`、tick 精度 |
 | **S5** | 可选：两个表（EPROC/ETHREAD）+ `fork` 语义 | 新功能 | 需新测试 |
 
@@ -91,6 +94,31 @@ S4 的三条硬要求：泵线程优先级高于用户任务（否则 #46 回归
 rv32/arm QEMU smoke PASS；`pwd`/`cd`/`ls` 会话 PASS；`configs/arm-kthreads.conf` 的
 `threadbench` + `kthreadtest` PASS（14 槽耗尽后重新创建、leader 打开的 fd 由线程读取、
 leader 关闭后线程看到关闭）；soak rv32+arm 2/2。
+
+## 2d. S3a 实际做了什么（2026-11-25）
+
+- 先确认：调度单位**本来就是线程**——每个线程是一个 `proc_t` 槽，有自己的 `saved`、
+  `state`、`prio`、`cpu`、`quantum`，`sched_pick()` 按优先级和 `rr` 在槽之间轮转。
+  S3 原来写的"run queue/优先级/quantum 以线程为单位"不需要改结构。
+- 缺的是"切组才重编程保护"：`sched_switch()` 原来每次切换都调
+  `apply_protection(next)`，同一进程的两个线程之间也重写 MPU/PMP。现在 `cpu_t.prot`
+  保存**窗口的 6 个输入**（`win_base/win_size/wx_start/brk/stack_top/stack_size`），
+  与当前组的这 6 个值相同就跳过。
+  - 用输入本身而不是"组指针 + 代数"：槽被回收再分配时，只要窗口形状真的相同，
+    跳过就是正确的；不同则一定重写。也顺带覆盖了 `sbrk`/栈增长后另一端 CPU 的
+    缓存失效——下一次切换看到的 `brk` 已经不同。
+  - 每 CPU 一份：MPU/PMP/页表都是每 CPU 的，两个线程可以同时在两个核上跑。
+- `struct schedstat` 加 `prot`（实际编程次数），`threadbench` 每阶段打印 `prot=`。
+  `kthreadtest` 新增"两个线程互相 `yield()`"用例：**488 次兄弟切换、0 次重编程**
+  （rv32 PMP）和 **403 次切换、0 次重编程**（arm MPU）。
+- `ps` 两级显示**暂缓**：列格式被 `cmd/tostest/emutest.go` 和
+  `scripts/rp2350/accept33.py` 解析，而 `ppid` 列已经指向组长，线程名 `thrN` 也能认；
+  改格式的收益小于改测试面的成本。放进 S3c。
+
+验证：T0 PASS；`tos build all` 17/18（x86 §17）；rv32/arm QEMU smoke PASS；
+`configs/arm-kthreads.conf` 与临时 rv32 kthreads 配置上 `kthreadtest` PASS、兄弟切换
+0 次重编程；soak rv32+arm 2/2。rv32 QEMU 上 `threadbench` 挂起是 **pre-existing**
+（2ec7d57 的 worktree 同样挂），记在 `docs/OPEN-ITEMS.md` §18。
 
 ## 3. 不进 main 的理由
 

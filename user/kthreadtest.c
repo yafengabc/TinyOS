@@ -52,6 +52,22 @@ static void slow(void *arg)
     kthread_exit(*(int *)arg);
 }
 
+static volatile int yran;
+
+/* Two threads of one process taking turns: every yield is a real switch, but
+ * the window belongs to the process, so the kernel must not program the
+ * protection unit again for each one. */
+static void yielder(void *arg)
+{
+    int n = *(int *)arg;
+
+    for (int i = 0; i < n; i++) {
+        yield();
+        yran++;
+    }
+    kthread_exit(0);
+}
+
 static volatile int fd_read_result = -2;
 
 static void fduser(void *arg)
@@ -165,6 +181,28 @@ int main(int argc, char *argv[])
         ok(kthread_join(tid, &code) == 0, "join the fd thread");
         ok(fd_read_result == -1, "leader close() closed it for the thread");
         (void)junk;
+    }
+
+    /* The protection units describe the process, not the thread: a switch
+     * between two of its threads must reuse them.  If it did not, the count
+     * of programs below would grow with the number of yields. */
+    {
+        struct schedstat a, b;
+        int n = 200, t1, t2, c1 = -1, c2 = -1;
+
+        yran = 0;
+        t1 = kthread_create(yielder, &n, 4096);
+        t2 = kthread_create(yielder, &n, 4096);
+        ok(t1 > 0 && t2 > 0, "create two yielding threads");
+        schedstat(&a);
+        ok(kthread_join(t1, &c1) == 0 && kthread_join(t2, &c2) == 0,
+           "join yielding threads");
+        schedstat(&b);
+        ok(yran == 2 * n, "both yielding threads ran all rounds");
+        ok(b.switches - a.switches > 0 && b.prot - a.prot == 0,
+           "sibling switches reused the protection regions");
+        printf("kthreadtest: %u sibling switch(es), %u region set(s)\n",
+               b.switches - a.switches, b.prot - a.prot);
     }
 
     printf("kthreadtest: %s (%d failure(s))\n",

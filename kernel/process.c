@@ -759,17 +759,31 @@ static void begin_group_exit_locked(proc_t *leader, int code);
 static volatile uint32_t sched_switches;  /* picked a different task */
 static volatile uint32_t sched_self;      /* scheduler ran, same task   */
 static volatile uint32_t sched_ticks;     /* timer ticks seen           */
+static volatile uint32_t sched_prot;      /* protection units programmed */
 #endif
 
 static void apply_protection(proc_t *p)
 {
     proc_t *g = PROC_GROUP(p);
+    cpu_t *c = cpu_self();
     plat_seg_t segs[PLAT_SEG_MAX];
     uint32_t win_base = g->win_base;
     uint32_t win_end = win_base + g->win_size;
     uint32_t stack_low = g->stack_top - g->stack_size;
     uint32_t brk = g->brk;
     int n = 0;
+
+    /* The regions describe the process, not the thread: two threads of one
+     * group have the same window, break and stack, so a switch between them
+     * has nothing to program.  The comparison is over the inputs themselves,
+     * so a moved break or a grown stack is still programmed; see cpu_t.prot
+     * for why that is stronger than a generation counter. */
+    if (c->prot_valid &&
+        c->prot.win_base == win_base && c->prot.win_size == g->win_size &&
+        c->prot.wx_start == g->wx_start && c->prot.brk == brk &&
+        c->prot.stack_top == g->stack_top &&
+        c->prot.stack_size == g->stack_size)
+        return;
 
     /* Three pieces, in address order, and any of them may be empty.  The gap
      * between the break and stack_low is left out on purpose - it is the hole
@@ -797,6 +811,17 @@ static void apply_protection(proc_t *p)
     }
 
     plat_task_protect(segs, n);
+
+    c->prot.win_base = win_base;
+    c->prot.win_size = g->win_size;
+    c->prot.wx_start = g->wx_start;
+    c->prot.brk = brk;
+    c->prot.stack_top = g->stack_top;
+    c->prot.stack_size = g->stack_size;
+    c->prot_valid = 1;
+#ifdef TOS_KTHREADS
+    sched_prot++;
+#endif
 }
 
 /* Save the outgoing frame and return the frame to resume.  Callers hold the
@@ -3257,13 +3282,14 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
 #ifdef TOS_KTHREADS
 int process_schedstat(uint32_t ptr)
 {
-    struct { uint32_t sw, self, ticks; } st;
+    struct { uint32_t sw, self, ticks, prot; } st;
 
     if (!process_user_ok(ptr, sizeof(st)))
         return -1;
     st.sw = sched_switches;
     st.self = sched_self;
     st.ticks = sched_ticks;
+    st.prot = sched_prot;
     memcpy((void *)ptr, &st, sizeof(st));
     return 0;
 }

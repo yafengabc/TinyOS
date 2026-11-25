@@ -76,6 +76,19 @@ typedef struct cpu {
     int      quantum;          /* ticks left in this CPU's slice   */
     volatile int need_resched; /* get off this task at the next exit */
     int      rr;               /* round-robin cursor for this CPU  */
+
+    /* The window shape this CPU has programmed into its protection unit.
+     * Applying a window is idempotent, and a switch between two threads of
+     * one process changes none of these six inputs, so comparing them is
+     * enough to skip the MPU/PMP write.  Comparing the inputs themselves -
+     * rather than a "programmed process" pointer plus a generation - also
+     * makes a reused table slot harmless: equal values mean equal regions,
+     * and anything else programs again.  Per CPU because the MPU, PMP and
+     * page tables are per CPU, and threads of one process may run on two. */
+    struct {
+        uint32_t win_base, win_size, wx_start, brk, stack_top, stack_size;
+    } prot;
+    int      prot_valid;       /* prot holds something this CPU programmed */
 } cpu_t;
 
 extern cpu_t cpus[MAX_CPUS];

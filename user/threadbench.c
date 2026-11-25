@@ -50,6 +50,7 @@ static void diff_stats(const struct schedstat *a, const struct schedstat *b,
     d->switches = b->switches - a->switches;
     d->self     = b->self - a->self;
     d->ticks    = b->ticks - a->ticks;
+    d->prot     = b->prot - a->prot;
 }
 
 static unsigned run_threads(int nthreads, unsigned iters, struct schedstat *d)
@@ -121,15 +122,15 @@ int main(void)
         ms_inline = t1 - t0;
     }
 
-    printf("threadbench: %u threads x %u: %u ms  sw=%u self=%u tick=%u\n",
+    printf("threadbench: %u threads x %u: %u ms  sw=%u self=%u tick=%u prot=%u\n",
            (unsigned)NTHR, ITERS, ms_threads,
-           dthreads.switches, dthreads.self, dthreads.ticks);
-    printf("threadbench: 1 thread  x %u: %u ms  sw=%u self=%u tick=%u\n",
+           dthreads.switches, dthreads.self, dthreads.ticks, dthreads.prot);
+    printf("threadbench: 1 thread  x %u: %u ms  sw=%u self=%u tick=%u prot=%u\n",
            ITERS * NTHR, ms_single,
-           dsingle.switches, dsingle.self, dsingle.ticks);
-    printf("threadbench: inline    x %u: %u ms  sw=%u self=%u tick=%u\n",
+           dsingle.switches, dsingle.self, dsingle.ticks, dsingle.prot);
+    printf("threadbench: inline    x %u: %u ms  sw=%u self=%u tick=%u prot=%u\n",
            ITERS * NTHR, ms_inline,
-           dinline.switches, dinline.self, dinline.ticks);
+           dinline.switches, dinline.self, dinline.ticks, dinline.prot);
     printf("threadbench: ratio %u%% (100%% = no overhead)\n",
            ms_inline ? (ms_threads * 100u + ms_inline / 2u) / ms_inline : 0);
 

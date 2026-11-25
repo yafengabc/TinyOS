@@ -309,8 +309,10 @@ int  wait(int pid);
 int  yield(void);
 int  ps(void);
 /* Scheduler counters, for benchmarks: one field each for "switched to
- * another task", "scheduler ran but kept the same task", and timer ticks. */
-struct schedstat { unsigned switches, self, ticks; };
+ * another task", "scheduler ran but kept the same task", timer ticks, and
+ * protection units actually programmed (a switch between two threads of one
+ * process reuses the regions, so this stays well below `switches`). */
+struct schedstat { unsigned switches, self, ticks, prot; };
 int  schedstat(struct schedstat *st);
 /* 0 = highest, 2 = lowest; pid 0 means yourself.  A task cannot climb
  * above its own level, so a program cannot starve the shell. */
