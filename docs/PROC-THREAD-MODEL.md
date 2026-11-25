@@ -1,4 +1,5 @@
 # 进程-线程模型（替换旧任务模型）
+> 讨论：issue #57（https://github.com/yafengabc/TinyOS/issues/57）。
 
 > 分支：`exp/thread-sched`。状态：**E0 设计 + 基线**。
 > 旧模型（一个 `proc_t` 同时装资源与调度）**废弃**，不再保留第二套路径。
