@@ -5,6 +5,11 @@
  *                        overflow inside a thread, sibling switches
  *   kthreadtest leave    exit the leader while a thread is still running;
  *                        the kernel must retire the group (run `ps` after)
+ *   kthreadtest pipes        exit the leader while it holds a pipe whose
+ *                            reader is blocked (deadlock probe)
+ *   kthreadtest create-exit  exit the leader while a sibling creates (slot
+ *                            recycling probe)
+ *   kthreadtest double-join  two siblings join one tid (parking probe)
  *
  * Every check prints one line; the exit code is the number of failures.
  */
@@ -247,6 +252,165 @@ static void forever(void *arg)
         sleep(10);
 }
 
+/* --- probes for the thread-exit defects found in the E1/E2 review --------
+ *
+ * Each one is named explicitly instead of joining the default run, because
+ * until the kernel side is fixed the expected outcome is a deadlock or a
+ * leaked slot, which would take every later check down with it:
+ *
+ *   kthreadtest pipes        the leader exits while it still holds a pipe
+ *                            whose only reader is blocked.  Closing the
+ *                            descriptors needs proc_lock, and the exit path
+ *                            already holds it -> self deadlock, no prompt.
+ *                            A healthy kernel returns status 3.
+ *   kthreadtest create-exit  a sibling spins in create/join while the leader
+ *                            exits.  A thread created into a group that is
+ *                            already dying must not survive, and must never
+ *                            wake up owning some other process's slot.
+ *   kthreadtest double-join  two siblings join the same tid at once.  Only
+ *                            one may collect the code; the other has to be
+ *                            refused rather than parked forever.
+ */
+
+static void pipe_blocked(void *arg)
+{
+    int fd = *(int *)arg;
+    char b;
+
+    (void)read(fd, &b, 1);          /* sleeps on the empty pipe */
+    kthread_exit(0);
+}
+
+static int probe_pipes(void)
+{
+    int fds[2];
+    int tid;
+
+    if (pipe(fds) != 0) {
+        printf("kthreadtest: FAIL pipe()\n");
+        return 1;
+    }
+    tid = kthread_create(pipe_blocked, &fds[0], 4096);
+    if (tid <= 0) {
+        printf("kthreadtest: FAIL create the blocked reader\n");
+        return 1;
+    }
+    sleep(20);                      /* let it reach read() and block */
+    printf("kthreadtest pipes: leader exits holding %d/%d, reader %d asleep\n",
+           fds[0], fds[1], tid);
+    printf("kthreadtest pipes: expect status 3 and a prompt (no prompt = "
+           "deadlock)\n");
+    return 3;
+}
+
+static volatile int churn_go;
+static volatile int churn_bad;
+static volatile int churn_n;
+
+static void churn_born(void *arg)
+{
+    /* The window this closes: created into a group that is exiting, the
+     * new thread can be handed a proc slot that has already been recycled,
+     * and then reads some other program's pid. */
+    if (getpid() != *(int *)arg)
+        churn_bad = 3;
+    kthread_exit(0);
+}
+
+static void churn_worker(void *arg)
+{
+    int me = getpid();
+    int tid;
+
+    (void)arg;
+    while (churn_go) {
+        tid = kthread_create(churn_born, &me, 512);
+        if (tid <= 0)
+            break;                  /* slots gone: the end, not a defect */
+        if (kthread_join(tid, 0) != 0)
+            churn_bad = 1;
+        if (getpid() != me)
+            churn_bad = 2;          /* our own slot was recycled under us */
+        churn_n++;
+    }
+    kthread_exit(churn_bad);
+}
+
+static int probe_create_exit(void)
+{
+    int tid, i;
+
+    churn_go = 1;
+    tid = kthread_create(churn_worker, 0, 4096);
+    if (tid <= 0) {
+        printf("kthreadtest: FAIL create the churn thread\n");
+        return 1;
+    }
+    /* Exit only once the churn is hot, otherwise the leader leaves before
+     * the sibling ever runs and the overlap never happens.  200 create/join
+     * cycles is ~1 tick each way, so this is a few milliseconds at most. */
+    for (i = 0; i < 200 && churn_n < 200 && !churn_bad; i++)
+        sleep(1);
+    printf("kthreadtest create-exit: exit after %d cycle(s), sibling flagged %d\n",
+           churn_n, churn_bad);
+    return 4;
+}
+
+static volatile int dj_tid;
+static volatile int dj_first = -99;
+static volatile int dj_second = -99;
+
+static void dj_victim(void *arg)
+{
+    (void)arg;
+    sleep(50);
+    kthread_exit(42);
+}
+
+static void dj_joiner_first(void *arg)
+{
+    int code = -1;
+    int rc = kthread_join(dj_tid, &code);
+
+    (void)arg;
+    dj_first = rc == 0 ? code : rc;
+    kthread_exit(0);
+}
+
+static void dj_joiner_second(void *arg)
+{
+    (void)arg;
+    dj_second = kthread_join(dj_tid, 0);
+    kthread_exit(0);
+}
+
+static int probe_double_join(void)
+{
+    int t1, t2, i;
+
+    dj_tid = kthread_create(dj_victim, 0, 4096);
+    ok(dj_tid > 0, "create the thread both siblings will join");
+    t1 = kthread_create(dj_joiner_first, 0, 4096);
+    sleep(10);                      /* the first is parked before the second */
+    t2 = kthread_create(dj_joiner_second, 0, 4096);
+    if (t1 <= 0 || t2 <= 0) {
+        printf("kthreadtest: FAIL create the joiners\n");
+        return 1;
+    }
+    /* Bounded: a joiner left in ST_WAIT_THREAD never sets its slot, and a
+     * probe that waits forever cannot report what went wrong. */
+    for (i = 0; i < 100; i++) {
+        if (dj_first != -99 && dj_second != -99)
+            break;
+        sleep(10);
+    }
+    printf("kthreadtest: first joiner got %d, second got %d\n",
+           dj_first, dj_second);
+    ok(dj_first == 42, "first joiner collected the exit code");
+    ok(dj_second == -1, "second joiner refused instead of sleeping forever");
+    return fails;
+}
+
 int main(int argc, char *argv[])
 {
     int code, tid, n, i;
@@ -257,6 +421,12 @@ int main(int argc, char *argv[])
         printf("kthreadtest: leader exits, thread %d still alive\n", tid);
         return 0;
     }
+    if (argc > 1 && !strcmp(argv[1], "pipes"))
+        return probe_pipes();
+    if (argc > 1 && !strcmp(argv[1], "create-exit"))
+        return probe_create_exit();
+    if (argc > 1 && !strcmp(argv[1], "double-join"))
+        return probe_double_join();
 
     code = -1;
     tid = kthread_create(give42, 0, 4096);
