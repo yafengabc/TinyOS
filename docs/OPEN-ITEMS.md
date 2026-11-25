@@ -895,10 +895,8 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 
 ## 19. S4：USB 泵线程的 Pico 2 RV32 板测（2026-11-25，待跑）
 
-**先读 §21**：泵是 ktask，SMP 的 trap 标志问题修好前只能用单核镜像。下面的
-命令已按 UP 目标给出。
-
-代码在 `exp/thread-sched`（见 `docs/THREAD-MODEL.md` §2f）。镜像：
+§21 的每核 trap 状态已修，SMP 镜像可直接用。代码在 `exp/thread-sched`
+（见 `docs/THREAD-MODEL.md` §2f）。镜像：
 
 ```sh
 go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
@@ -985,7 +983,17 @@ release 屏障里写 0。`user/heap.c` 只在 `TOS_KTHREADS` 下取这把锁，�
 S4 的 USB 泵线程不经过用户堆，所以不阻塞板测；但 S5/合回 main 之前必须在这条上给出
 结论。
 
-## 21. ktask 的 trap 标志是全局的：SMP 上会串核（2026-11-25，blocker）
+## 21. ktask 的 trap 标志是全局的：SMP 上会串核（2026-11-25，**已解决**）
+
+**已解决（2026-11-25，本提交）**：`ktask_running` 变成每核的
+`ktask_cpu[MAX_CPUS]`，由 `mscratch` 指向（布局 0 = flag，4/8 = trap 入口的
+t1/t2 暂存），`process_ktask_trap_init()` 在 `plat_init()` 和每个次核启动时设置；
+`ktask_entry_sp` 也改成每核数组，start.S 的 bootstrap stub 用 mhartid 索引。
+trap 入口不再需要第二个 scratch 寄存器，也不需要 mhartid。
+
+回归：`configs/rv32smp-ktasktest.conf`（ktask 在 CPU 0、shell 在 CPU 1）启动正常，
+`[ktest] ktask ran 5 sleeps + yield, cpu_bad=0`，`/proc/ktask` 显示 `656/656 ktest`，
+不再 panic。泵镜像已切回 `rpi-pico2-rv32-smp`。下面是当时的分析，保留作记录。
 
 `kernel/process.c` 的 `ktask_running`/`ktask_entry_sp` 是全局变量；`arch/rv32/start.S`
 的 `TRAP_ENTRY` 用 `ktask_running` 决定“这个帧放哪个栈、要不要切内核栈”，因为
@@ -1018,4 +1026,5 @@ kernel stack out of bounds: sp=800ffd40
 2. 验收：`rv32smp` + ktask selftest 不再 panic；泵在 `rpi-pico2-rv32-smp` 上跑完
    §19 的全部项；UP 镜像不回归。
 
-在此之前，§19 的 Pico 2 泵测请用 UP 镜像 `build/tinyos-rpi-pico2-rv32.uf2`。
+SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
+`configs/rpi-pico2-rv32-usbpump.conf`（`rpi-pico2-rv32-smp`）。

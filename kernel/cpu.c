@@ -105,6 +105,11 @@ void cpu_init(void)
         cpus[i].rr = 0;
     }
     cpus[0].online = 1;
+#if defined(__riscv)
+    /* start.S finds this hart's ktask flag through mscratch; the boot CPU
+     * needs it before interrupts are enabled. */
+    process_ktask_trap_init();
+#endif
     __sync_synchronize();
     cpu_count = 1;
     __sync_synchronize();
@@ -161,6 +166,10 @@ void cpu_secondary_main(void)
     me->cur = 0;
     me->quantum = 0;
     me->online = 1;
+#if defined(__riscv)
+    /* mscratch is per hart and this one starts at zero. */
+    process_ktask_trap_init();
+#endif
     /* One writer, but readers on the boot CPU poll it and spin_lock()/
      * spin_unlock() use it as the SMP/UP gate.  A full barrier before and
      * after the increment makes the per-CPU slot writes visible before the

@@ -368,15 +368,51 @@ static uint32_t ms_per_tick;
 /* Trap entry cannot trust mstatus.MPP to tell it where it came from: mret
  * always writes MPP=U, so a kernel thread entered through a trap frame would
  * look like a user task on its *next* trap and the entry would switch to the
- * kernel stack while the frame is on the ktask stack.  This flag is set by
- * the scheduler whenever a kernel thread is current; start.S selects the
- * current-stack path from it, and trap_handler forces the saved frame's
- * MPP back to M before mret. */
-volatile int ktask_running;
-/* Set by the scheduler immediately before it returns a ktask's first frame;
- * the bootstrap stub in start.S reads it to get off the frame's stack and
- * onto the ktask's own stack before calling any C code. */
-volatile uint32_t ktask_entry_sp;
+ * kernel stack while the frame is on the ktask stack.
+ *
+ * The state is per hart.  A single global flag meant a ktask on core 0 made
+ * core 1's user trap take the kernel-stack path, which panicked with
+ * "kernel stack out of bounds" on rv32smp as soon as the ktask selftest ran.
+ * start.S reaches this through mscratch, so the layout is part of the trap
+ * contract: offset 0 = running, 4/8 = the entry's saved t1/t2.  The scheduler
+ * sets it; trap_handler asks this hart's flag and forces the saved frame's
+ * MPP back to M before mret.
+ *
+ * ktask_entry_sp stays an array indexed by mhartid: the bootstrap stub in
+ * start.S reads it to get off the frame's stack and onto the ktask's own
+ * stack, and each hart must see its own. */
+#if defined(__riscv)
+typedef struct {
+    volatile int running;       /* offset 0: read by TRAP_ENTRY        */
+    uint32_t t1_save;           /* offset 4: entry scratch             */
+    uint32_t t2_save;           /* offset 8                            */
+} ktask_cpu_t;
+
+static ktask_cpu_t ktask_cpu[MAX_CPUS];
+uint32_t ktask_entry_sp[MAX_CPUS];      /* start.S, indexed by mhartid   */
+
+void process_ktask_trap_init(void)
+{
+    int id = cpu_id();
+
+    __asm__ volatile("csrw mscratch, %0" :: "r"(&ktask_cpu[id]));
+}
+
+int process_ktask_running(void)
+{
+    return ktask_cpu[cpu_id()].running;
+}
+
+#define KTASK_SET_RUN(v)  (ktask_cpu[cpu_id()].running = (v))
+#define KTASK_SET_SP(v)   (ktask_entry_sp[cpu_id()] = (v))
+#else
+static int ktask_dummy_run;
+
+int process_ktask_running(void) { return 0; }
+void process_ktask_trap_init(void) { }
+#define KTASK_SET_RUN(v)  (ktask_dummy_run = (v))
+#define KTASK_SET_SP(v)   ((void)0)
+#endif
 
 /* Kernel-thread stacks.  Four slots of 6 KiB; see the layout comment in
  * board/esp32c3-generic/layout.c for the 160 KiB kernel-region budget.  The ktask
@@ -962,7 +998,7 @@ static regs_t *sched_switch(regs_t *r)
                 proc_set_state(prev, ST_RUNNING);
                 prev->cpu = cpu_id();
                 current = prev;
-                ktask_running = prev->is_ktask ? 1 : 0;
+                KTASK_SET_RUN(prev->is_ktask ? 1 : 0);
                 quantum = QUANTUM;
                 spin_unlock(&proc_lock);
                 apply_protection(prev);
@@ -983,7 +1019,7 @@ static regs_t *sched_switch(regs_t *r)
             proc_set_state(next, ST_RUNNING);
             next->cpu = cpu_id();
             current = next;
-            ktask_running = next->is_ktask ? 1 : 0;
+            KTASK_SET_RUN(next->is_ktask ? 1 : 0);
             quantum = QUANTUM;
             spin_unlock(&proc_lock);
             /* A task can move to another core, and on ARM the kernel stack
@@ -998,7 +1034,7 @@ static regs_t *sched_switch(regs_t *r)
              * frame is in proc_t.  The stub in start.S uses the entry sp to
              * leave that frame behind before it touches a C stack. */
             if (next->is_ktask) {
-                ktask_entry_sp = next->stack_top;
+                KTASK_SET_SP(next->stack_top);
                 return next->kframe ? next->kframe : &next->saved;
             }
             /* Leave interrupts closed: the caller is trap exit and mret

@@ -111,8 +111,9 @@ Examples:
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
 | `configs/rv32-kthreads.conf` | QEMU rv32 (virt) with kernel threads; the other half of the `kthreadtest`/`threadbench` pair |
 | `configs/rv32smp-kthreads.conf` | QEMU rv32 (virt, two harts) with kernel threads; where the concurrent `sbrk()` phase runs on two CPUs |
-| `configs/rv32-ktasktest.conf` | QEMU rv32 (virt) with the kernel-thread (ktask) selftest: pool, pinning, paint/high-water, `/proc/ktask`.  Uniprocessor until OPEN-ITEMS 21 |
+| `configs/rv32-ktasktest.conf` | QEMU rv32 (virt) with the kernel-thread (ktask) selftest: pool, pinning, paint/high-water, `/proc/ktask` |
+| `configs/rv32smp-ktasktest.conf` | the same on two harts; the regression for the per-hart trap state (OPEN-ITEMS 21) |
 | `configs/atk-dnr2350am-smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
 | `configs/atk-dnr2350am-rv32-smp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |
-| `configs/rpi-pico2-rv32-usbpump.conf` | RP2350 Hazard3 (uniprocessor) with the USB pump as a pinned kernel thread (`usb_pump`, S4; SMP waits for OPEN-ITEMS 21) |
+| `configs/rpi-pico2-rv32-usbpump.conf` | RP2350 Hazard3 dual core with the USB pump as a pinned kernel thread (`usb_pump`, S4) |
 | `configs/release.conf` | target-agnostic release build: boot traces and diagnostics compiled out (`boot_trace = 0`), everything else at the target's defaults |

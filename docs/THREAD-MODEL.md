@@ -49,7 +49,7 @@ C3（`esp32c3-generic`，`max_procs = 8`，rv32，`-Oz`，`TOS_KEEP_SYMS=1` 后�
 | **S3a** ✅ | **保护按组重编程**：`cpu_t.prot` 缓存窗口的 6 个输入，相同就跳过 `plat_task_protect()`；`schedstat.prot` 计量。调度本来就是按槽（每个线程一个槽、自己的 prio/quantum），这次只是把"切谁才要重编程"写清楚 | 无 | T0/T1/T2；kthreads QEMU 的兄弟切换 0 次重编程 |
 | **S3b** ✅ | **线程栈边界**：`SYS_THREAD_CREATE` 的第三参数改为 `struct tos_thread_stack *`（top+size）；线程槽记录自己的栈范围，刷 0xCC、写 canary；溢出只杀线程；`ps` 的 `stk/sz` 分母对线程生效 | 线程栈有了边界与统计 | T0/T1/T2；kthreadtest 的 overflow 用例 |
 | **S3c** | `ps` 两级显示 | 显示 | 暂缓：列格式被 `cmd/tostest/emutest.go` 与 `scripts/rp2350/accept33.py` 解析，且 `ppid` 已经指向组长 |
-| **S4** ✅（UP 代码） | **第一个真实客户：USB 泵做成 ktask**：`usb_pump = true` 时 `usb_cdc_poll()` 从 trap/idle 钩子移进一个 prio 0、固定 core 0 的内核线程；新增 `home_cpu` 亲和与 `plat_start_tasks()` 板级钩子 | 控制器的轮询有了自己的线程上下文 | 构建 + T0/T1/T2；**SMP 被 §21 阻塞**；UP 的 T3 见 §19 |
+| **S4** ✅（代码） | **第一个真实客户：USB 泵做成 ktask**：`usb_pump = true` 时 `usb_cdc_poll()` 从 trap/idle 钩子移进一个 prio 0、固定 core 0 的内核线程；新增 `home_cpu` 亲和与 `plat_start_tasks()` 板级钩子 | 控制器的轮询有了自己的线程上下文 | 构建 + T0/T1/T2；SMP 的 §21 已修；T3 见 §19 |
 | **S5** | 可选：两个表（EPROC/ETHREAD）+ `fork` 语义 | 新功能 | 需新测试 |
 
 S4 的三条硬要求：泵线程优先级高于用户任务（否则 #46 回归）；固定 core 0；栈深用 S0
@@ -164,10 +164,10 @@ soak rv32+arm 2/2；`kthreadtest` 在 ARM MPU 与 RV32 PMP 上新增：
 - **构建开关**：feature `usb_pump`（define-only）、`configs/rpi-pico2-rv32-usbpump.conf`。
   默认镜像不含这个线程，现有发布行为不变。ktask 机制只在 RV32，所以没有 ARM 版。
 
-**SMP 阻塞（2026-11-25，ktask selftest 发现）**：`ktask_running`/`ktask_entry_sp`
-是全局的，start.S 用它们决定栈，两个核同时跑 ktask + 用户任务会串核 panic
-（`kernel stack out of bounds`）。所以泵镜像先只跑单核 `rpi-pico2-rv32`；修法见
-`docs/OPEN-ITEMS.md` §21。
+**SMP（2026-11-25，selftest 发现并修复）**：`ktask_running` 原来是全局的，另一个
+核的用户 trap 会走错栈并 panic。现在每核一份（`ktask_cpu[]` 经 mscratch 到达，
+`ktask_entry_sp[]` 按 mhartid 索引），`rv32smp` 的 ktask selftest 通过，泵镜像重新
+面向 `rpi-pico2-rv32-smp`。细节见 `docs/OPEN-ITEMS.md` §21。
 
 **没有在这步做的**：控制台写者仍然走 `plat_console_can_take()` + 短写/重试，
 `write()` 还不会阻塞在泵线程上。S4 只是把状态机搬进线程、给它自己的栈和上下文；
@@ -280,9 +280,9 @@ unlock 后移交；以及线程持锁后故意 fault（store 到 0），内核�
   `0 6144 656 656 ktest`（槽、已用、高水位、名字）。
 - 这是 S0 的池/paint/高水位、S4 的亲和和 `/proc/ktask` 在 **QEMU 上的第一次真实
   运行**；WiFi 需要 C3，泵需要 USB，都只能上板。
-- 同一天在 `rv32smp` 上跑同样的 selftest，暴露了 `ktask_running` 的跨核串扰
-  （§21）：两个核一个跑 ktask、一个跑用户任务时，后者进 trap 会走错栈并 panic。
-  这就是 selftest 存在的价值：S4 的 SMP 泵镜像在板测前就被拦下了。
+- 同一天在 `rv32smp` 上跑同样的 selftest，暴露了 `ktask_running` 的跨核串扰：
+  两个核一个跑 ktask、一个跑用户任务时，后者进 trap 会走错栈并 panic。修好后
+  `configs/rv32smp-ktasktest.conf` 就是这条的回归用例，S4 的 SMP 泵镜像也重新可用。
 
 ## 3. 不进 main 的理由
 

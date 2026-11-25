@@ -47,7 +47,7 @@ regs_t *trap_handler(regs_t *f)
      * mret must go back to M-mode even though the hardware cleared MPP when
      * the thread was first entered.  Force the saved copy before any of the
      * from_user()/reschedule decisions look at it. */
-    if (ktask_running)
+    if (process_ktask_running())
         f->mstatus = (f->mstatus & ~RV_MSTATUS_MPP_MASK) | RV_MSTATUS_MPP_M;
 
     /* qemu-virt routes the tick through the CLINT (cause 7); the C3 has no
@@ -234,6 +234,9 @@ static void pmp_open_trap_vector(void);
 
 void plat_init(void)
 {
+    /* The trap entry finds this hart's ktask flag through mscratch; set it
+     * before anything can trap, not just before the scheduler runs. */
+    process_ktask_trap_init();
     pmp_deny_user();
     plat_board_init();
     pmp_open_trap_vector();

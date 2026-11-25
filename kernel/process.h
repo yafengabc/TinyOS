@@ -61,8 +61,11 @@ regs_t  *process_saved_frame(struct proc *p);
 regs_t  *process_current_frame(void);
 
 /* Kernel threads used by the WiFi OSI layer.  They run in M-mode on their
- * own stack; start.S reads ktask_running because mret clears MPP. */
-extern volatile int ktask_running;
+ * own stack; start.S reads this hart's flag because mret clears MPP.
+ * process_ktask_trap_init() is called once per CPU (it puts the per-hart
+ * state where the trap entry expects to find it). */
+int      process_ktask_running(void);
+void     process_ktask_trap_init(void);
 /* `cpu` pins the thread to one hart (-1 = anywhere).  A thread that owns a
  * device passes the hart that owns it. */
 int      process_ktask_create(const char *name, void (*fn)(void *), void *arg,

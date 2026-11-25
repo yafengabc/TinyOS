@@ -272,18 +272,18 @@ trap_vectors_h1:
  * the interrupted sp just above the frame, then recover t0 from mscratch. */
     .macro TRAP_ENTRY name, kstack
 \name:
-    csrw    mscratch, t0            /* park t0 */
-
-    /* A kernel thread runs in M-mode but mret has already set mstatus.MPP
-     * back to U.  The scheduler's flag, not MPP, says which stack the frame
-     * must go on; without this the entry would switch to the kernel stack
-     * while the ktask frame is on its own stack. */
-    .option push
-    .option norelax
-    la      t0, ktask_running
-    .option pop
-    lbu     t0, 0(t0)
-    bnez    t0, .Lm_\name
+    /* mscratch holds this hart's ktask state (process.c):
+     *   0 = running flag, 4 = saved t1, 8 = saved t2.
+     * A trap has no stack to spill to, and reading mhartid would need a
+     * second scratch register, so the state is reached through mscratch
+     * itself.  Parking t1 there and t0 in the state keeps every interrupted
+     * register recoverable before the frame is built. */
+    csrrw   t1, mscratch, t1        /* t1 = state, mscratch = old t1 */
+    sw      t2, 8(t1)               /* old t2 */
+    lw      t2, 0(t1)               /* this hart's ktask flag */
+    csrrw   t0, mscratch, t0        /* t0 = old t1, mscratch = old t0 */
+    sw      t0, 4(t1)               /* old t1 */
+    bnez    t2, .Lm_\name
 
     csrr    t0, mstatus
     srli    t0, t0, 11
@@ -297,6 +297,9 @@ trap_vectors_h1:
     sw      t0, 20(sp)              /* frame->x5 */
     addi    t0, sp, FRAME_SIZE
     sw      t0, 8(sp)               /* frame->sp = sp at trap */
+    csrw    mscratch, t1            /* state back for the next trap */
+    lw      t2, 8(t1)
+    lw      t1, 4(t1)
     j       .Lsave
 
 .Luser_\name:
@@ -311,6 +314,9 @@ trap_vectors_h1:
     sw      t0, 8(sp)               /* frame->sp = user sp */
     csrr    t0, mscratch            /* original t0 */
     sw      t0, 20(sp)              /* frame->x5 */
+    csrw    mscratch, t1            /* state back for the next trap */
+    lw      t2, 8(t1)
+    lw      t1, 4(t1)
     j       .Lsave
     .endm
 
@@ -379,6 +385,9 @@ ktask_start_stub:
     .option norelax
     la      sp, ktask_entry_sp
     .option pop
+    csrr    t0, mhartid             /* this hart's slot */
+    slli    t0, t0, 2
+    add     sp, sp, t0
     lw      sp, 0(sp)
     csrsi   mstatus, 8
     .option push
