@@ -302,5 +302,5 @@ static void wifi_ctrl_task(void *arg)
 
 void wifi_test_start(void)
 {
-    process_ktask_create("wifi", wifi_ctrl_task, 0, 6144, 0);
+    process_ktask_create("wifi", wifi_ctrl_task, 0, 6144, 0, -1);
 }

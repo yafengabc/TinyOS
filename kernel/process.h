@@ -63,8 +63,10 @@ regs_t  *process_current_frame(void);
 /* Kernel threads used by the WiFi OSI layer.  They run in M-mode on their
  * own stack; start.S reads ktask_running because mret clears MPP. */
 extern volatile int ktask_running;
+/* `cpu` pins the thread to one hart (-1 = anywhere).  A thread that owns a
+ * device passes the hart that owns it. */
 int      process_ktask_create(const char *name, void (*fn)(void *), void *arg,
-                              uint32_t stack_bytes, int prio);
+                              uint32_t stack_bytes, int prio, int cpu);
 /* Per-slot snapshot for /proc/ktask (kernel-thread stacks): slot size, bytes
  * used, high-water.  Returns 0 for a free slot or when the port has no ktask
  * pool at all. */

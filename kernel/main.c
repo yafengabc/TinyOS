@@ -56,6 +56,10 @@ __attribute__((weak)) void plat_boot_stage(uint32_t n) { (void)n; }
 __attribute__((weak)) int plat_flash_unique_id(uint8_t out[8])
 { (void)out; return 0; }
 
+__attribute__((weak)) void plat_start_tasks(void)
+{
+}
+
 void kmain(void)
 {
     plat_early_init();
@@ -141,6 +145,11 @@ void kmain(void)
     kprintf("\nstarting /bin/msh ...\n\n");
 #endif
     plat_boot_stage(11u);
+    /* Boards start their own kernel threads here: the scheduler and every
+     * CPU are live, and the first user task has not been picked yet, so a
+     * device thread (the RP2350 RV32 USB pump) is already running when the
+     * shell starts. */
+    plat_start_tasks();
     process_start_shell("/bin/msh");
     panic("shell returned");
 }

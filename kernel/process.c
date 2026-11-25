@@ -261,6 +261,12 @@ typedef struct proc {
      * CPU field says whether it is this one or the other.  Maintained by
      * whichever scheduler put it there, and only ever read for display. */
     int      cpu;
+    /* Where this task may run: -1 anywhere, otherwise a CPU id.  A kernel
+     * thread that owns a device has to stay on the hart that owns it - the
+     * USB pump belongs to core 0 - and a task the scheduler picks on the
+     * wrong CPU would take the device with it.  Ordinary tasks never set
+     * this. */
+    int      home_cpu;
 
     /* ST_WAIT_PIPE: which channel we are waiting on, in which direction,
      * and for which user buffer.  The waker completes the transfer on our
@@ -525,6 +531,10 @@ int process_pid_exists(int pid)
  * an expired quantum would. */
 static void preempt_if_higher(proc_t *p)
 {
+    /* A task pinned to another CPU is that CPU's to run; waking it must not
+     * make this one switch to a task it is not allowed to pick. */
+    if (p->home_cpu >= 0 && p->home_cpu != cpu_id())
+        return;
     if (current && current->state == ST_RUNNING && p->prio < current->prio)
         need_resched = 1;
 }
@@ -554,13 +564,23 @@ static void make_ready(proc_t *p, int32_t val)
 
 static proc_t *sched_pick(void)
 {
+    int me = cpu_id();
+
     for (int lvl = 0; lvl < PRIO_LEVELS; lvl++) {
         for (int i = 1; i <= MAX_PROCS; i++) {
             int idx = (rr + i) % MAX_PROCS;
-            if (procs[idx].state == ST_READY && procs[idx].prio == lvl) {
-                rr = idx;
-                return &procs[idx];
-            }
+            proc_t *p = &procs[idx];
+
+            if (p->state != ST_READY || p->prio != lvl)
+                continue;
+            /* A pinned task belongs to one CPU (the USB pump owns core 0 and
+             * the controller does not follow it anywhere else).  Skipping it
+             * here rather than refusing later means a wrong-CPU pick simply
+             * continues down the queue. */
+            if (p->home_cpu >= 0 && p->home_cpu != me)
+                continue;
+            rr = idx;
+            return p;
         }
     }
     return NULL;
@@ -1604,6 +1624,7 @@ static proc_t *proc_alloc(void)
              * memset() the whole struct a hundred lines later, which wiped
              * this very claim (ST_FREE is 0) and reopened the race. */
             memset(p, 0, sizeof(*p));
+            p->home_cpu = -1;       /* memset() says 0, which is a real CPU */
             /* The resource block is outside the slot now, so clearing the
              * slot no longer resets it.  The entry is ST_FREE here, which
              * means no leader owns it, so no thread can be pointing at it. */
@@ -1803,12 +1824,22 @@ int process_ktask_info(int idx, const char **name, uint32_t *size,
     *size = KTASK_STACK_BYTES;
     *used = ktask_slot_used(idx);
     *hw = ktask_stack_hw[idx];
+    /* The slot bitmap says a thread exists; its proc_t carries the name.
+     * The table may change on another CPU while this runs, so a torn read is
+     * possible - the name is display data and the array is static. */
     *name = "ktask";
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].is_ktask && procs[i].kstack_slot == idx &&
+            procs[i].state != ST_FREE) {
+            *name = procs[i].name;
+            break;
+        }
+    }
     return 1;
 }
 
 int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
-                         uint32_t stack_bytes, int prio)
+                         uint32_t stack_bytes, int prio, int cpu)
 {
     proc_t *p;
     int slot = -1;
@@ -1856,6 +1887,7 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     p->stack_size = stack_bytes;
     p->brk = 0;
     p->cpu = -1;
+    p->home_cpu = cpu < 0 ? -1 : cpu;   /* a device owner names its hart */
     p->start_ns = plat_uptime_ms();
     set_name(p, name);
 

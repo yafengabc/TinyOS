@@ -892,3 +892,38 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 - 没做的事：没有 bisect，也没在真机上复现；C3 kthreads 镜像需要板。
 - 处理方向：先用 `-d int`/`gdb` 看是卡在 `sched_pick` 还是用户循环；如果只是 TCG 太慢，
   把 `ITERS` 调小或加一个 `threadbench small` 入口。
+
+## 19. S4：USB 泵线程的 Pico 2 RV32 板测（2026-11-25，待跑）
+
+代码在 `exp/thread-sched`（见 `docs/THREAD-MODEL.md` §2f）。镜像：
+
+```sh
+go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
+# build/tinyos-rpi-pico2-rv32-smp.uf2
+```
+
+默认镜像不启用 `usb_pump`，行为与今天一致（tick 返回用户态时 poll）。
+
+1. 启动先看 UART0 与枚举（CDC 出现前 UART0 先说话，避免把"主机还没枚举"当成死机）：
+
+   ```sh
+   python scripts/rp2350/pump_repro.py --uf2 build/tinyos-rpi-pico2-rv32-smp.uf2 \
+       --uart-port COM19 --watch 40 --log build/pump-repro.log
+   ```
+
+   期望：UART0 走完全部阶段，`[usb] pump thread pid N on cpu 0` 出现一次，
+   CDC（2e8a:000a）出现并应答 shell。
+
+2. CDC 上：
+   - `cat /proc/ktask`：应有一行 `usbpump`，size 6144，used/hw 是真实高水位
+     （S0 的测量点；这个数字决定以后要不要把池缩小到 4 KiB 或分池）。
+   - `ps`：`usbpump` 在列表里，prio 0，`wink 0.0/0`（ktask 没有窗口）。
+   - `cat readme.txt`、`ls /bin`：短写路径。
+   - 一个 ~21 KiB 文件 `cat` 两路逐字节一致（§5c 的判据）。
+   - `crash`：fault 只走 UART0，shell 继续（§2c/§5c）。
+   - `smpbench`：两个 hart 都跑满；泵固定在 core 0，core 1 的吞吐不应被拖。
+   - `heartbeat` / `uptime`：tick 仍 1000 Hz。
+3. 回退：用默认配置重建（`go run ./cmd/tos build -target rpi-pico2-rv32-smp`），
+   确认 `[usb] pump thread` 不出现、控制器仍由旧钩子轮询。
+
+结果写 `docs/acceptance/`，注明板子、端口、镜像与 `cat /proc/ktask` 的 used/hw。

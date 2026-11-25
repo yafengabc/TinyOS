@@ -1,7 +1,7 @@
 # 线程调度实验（分支 `exp/thread-sched`）
 
-> 状态：**实验分支**，不进 main。S0–S2、S3a、S3b 已完成（测量、资源接缝、资源块、
-> 按组重编程保护、线程栈边界）；S4 是 USB 泵线程。
+> 状态：**实验分支**，不进 main。S0–S2、S3a、S3b 已完成；S4 的代码已写
+> （USB 泵线程 + CPU 亲和），等 Pico 2 RV32 板测。
 > 目标不是"把 ktask 的栈改小"，而是**调度单位换成线程、进程只管资源**。
 
 ## 0. 为什么开这个分支
@@ -49,7 +49,7 @@ C3（`esp32c3-generic`，`max_procs = 8`，rv32，`-Oz`，`TOS_KEEP_SYMS=1` 后�
 | **S3a** ✅ | **保护按组重编程**：`cpu_t.prot` 缓存窗口的 6 个输入，相同就跳过 `plat_task_protect()`；`schedstat.prot` 计量。调度本来就是按槽（每个线程一个槽、自己的 prio/quantum），这次只是把"切谁才要重编程"写清楚 | 无 | T0/T1/T2；kthreads QEMU 的兄弟切换 0 次重编程 |
 | **S3b** ✅ | **线程栈边界**：`SYS_THREAD_CREATE` 的第三参数改为 `struct tos_thread_stack *`（top+size）；线程槽记录自己的栈范围，刷 0xCC、写 canary；溢出只杀线程；`ps` 的 `stk/sz` 分母对线程生效 | 线程栈有了边界与统计 | T0/T1/T2；kthreadtest 的 overflow 用例 |
 | **S3c** | `ps` 两级显示 | 显示 | 暂缓：列格式被 `cmd/tostest/emutest.go` 与 `scripts/rp2350/accept33.py` 解析，且 `ppid` 已经指向组长 |
-| **S4** | **第一个真实客户：USB 泵做成 ktask**（先在 RV32 上，ktask 机制只在那里） | 去掉 PendSV/短写协议 | `cat 21 KB`、`ls /bin`、`crash`、`heartbeat`、`smpbench`、tick 精度 |
+| **S4** ✅（代码） | **第一个真实客户：USB 泵做成 ktask**：`usb_pump = true` 时 `usb_cdc_poll()` 从 trap/idle 钩子移进一个 prio 0、固定 core 0 的内核线程；新增 `home_cpu` 亲和与 `plat_start_tasks()` 板级钩子 | 控制器的轮询有了自己的线程上下文 | 构建 + T0/T1/T2；**T3 待跑**（见 `docs/OPEN-ITEMS.md` §19） |
 | **S5** | 可选：两个表（EPROC/ETHREAD）+ `fork` 语义 | 新功能 | 需新测试 |
 
 S4 的三条硬要求：泵线程优先级高于用户任务（否则 #46 回归）；固定 core 0；栈深用 S0
@@ -145,6 +145,34 @@ soak rv32+arm 2/2；`kthreadtest` 在 ARM MPU 与 RV32 PMP 上新增：
 `create an overflowing thread` → 只杀该线程、`join` 得到 139、组长继续；兄弟切换
 仍是 403/444 次、0 次重编程。
 
+## 2f. S4 实际做了什么（2026-11-25，代码完成、板测待跑）
+
+- **CPU 亲和**：`proc_t.home_cpu`（-1 = 任意）。`sched_pick()` 跳过不属于本 CPU 的
+  任务，`preempt_if_higher()` 不因别的 CPU 的任务而请求切换。普通任务从不设置；
+  `process_ktask_create()` 新增最后一个参数 `cpu`，WiFi 的四个调用点传 -1。
+- **板级启动钩子**：`plat_start_tasks()`（`kernel/plat/tasks.h`，弱默认空）在
+  `cpu_init()` 之后、`process_start_shell()` 之前调用。`plat_init()` 太早——那时
+  进程表还不存在；`plat_board_init()` 在它里面。
+- **泵线程**（`board/rp2350rv-generic/platform.c`，`#ifdef TOS_USB_PUMP`）：
+  `for (;;) { usb_cdc_poll(); process_ktask_sleep(1); }`，prio 0、`home_cpu = 0`、
+  请求 4 KiB 栈（槽仍是 6 KiB，S0 的 `/proc/ktask` 高水位会给出真实数字）。
+  创建成功后把 `g_idle_poll` 清空：trap 返回用户态时的 `board_poll_deferred()` 和
+  idle 池都不再 poll，控制器只有一个所有者。创建失败则保留旧钩子并打一行。
+  启动时打 `[usb] pump thread pid N on cpu 0`。
+- **`/proc/ktask`**：节点现在也在 `TOS_USB_PUMP` 下编译，并显示线程的真实名字
+  （此前固定打印 `ktask`）；泵线程是 S0 测量脚手架的**第一个真实客户**。
+- **构建开关**：feature `usb_pump`（define-only）、`configs/rpi-pico2-rv32-usbpump.conf`。
+  默认镜像不含这个线程，现有发布行为不变。ktask 机制只在 RV32，所以没有 ARM 版。
+
+**没有在这步做的**：控制台写者仍然走 `plat_console_can_take()` + 短写/重试，
+`write()` 还不会阻塞在泵线程上。S4 只是把状态机搬进线程、给它自己的栈和上下文；
+下一步才是让写者与泵共享一个队列并真正睡眠等待。短写的回归判据（§5c 的
+`cat` 21 KiB 两路逐字节一致）仍然适用。
+
+验证：T0；`tos build all` 17/18（x86 §17）；rv32/arm QEMU smoke；soak 2/2；
+`kthreadtest` 在 ARM MPU 与 RV32 PMP 上仍全过（亲和默认 -1 不改变普通任务）。
+泵线程本身在 QEMU 上没有 USB 控制器，**T3 由板侧按 §19 跑**。
+
 ## 3. 不进 main 的理由
 
 - S2 保持"**槽死即窗口释放**"不变：资源块和槽同生命周期，按槽索引，领槽即清。
@@ -158,9 +186,12 @@ soak rv32+arm 2/2；`kthreadtest` 在 ARM MPU 与 RV32 PMP 上新增：
 ```sh
 git checkout exp/thread-sched
 # 量 ktask 栈高水位（需要有人创建 ktask；S4 之后是泵线程）：
-# /proc/ktask 只在能创建 ktask 的镜像里存在（TOS_KTHREADS 或 TOS_WIFI）：
+# /proc/ktask 只在能创建 ktask 的镜像里存在（TOS_KTHREADS / TOS_WIFI /
+# TOS_USB_PUMP）：
 go run ./cmd/tos build -config configs/arm-kthreads.conf && \
     go run ./cmd/tostest smoke -target arm -commands "threadbench,cat /proc/ktask"
+# S4 的泵线程（需要 Pico 2 RV32 硬件）：
+go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
 # 想试更小的池：在 kernel/process.c 里 -DKTASK_STACK_BYTES=2048（或改默认值）
 ```
 

@@ -63,6 +63,7 @@ void plat_init(void);
 #include "plat/irq.h"
 #include "plat/block.h"
 #include "plat/memprot.h"
+#include "plat/tasks.h"
 
 /* ---- physical memory ------------------------------------------------- */
 

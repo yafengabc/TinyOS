@@ -136,7 +136,7 @@ static uint32_t fmt_usbboot(char *b, uint32_t cap)
  * thread (the S0 measurement scaffolding did exactly that by accident).  The
  * WiFi OSI layer is the current client and does not imply the kthreads
  * feature, so both selectors count. */
-#if defined(TOS_KTHREADS) || defined(TOS_WIFI)
+#if defined(TOS_KTHREADS) || defined(TOS_WIFI) || defined(TOS_USB_PUMP)
 #define PROC_KTASK_NODE 1
 
 static uint32_t fmt_ktask(char *b, uint32_t cap)

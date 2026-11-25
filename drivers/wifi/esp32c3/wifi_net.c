@@ -1678,7 +1678,7 @@ void wifi_net_start(void)
         esp_wifi_get_macaddr_internal(0, ns.mac);
         esp_wifi_internal_reg_rxcb(0, net_rx);
         devfs_register("dev/net", &net_ops, 0);
-        process_ktask_create("net", net_task, 0, 4096, 0);
+        process_ktask_create("net", net_task, 0, 4096, 0, -1);
         kprintf("[net] ready mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
                 ns.mac[0], ns.mac[1], ns.mac[2], ns.mac[3], ns.mac[4], ns.mac[5]);
     }

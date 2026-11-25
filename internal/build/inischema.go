@@ -28,7 +28,7 @@ import (
 // side through featureDefines() (-DTOS_SOFTFLOAT_MIN) and user/softfloat32.c.
 var featureNames = []string{
 	"dma", "exec_mock", "i2c", "kthreads", "net", "pio", "pwm", "rir",
-	"scripting", "softfloat-min", "spi", "uart1", "wifi",
+	"scripting", "softfloat-min", "spi", "uart1", "usb_pump", "wifi",
 }
 
 func featureAllowed(name string) bool {

@@ -96,6 +96,7 @@
 #include "rp2350_xosc.h"   /* XOSC is a chip fact shared with the ARM port */
 #include "console.h"
 #include "usb_cdc.h"
+#include "process.h"
 #include "string.h"
 
 /* Same attribute kernel/cpu.h defines, repeated here rather than pulling that
@@ -2179,9 +2180,58 @@ void plat_board_init(void)
 
     /* The USB controller is polled, not interrupt driven, and its state
      * machine must not run in interrupt context - hook it into the
-     * scheduler's idle loop instead (see usb_idle_poll above). */
+     * scheduler's idle loop instead (see usb_idle_poll above).  When the
+     * pump thread is built (TOS_USB_PUMP) it takes this over in
+     * plat_start_tasks(), and this hook is cleared. */
     g_idle_poll = usb_idle_poll;
 }
+
+#ifdef TOS_USB_PUMP
+/* The polled controller's state machine as a kernel thread.
+ *
+ * Until now it ran from the scheduler's idle loop and from this port's
+ * "PendSV" (the tick returning to user mode).  Both are workarounds for the
+ * same thing: tud_task() needs real thread context and has to keep running
+ * while a user task is runnable, and neither a tick nor a syscall may own it.
+ * A kernel thread is that context by construction: it has its own stack, it
+ * is scheduled like any task, and it can block between polls.
+ *
+ * One millisecond is the cadence the tick used.  The thread's priority is
+ * above every user task so a long console write cannot starve the drain
+ * (issue #46), and it is pinned to core 0 because the controller and its
+ * locks are core 0's (see the SIO spinlock comment in usb_cdc.c).  The pool
+ * slot is 6 KiB whatever is requested; 4 KiB is the request so the S0
+ * high-water in /proc/ktask says whether that is the right number. */
+static void usb_pump_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        usb_cdc_poll();
+        process_ktask_sleep(1);
+    }
+}
+
+void plat_start_tasks(void)
+{
+    int pid;
+
+    if (!g_usb_ready)
+        return;
+    pid = process_ktask_create("usbpump", usb_pump_task, NULL, 4096, 0, 0);
+    if (pid < 0) {
+        /* Keeping the old hooks is the safe fallback: the board still works,
+         * it just pays the trap-exit/idle pump again. */
+        kprintf("[usb] pump thread not started; keeping the polled hooks\n");
+        return;
+    }
+    /* One owner.  The idle/deferred hook existed because the state machine
+     * had to run outside interrupt context; the thread is that context now,
+     * and leaving both would just make the reentrancy guard bounce. */
+    g_idle_poll = NULL;
+    kprintf("[usb] pump thread pid %d on cpu 0\n", pid);
+}
+#endif
 
 /* ---- power ------------------------------------------------------------- */
 

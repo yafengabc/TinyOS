@@ -495,7 +495,7 @@ int osi_task_create(void (*fn)(void *), const char *name, uint32_t stack,
     else
         level = 2;
 
-    int pid = process_ktask_create(name, fn, param, stack, level);
+    int pid = process_ktask_create(name, fn, param, stack, level, -1);
     if (pid < 0) {
         kprintf("[osi] task %s stack %u prio %u failed\n", name, stack, prio);
         return 0;
@@ -998,7 +998,7 @@ static void timer_setfn_wrap(void *timer, void *fn, void *arg)
 
     if (!osi_timer_task_started) {
         osi_timer_task_started = 1;
-        process_ktask_create("wtimer", osi_timer_service, NULL, 4096, 0);
+        process_ktask_create("wtimer", osi_timer_service, NULL, 4096, 0, -1);
     }
 }
 
