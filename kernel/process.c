@@ -168,7 +168,7 @@ enum {
  * whether the entry is owned.
  */
 typedef struct proc {
-    uint8_t  state;              /* 0 = free, 1 = owned                */
+    uint8_t  state;              /* PROC_FREE/NEW/LIVE/DYING, see below */
 
     /* Identity.  A process has one pid and one name; every thread of it
      * answers with these, and the thread's own id is its tid.  A kernel
@@ -199,6 +199,40 @@ typedef struct proc {
     int      lag_code[LAG_MAX];
     uint8_t  lag_n;
 } proc_t;
+
+/* A process entry has four states, and nothing else may reuse the slot until
+ * it is FREE again:
+ *
+ *   FREE -> NEW    process_alloc() claimed it; exec() is building it
+ *   NEW  -> LIVE   the main thread is published (proc_set_state ST_READY)
+ *   NEW  -> FREE   exec() failed before publishing
+ *   LIVE -> DYING  the main thread exited and workers are winding down
+ *   LIVE -> FREE   the main thread exited alone
+ *   DYING-> FREE   the last worker finished the reap
+ *
+ * The thread states say what a *task* is doing; this says whether there is a
+ * process at all, which is the question process_alloc(), ps and /proc ask.
+ * Written under proc_lock, like the thread state. */
+enum { PROC_FREE = 0, PROC_NEW, PROC_LIVE, PROC_DYING };
+
+static int proc_state_ok(int from, int to)
+{
+    if (from == to)
+        return 1;
+    switch (from) {
+    case PROC_FREE:  return to == PROC_NEW;
+    case PROC_NEW:   return to == PROC_LIVE || to == PROC_FREE;
+    case PROC_LIVE:  return to == PROC_DYING || to == PROC_FREE;
+    case PROC_DYING: return to == PROC_FREE;
+    }
+    return 0;
+}
+
+static void proc_entry_set_state(proc_t *pr, int st)
+{
+    KASSERT_HALT(proc_state_ok(pr->state, st));
+    pr->state = (uint8_t)st;
+}
 
 typedef struct thread {
     struct proc *proc;       /* NULL = kernel thread; else its process */
@@ -1680,10 +1714,10 @@ static proc_t *process_alloc(void)
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
     for (int i = 0; i < MAX_PROCS; i++) {
-        if (procs[i].state == 0) {
+        if (procs[i].state == PROC_FREE) {
             pr = &procs[i];
             memset(pr, 0, sizeof(*pr));
-            pr->state = 1;
+            proc_entry_set_state(pr, PROC_NEW);
             break;
         }
     }
@@ -1718,7 +1752,7 @@ static void proc_retire_locked(thread_t *p)
         p->proc->main = NULL;
         p->proc->win_base = 0;
         p->proc->win_size = 0;
-        p->proc->state = 0;
+        proc_entry_set_state(p->proc, PROC_FREE);
         p->proc = NULL;
     }
 }
@@ -2376,8 +2410,12 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
         kprintf("exec: process or thread table full\n");
         if (p)
             proc_retire(p);
-        if (pr)
-            pr->state = 0;
+        if (pr) {
+            uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+
+            proc_entry_set_state(pr, PROC_FREE);
+            plat_spin_unlock_irqrestore(&proc_lock, irq);
+        }
         return NULL;
     }
     /* The new thread is the process's main thread: it speaks for the
@@ -2649,6 +2687,7 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
        followed by a boot that dies in the shell roughly one time in three,
        because both cores end up running it on different stacks. */
     irq = plat_spin_lock_irqsave(&proc_lock);
+    proc_entry_set_state(p->proc, PROC_LIVE);
     proc_set_state(p, claim ? ST_RUNNING : ST_READY);
     if (claim) {
         p->cpu = cpu_id();
@@ -3380,6 +3419,7 @@ static thread_t *finish_group_locked(thread_t *main)
 static void begin_group_exit_locked(thread_t *main, int code)
 {
     main->proc->exit_code = code;
+    proc_entry_set_state(main->proc, PROC_DYING);
     proc_set_state(main, ST_DYING);
     main->cpu = -1;
 
@@ -3897,7 +3937,8 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
         char cpubuf[4];
         uint32_t age, busy, pct10, stk10;
 
-        if (p->state == ST_FREE || !p->proc)
+        if (p->state == ST_FREE || !p->proc ||
+            p->proc->state == PROC_NEW)
             continue;
 
         if (p->cpu < 0 || p->state != ST_RUNNING) {
@@ -3966,7 +4007,8 @@ uint32_t process_threads_text(char *buf, uint32_t cap)
         char cpubuf[3];
         uint32_t stk10;
 
-        if (p->state == ST_FREE || !p->proc)
+        if (p->state == ST_FREE || !p->proc ||
+            p->proc->state == PROC_NEW)
             continue;
         /* A character, like ps: the formatter pads a negative %d after the
          * sign, so "-1" would come out as "- 1" and shift the row. */

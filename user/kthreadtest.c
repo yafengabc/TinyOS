@@ -289,6 +289,14 @@ int main(int argc, char *argv[])
     }
     printf("kthreadtest: %d thread slot(s) usable beside shell+self\n", n);
     ok(n > 0 && n < 40, "slot exhaustion returns -1");
+
+    /* A full thread table must not leak a process entry either: exec() claims
+     * both, the process first, and has to give that one back when the thread
+     * slot is the one that ran out (PROC_NEW -> PROC_FREE).  Without this the
+     * process table fills with ghosts and every later exec fails on a machine
+     * with no processes on it. */
+    ok(exec("/bin/echo", NULL, 0) < 0, "exec fails when the thread table is full");
+
     for (i = 0; i < n; i++) {
         code = -1;
         if (kthread_join(tids[i], &code) != 0 || code != i + 1) {
@@ -299,6 +307,18 @@ int main(int argc, char *argv[])
 
     tid = kthread_create(give42, 0, 4096);
     ok(tid > 0, "create works again after joining everything");
+
+    /* The other half of the same seam: after draining the table, exec() must
+     * work again, which it cannot if the failed attempts above left a process
+     * entry claimed.  echo with no arguments prints one empty line. */
+    {
+        int child = exec("/bin/echo", NULL, 0);
+
+        ok(child > 0, "exec works again after the table drains");
+        if (child > 0)
+            ok(wait(child) == 0, "the exec'd program ran and exited");
+    }
+
     code = -1;
     ok(kthread_join(tid, &code) == 0 && code == 42, "churn join code");
 
