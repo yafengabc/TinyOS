@@ -173,6 +173,33 @@ soak rv32+arm 2/2；`kthreadtest` 在 ARM MPU 与 RV32 PMP 上新增：
 `kthreadtest` 在 ARM MPU 与 RV32 PMP 上仍全过（亲和默认 -1 不改变普通任务）。
 泵线程本身在 QEMU 上没有 USB 控制器，**T3 由板侧按 §19 跑**。
 
+## 2g. 用户态线程库：join 归还栈 + cwd/churn 用例（2026-11-25）
+
+新用例先失败，再修：
+
+- **泄漏**：`kthread_create()` 从进程堆里 `malloc` 栈（`bytes + 32`）和 start
+  record，`kthread_join()` 从来没还过；创建失败（槽耗尽、用户指针校验失败）也直接
+  return，两个块一起漏。`kthreadtest` 的 200 次 create/join 用例在 96 KiB 窗口里
+  第 2 次左右就 `kthread_create` 失败，随后 yield 用例也建不出线程：
+  `heap ... -> ... (stopped early)` + `FAILED (6 failure(s))`。
+- **修法**（`user/kthread.c`）：一张 `KT_TRACK 24` 的表记录 `{tid, base, rec}`；
+  `join` 返回 0 后 `free(rec)`、`free(base)`（内核在返回前已经退休槽，栈上不会再有人
+  跑）；`SYS_THREAD_CREATE` 失败则立刻把两个块还掉。表满只丢 bookkeeping，线程照跑；
+  和用户库其余部分一样，这个表不是线程安全的。
+- **新用例**：
+  - cwd 跨线程（S1 的行为第一次有测试）：leader `chdir("/bin")`，线程 `getcwd`
+    看到 `/bin`，线程 `chdir("/")` 之后 leader 也看到 `/`。
+  - 200 次 create/join，`sbrk(0)` 前后差 ≤ 8 KiB（无泄漏）。
+  - 兄弟切换的计数器改成**每线程一个**：共用一个 `volatile int` 自增是测试自己的
+    丢更新竞态，之前只是时序上恰好通过。
+- **可重复**：新增 `configs/rv32-kthreads.conf`（QEMU rv32 + `kthreads`），和
+  `configs/arm-kthreads.conf` 对称；不再需要手写临时配置。
+
+验证：T0 PASS；`tos build all` 17/18（x86 §17）；rv32/arm QEMU smoke PASS；
+soak 2/2；`configs/rv32-kthreads.conf` 与 `configs/arm-kthreads.conf` 上
+`kthreadtest` 全过（200 次循环堆不增长、472/405 次兄弟切换 0 次重编程）、
+`threadbench` 正常；`configs/rpi-pico2-rv32-usbpump.conf` 仍可构建。
+
 ## 3. 不进 main 的理由
 
 - S2 保持"**槽死即窗口释放**"不变：资源块和槽同生命周期，按槽索引，领槽即清。

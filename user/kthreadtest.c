@@ -53,7 +53,22 @@ static void slow(void *arg)
     kthread_exit(*(int *)arg);
 }
 
-static volatile int yran;
+#define YROUNDS 200
+static volatile int yran[2];
+
+/* cwd is process state: a thread must see the directory the leader set, and
+ * a chdir() in the thread must move the leader too (S1). */
+static void cwduser(void *arg)
+{
+    char buf[TOS_PATH_MAX];
+
+    (void)arg;
+    if (getcwd(buf, sizeof(buf)) < 0 || strcmp(buf, "/bin") != 0)
+        kthread_exit(1);
+    if (chdir("/") != 0)
+        kthread_exit(2);
+    kthread_exit(0);
+}
 
 /* A thread stack lives inside the process heap, so no protection region can
  * fence it off.  The kernel plants a guard word under the stack and checks it
@@ -73,14 +88,16 @@ static void overflow(void *arg)
 
 /* Two threads of one process taking turns: every yield is a real switch, but
  * the window belongs to the process, so the kernel must not program the
- * protection unit again for each one. */
+ * protection unit again for each one.  Each thread counts into its own slot:
+ * a shared `volatile int` incremented by both is a lost-update race, and the
+ * test must fail for the kernel's reason, not its own. */
 static void yielder(void *arg)
 {
-    int n = *(int *)arg;
+    int id = (int)arg;
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < YROUNDS; i++) {
         yield();
-        yran++;
+        yran[id]++;
     }
     kthread_exit(0);
 }
@@ -214,22 +231,65 @@ int main(int argc, char *argv[])
         ok(1, "leader survived the thread stack overflow");
     }
 
+    /* S1: a thread sees the leader's cwd and its chdir moves the process. */
+    {
+        char buf[TOS_PATH_MAX];
+        int code = -1;
+
+        ok(chdir("/bin") == 0, "leader chdir(/bin)");
+        tid = kthread_create(cwduser, 0, 4096);
+        ok(kthread_join(tid, &code) == 0 && code == 0,
+           "thread saw the leader's cwd and moved it");
+        ok(getcwd(buf, sizeof(buf)) > 0 && strcmp(buf, "/") == 0,
+           "thread chdir moved the whole process");
+    }
+
+    /* A long-lived process that keeps creating threads must get the stack
+     * back when join() has the code.  The window is 96 KiB of heap and a
+     * 4 KiB stack a cycle, so a leak runs out long before 200. */
+    {
+        uint32_t before = (uint32_t)sbrk(0);
+        int i, code = 0, failed = 0;
+
+        for (i = 0; i < 200; i++) {
+            tid = kthread_create(give42, 0, 4096);
+            if (tid < 0) {
+                failed = i ? i : -1;
+                break;
+            }
+            code = -1;
+            if (kthread_join(tid, &code) != 0 || code != 42) {
+                failed = 1000 + i;
+                break;
+            }
+        }
+        {
+            uint32_t after = (uint32_t)sbrk(0);
+
+            printf("kthreadtest: 200 create/join cycle(s), heap %u -> %u bytes%s\n",
+                   before, after, failed ? " (stopped early)" : "");
+            ok(failed == 0, "200 create/join cycles fit in the heap");
+            ok(after - before <= 8192u, "create/join returns the thread stack");
+        }
+    }
+
     /* The protection units describe the process, not the thread: a switch
      * between two of its threads must reuse them.  If it did not, the count
      * of programs below would grow with the number of yields. */
     {
         struct schedstat a, b;
-        int n = 200, t1, t2, c1 = -1, c2 = -1;
+        int t1, t2, c1 = -1, c2 = -1;
 
-        yran = 0;
-        t1 = kthread_create(yielder, &n, 4096);
-        t2 = kthread_create(yielder, &n, 4096);
+        yran[0] = yran[1] = 0;
+        t1 = kthread_create(yielder, (void *)0, 4096);
+        t2 = kthread_create(yielder, (void *)1, 4096);
         ok(t1 > 0 && t2 > 0, "create two yielding threads");
         schedstat(&a);
         ok(kthread_join(t1, &c1) == 0 && kthread_join(t2, &c2) == 0,
            "join yielding threads");
         schedstat(&b);
-        ok(yran == 2 * n, "both yielding threads ran all rounds");
+        ok(yran[0] == YROUNDS && yran[1] == YROUNDS,
+           "both yielding threads ran all rounds");
         ok(b.switches - a.switches > 0 && b.prot - a.prot == 0,
            "sibling switches reused the protection regions");
         printf("kthreadtest: %u sibling switch(es), %u region set(s)\n",

@@ -22,6 +22,24 @@ struct kstart {
     void *arg;
 };
 
+/* The stack and the start record are the library's allocation; the kernel
+ * only ever sees the stack top.  join() is therefore the only place that can
+ * give them back, and it needs to find them from the tid alone: one entry per
+ * thread this process created.  Sized above the largest process table (18),
+ * so the table cannot fill before thread creation does.  A thread nobody
+ * joins keeps its entry and its stack until the process exits - the same
+ * lifetime its kernel slot has.
+ *
+ * Not thread-safe: two threads calling kthread_create()/join() at the same
+ * time race on this table, like the rest of the user-space library. */
+#define KT_TRACK 24
+
+static struct {
+    int tid;
+    char *base;
+    struct kstart *rec;
+} kt[KT_TRACK];
+
 /* First code to run on the new stack: call the user function, then exit
  * through the kernel.  Keeping this in user space means the kernel only has
  * to know "entry, arg, sp" - no per-architecture return-address fixing. */
@@ -40,6 +58,7 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     struct kstart *s;
     struct tos_thread_stack st;
     char *base;
+    int tid, slot = -1;
 
     if (stack_bytes < 512)
         stack_bytes = 512;
@@ -67,15 +86,52 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     s->fn = fn;
     s->arg = arg;
 
+    for (int i = 0; i < KT_TRACK; i++) {
+        if (kt[i].tid == 0) {
+            slot = i;
+            break;
+        }
+    }
+
     st.top = top;
     st.size = bytes;
-    return tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s,
-                    (int)&st);
+    tid = tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s,
+                   (int)&st);
+    if (tid <= 0) {
+        /* No slot, no table entry, bad stack: the kernel did not take the
+         * blocks, so they are ours to return. */
+        free(s);
+        free(base);
+        return -1;
+    }
+    if (slot >= 0) {
+        kt[slot].tid = tid;
+        kt[slot].base = base;
+        kt[slot].rec = s;
+    }
+    /* else: more threads than KT_TRACK.  Creation itself succeeded, so the
+     * thread runs; only the bookkeeping (and later the free) is missing. */
+    return tid;
 }
 
 int kthread_join(int tid, int *code)
 {
-    return tos_sys2(SYS_THREAD_JOIN, tid, (int)code);
+    int rc = tos_sys2(SYS_THREAD_JOIN, tid, (int)code);
+
+    /* The slot is retired before join returns, so nothing can still be
+     * running on the stack.  Free after the call, not before: the kernel
+     * writes the exit code through `code` on the way out. */
+    if (rc == 0) {
+        for (int i = 0; i < KT_TRACK; i++) {
+            if (kt[i].tid == tid) {
+                free(kt[i].rec);
+                free(kt[i].base);
+                kt[i].tid = 0;
+                break;
+            }
+        }
+    }
+    return rc;
 }
 
 void kthread_exit(int code)

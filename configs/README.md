@@ -109,6 +109,7 @@ Examples:
 | `configs/esp32c3-8k-float.conf` | the same, with `pvm-float = true`: pvm gets float/printf/args; pvm ~19K / 36K window |
 | `configs/esp32c3-rir.conf` | the 8 KiB C3 image with the experimental `csc` + `rvm` + `rcc` trio instead of `csa` + `pvm` (`csc` ~124 KiB, `rvm` 32 KiB, `rcc` 72 KiB windows) |
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
+| `configs/rv32-kthreads.conf` | QEMU rv32 (virt) with kernel threads; the other half of the `kthreadtest`/`threadbench` pair |
 | `configs/atk-dnr2350am-smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
 | `configs/atk-dnr2350am-rv32-smp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |
 | `configs/rpi-pico2-rv32-usbpump.conf` | RP2350 Hazard3 dual core with the USB pump as a pinned kernel thread (`usb_pump`, S4; Pico 2 RV32) |
