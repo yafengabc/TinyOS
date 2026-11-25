@@ -146,6 +146,19 @@ void     plat_frame_set_arg(regs_t *frame, uint32_t arg);
 
 void     plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp);
 
+/* The same for a kernel thread: a frame that starts `fn(arg)` on the given
+ * pool stack, in Thread mode but with the kernel's privileges.  Implemented
+ * by the ports that can run kernel threads (rv32 keeps its M-mode bootstrap
+ * in process.c; arm uses privileged Thread mode on PSP). */
+void     plat_prepare_kernel_frame(regs_t *frame, uint32_t entry,
+                                   uint32_t a0, uint32_t a1,
+                                   uint32_t stack_top);
+
+/* 1 when the caller runs with the kernel's privileges (a kernel thread on
+ * ports that have them).  Diagnostics only: the ktask selftest reports it so
+ * "the thread really is privileged" is a measurement, not a reading. */
+int      plat_thread_is_privileged(void);
+
 /* Power the machine off (best effort). */
 void     plat_shutdown(void) __attribute__((noreturn));
 

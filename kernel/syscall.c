@@ -258,6 +258,14 @@ static regs_t *dispatch(regs_t *r);
 
 regs_t *syscall_dispatch(regs_t *r)
 {
+#if defined(__riscv) || defined(__arm__)
+    /* A kernel thread's SVC is the OSI block/yield/exit, not a user syscall.
+     * On rv32 the kernel thread traps with cause ECALL_M and its port routes
+     * here first; on arm every SVC lands in this one entry, so the decision
+     * has to be made here. */
+    if (process_current_is_kernel())
+        return process_ktask_syscall(r);
+#endif
     /* No-op unless the board has no faulting protection unit (the RP2040):
      * there the guard word under the stack is the only way to notice that a
      * task ran off its bottom, and this is the first point after the fact. */

@@ -439,10 +439,12 @@ void process_ktask_trap_init(void) { }
 #define KTASK_SET_SP(v)   ((void)0)
 #endif
 
-/* Kernel-thread stacks.  Four slots of 6 KiB; see the layout comment in
- * board/esp32c3-generic/layout.c for the 160 KiB kernel-region budget.  The ktask
- * machinery is RV32-only: it rides the M-mode trap path and start.S. */
-#if defined(__riscv)
+/* Kernel-thread stacks.  Six slots of 6 KiB; see the layout comment in
+ * board/esp32c3-generic/layout.c for the 160 KiB kernel-region budget.  The
+ * pool and everything around it is port-neutral; only the frame that starts
+ * a thread and the instruction it uses to block are per architecture (rv32
+ * runs it in M-mode, arm in privileged Thread mode). */
+#if defined(__riscv) || defined(__arm__)
 #define KTASK_SLOTS       6
 /* Slot size.  Overridable so an experiment can build a smaller pool; the
  * point of the measurement below is to find the number instead of guessing.
@@ -471,7 +473,7 @@ void ktask_trampoline(void (*fn)(void *), void *arg);
 static void ktask_exit(void) __attribute__((noreturn));
 extern void ktask_start_stub(void);
 #else
-/* No kernel-thread pool on this port (ARM): the accessor reports "none". */
+/* No kernel-thread pool on this port: the accessor reports "none". */
 int process_ktask_info(int idx, const char **name, uint32_t *size,
                        uint32_t *used, uint32_t *hw)
 {
@@ -1444,6 +1446,14 @@ int process_current_pid(void)
     return current ? thread_pid(current) : 0;
 }
 
+/* True when the running task is a kernel thread (no process).  Used by the
+ * ports to pick the privileged resume path and to keep a tick from
+ * preempting it. */
+int process_current_is_kernel(void)
+{
+    return current && !current->proc;
+}
+
 void *process_current_task(void)
 {
     return current;
@@ -1843,20 +1853,20 @@ static void set_name(proc_t *pr, const char *path)
     pr->name[i] = '\0';
 }
 
-#if defined(__riscv)
+#if defined(__riscv) || defined(__arm__)
 /* ---- kernel threads -------------------------------------------------- *
  *
  * A kernel thread is a thread with proc == NULL: no user window, its own
- * stack, M-mode code.  It is scheduled by the same frames as a user task,
- * but two RISC-V details have to be handled explicitly: *
- *   - mret always writes mstatus.MPP=U, so the next trap entry would mistake
- *     a kernel thread for a user task and switch stacks.  ktask_running is
- *     what start.S checks instead; trap_handler forces the saved MPP back to
- *     M so the return stays in machine mode.
- *   - the tick never preempts a kernel thread (process_tick only reschedules
- *     U-mode frames), so a thread gives up the CPU only at an OSI block or
- *     yield.  That is the right shape for the WiFi blob: its tasks park on
- *     queues and are woken by the WiFi interrupt. */
+ * stack, kernel code.  It is scheduled by the same frames as a user task,
+ * with two architecture details handled by the port:
+ *   - rv32 runs it in M-mode: mret writes MPP=U, so the next trap entry
+ *     would mistake it for a user task; ktask_running is what start.S
+ *     checks, and the trap handler forces MPP back to M.
+ *   - arm runs it in privileged Thread mode on PSP (CONTROL.nPRIV = 0):
+ *     the frame carries a `priv` word and arm_resume honours it.
+ *   On both, the tick never preempts a kernel thread, so it gives up the
+ *   CPU only at an OSI block or yield.  That is the right shape for the
+ *   WiFi blob: its tasks park on queues and are woken by the WiFi IRQ. */
 #define SYS_KTASK_SLEEP 60
 #define SYS_KTASK_YIELD 61
 #define SYS_KTASK_EXIT  62
@@ -1867,6 +1877,7 @@ void ktask_trampoline(void (*fn)(void *), void *arg)
     ktask_exit();
 }
 
+#if defined(__riscv)
 static void ktask_exit(void)
 {
     register int a7 __asm__("a7") = SYS_KTASK_EXIT;
@@ -1890,6 +1901,31 @@ void process_ktask_yield(void)
 
     __asm__ volatile("ecall" : : "r"(a7) : "memory");
 }
+#else /* __arm__: an SVC, from privileged Thread mode */
+static void ktask_exit(void)
+{
+    register int r0 __asm__("r0") = SYS_KTASK_EXIT;
+
+    __asm__ volatile("svc 0" : "+r"(r0) : : "memory");
+    for (;;)
+        ;
+}
+
+void process_ktask_sleep(uint32_t ticks)
+{
+    register int r0 __asm__("r0") = SYS_KTASK_SLEEP;
+    register int r1 __asm__("r1") = (int)ticks;
+
+    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r1) : "memory");
+}
+
+void process_ktask_yield(void)
+{
+    register int r0 __asm__("r0") = SYS_KTASK_YIELD;
+
+    __asm__ volatile("svc 0" : "+r"(r0) : : "memory");
+}
+#endif
 
 /* Bytes a ktask slot has used, counted from the untouched paint at the
  * bottom.  Cheap (one pass over at most KTASK_STACK_BYTES) and only called on
@@ -1952,8 +1988,15 @@ static void ktest_fn(void *arg)
     if (plat_cpu_id() != 0)
         ktest_cpu_bad++;
     ktest_done = 1;
+#if defined(__arm__)
+    /* The whole point of the ARM port of this machinery: the thread runs
+     * with the kernel's privileges, not as a user task with a window. */
+    kprintf("[ktest] ktask ran 5 sleeps + yield, cpu_bad=%d priv=%d\n",
+            ktest_cpu_bad, plat_thread_is_privileged());
+#else
     kprintf("[ktest] ktask ran 5 sleeps + yield, cpu_bad=%d\n",
             ktest_cpu_bad);
+#endif
     for (;;)
         process_ktask_sleep(1000);      /* keep the slot for /proc/ktask */
 }
@@ -2015,6 +2058,7 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     p->start_ns = plat_uptime_ms();
     ktask_names[slot] = name ? name : "ktask";
 
+#if defined(__riscv)
     memset(&p->saved, 0, sizeof(p->saved));
     p->saved.mstatus = RV_MSTATUS_MPP_M;   /* MPIE=0: the stub enables it */
     p->saved.mepc = (uint32_t)ktask_start_stub;
@@ -2023,6 +2067,13 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     p->saved.a0 = (uint32_t)fn;
     p->saved.a1 = (uint32_t)arg;
     p->kframe = &p->saved;
+#else
+    /* Enter ktask_trampoline(fn, arg) on the pool stack.  p->kframe stays
+     * NULL: on ARM the live frame is the copy in p->saved (arm_resume
+     * restores from it), so a waker writes there, not at a dead stack. */
+    plat_prepare_kernel_frame(&p->saved, (uint32_t)ktask_trampoline,
+                              (uint32_t)fn, (uint32_t)arg, p->stack_top);
+#endif
 
     spin_lock(&proc_lock);
     p->tid = next_pid++;
@@ -2041,18 +2092,28 @@ regs_t *process_ktask_syscall(regs_t *r)
         return r;
     }
 
+#if defined(__riscv)
     /* The trap entry came through the ktask path, so the frame is on the
      * ktask stack.  Force MPP back to M: mret must return to machine mode,
      * and mret will clear MPP again for the next entry (which uses the
      * flag, not MPP). */
     r->mstatus = (r->mstatus & ~RV_MSTATUS_MPP_MASK) | RV_MSTATUS_MPP_M;
+    uint32_t nr = r->a7, arg = r->a0;
+#else
+    /* ARM: r0 = number, r1 = argument, r0 = result.  The frame is the copy
+     * arm_trap_enter built on the kernel stack; p->saved keeps it while the
+     * thread sleeps and arm_resume restores it, PSP and all. */
+    uint32_t nr = r->r0, arg = r->r1;
+#endif
 
-    switch (r->a7) {
+    switch (nr) {
     case SYS_KTASK_SLEEP: {
-        uint32_t ticks = r->a0 ? (uint32_t)r->a0 : 1u;
+        uint32_t ticks = arg ? arg : 1u;
 
         p->saved = *r;
+#if defined(__riscv)
         p->kframe = r;
+#endif
         plat_frame_set_ret(r, 0);
         p->wake_tick = plat_ticks() + ticks;
         proc_set_state(p, ST_KT_WAIT);
@@ -2062,7 +2123,9 @@ regs_t *process_ktask_syscall(regs_t *r)
 
     case SYS_KTASK_YIELD:
         p->saved = *r;
+#if defined(__riscv)
         p->kframe = r;
+#endif
         plat_frame_set_ret(r, 0);
         proc_set_state(p, ST_READY);
         p->cpu = -1;
@@ -2085,7 +2148,7 @@ regs_t *process_ktask_syscall(regs_t *r)
         return r;
     }
 }
-#endif /* __riscv */
+#endif /* __riscv || __arm__ */
 
 /* A TOS_STACK() request (or the same value arriving in an envelope hint)
    has to be one the protection unit can describe and the window grain can

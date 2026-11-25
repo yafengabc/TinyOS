@@ -365,6 +365,14 @@ regs_t *arm_handle_tick(regs_t *f)
     plat_timer_tick();
     process_tick(f);
 
+    /* A kernel thread is cooperative: this tick woke sleepers and added the
+       slice to its clock, but it does not give the CPU away.  Returning the
+       frame unchanged leaves need_resched set, and the next trap from a user
+       task consumes it - which is also what keeps the WiFi blob from being
+       preempted while it holds its own locks. */
+    if (process_current_is_kernel())
+        return f;
+
     /* A tick nested inside an SVCall handler must never switch tasks.  The
        SVCall below it is still active, so an arm_resume() carrying a
        "return to Thread mode" EXC_RETURN would unwind two active exceptions
@@ -1344,6 +1352,57 @@ void plat_prepare_user_frame(regs_t *frame, uint32_t entry, uint32_t sp)
        of whichever core prepares it: the next trap overwrites whatever is
        below it anyway, and a task may start on either core. */
     frame->kern_sp = CPU_KSTACK_TOP((uint32_t)plat_cpu_id());
+}
+
+/* Called from arm_resume with the frame about to be restored: record
+ * whether it belongs to a kernel thread, so the resume path leaves
+ * CONTROL.nPRIV clear for it.  This is the only place that knows both the
+ * frame and the task being resumed, and it runs on the core that is about
+ * to execute it. */
+regs_t *arm_frame_priv(regs_t *f)
+{
+    f->priv = process_current_is_kernel() ? 1u : 0u;
+    return f;
+}
+
+/* The kernel-thread counterpart of plat_prepare_user_frame(): a hardware
+ * frame on the thread's own pool stack, entered through Thread mode on PSP
+ * like a user task but with CONTROL.nPRIV left at 0 (see arm_frame_priv).
+ * The thread runs with the kernel's privileges - it is kernel code - and
+ * nothing else can reach its stack; it gives up the CPU only at an SVC
+ * (sleep/yield/exit), because the tick refuses to switch away from it. */
+void plat_prepare_kernel_frame(regs_t *frame, uint32_t entry, uint32_t a0,
+                               uint32_t a1, uint32_t stack_top)
+{
+    uint32_t *hw = (uint32_t *)((stack_top - ARM_HW_SIZE) & ~7u);
+
+    memset(frame, 0, sizeof(*frame));
+    memset(hw, 0, ARM_HW_SIZE);
+    hw[ARM_HW_R0 / 4]     = a0;
+    hw[ARM_HW_R1 / 4]     = a1;
+    hw[ARM_HW_LR / 4]     = 0;              /* returning from entry exits  */
+    hw[ARM_HW_PC / 4]     = entry | 1u;     /* Thumb bit must be set       */
+    hw[ARM_HW_XPSR / 4]   = ARM_XPSR_THUMB;
+
+    frame->hw = (uint32_t)hw;
+    frame->r0 = a0;
+    frame->r1 = a1;
+    frame->pc = hw[ARM_HW_PC / 4];
+    frame->xpsr = hw[ARM_HW_XPSR / 4];
+    frame->exc_return = ARM_EXC_RET_THREAD;
+    frame->priv = 1;
+    frame->kern_sp = CPU_KSTACK_TOP((uint32_t)plat_cpu_id());
+}
+
+/* Diagnostics for the kernel-thread selftest: 1 when the caller is running
+ * in privileged Thread mode.  A kernel thread must answer 1; a user task 0.
+ * CONTROL is readable from both, so this does not fault either way. */
+int plat_thread_is_privileged(void)
+{
+    uint32_t c;
+
+    __asm__ volatile("mrs %0, control" : "=r"(c));
+    return (c & 1u) == 0;
 }
 
 /* ARM syscall convention: r0 = number, r1/r2/r3 = arguments, r0 = result.

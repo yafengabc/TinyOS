@@ -5,10 +5,11 @@
 
 /* Register frame for the Cortex-M port (arch/arm/start.S).
  *
- * Exception entry builds an 80-byte block on the kernel stack; the first
- * four words are bookkeeping, the next eight are the saved r4..r11 and the
- * last eight are a copy of the hardware frame the core pushed (r0,r1,r2,r3,
- * r12,lr,pc,xpsr).  arm_resume writes that copy back before returning, so
+ * Exception entry builds an 88-byte block on the kernel stack; the first
+ * four words are bookkeeping, the next eight are the saved r4..r11, the
+ * next eight are a copy of the hardware frame the core pushed (r0,r1,r2,r3,
+ * r12,lr,pc,xpsr) and the last word says whether the frame resumes
+ * privileged (a kernel thread).  arm_resume writes that copy back before returning, so
  * C code edits registers by writing these fields.
  *
  * The layout is shared with assembly, which uses byte offsets (FR_EXC,
@@ -29,10 +30,12 @@ typedef struct regs {
     uint32_t lr;                  /* 17                               */
     uint32_t pc;                  /* 18                               */
     uint32_t xpsr;                /* 19                               */
+    uint32_t priv;                /* 20      resume privileged (ktask) */
+    uint32_t pad;                 /* 21      keeps the frame 8-aligned */
 } regs_t;
 
 /* FR_SIZE in start.S is 80 (4 bookkeeping + 8 saved + 8 hardware words). */
-typedef char arm_regs_frame_size_check[(sizeof(regs_t) == 80) ? 1 : -1];
+typedef char arm_regs_frame_size_check[(sizeof(regs_t) == 88) ? 1 : -1];
 
 /* Hardware frame sizes and offsets (ARMv7-M stacking order). */
 #define ARM_HW_SIZE   32

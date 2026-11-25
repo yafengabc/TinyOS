@@ -118,7 +118,8 @@ __vector_table:
     .equ FR_HW,   40
     .equ FR_TSP,  44
     .equ FR_R0,   48
-    .equ FR_SIZE, 80
+    .equ FR_PRIV, 80
+    .equ FR_SIZE, 88
 
 /* -------------------------------------------------------------------- */
 
@@ -161,13 +162,13 @@ park:
 
     .thumb_func
 arm_trap_enter:
-    /* Build the 80-byte regs_t so that its layout matches regs.h exactly:
+    /* Build the 88-byte regs_t so that its layout matches regs.h exactly:
        the saved r4..r11 sit at +0, the bookkeeping words at +32 and the
        copy of the hardware frame at +48.  The reserve has to come first:
        "push" after it puts the saved registers at the BOTTOM of the block
        (r0+0), while pushing first would place them at r0+48 and leave the
        stale kernel stack at the offset arm_resume pops from. */
-    sub     sp, #80                 /* whole regs_t frame (8-byte aligned) */
+    sub     sp, #88                 /* whole regs_t frame (8-byte aligned) */
     mov     r0, sp
     /* Save r4-r11 explicitly.  ARMv6-M (Cortex-M0+) cannot push the high
        registers in one PUSH, nor store them with an immediate offset, so the
@@ -244,6 +245,11 @@ arm_resume:
        base, and r0 already is one - the M3-only rewrite moved it to r12
        for indexed addressing, but on the M0+ that copy is backwards and
        would clobber the frame pointer with garbage. */
+    /* The one place that knows both the frame and `current`: record whether
+       this frame resumes a kernel thread, so the privilege write below can
+       leave CONTROL.nPRIV clear for it.  Returns the frame in r0 (BL is
+       fine here: EXC_RETURN lives in the frame, and lr is reloaded below). */
+    bl      arm_frame_priv
     ldr     r1, [r0, #FR_HW]
     cmp     r1, #0
     beq     9f
@@ -308,8 +314,13 @@ arm_resume:
     mov     r1, lr
     tst     r1, r2                  /* bit 2: Thread mode on PSP?       */
     beq     7f
-    movs    r2, #1                  /* CONTROL.nPRIV = 1                */
-    msr     control, r2
+    ldr     r2, [r0, #FR_PRIV]
+    cmp     r2, #0
+    beq     6f
+    movs    r2, #0                  /* kernel thread: stays privileged  */
+    b       5f
+6:  movs    r2, #1                  /* CONTROL.nPRIV = 1                */
+5:  msr     control, r2
     isb
     /* ARM has no MPIE: exception entry/exit does NOT save or restore
        PRIMASK.  sched_switch() masks interrupts around its run-queue scan
