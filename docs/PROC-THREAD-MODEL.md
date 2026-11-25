@@ -204,8 +204,9 @@ DYING -> FREE     最后一个线程退出，退出码交给父进程/记忆
   估计大（`regs_t` 144/80 B 加上等待、栈与记账字段），以及 `MAX_THREADS` 取
   2×进程数（上限 32）。这是“线程是调度单位”的必要成本，写在这里是为了
   让 RP2040 一类 264 KiB 的板子有据可查。
-- 内核线程栈：RV32 继续 6 KiB 池（`/proc/ktask` 量高水位）；ARM 新增每线程栈池，
-  大小用同样的 paint/高水位方式量（E3）。内核线程名和栈池放在一起
+- 内核线程栈：两个 ISA 共用同一个 6×6 KiB 池和同一套 paint/高水位计量
+  （`/proc/ktask`）；池只在有 ktask 使用者的镜像里链接（`--gc-sections`，
+  arm 默认 178,336 B vs ktasktest 215,240 B 的 .bss）。内核线程名和栈池放在一起
   （`const char *names[KTASK_SLOTS]` = 24 B，替代每线程 `name[8]`）。
 - `TOS_KTHREADS` 改为只控制**用户态线程 API 与测试程序**，不再是内核模型开关。
 
@@ -214,7 +215,7 @@ DYING -> FREE     最后一个线程退出，退出码交给父进程/记忆
 | 端口 | 用户线程 | 内核线程 |
 |---|---|---|
 | rv32 / rv32smp / C3 | 现有 | 现有 ktask（M-mode、每核 trap 状态、栈池） |
-| Cortex-M3/M33/M0+ | 现有 | **新增**（E3，#58）：privileged Thread mode、每线程 PSP 栈、PendSV 切换；协作式 |
+| Cortex-M3/M33/M0+ | 现有 | **已可用**（E3，#58）：privileged Thread mode、每线程 PSP 栈、帧内 priv 位、协作式；M3 QEMU 有自测，M33/RP2040 待板测 |
 | x86 | 现有（若有） | 按同一模型，具体实现随 x86 端口；本轮以 ARM/RV32 为主 |
 
 ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先级关系、M0+ 无 PSPLIM
@@ -254,7 +255,8 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | **E2-A** ✅ `9f41f18` | ps 加 `tid` 列（每行一个线程）；新增 `/proc/threads` 机器视图；`emutest`/`accept33` 解析同步 | T0/T1/T2、C3 真机 |
 | **E2-B1** ✅ `f6949ab` | 线程槽只留线程自己的东西：`wait_pid` 拆 `wait_child`/`join_tid`、`leader` → `proc->main`、`is_ktask` 删除（`proc == NULL` 就是内核线程） | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
 | **E2-B2** ✅ `35f0118` | `proc->state`（FREE/NEW/LIVE/DYING）状态机 + KASSERT；ps//proc/threads 跳过 NEW；kthreadtest 新增“线程表满时 exec 失败不漏进程条目”与“表清空后 exec 恢复”两条 | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
-| **E3** | ARM 内核线程（#58）+ USB 泵迁移 | M3 QEMU + M33/RP2040 板测 |
+| **E3-M3** ✅ `238d381` | ARM 内核线程：特权 Thread mode + 每线程 PSP 栈；帧内 `priv` 位与 `arm_resume`；SVC 路由到 ktask syscall；tick 不抢占；`configs/arm-ktasktest.conf` | M3 QEMU（priv=1）+ T0/T1/T2 |
+| **E3-board** | USB 泵迁到内核线程 + M33/RP2040 真机验收（#58） | 板卡（OPEN-ITEMS §22） |
 | **E4** | 全端口矩阵：rv32/rv32smp、C3、M3/M33、RP2040、x86；删旧模型残留 | 全 T3 + 板卡 |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
 
