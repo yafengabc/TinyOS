@@ -390,6 +390,24 @@ RV32 的 `drivers/usb/rp2350rv`（1 KiB 环、泵只在 CPU 0）用同一机制�
   `fault isolation` FAIL 与 gap 无关（UART0 3 轮证明板级 fault 正常）。细节与逐轮数据见
   `docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`。
 
+  **2026-11-25 定位更新（两个候选补丁均已撤回，修复未落地）**：在 ATK-DNRP2350AM ARM SMP
+  上同时打开 UART0（COM14）与板载 CDC（COM26，DTR=True）抓同一次 `crash`，UART0
+  997 B 完整、CDC 267–311 B，首差在 262/306 B，正是 256 B per-core TX ring 写穿；
+  `D` 增量与丢失字节数相等。 RP2350 的 fault 优先级可降到 0x40，USB IRQ(0x00) 与
+  SysTick(0x20) 能抢占，所以 prompt 会在 dump 被截断后补出来；M0+ HardFault 固定在
+  所有 IRQ 之上，整段 dump 期间 pump 抢不进来，prompt 也会落进满环。UART0 不丢不是
+  因为环大：硬件 FIFO 只有 16 B，`plat_console_putc()` 每字节等 `FR.TXFF` 清零，
+  由 UART 控制器自行按波特率发送，不依赖中断/pump。
+  曾试在 `arch/arm/platform.c` 的 `process_exit()` 前调用 `plat_console_flush()`：
+  ATK ARM SMP 无回退，但 RP2040 SMP 实测 **ACCEPT FAIL 25/30**，`crash` 后 30 s
+  CDC 无 prompt，已撤回。第二个方案是在 `board/rpi-pico/platform.c` 的
+  `plat_console_putc()` 里读 `IPSR`，仅在 `IPSR != 3` 时写 CDC（M0+ dump 只走
+  UART0）：刷入后单连接探针里第一次 `crash` 只回 41 B（停在
+  `about to execute an illegal instru`），第二次 0 B，CDC 之后完全沉默；UART0
+  同一时刻仍是完整 HardFault dump + prompt。说明按异常号判别会把正常线程态输出
+  也一起挡掉，已撤回该补丁并重建基线镜像。当前 `fault isolation` 仍按失败记录，
+  修复未落地。
+
 若 (a) 出现 `N > 0` 或 (b) 仍截断，先看 `/proc/usbboot` 的 `handed` 是否还在增长：
 增长说明泵在工作、问题在主机/端点；停住说明泵没被调度，回到 §5b 第 5 条的 PendSV 检查。
 
@@ -415,7 +433,8 @@ ARMv8-M 上是 SecureFault（不是保留字节），也按 `ARM_PRIO_FAULT` 写
   `[pid N] HardFault at 0x2001409a`、回提示符、uptime 366→370→373→376 s 不复位
   (`prompt_in_crash=True, panic=False`)。板级 `arm_default_handler` 的 IPSR 读取在 M0+
   上生效无疑；CDC 那一项判为**串口/输出时序问题，不是 fault 逻辑**，单列待查，
-  不阻塞本补丁的板级结论。
+  不阻塞本补丁的板级结论。该输出时序项的根因与待复测补丁见 §5c(c) 的 2026-11-25
+  定位更新。
 
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
