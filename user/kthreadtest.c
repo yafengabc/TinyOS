@@ -46,9 +46,24 @@ static void give(void *arg)
 
 static volatile int woke;
 
+/* Set from the sleeping thread so the compiler has to materialise its 768-byte
+ * frame: a pointer that escapes cannot be scalar-replaced, which is what
+ * happened when only two elements were read.  Only valid while that thread
+ * lives; ps is printed during that window. */
+static volatile char *slow_frame;
+
 static void slow(void *arg)
 {
+    /* A frame big enough for ps's stk column to show this thread's own stack
+     * (S3b), live across the sleep. */
+    volatile char pad[768];
+
+    slow_frame = pad;
+    pad[0] = 1;
+    pad[sizeof(pad) - 1] = 2;
     sleep(200);
+    if (slow_frame[0] == 0x7f || slow_frame[sizeof(pad) - 1] == 0x7f)
+        kthread_exit(9);                /* never: keeps the frame live */
     woke = 1;
     kthread_exit(*(int *)arg);
 }
@@ -225,6 +240,10 @@ int main(int argc, char *argv[])
         tid = kthread_create(slow, &v, 4096);
         sleep(50);
         ok(woke == 0, "leader ran while the thread was still asleep");
+        /* The thread slot now has its own stack range (S3b): ps must show a
+         * thrN row in sleep with a real stk/sz, not 0/0 or the leader's. */
+        printf("kthreadtest: ps while the thread sleeps:\n");
+        ps();
         code = -1;
         ok(kthread_join(tid, &code) == 0 && code == 7, "join sleeping thread");
         ok(woke == 1, "thread finished before join returned");

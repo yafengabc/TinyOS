@@ -216,6 +216,22 @@ soak 2/2；`configs/rv32-kthreads.conf` 与 `configs/arm-kthreads.conf` 上
   `all ok`；rv32smp 每次都是 25,600 字节 / 偏移和 1,279,200；soak rv32+arm
   **10 轮** 2/2。
 
+## 2i. ps 的线程行 + 用户堆的边界（2026-11-25）
+
+- `kthreadtest` 现在在 `slow` 线程睡眠时打印一次 `ps`。rv32 与 arm 上都能看到
+  leader `0.5/4`、线程 `0.7/4`：线程显示的是自己 768 B 的帧，不是 leader 的栈；
+  state `sleep`、ppid=leader、wink 是组的 128 KiB。S3b 的 `stk/sz` 对线程成立。
+  测试里用 `slow_frame` 存了一次数组地址：只读写两个元素时编译器把数组拆成了标量，
+  ps 会显示 0.0。
+- 同时试了 4 线程 × 200 次 `malloc/free`（块上写校验和）：**用户堆不是线程安全的**。
+  rv32（UP）10 次里失败 2 次，一次把线程栈写坏后内核按 `thread stack overflow`
+  杀线程；rv32smp 10 次里失败 1 次，`store access fault at 0x80100514`。这条用例
+  没有进默认测试——失败率不定，不能当回归——记为 `docs/OPEN-ITEMS.md` §20，
+  **合回 main 前必须解决**。
+- 试过用 `__atomic_exchange` 给 `heap.c` 加锁：M0+（RP2040）和 ESP32-C3 没有 A
+  扩展，链接直接报 `undefined symbol: __atomic_exchange_4` / `__atomic_store_4`，
+  所以修法要么是内核辅助的 mutex、要么每线程堆，见 §20。本轮没有改 `heap.c`。
+
 ## 3. 不进 main 的理由
 
 - S2 保持"**槽死即窗口释放**"不变：资源块和槽同生命周期，按槽索引，领槽即清。

@@ -927,3 +927,39 @@ go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
    确认 `[usb] pump thread` 不出现、控制器仍由旧钩子轮询。
 
 结果写 `docs/acceptance/`，注明板子、端口、镜像与 `cat /proc/ktask` 的 used/hw。
+
+## 20. 用户态 malloc/free 不是线程安全的（2026-11-25，合回 main 前必须解决）
+
+`user/heap.c` 的自由链表属于整个进程，而线程共享窗口。`kthreadtest` 的压力用例
+（4 个线程各 200 次 malloc/free，两个块上写反向校验和）在 QEMU 上暴露了它：
+
+- rv32（单核）10 次运行失败 2 次：一次内核打出
+  `[pid 1171] thread stack overflow ... killing`——堆里的块被发两次，写坏了相邻的
+  线程栈；`kthreadtest: FAIL concurrent malloc/free keeps every block intact`。
+- rv32smp（两核）10 次运行失败 1 次：
+  `[pid 1636] store access fault at 0x80100514 (address 0x5352515c)`——块头/指针已经
+  不可用。
+- arm（单核）10 次全过，说明这是**概率**窗口，不是只在 SMP 上才有。
+
+失败率不定，所以这条用例没有留在默认 `kthreadtest` 里；`heap.c` 的注释本来就写着
+"Not thread-safe"。`kthread_create()` 自己也会 malloc（栈 + start record），因此
+"线程里不要 malloc" 不是可接受的契约。
+
+修法选项：
+
+1. **内核辅助的 mutex**（推荐）：`SYS_MUTEX_TRY` / `SYS_MUTEX_UNLOCK`，在系统调用里
+   对用户提供的锁字做 test-and-set（内核用 `proc_lock` 或一把专用自旋锁串行化两核），
+   用户在 0 返回时 `yield()`。M0+ 与 C3 没有原子指令，这是唯一不依赖目标原子扩展的
+   做法；代价是 `TOS_KTHREADS` 程序每次 malloc/free 多一次系统调用（非线程程序不受
+   影响，因为锁只在 `#ifdef TOS_KTHREADS` 下编译）。解锁需要 release 语义（内核里
+   加屏障）。
+2. **每线程堆**：线程只用自己的 free list，`TOS_HEAP` 的区域要切分，跨线程 free 需要
+   归还给所有者；语义更复杂，但 malloc 不付系统调用。
+3. 不修、写进契约：不能接受，`kthread_create` 本身就在 malloc。
+
+已排除的快速方案：`__atomic_exchange_n` 加锁在 RP2040（M0+）和 ESP32-C3 上链接失败
+（`undefined symbol: __atomic_exchange_4` / `__atomic_store_4`），这两个目标没有 A
+扩展；所以不能只改 `user/heap.c`。
+
+S4 的 USB 泵线程不经过用户堆，所以不阻塞板测；但 S5/合回 main 之前必须在这条上给出
+结论。
