@@ -345,6 +345,7 @@ static void bootsel_enter_rom(void)
     boot = (rp_rom_usb_boot_t)rp_rom_func(ROM_FUNC_RESET_USB_BOOT);
     if (!boot) {
         dbg_uart_puts("[bootsel] ROM lookup failed\n");
+        g_bootsel_req = 1;      /* keep it: the next poll retries */
         return;
     }
     /* The bootrom runs on ROSC after the reset (PSM_WDSEL leaves it alone),
@@ -433,7 +434,15 @@ static void bootsel_poll_uart(void)
         return;
     switch (c) {
     case BOOTSEL_MAGIC_CHAR:
-        g_bootsel_req = 1;       /* serviced from the idle thread */
+        /* Service it here, not at one caller: this poller is reached from the
+         * tick, from console output during early boot and from
+         * plat_panic_halt()'s spin (g_panic_poll), and after a panic the tick
+         * is stopped - so the panic loop is the only thing still running and
+         * must be able to hand the chip to the ROM itself.  bootsel_enter_rom()
+         * stops SysTick before the ROM arms the watchdog, so being called from
+         * an interrupt or with PRIMASK set is fine. */
+        g_bootsel_req = 1;
+        bootsel_enter_rom();
         return;
     case REPLUG_CHAR: g_replug_req = 1; return;
     case TRACE_CHAR:  g_trace_req  = 1; return;
@@ -695,11 +704,9 @@ void plat_timer_tick(void)
      * steal keystrokes from plat_console_getchar(); it only makes Ctrl-D
      * work while the shell is blocked on a device. */
     bootsel_poll_uart();
-    /* Ctrl-D: hand over to the ROM from the tick.  This handler stops its own
-     * SysTick first, so the "disarm a leftover watchdog" line above cannot
-     * cancel the ROM's 10 ms countdown.  On success the watchdog resets the
-     * chip into BOOTSEL and nothing after this call runs. */
-    bootsel_enter_rom();
+    /* Ctrl-D is handled inside bootsel_poll_uart() (it calls
+     * bootsel_enter_rom()), so the panic loop - where this tick no longer runs
+     * - reaches the same code. */
     usb_cdc_poll();
     if (g_replug_req) {
         g_replug_req = 0;

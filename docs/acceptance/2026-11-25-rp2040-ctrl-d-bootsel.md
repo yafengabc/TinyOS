@@ -64,6 +64,13 @@ REBOOT2（`0x4252`），不经过 watchdog，所以那边一直好用。
 CDC 的 `crash` fault-isolation 仍失败（`handed` 增长但主机只收到 fault 前约 50 B，
 端口随后需要复位），与本次 Ctrl-D 改动无关，记在 `docs/OPEN-ITEMS.md` §5c。
 
+## 后续（同一轮）
+
+Ctrl-D 的 ROM 调用从 tick 挪进了 `bootsel_poll_uart()` 本身，于是
+**内核 panic 之后也能用**（panic 自旋里 `g_panic_poll` 反复调用它，不再依赖已停的
+tick）；ROM lookup 失败时请求会保留，下一次 poll 重试。板测项：panic 后按一次
+`0x04`，UART0 上应出现 `[bootsel] ROM reset_usb_boot()`，随后 `RPI-RP2`。
+
 ## 注
 
 1. `go run ./cmd/tos build all` 在 HEAD（未含本改动）上就已经是 **17/18**：`x86` 的

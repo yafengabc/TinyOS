@@ -121,9 +121,11 @@ core 0 的下一个 tick 里 `bootsel_enter_rom()`（IPSR=0x0f，这是可以的
 
 ## 6. 已知边界
 
-- **panic 之后**：`g_panic_poll = bootsel_poll_uart` 只负责收 Ctrl-D 并置
-  `g_bootsel_req`；真正调 ROM 在 tick 里，而 panic 已经停了调度/tick，所以 panic
-  之后 Ctrl-D 不保证能进 BOOTSEL。该路径保持原样。
+- **panic 之后**：可以。`g_panic_poll = bootsel_poll_uart` 在 panic 的自旋里被
+  反复调用，而 Ctrl-D 现在就在这个 poller 里直接交给 ROM（`bootsel_enter_rom()`），
+  不再依赖 tick。tick 早停了也无所谓：`bootsel_enter_rom()` 本来就要先停 SysTick，
+  复位是 watchdog 硬件完成的；前提是 panic 时 UART0 还能收发（本板由控制器时钟
+  驱动，可以）。
 - **SMP**：tick 只在 core 0 轮询 UART；core 1 收到 Ctrl-D 不会处理。要 Ctrl-D 就用
   core 0（默认 shell 在 core 0）。
 - **ROSC**：`xosc_start()` 失败时走 `keep_ref`（ROSC），tick 仍按 12 计数，倒计时会偏快；
