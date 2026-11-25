@@ -124,6 +124,7 @@ enum {
     ST_WAIT_PIPE,
 #ifdef TOS_KTHREADS
     ST_WAIT_THREAD, /* a join() waiting for a sibling                */
+    ST_WAIT_MUTEX,  /* blocked on a user mutex word (process.c)      */
     ST_THREAD_ZOMBIE,/* exited, code kept until join                  */
     ST_DYING,       /* leader exited; threads are still winding down */
 #endif
@@ -247,6 +248,12 @@ typedef struct proc {
 #ifdef TOS_KTHREADS
     struct proc *leader;
     int      tgid;          /* thread group id: the leader's pid */
+    /* User-mutex state.  `held_mutex` is the word this thread owns through
+     * kmutex_lock()/try(); it is what a dying thread hands on (the heap lock
+     * exists so a thread that faults inside malloc does not wedge the
+     * process).  `wmutex` is the word it is sleeping on in ST_WAIT_MUTEX. */
+    volatile int *held_mutex;
+    volatile int *wmutex;
     int      exit_code;     /* ST_THREAD_ZOMBIE: value for join() */
     int      live_threads;  /* threads that have not exited yet        */
     spin_t   glock;         /* protects brk and the fd table below     */
@@ -322,7 +329,7 @@ static int proc_state_transition_ok(int from, int to)
     if (to == ST_WAIT_CHILD || to == ST_WAIT_INPUT ||
         to == ST_WAIT_SLEEP || to == ST_WAIT_PIPE ||
 #ifdef TOS_KTHREADS
-        to == ST_WAIT_THREAD ||
+        to == ST_WAIT_THREAD || to == ST_WAIT_MUTEX ||
 #endif
         to == ST_KT_WAIT)
         return from == ST_RUNNING || from == ST_READY;
@@ -604,7 +611,7 @@ static int proc_waiting(void)
         if (st == ST_WAIT_CHILD || st == ST_WAIT_INPUT || st == ST_WAIT_SLEEP ||
             st == ST_WAIT_PIPE
 #ifdef TOS_KTHREADS
-            || st == ST_WAIT_THREAD
+            || st == ST_WAIT_THREAD || st == ST_WAIT_MUTEX
 #endif
             || st == ST_KT_WAIT)
             return 1;
@@ -771,6 +778,9 @@ static void group_unlock(proc_t *p) { spin_unlock(&PROC_GROUP(p)->glock); }
 /* Defined with the thread code further down; process_exit() and task_kill()
  * need it earlier. */
 static void begin_group_exit_locked(proc_t *leader, int code);
+/* Likewise the mutex handoff: process_thread_exit() releases a word its
+ * thread held, and the implementation sits next to the syscall handlers. */
+static proc_t *mutex_handoff_locked(volatile int *word, const proc_t *dead);
 #else
 #define group_lock(p)   ((void)0)
 #define group_unlock(p) ((void)0)
@@ -1654,6 +1664,8 @@ static void proc_retire_locked(proc_t *p)
 #ifdef TOS_KTHREADS
     p->leader = NULL;
     p->tgid = 0;
+    p->held_mutex = NULL;
+    p->wmutex = NULL;
 #endif
     p->cpu = -1;
     p->win_base = 0;
@@ -3246,8 +3258,9 @@ static void begin_group_exit_locked(proc_t *leader, int code)
         q->kill_pending = 1;
         if (q->state == ST_WAIT_CHILD || q->state == ST_WAIT_INPUT ||
             q->state == ST_WAIT_SLEEP || q->state == ST_WAIT_PIPE ||
-            q->state == ST_WAIT_THREAD) {
+            q->state == ST_WAIT_THREAD || q->state == ST_WAIT_MUTEX) {
             plat_frame_set_ret(&q->saved, (uint32_t)-1);
+            q->wmutex = NULL;       /* the group (and the word) is going away */
             proc_set_state(q, ST_READY);
             q->cpu = -1;
         }
@@ -3260,6 +3273,7 @@ regs_t *process_thread_exit(regs_t *r, int code)
     proc_t *leader;
     proc_t *woke = NULL;
     proc_t *woke_leader = NULL;
+    proc_t *woke_mutex = NULL;
     uint32_t irq;
 
     if (!p || !p->leader)
@@ -3268,6 +3282,16 @@ regs_t *process_thread_exit(regs_t *r, int code)
     leader = p->leader;
     irq = plat_spin_lock_irqsave(&proc_lock);
     p->exit_code = code;
+    /* A thread that dies holding a user mutex (the heap lock is the one this
+     * exists for) must hand it on: a fault inside malloc would otherwise
+     * leave every sibling waiting forever.  When the whole group is dying
+     * there is nobody to hand it to. */
+    if (p->held_mutex) {
+        if (leader->state != ST_DYING)
+            woke_mutex = mutex_handoff_locked(p->held_mutex, p);
+        p->held_mutex = NULL;
+    }
+    p->wmutex = NULL;
     woke = wake_joiner_locked(p, code);
     if (woke) {
         /* The waiter has the code in its frame and its user buffer, so the
@@ -3291,6 +3315,8 @@ regs_t *process_thread_exit(regs_t *r, int code)
 
     if (woke_leader)
         preempt_if_higher(woke_leader);
+    if (woke_mutex)
+        preempt_if_higher(woke_mutex);
     if (woke)
         preempt_if_higher(woke);
     return sched_switch(r);
@@ -3347,33 +3373,88 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
  * list), so one guard for the whole system is enough. */
 static spin_t user_mutex_guard = SPIN_INIT;
 
+/* Give `word` to the first thread sleeping on it, or release it.  Called
+ * with proc_lock held.  Ownership moves with the word (it stays 1), so the
+ * woken thread returns from kmutex_lock() already holding it - no race with
+ * a third thread that would otherwise grab it between wake and retry. */
+static proc_t *mutex_handoff_locked(volatile int *word, const proc_t *dead)
+{
+    for (int i = 0; i < MAX_PROCS; i++) {
+        proc_t *q = &procs[i];
+
+        if (q == dead || q->wmutex != word || q->state != ST_WAIT_MUTEX)
+            continue;
+        q->wmutex = NULL;
+        q->held_mutex = word;
+        plat_frame_set_ret(&q->saved, 0);
+        proc_set_state(q, ST_READY);
+        q->cpu = -1;
+        return q;
+    }
+    *word = 0;
+    return NULL;
+}
+
 int process_mutex_try(uint32_t ptr)
 {
+    proc_t *p = current;
     volatile int *word;
     uint32_t irq;
     int got = 0;
 
-    if (!current || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
+    if (!p || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
         return -1;
-    irq = plat_spin_lock_irqsave(&user_mutex_guard);
+    irq = plat_spin_lock_irqsave(&proc_lock);
     word = (volatile int *)ptr;
     if (*word == 0) {
         *word = 1;
+        p->held_mutex = word;
         got = 1;
     }
-    plat_spin_unlock_irqrestore(&user_mutex_guard, irq);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
     return got;
+}
+
+/* Blocking lock.  The check and the sleep are one critical section, so an
+ * unlock between them cannot be lost (same shape as block_locked's pipe
+ * waits).  The unlocker sets our return value to 0 and hands the word over;
+ * if nobody unlocks we stay here. */
+regs_t *process_mutex_lock(regs_t *r, uint32_t ptr)
+{
+    proc_t *p = current;
+    volatile int *word;
+    uint32_t irq;
+
+    if (!p || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
+        return done(r, -1);
+    word = (volatile int *)ptr;
+
+    irq = plat_spin_lock_irqsave(&proc_lock);
+    if (*word == 0) {
+        *word = 1;
+        p->held_mutex = word;
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return done(r, 0);
+    }
+    p->wmutex = word;
+    return block_locked(r, ST_WAIT_MUTEX, irq);
 }
 
 int process_mutex_unlock(uint32_t ptr)
 {
+    proc_t *p = current;
+    proc_t *woke;
     uint32_t irq;
 
-    if (!current || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
+    if (!p || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
         return -1;
-    irq = plat_spin_lock_irqsave(&user_mutex_guard);
-    *(volatile int *)ptr = 0;
-    plat_spin_unlock_irqrestore(&user_mutex_guard, irq);
+    irq = plat_spin_lock_irqsave(&proc_lock);
+    if (p->held_mutex == (volatile int *)ptr)
+        p->held_mutex = NULL;
+    woke = mutex_handoff_locked((volatile int *)ptr, p);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+    if (woke)
+        preempt_if_higher(woke);
     return 0;
 }
 
@@ -3597,6 +3678,7 @@ static const char *state_name(int st)
     case ST_KT_WAIT:    return "ktwait";
 #ifdef TOS_KTHREADS
     case ST_WAIT_THREAD:   return "join ";
+    case ST_WAIT_MUTEX:    return "mutex";
     case ST_THREAD_ZOMBIE: return "zombi";
     case ST_DYING:         return "dying";
 #endif

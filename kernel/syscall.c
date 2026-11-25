@@ -314,6 +314,9 @@ static regs_t *dispatch(regs_t *r)
     case SYS_MUTEX_UNLOCK:
         plat_frame_set_ret(r, (uint32_t)process_mutex_unlock(sc.a0));
         return r;
+
+    case SYS_MUTEX_LOCK:
+        return process_mutex_lock(r, sc.a0);
 #endif
 
     case SYS_REMOTE_TEST: {

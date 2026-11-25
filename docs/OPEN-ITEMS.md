@@ -939,8 +939,12 @@ release 屏障里写 0。`user/heap.c` 只在 `TOS_KTHREADS` 下取这把锁，�
 
 回归：4 线程 × 200 次 × 2 块（写反向校验和），rv32 / rv32smp / arm 各 10 次全过
 （此前 rv32 10 次失败 2 次、rv32smp 1 次）。已知代价：线程程序每次 malloc/free
-两次系统调用；等待是 `yield()`，高优先级线程等低优先级持有者时仍有理论上的优先级
-反转，**阻塞式 mutex（unlock 唤醒等待者）留作后续**。
+两次系统调用。
+
+**阻塞式随后也做了**：`SYS_MUTEX_LOCK`(56) 在字被占时进入 `ST_WAIT_MUTEX` 睡眠，
+解锁把所有权直接交给第一个等待者；线程死亡时把持有的字交出去（fault 在 malloc 里
+不会卡死同进程其他线程）。`ps` 会显示 `mutex` 状态。细节见
+`docs/THREAD-MODEL.md` §2k。
 
 下面是当时的分析，保留作记录。
 

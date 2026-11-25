@@ -304,6 +304,17 @@ void mutex_unlock(mutex_t *m);
 int  kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
 int  kthread_join(int tid, int *code);
 void kthread_exit(int code) __attribute__((noreturn));
+/* Blocking mutex for these threads (distinct from the cooperative mutex_t
+ * above).  `word` is one int initialised to 0; lock sleeps in the kernel
+ * while it is taken, and unlock hands ownership to the first waiter.  Try is
+ * the non-blocking form: 1 acquired, 0 busy, -1 bad pointer.
+ *
+ * The kernel tracks one held word per thread, which is what the heap lock
+ * needs; a thread that locks a second word before unlocking the first is not
+ * covered by the release-on-death path, and nesting can deadlock. */
+int  kmutex_lock(int *word);
+int  kmutex_unlock(int *word);
+int  kmutex_try(int *word);
 #endif
 int  wait(int pid);
 int  yield(void);

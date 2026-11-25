@@ -84,6 +84,7 @@
  * is taken, -1 on a bad pointer.  UNLOCK writes 0 with the release barrier. */
 #define SYS_MUTEX_TRY     54 /* mutex_try(int *word) -> 1/0/-1          */
 #define SYS_MUTEX_UNLOCK  55 /* mutex_unlock(int *word) -> 0/-1         */
+#define SYS_MUTEX_LOCK    56 /* kmutex_lock(int *word) -> 0/-1          */
 
 /* Longest path the kernel accepts in one syscall, including the NUL.
  *

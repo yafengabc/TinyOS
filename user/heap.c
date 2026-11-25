@@ -47,27 +47,24 @@ static struct heap_blk *heap_head;
 static struct heap_blk *heap_tail;
 
 #ifdef TOS_KTHREADS
-/* Threads share this free list.  The test-and-set lives in the kernel
- * (SYS_MUTEX_TRY): user mode has no atomics on the M0+ or the C3, and a plain
- * flag loses to preemption even on one core.  A waiter yields - the holder is
- * never blocked, so progress is at most one slice away.  Critical sections
- * are a handful of instructions; the lock is compiled only when threads are
- * possible, so single-threaded programs pay nothing. */
-int tos_mutex_try(int *word);
-int tos_mutex_unlock(int *word);
-int yield(void);
+/* Threads share this free list.  The lock is a kernel mutex: user mode has
+ * no atomics on the M0+ or the C3, and a plain flag loses to preemption even
+ * on one core.  A waiter sleeps in the kernel instead of spinning, and the
+ * kernel hands ownership to the first waiter on unlock.  It is compiled only
+ * when threads are possible, so single-threaded programs pay nothing. */
+int kmutex_lock(int *word);
+int kmutex_unlock(int *word);
 
-static volatile int heap_lock;
+static int heap_lock;
 
 static void heap_lock_take(void)
 {
-    while (!tos_mutex_try((int *)&heap_lock))
-        yield();
+    kmutex_lock(&heap_lock);
 }
 
 static void heap_unlock(void)
 {
-    tos_mutex_unlock((int *)&heap_lock);
+    kmutex_unlock(&heap_lock);
 }
 #else
 #define heap_lock_take()   ((void)0)

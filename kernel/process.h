@@ -78,6 +78,7 @@ void     process_ktask_sleep(uint32_t ticks);
 /* The thread library's heap lock: test-and-set and release of one user word. */
 int      process_mutex_try(uint32_t ptr);
 int      process_mutex_unlock(uint32_t ptr);
+regs_t  *process_mutex_lock(regs_t *r, uint32_t ptr);
 void     process_ktask_yield(void);
 regs_t  *process_ktask_syscall(regs_t *r);
 

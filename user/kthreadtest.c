@@ -46,6 +46,30 @@ static void give(void *arg)
 
 static volatile int woke;
 
+/* Blocking mutex: one thread holds the word, another must sleep in the
+ * kernel (ps state "mutex") rather than spin, and take over on unlock.  The
+ * second case is the heap-lock nightmare: a holder that faults must hand the
+ * word on, or every sibling waits forever. */
+static int tmutex, deadmutex;
+static volatile int locker_got;
+
+static void locker(void *arg)
+{
+    (void)arg;
+    kmutex_lock(&tmutex);
+    locker_got = 1;
+    sleep(20);
+    kmutex_unlock(&tmutex);
+    kthread_exit(0);
+}
+
+static void die_holding(void *arg)
+{
+    (void)arg;
+    kmutex_lock(&deadmutex);
+    *(volatile int *)0 = 1;             /* fault while holding the word */
+}
+
 /* Concurrent malloc/free from four threads.  The free list is shared, and
  * even on a uniprocessor the tick can preempt a thread in the middle of it;
  * the checksum catches a block handed out twice (two threads writing each
@@ -429,6 +453,39 @@ int main(int argc, char *argv[])
            "sibling switches reused the protection regions");
         printf("kthreadtest: %u sibling switch(es), %u region set(s)\n",
                b.switches - a.switches, b.prot - a.prot);
+    }
+
+    /* Blocking mutex: sleep while taken, hand off on unlock, and release if
+     * the holder dies. */
+    {
+        int code = -1;
+
+        tmutex = 0;
+        locker_got = 0;
+        ok(kmutex_lock(&tmutex) == 0, "leader took the test mutex");
+        tid = kthread_create(locker, 0, 4096);
+        sleep(50);
+        ok(locker_got == 0, "the waiter is blocked, not spinning");
+        printf("kthreadtest: ps with a mutex waiter:\n");
+        ps();
+        ok(kmutex_unlock(&tmutex) == 0, "leader released the test mutex");
+        ok(kthread_join(tid, &code) == 0 && code == 0,
+           "the blocked thread ran after the handoff");
+        ok(locker_got == 1, "the waiter saw its critical section");
+        ok(kmutex_try(&tmutex) == 1, "mutex is free after the waiter exited");
+        kmutex_unlock(&tmutex);
+    }
+
+    {
+        int code = -1;
+
+        deadmutex = 0;
+        tid = kthread_create(die_holding, 0, 4096);
+        ok(tid > 0, "create a thread that dies holding a mutex");
+        ok(kthread_join(tid, &code) == 0 && code == 139,
+           "the holder died on its fault");
+        ok(kmutex_try(&deadmutex) == 1, "a dead holder released the mutex");
+        kmutex_unlock(&deadmutex);
     }
 
     /* The user heap is shared by the process's threads; the kernel mutex in

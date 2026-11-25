@@ -360,13 +360,17 @@ int schedstat(struct schedstat *st)
 }
 
 #ifdef TOS_KTHREADS
-/* Used by user/heap.c; not part of the public lib.h surface. */
-int tos_mutex_try(int *word)
+int kmutex_lock(int *word)
+{
+    return tos_sys1(SYS_MUTEX_LOCK, (int)word);
+}
+
+int kmutex_try(int *word)
 {
     return tos_sys1(SYS_MUTEX_TRY, (int)word);
 }
 
-int tos_mutex_unlock(int *word)
+int kmutex_unlock(int *word)
 {
     return tos_sys1(SYS_MUTEX_UNLOCK, (int)word);
 }

@@ -242,10 +242,29 @@ soak 2/2；`configs/rv32-kthreads.conf` 与 `configs/arm-kthreads.conf` 上
   `yield()`；没有线程的程序不编译这段，代码和以前完全一样。
 - 回归：`kthreadtest` 的 4 线程 × 200 次 × 2 块（反向校验和）在 rv32 / rv32smp /
   arm 各 10 次全过；修之前 rv32 10 次失败 2 次、rv32smp 1 次。
-- 代价与边界：线程程序每次 malloc/free 两次系统调用；`yield()` 等待在高优先级
-  线程等低优先级持有者时仍有理论上的优先级反转，阻塞式 mutex（unlock 唤醒）是
-  后续工作。`abi/syscalls.csv` 与 goc32 的 snapshot 已同步，goc32 `go test` 与
-  `hello.c` 样例编译都通过。
+- 代价与边界：线程程序每次 malloc/free 两次系统调用。阻塞式 mutex 见 §2k（已完成）。
+  `abi/syscalls.csv` 与 goc32 的 snapshot 已同步，goc32 `go test` 与 `hello.c`
+  样例编译都通过。
+
+## 2k. 阻塞式 mutex（2026-11-25）
+
+- 新系统调用 `SYS_MUTEX_LOCK`(56)：内核在 `proc_lock` 下检查一个用户字；空闲就置 1
+  返回 0，被占就置 `ST_WAIT_MUTEX`、`wmutex = word`，然后走 `block_locked()` 睡下。
+  `SYS_MUTEX_UNLOCK` 把所有权**直接交给**第一个等待者（字保持 1，唤醒时把它的返回
+  值写成 0），没有“唤醒后再抢”的窗口。没有等待者才清零。
+- `SYS_MUTEX_TRY`/`UNLOCK` 保留：TRY 是非阻塞形式（`kmutex_try`），堆锁现在用
+  `kmutex_lock`。
+- 持有者死亡：每个线程记录一个 `held_mutex`；线程在 `process_thread_exit()` 里
+  把字交给等待者（组长正在解散时不交，整组都要走）。这样一次 fault 在 malloc 里
+  不会把同进程其他线程永久卡住。
+- `ps` 新状态：`mutex`（cpu 0.0，不在运行队列），`proc_waiting()` 把它算作“有人在等”。
+- 一个线程同时只跟踪一个持有字，够堆锁用；嵌套/多锁的死亡释放不在覆盖范围，
+  写在 `lib.h` 的 API 注释里。
+
+验证：`kthreadtest` 新增两个用例——leader 持锁、线程阻塞（`ps` 显示 `mutex`）、
+unlock 后移交；以及线程持锁后故意 fault（store 到 0），内核杀掉它、`join` 得到
+139、`mutex_try` 重新拿到字。rv32 / rv32smp / arm 各 10 次全过；并发 malloc/free
+用例仍 10/10。
 
 ## 3. 不进 main 的理由
 
