@@ -252,7 +252,8 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | **E1a** ✅ `2f8b49a` | 资源（win/heap/brk）搬进 proc 块，`entry`/`user_esp` 改局部，**删掉旧字段**；按槽扫块、退休只清本槽；窗口不变量断言 | T0/T1/T2、kthreadtest 10×、ktest、soak 10 轮、窗口泄漏用例、C3 真机 |
 | **E1b-1** ✅ `948d5b6` | 拆 `procs[]`/`threads[]`；`t->proc`、`PROC_RES`/`PFD` 改指针；`current`/`cpu_take_task` 改线程；exec 分配 proc+主线程、线程共享 proc、ktask `proc == NULL` 并补齐空指针分支；退休只由主线程释放 proc | T0/T1/T2、kthreadtest ×3、ktest UP/SMP、C3 真机 |
 | **E1b-2** ✅ `fd16196` | 身份（pid/name/parent/exit/live/stop/lag）搬到 `proc`；wait 交给真正等待的线程；SIGSTOP/SIGCONT 作用于整个进程；内核线程名进栈池；ps 打进程 id + 进程名（tid 列留给 E2） | T0/T1/T2、kthreadtest ×3、ktest UP/SMP、C3 真机 |
-| **E2** | 生命周期收口：`proc->state` 状态机、信号归属（kill 落到进程）、ps//proc 两级输出、删掉线程槽里的身份残留 | 同上 + 现有 ps 解析脚本 |
+| **E2-A** ✅ `9f41f18` | ps 加 `tid` 列（每行一个线程）；新增 `/proc/threads` 机器视图；`emutest`/`accept33` 解析同步 | T0/T1/T2、C3 真机 |
+| **E2-B** | 生命周期收口：`proc->state`（FREE/NEW/LIVE/DYING）、信号归属（kill 落到进程）、删掉线程槽里的残留（`leader`→`is_main`、`wait_pid` 拆 `join_tid`/`wait_child`、`is_ktask` 与 `proc == NULL` 合并） | 同上 + 现有 ps 解析脚本 |
 | **E3** | ARM 内核线程（#58）+ USB 泵迁移 | M3 QEMU + M33/RP2040 板测 |
 | **E4** | 全端口矩阵：rv32/rv32smp、C3、M3/M33、RP2040、x86；删旧模型残留 | 全 T3 + 板卡 |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
