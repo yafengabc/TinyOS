@@ -1850,6 +1850,44 @@ int process_ktask_info(int idx, const char **name, uint32_t *size,
     return 1;
 }
 
+#ifdef TOS_KTASK_TEST
+/* QEMU-only exerciser for the ktask machinery (S0/S4): the WiFi OSI layer is
+ * the only real client and needs hardware, the USB pump needs a controller,
+ * so without this the pool, the pinning, the paint/high-water and
+ * /proc/ktask never run in CI.  It is a kernel thread at priority 0 pinned
+ * to CPU 0; it sleeps five times through the tick, yields once, records the
+ * CPU every time it wakes and stays alive (sleeping) so /proc/ktask can show
+ * the slot's high-water mark. */
+static volatile int ktest_cpu_bad;
+static volatile int ktest_done;
+
+static void ktest_fn(void *arg)
+{
+    (void)arg;
+
+    for (int i = 0; i < 5; i++) {
+        if (plat_cpu_id() != 0)
+            ktest_cpu_bad++;
+        process_ktask_sleep(1);
+    }
+    process_ktask_yield();
+    if (plat_cpu_id() != 0)
+        ktest_cpu_bad++;
+    ktest_done = 1;
+    kprintf("[ktest] ktask ran 5 sleeps + yield, cpu_bad=%d\n",
+            ktest_cpu_bad);
+    for (;;)
+        process_ktask_sleep(1000);      /* keep the slot for /proc/ktask */
+}
+
+void process_ktask_selftest(void)
+{
+    int pid = process_ktask_create("ktest", ktest_fn, NULL, 4096, 0, 0);
+
+    kprintf("[ktest] create pid=%d\n", pid);
+}
+#endif
+
 int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, int prio, int cpu)
 {

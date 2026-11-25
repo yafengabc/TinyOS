@@ -27,8 +27,9 @@ import (
 // softfloat-min has no feature("softfloat-min") call site: it reaches the C
 // side through featureDefines() (-DTOS_SOFTFLOAT_MIN) and user/softfloat32.c.
 var featureNames = []string{
-	"dma", "exec_mock", "i2c", "kthreads", "net", "pio", "pwm", "rir",
-	"scripting", "softfloat-min", "spi", "uart1", "usb_pump", "wifi",
+	"dma", "exec_mock", "i2c", "kthreads", "ktask_test", "net", "pio",
+	"pwm", "rir", "scripting", "softfloat-min", "spi", "uart1", "usb_pump",
+	"wifi",
 }
 
 func featureAllowed(name string) bool {

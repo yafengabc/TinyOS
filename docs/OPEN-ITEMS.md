@@ -895,6 +895,9 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 
 ## 19. S4：USB 泵线程的 Pico 2 RV32 板测（2026-11-25，待跑）
 
+**先读 §21**：泵是 ktask，SMP 的 trap 标志问题修好前只能用单核镜像。下面的
+命令已按 UP 目标给出。
+
 代码在 `exp/thread-sched`（见 `docs/THREAD-MODEL.md` §2f）。镜像：
 
 ```sh
@@ -981,3 +984,38 @@ release 屏障里写 0。`user/heap.c` 只在 `TOS_KTHREADS` 下取这把锁，�
 
 S4 的 USB 泵线程不经过用户堆，所以不阻塞板测；但 S5/合回 main 之前必须在这条上给出
 结论。
+
+## 21. ktask 的 trap 标志是全局的：SMP 上会串核（2026-11-25，blocker）
+
+`kernel/process.c` 的 `ktask_running`/`ktask_entry_sp` 是全局变量；`arch/rv32/start.S`
+的 `TRAP_ENTRY` 用 `ktask_running` 决定“这个帧放哪个栈、要不要切内核栈”，因为
+`mret` 会把 `mstatus.MPP` 强制写成 U，不能靠 MPP 区分 ktask 和用户任务。
+
+复现：把 `configs/rv32-ktasktest.conf` 的 target 临时改成 `rv32smp` 并启动一个
+ktask。CPU 0 跑 ktask 把全局置 1；CPU 1 上的 shell 一进 trap 就看见 1，走 M 路径，
+帧落错栈，`process_tick()` 的 `kstack_check()` 立刻 panic：
+
+```
+kernel stack out of bounds: sp=800ffd40
+```
+
+影响：S4 的 USB 泵是 ktask，`rpi-pico2-rv32-smp` 上一旦泵被调度就会 panic。
+**修好前泵只在单核镜像上测**：`configs/rpi-pico2-rv32-usbpump.conf` 已改为
+`rpi-pico2-rv32`（UP）。WiFi 的 ktask 在 C3 是单核，不受影响。§19 的 SMP 项先别跑。
+
+修法（需要改 trap 入口，单独做，配 QEMU + 板测）：
+
+1. `ktask_running`/`ktask_entry_sp` 改成每核数组，start.S 用 `mhartid` 索引。
+   难点是 trap 入口只有一个 scratch（`mscratch` 存 t0），读 mhartid 要第二个寄存器。
+   可选：
+   - 用 `sscratch` 存每核指针——C3 与 Hazard3 没有 S-mode，不能依赖；
+   - 在入口用 sp 下面的 8 字节临时保存（用户 sp 正好在栈底时会覆盖 canary，
+     极端但真实存在）；
+   - 让 `mscratch` 常驻指向一个每核结构（flag + scratch），入口用 `csrrw` 交换、
+     建帧后恢复；
+   - 换一种不经过 `mret` 的 ktask 返回路径，让 MPP 保持 M，彻底去掉 flag——
+     改动最大，但最干净。
+2. 验收：`rv32smp` + ktask selftest 不再 panic；泵在 `rpi-pico2-rv32-smp` 上跑完
+   §19 的全部项；UP 镜像不回归。
+
+在此之前，§19 的 Pico 2 泵测请用 UP 镜像 `build/tinyos-rpi-pico2-rv32.uf2`。

@@ -67,6 +67,9 @@ extern volatile int ktask_running;
  * device passes the hart that owns it. */
 int      process_ktask_create(const char *name, void (*fn)(void *), void *arg,
                               uint32_t stack_bytes, int prio, int cpu);
+#ifdef TOS_KTASK_TEST
+void     process_ktask_selftest(void);
+#endif
 /* Per-slot snapshot for /proc/ktask (kernel-thread stacks): slot size, bytes
  * used, high-water.  Returns 0 for a free slot or when the port has no ktask
  * pool at all. */

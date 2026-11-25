@@ -110,6 +110,7 @@ func TestFeatureAllowlistCoversCode(t *testing.T) {
 	}
 	// Features with no feature() call site: they are consumed as defines.
 	defineOnly := map[string]bool{
+		"ktask_test":    true, // -DTOS_KTASK_TEST: kernel/process.c selftest
 		"softfloat-min": true, // -DTOS_SOFTFLOAT_MIN in user/softfloat32.c
 		"usb_pump":      true, // -DTOS_USB_PUMP: board/rp2350rv-generic only
 		"wifi":          true, // build.go: also forced by the TOS_WIFI_LIB env

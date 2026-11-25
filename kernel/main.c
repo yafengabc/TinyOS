@@ -150,6 +150,9 @@ void kmain(void)
      * device thread (the RP2350 RV32 USB pump) is already running when the
      * shell starts. */
     plat_start_tasks();
+#ifdef TOS_KTASK_TEST
+    process_ktask_selftest();
+#endif
     process_start_shell("/bin/msh");
     panic("shell returned");
 }
