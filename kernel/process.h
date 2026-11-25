@@ -124,7 +124,8 @@ regs_t  *process_suspend(regs_t *r);
  * allocated inside its own window; create returns the tid (a pid), join
  * blocks until that thread exits and stores its code through `codeptr`
  * (a user pointer, may be 0), and exit does not return. */
-int      process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack);
+int      process_thread_create(uint32_t entry, uint32_t arg,
+                              uint32_t ustack, uint32_t usize);
 regs_t  *process_thread_join(regs_t *r, int tid, uint32_t codeptr);
 regs_t  *process_thread_exit(regs_t *r, int code);
 #endif

@@ -59,14 +59,17 @@
 #define SYS_I2C      45  /* i2c(op, &req) -> depends on op             */
 #define SYS_DMA_MEMCPY 47 /* dma_memcpy(dst, src, len) -> len/-1       */
 /* Kernel threads (TOS_KTHREADS): only built when the kthreads feature is on.
- * A thread shares the caller's window; `sp` is the top of a stack the caller
- * allocated inside it.  tid is a pid; join stores the exit code through the
- * user pointer. */
-#define SYS_THREAD_CREATE 48 /* kthread_create(entry, arg, sp) -> tid  */
+ * A thread shares the caller's window; argument 3 is a struct tos_thread_stack
+ * (top and usable size) for a stack the caller allocated inside it.  The
+ * kernel writes a guard word just below the stack and checks it at every
+ * syscall, because the heap around a thread stack is writable to the whole
+ * process.  tid is a pid; join stores the exit code through the user pointer. */
+#define SYS_THREAD_CREATE 48 /* kthread_create(entry, arg, &stack) -> tid */
 #define SYS_THREAD_EXIT   49 /* kthread_exit(code) -> no return        */
 #define SYS_THREAD_JOIN   50 /* kthread_join(tid, &code) -> 0 or -1    */
-/* Scheduler counters, for benchmarks: schedstat(&st) fills three u32
- * (switches to another task, scheduler runs that kept the same task, ticks). */
+/* Scheduler counters, for benchmarks: schedstat(&st) fills four u32
+ * (switches to another task, scheduler runs that kept the same task, timer
+ * ticks, protection units actually programmed). */
 #define SYS_SCHEDSTAT     51
 /* PIO (RP2040): pio(op, &req).  One request struct carries both the assembled
  * program and the SM configuration; see struct pio_req below. */

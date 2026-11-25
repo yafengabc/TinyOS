@@ -1,7 +1,8 @@
 /* kthreadtest - edge cases the threadbench does not touch.
  *
  *   kthreadtest          create/join, exit codes, join-after-exit, double
- *                        join, slot exhaustion, blocking overlap
+ *                        join, slot exhaustion, blocking overlap, stack
+ *                        overflow inside a thread, sibling switches
  *   kthreadtest leave    exit the leader while a thread is still running;
  *                        the kernel must retire the group (run `ps` after)
  *
@@ -53,6 +54,22 @@ static void slow(void *arg)
 }
 
 static volatile int yran;
+
+/* A thread stack lives inside the process heap, so no protection region can
+ * fence it off.  The kernel plants a guard word under the stack and checks it
+ * at every syscall; yielding after each frame means the first frame that
+ * crosses the bottom is caught there, instead of quietly eating the heap. */
+static void overflow(void *arg)
+{
+    volatile char pad[256];
+    int depth = (int)arg;
+
+    pad[0] = (char)depth;
+    yield();
+    overflow((void *)(depth + 1));
+    if (pad[0] == 0x7f)                 /* keep the array live */
+        kthread_exit(1);
+}
 
 /* Two threads of one process taking turns: every yield is a real switch, but
  * the window belongs to the process, so the kernel must not program the
@@ -181,6 +198,20 @@ int main(int argc, char *argv[])
         ok(kthread_join(tid, &code) == 0, "join the fd thread");
         ok(fd_read_result == -1, "leader close() closed it for the thread");
         (void)junk;
+    }
+
+    /* S3b: the stack range now belongs to the thread.  Overflowing it must
+     * kill that thread and nobody else; the leader keeps running and join
+     * still collects the code (139, the same one a user fault uses). */
+    {
+        int code = 0;
+
+        tid = kthread_create(overflow, (void *)0, 4096);
+        ok(tid > 0, "create an overflowing thread");
+        code = -1;
+        ok(kthread_join(tid, &code) == 0 && code == 139,
+           "thread stack overflow killed only the thread");
+        ok(1, "leader survived the thread stack overflow");
     }
 
     /* The protection units describe the process, not the thread: a switch

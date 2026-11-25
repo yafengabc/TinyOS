@@ -38,13 +38,18 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
 {
     unsigned bytes, top;
     struct kstart *s;
+    struct tos_thread_stack st;
     char *base;
 
     if (stack_bytes < 512)
         stack_bytes = 512;
     bytes = (stack_bytes + 31u) & ~15u;
 
-    base = malloc(bytes);
+    /* 32 bytes of slack below the usable stack: the kernel writes the guard
+     * word at top-size-4 and checks it on every syscall.  malloc only
+     * promises 8-byte alignment, so the top is aligned here and the slack
+     * keeps the guard word inside the block. */
+    base = malloc(bytes + 32u);
     if (!base)
         return -1;
 
@@ -58,11 +63,14 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
         return -1;
     }
 
-    top = ((unsigned)base + bytes) & ~15u;
+    top = ((unsigned)base + bytes + 32u) & ~15u;
     s->fn = fn;
     s->arg = arg;
 
-    return tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s, top);
+    st.top = top;
+    st.size = bytes;
+    return tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s,
+                    (int)&st);
 }
 
 int kthread_join(int tid, int *code)

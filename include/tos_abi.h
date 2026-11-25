@@ -18,6 +18,20 @@
 
 #define TOS_ABI_VERSION 1
 
+/* Argument 3 of SYS_THREAD_CREATE: where a new thread's stack is, and how
+ * much of it belongs to the thread.  It is a pointer rather than the bare sp
+ * so the size travels with the top; the kernel copies it during the syscall
+ * and validates both against the caller's window.
+ *
+ * The caller must leave at least 4 bytes below (top - size): the kernel puts
+ * the stack-guard word there, which is what notices an overflow on a port
+ * whose protection unit cannot separate a thread stack from the heap around
+ * it.  `size` is the usable stack, not the allocation. */
+struct tos_thread_stack {
+    uint32_t top;    /* initial sp: 16-byte aligned, inside the window */
+    uint32_t size;   /* bytes below top that belong to this thread    */
+};
+
 struct stat {
     uint32_t size;   /* file size in bytes (0 for directories/devices) */
     uint8_t  type;   /* TOS_FTYPE_* */

@@ -718,6 +718,12 @@ static void sched_idle(void)
  */
 #define PROC_OF(p) PROC_GROUP(p)
 
+#ifdef TOS_KTHREADS
+#define PROC_IS_THREAD(p) ((p)->leader != NULL)
+#else
+#define PROC_IS_THREAD(p) 0
+#endif
+
 /* The resource block of a task's process.  Keyed by the leader's table
  * index, so there is no pointer to keep in sync and no allocation to fail:
  * PROC_GROUP() already finds the owner, and procs[] is the array it lives
@@ -3094,19 +3100,29 @@ static proc_t *wake_joiner_locked(proc_t *tid_task, int code)
     return NULL;
 }
 
-int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
+int process_thread_create(uint32_t entry, uint32_t arg,
+                          uint32_t ustack, uint32_t usize)
 {
     proc_t *leader = current ? PROC_GROUP(current) : NULL;
     proc_t *p;
+    uint32_t low;
     uint32_t irq;
     int pid;
 
     if (!leader || leader->is_ktask || leader->win_size == 0)
         return -1;
-    if (entry == 0 || (ustack & 3u))
+    if (entry == 0 || (ustack & 15u) || usize == 0 || (usize & 3u))
         return -1;
     if (ustack <= leader->win_base ||
         ustack > leader->win_base + leader->win_size)
+        return -1;
+    low = ustack - usize;
+    /* The 4 bytes below the stack hold the guard word; the caller promises
+     * them (struct tos_thread_stack).  Everything must still be inside the
+     * process's window, or the canary write itself would be a wild store. */
+    if (low < leader->win_base + 8u ||
+        low - 4u < leader->win_base ||
+        low > ustack)
         return -1;
 
     p = proc_alloc();
@@ -3118,7 +3134,17 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     p->prio = current->prio;
     p->parent = leader;
     p->stack_top = ustack;
-    p->stack_size = 0;              /* protection comes from the group */
+    /* A thread's stack now has a name and a size: the group's protection
+     * cannot separate it from the heap around it (both are the same writable
+     * data region), so this range is what the software guard checks.  It is
+     * not growable - the bytes below belong to the allocator. */
+    p->stack_size = usize;
+    /* Poison it before the first instruction, like exec() does, so ps's
+     * stk/sz column means the same thing for a thread as for a process. */
+    memset((void *)low, STACK_POISON, usize);
+    /* Guard word just below the stack: stack_guard() reads it on every syscall
+     * and a runaway push has to clobber it on the way down. */
+    *((uint32_t *)low - 1) = USER_STACK_GUARD;
     /* The heap fields are still copies; nothing reads them through a thread
      * (PROC_OF() is the only accessor, and it goes to the leader), and S3
      * reworks the stack guard before they can go away.  cwd and fds are the
@@ -3351,9 +3377,14 @@ int process_stack_guard(const regs_t *r)
     proc_t *p = current;
     uint32_t low, sp, *gw;
 
-    if (!plat_user_stack_guard())
+    if (!p || PROC_GROUP(p)->win_size == 0 || p->stack_size == 0)
         return 1;
-    if (!p || p->win_size == 0 || p->stack_size == 0)
+    /* A process stack is covered by the port's own mechanism when it has
+     * one (an MPU/PMP rule plus, on some boards, the same canary).  A thread
+     * stack is inside the group's writable data region, where no MPU/PMP rule
+     * can separate it from the heap, so its canary is the only check and it
+     * runs on every port. */
+    if (!PROC_IS_THREAD(p) && !plat_user_stack_guard())
         return 1;
 
     low = p->stack_top - p->stack_size;
@@ -3362,15 +3393,20 @@ int process_stack_guard(const regs_t *r)
 
     /* Two independent witnesses: the sp this call was made with (exact, and
      * the usual case - a recursion that ran out then called something), and
-     * the canary (a write past the bottom without sp following it). */
-    if (sp >= low && sp < p->stack_top && *gw == USER_STACK_GUARD)
+     * the canary (a write past the bottom without sp following it).  `<=`
+     * on the top: a fresh thread starts with sp == stack_top, and its first
+     * syscall is legitimate - the exception frame is below the pointer. */
+    if (sp >= low && sp <= p->stack_top && *gw == USER_STACK_GUARD)
         return 1;
 
-    kprintf("\n[pid %d] stack overflow (sp 0x%08x, stack 0x%08x..0x%08x)\n",
-            p->pid, sp, low, p->stack_top);
+    kprintf("\n[pid %d] %s overflow (sp 0x%08x, stack 0x%08x..0x%08x)\n",
+            p->pid, PROC_IS_THREAD(p) ? "thread stack" : "stack",
+            sp, low, p->stack_top);
     *gw = USER_STACK_GUARD;          /* re-arm before the growth decision */
     if (!process_stack_grow(sp < low ? sp : low - 4u, sp)) {
-        kprintf("[pid %d] no room to grow it; killing\n", p->pid);
+        kprintf("[pid %d] %s; killing\n", p->pid,
+                PROC_IS_THREAD(p) ? "a thread stack cannot grow in place"
+                                  : "no room to grow it");
         return 0;
     }
     return 1;
@@ -3383,7 +3419,7 @@ int process_stack_overflow_at(uint32_t sp)
 {
     proc_t *p = current;
 
-    if (!p || p->win_size == 0 || p->stack_size == 0)
+    if (!p || PROC_GROUP(p)->win_size == 0 || p->stack_size == 0)
         return 0;
     return sp < p->stack_top - p->stack_size;
 }
@@ -3393,8 +3429,15 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     proc_t *p = current;
     uint32_t old, want, low, poison_end;
 
-    if (!p || p->win_size == 0 || p->stack_size == 0)
+    if (!p || PROC_GROUP(p)->win_size == 0 || p->stack_size == 0)
         return 0;
+#ifdef TOS_KTHREADS
+    /* A thread stack is a block inside the process heap: the bytes below it
+     * are another allocation, not a hole the stack may take.  Overflow is
+     * therefore fatal for the thread, and stack_guard() says so. */
+    if (p->leader)
+        return 0;
+#endif
 
     old = p->stack_size;
     want = old << 1;
@@ -3497,7 +3540,7 @@ static uint32_t stack_used(const proc_t *p)
     const uint8_t *low;
     uint32_t i = 0;
 
-    if (p->win_size == 0 || p->stack_top == 0 || p->stack_size == 0)
+    if (PROC_GROUP(p)->win_size == 0 || p->stack_top == 0 || p->stack_size == 0)
         return 0;
     low = (const uint8_t *)(p->stack_top - p->stack_size);
     while (i < p->stack_size && low[i] == STACK_POISON)

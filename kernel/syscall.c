@@ -285,7 +285,18 @@ static regs_t *dispatch(regs_t *r)
 
 #ifdef TOS_KTHREADS
     case SYS_THREAD_CREATE: {
-        int tid = process_thread_create(sc.a0, sc.a1, sc.a2);
+        struct tos_thread_stack st;
+        int tid;
+
+        /* Argument 3 is a user pointer so the size travels with the top.  It
+         * is read here, during the syscall, and every field is checked by
+         * process_thread_create() against the caller's window. */
+        if (!process_user_ok(sc.a2, sizeof(st))) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        memcpy(&st, (const void *)sc.a2, sizeof(st));
+        tid = process_thread_create(sc.a0, sc.a1, st.top, st.size);
         plat_frame_set_ret(r, (uint32_t)tid);
         return r;
     }

@@ -1,7 +1,7 @@
 # 线程调度实验（分支 `exp/thread-sched`）
 
-> 状态：**实验分支**，不进 main。S0–S2、S3a 已完成（测量、资源接缝、资源块、
-> 按组重编程保护）；S3b 起是把线程栈也纳入边界。
+> 状态：**实验分支**，不进 main。S0–S2、S3a、S3b 已完成（测量、资源接缝、资源块、
+> 按组重编程保护、线程栈边界）；S4 是 USB 泵线程。
 > 目标不是"把 ktask 的栈改小"，而是**调度单位换成线程、进程只管资源**。
 
 ## 0. 为什么开这个分支
@@ -47,7 +47,7 @@ C3（`esp32c3-generic`，`max_procs = 8`，rv32，`-Oz`，`TOS_KEEP_SYMS=1` 后�
 | **S1** ✅ | **资源接缝**：`PROC_OF(p)` 定义 + `cwd` 改走它；`ps` 的 `wink`、栈增长消息改读组的字段 | `chdir` 变成组级（修 bug） | T0/T1/T2；两个 kthreads 配置构建 |
 | **S2** ✅ | **资源块**：`fds`+`cwd` 迁到 `proc_res[]`（按组长槽索引）；`PROC_RES(p)`；领槽时清块；线程不再拷贝 cwd | 无（cwd 语义 S1 已修） | T0/T1/T2；`kthreadtest` 的 fd 共享项；`free`/`ps` |
 | **S3a** ✅ | **保护按组重编程**：`cpu_t.prot` 缓存窗口的 6 个输入，相同就跳过 `plat_task_protect()`；`schedstat.prot` 计量。调度本来就是按槽（每个线程一个槽、自己的 prio/quantum），这次只是把"切谁才要重编程"写清楚 | 无 | T0/T1/T2；kthreads QEMU 的兄弟切换 0 次重编程 |
-| **S3b** | **线程栈边界**：`SYS_THREAD_CREATE` 传 `stack_size`，线程槽记录自己的栈范围；线程栈溢出只能被杀（内存来自用户堆，不能像进程栈那样向空洞里长）；`ps` 的 `stk/sz` 分母对线程生效 | 线程栈有了边界与统计 | T0/T1/T2 + T3 |
+| **S3b** ✅ | **线程栈边界**：`SYS_THREAD_CREATE` 的第三参数改为 `struct tos_thread_stack *`（top+size）；线程槽记录自己的栈范围，刷 0xCC、写 canary；溢出只杀线程；`ps` 的 `stk/sz` 分母对线程生效 | 线程栈有了边界与统计 | T0/T1/T2；kthreadtest 的 overflow 用例 |
 | **S3c** | `ps` 两级显示 | 显示 | 暂缓：列格式被 `cmd/tostest/emutest.go` 与 `scripts/rp2350/accept33.py` 解析，且 `ppid` 已经指向组长 |
 | **S4** | **第一个真实客户：USB 泵做成 ktask**（先在 RV32 上，ktask 机制只在那里） | 去掉 PendSV/短写协议 | `cat 21 KB`、`ls /bin`、`crash`、`heartbeat`、`smpbench`、tick 精度 |
 | **S5** | 可选：两个表（EPROC/ETHREAD）+ `fork` 语义 | 新功能 | 需新测试 |
@@ -119,6 +119,31 @@ leader 关闭后线程看到关闭）；soak rv32+arm 2/2。
 `configs/arm-kthreads.conf` 与临时 rv32 kthreads 配置上 `kthreadtest` PASS、兄弟切换
 0 次重编程；soak rv32+arm 2/2。rv32 QEMU 上 `threadbench` 挂起是 **pre-existing**
 （2ec7d57 的 worktree 同样挂），记在 `docs/OPEN-ITEMS.md` §18。
+
+## 2e. S3b 实际做了什么（2026-11-25）
+
+- `SYS_THREAD_CREATE` 的第三个参数从"栈顶"改成 `struct tos_thread_stack *`
+  （`include/tos_abi.h`：`top` + `size`）。理由：ARM 的 SVC 帧只带 r0–r3、x86 只带
+  eax/ebx/ecx/edx，加第四个参数要改三个 arch 的入口；一个在系统调用中拷贝的指针
+  不改变陷阱约定，也能按普通用户指针校验。
+- `process_thread_create(entry, arg, top, size)` 校验：`top` 16 字节对齐、`size`
+  非 0 且 4 字节对齐、`[top-size-4, top)` 整个落在组窗口内。然后：
+  `p->stack_size = size`；把 `[top-size, top)` 刷成 `0xCC`（`ps` 的高水位扫描）；
+  在 `top-size-4` 写 `USER_STACK_GUARD`（调用方为此保留 4 字节，`kthread_create()`
+  实际留了 32 字节）。
+- `process_stack_guard()`：窗口判断改成 `PROC_GROUP(p)->win_size`；**线程的 canary
+  在所有端口都检查**——MPU/PMP 无法把线程栈和它周围的堆分开，canary 是唯一能发现
+  越界的东西；进程栈仍由板子的 `plat_user_stack_guard()` 决定。
+- `process_stack_grow()`：线程直接返回 0（栈下面是堆里的另一块分配），溢出即杀线程，
+  消息为 `thread stack overflow ... a thread stack cannot grow in place; killing`。
+- 两个边界细节：新线程的 sp 初始值正好等于 `stack_top`，第一次系统调用时原来的
+  `sp < top` 会把它误判成溢出，改成 `sp <= top`；`stack_used()` 的窗口检查也必须用组
+  （线程自己的 `win_size` 是 0，否则 `ps` 的分子恒为 0）。
+
+验证：T0 PASS；`tos build all` 17/18（x86 §17）；rv32/arm QEMU smoke PASS；
+soak rv32+arm 2/2；`kthreadtest` 在 ARM MPU 与 RV32 PMP 上新增：
+`create an overflowing thread` → 只杀该线程、`join` 得到 139、组长继续；兄弟切换
+仍是 403/444 次、0 次重编程。
 
 ## 3. 不进 main 的理由
 
