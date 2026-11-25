@@ -1975,6 +1975,14 @@ int process_ktask_info(int idx, const char **name, uint32_t *size,
 static volatile int ktest_cpu_bad;
 static volatile int ktest_done;
 
+/* Returning from the entry is the exit path: ktask_trampoline() calls
+ * ktask_exit(), SYS_KTASK_EXIT gives the pool slot and the name back, and
+ * --gc-sections' neighbour in the pool can take it again. */
+static void kexit_fn(void *arg)
+{
+    (void)arg;
+}
+
 static void ktest_fn(void *arg)
 {
     (void)arg;
@@ -1997,6 +2005,33 @@ static void ktest_fn(void *arg)
     kprintf("[ktest] ktask ran 5 sleeps + yield, cpu_bad=%d\n",
             ktest_cpu_bad);
 #endif
+
+    /* The exit path: the "kexit" thread created beside this one returned, so
+     * its slot and name must be gone and a new thread must be able to take
+     * it.  This is the one part of the ktask lifecycle a sleeping selftest
+     * would otherwise never run. */
+    {
+        int freed = 1;
+        int t;
+
+        for (int i = 0; i < KTASK_SLOTS; i++) {
+            const char *nm = NULL;
+            uint32_t sz, used, hw;
+
+            if (process_ktask_info(i, &nm, &sz, &used, &hw) && nm &&
+                !strcmp(nm, "kexit"))
+                freed = 0;
+        }
+        t = process_ktask_create("kexit2", kexit_fn, NULL, 512, 0, 0);
+        if (freed && t > 0) {
+            kprintf("[ktest] ktask exit recycled its slot\n");
+        } else {
+            ktest_cpu_bad += 100;
+            kprintf("[ktest] FAIL ktask exit: name %s, create %d\n",
+                    freed ? "gone" : "still there", t);
+        }
+    }
+
     for (;;)
         process_ktask_sleep(1000);      /* keep the slot for /proc/ktask */
 }
@@ -2004,8 +2039,9 @@ static void ktest_fn(void *arg)
 void process_ktask_selftest(void)
 {
     int pid = process_ktask_create("ktest", ktest_fn, NULL, 4096, 0, 0);
+    int pid2 = process_ktask_create("kexit", kexit_fn, NULL, 512, 0, 0);
 
-    kprintf("[ktest] create pid=%d\n", pid);
+    kprintf("[ktest] create pid=%d exit=%d\n", pid, pid2);
 }
 #endif
 
