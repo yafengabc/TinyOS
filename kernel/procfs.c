@@ -130,8 +130,15 @@ static uint32_t fmt_usbboot(char *b, uint32_t cap)
 
 /* Kernel-thread stack pool: one line per live slot, size/used/high-water.
  * "used" is the paint scan, "hw" the worst seen since the slot was taken.
- * Only RV32 has this pool; the accessor returns 0 elsewhere, and then the
- * node says so instead of printing an empty table. */
+ * Only RV32 has this pool, and only an image that can create a ktask should
+ * pay for it: the pool is 6 slots of 6 KiB, and referencing it from this node
+ * is enough to keep it alive past --gc-sections in images that never create a
+ * thread (the S0 measurement scaffolding did exactly that by accident).  The
+ * WiFi OSI layer is the current client and does not imply the kthreads
+ * feature, so both selectors count. */
+#if defined(TOS_KTHREADS) || defined(TOS_WIFI)
+#define PROC_KTASK_NODE 1
+
 static uint32_t fmt_ktask(char *b, uint32_t cap)
 {
     uint32_t off = put(b, cap, 0, "ktask: slot   size   used     hw  name\n");
@@ -151,6 +158,7 @@ static uint32_t fmt_ktask(char *b, uint32_t cap)
         off = put(b, cap, off, "  no kernel threads\n");
     return off;
 }
+#endif /* TOS_KTHREADS || TOS_WIFI */
 
 static uint32_t fmt_cdc_state(char *b, uint32_t cap)
 {
@@ -459,8 +467,10 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_cdcfix(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/cdcstat"))
         n = fmt_cdcstat(b, PROC_CAP);
+#ifdef PROC_KTASK_NODE
     else if (!strcmp(d->name, "proc/ktask"))
         n = fmt_ktask(b, PROC_CAP);
+#endif
     else if (!strcmp(d->name, "proc/ps"))
         n = process_ps_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/execfmt"))
@@ -548,7 +558,9 @@ void procfs_init(void)
     devfs_register("proc/cdcfix", &proc_ops, NULL);
     devfs_register("proc/cdcstat", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
+#ifdef PROC_KTASK_NODE
     devfs_register("proc/ktask",   &proc_ops, NULL);
+#endif
     devfs_register("proc/execfmt", &proc_ops, NULL);
     devfs_register("proc/flash",  &proc_ops, NULL);
     devfs_register("proc/usbpoll", &proc_ops, NULL);
