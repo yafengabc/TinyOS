@@ -37,8 +37,8 @@
 
 | 阶段 | 内容 | 行为变化 | 验证 |
 |---|---|---|---|
-| **S0** | ktask 栈 paint + 高水位；`/proc/ktask`（槽、已用、高水位）；`KTASK_STACK_BYTES` 可覆盖 | 无 | T0/T1；QEMU `cat /proc/ktask` |
-| **S1** | **资源接缝**：`PROC_OF(p)`（= 今天的 `PROC_GROUP`）接管 `cwd`、`win_*`、`wx_start`、`heap_*`、`brk`、`entry` 的访问；顺手修 `cwd` 语义 | `chdir` 变成组级（修 bug） | T0/T1/T2；多线程镜像的 `cd`/`pwd` |
+| **S0** ✅ | ktask 栈 paint + 高水位；`/proc/ktask`（槽、已用、高水位）；`KTASK_STACK_BYTES` 可覆盖 | 无 | T0/T1；QEMU `cat /proc/ktask` |
+| **S1** ✅ | **资源接缝**：`PROC_OF(p)` 定义 + `cwd` 改走它；`ps` 的 `wink`、栈增长消息改读组的字段 | `chdir` 变成组级（修 bug） | T0/T1/T2；两个 kthreads 配置构建 |
 | **S2** | **结构拆分**：`fds`+`cwd` 迁到 `struct res`，leader 内联、线程存指针（或独立 `res[]` 表）；窗口/堆字段跟随 | 线程槽 646→~262 B | 同上 + `free`/`ps` 计数 |
 | **S3** | **按线程调度**：run queue/优先级/quantum 以线程为单位；切组时才重编程保护（`plat_board_task_protect(PROC_OF(next))`）；`ps` 两级显示 | 语义明确化 | 全 T3 矩阵（含 `*-kthreads`） |
 | **S4** | **第一个真实客户：USB 泵做成 ktask**（先在 RV32 上，ktask 机制只在那里） | 去掉 PendSV/短写协议 | `cat 21 KB`、`ls /bin`、`crash`、`heartbeat`、`smpbench`、tick 精度 |
@@ -46,6 +46,26 @@
 
 S4 的三条硬要求：泵线程优先级高于用户任务（否则 #46 回归）；固定 core 0；栈深用 S0
 的高水位实测（`tud_task` + `kprintf` 叠起来可能是 1.5–3 KiB，先试 4 KiB）。
+
+## 2b. S1 实际做了什么（2026-11-25）
+
+- `kernel/process.c` 新增 `PROC_OF(p)`（今天就是 `PROC_GROUP`），并写明：窗口、堆与
+  `brk`、`entry`、cwd、fd 表都归组，调度字段（栈、`saved`、state、cpu、prio、等待状态）
+  留在槽上。
+- `process_cwd_str()` / `process_set_cwd_str()` 改走 `PROC_OF(current)`：**线程里的
+  `chdir` 现在移动整个组**（此前只改调用者那份拷贝）。
+- `ps` 的 `wink` 列、`process_stack_grow()` 的消息改读组的字段（线程显示它所处组的
+  窗口/堆）。
+- `thread_create()` 仍然把 `heap_base`/`heap_end`/`brk`/`cwd` 拷贝进线程槽，但**已经
+  没有读者经过这些拷贝**；S2 把它们换成指向组资源块的指针并删掉拷贝。
+
+**没在 S1 改的**：`process_stack_guard()`/`process_stack_grow()` 仍以
+`p->win_size == 0` 判"这个槽有没有窗口"，所以线程的栈目前**不受软件栈守卫**——线程
+栈在组的窗口里，S3 让调度按线程走时要把这条一起改成"用组的窗口 + 线程自己的栈范围"。
+
+验证：T0 `go test -count=1 ./...` PASS；`rv32` / `esp32c3-generic` / `rpi-pico` /
+`arm` / `rpi-pico2-smp` 构建 PASS；`configs/arm-kthreads.conf`、
+`configs/c3-kthreads.conf` 构建 PASS；QEMU rv32 smoke PASS；soak rv32+arm 2/2。
 
 ## 3. 不进 main 的理由
 

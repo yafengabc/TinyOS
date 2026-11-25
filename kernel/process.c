@@ -684,6 +684,19 @@ static void sched_idle(void)
 #define PROC_GROUP(p) (p)
 #endif
 
+/* The resource owner of a task: the group leader, or the task itself when it
+ * has none.  Everything a *process* owns is reached through this, never
+ * through the slot the scheduler happens to be running: the window, the heap
+ * and its brk, the entry point, the current directory and the fd table.  A
+ * thread slot carries copies of some of them today (thread_create() fills
+ * them in); those copies are unreachable through this macro and go away when
+ * the fields move into a shared resource block (docs/THREAD-MODEL.md S2).
+ *
+ * The scheduler-side fields - stack_top/stack_size, saved, state, cpu, prio,
+ * the wait state - stay on the slot: they are what makes it a thread.
+ */
+#define PROC_OF(p) PROC_GROUP(p)
+
 /* Descriptors are process state, not thread state: every thread of a group
  * sees the same open files and pipes, and a close() in one is a close() for
  * all of them (POSIX).  With the feature off, PROC_GROUP(p) is just p. */
@@ -1300,15 +1313,23 @@ void *process_current_task(void)
  * proc_t reads as after the memset in proc_create(). */
 const char *process_cwd_str(void)
 {
-    return (current && current->cwd[0]) ? current->cwd : "/";
+    proc_t *g = current ? PROC_OF(current) : NULL;
+
+    return (g && g->cwd[0]) ? g->cwd : "/";
 }
 
 void process_set_cwd_str(const char *path)
 {
+    proc_t *g;
+
     if (!current)
         return;
-    strncpy(current->cwd, path, sizeof(current->cwd) - 1);
-    current->cwd[sizeof(current->cwd) - 1] = '\0';
+    /* Per process, not per thread: a chdir() in one thread must move every
+     * thread of the group (POSIX/Windows agree on this; before the seam this
+     * wrote the calling slot's own copy). */
+    g = PROC_OF(current);
+    strncpy(g->cwd, path, sizeof(g->cwd) - 1);
+    g->cwd[sizeof(g->cwd) - 1] = '\0';
 }
 
 int process_console_reader(void)
@@ -3036,6 +3057,9 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     p->parent = leader;
     p->stack_top = ustack;
     p->stack_size = 0;              /* protection comes from the group */
+    /* Copies, not shares: they are unreachable through PROC_OF() now and
+     * S2 replaces them with a pointer to the leader's resource block.  Kept
+     * until then so a stray direct access does not read zero. */
     p->heap_base = leader->heap_base;
     p->heap_end = leader->heap_end;
     p->brk = leader->brk;
@@ -3364,7 +3388,8 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     apply_protection(p);
 
     kprintf("\n[pid %d] stack grown to %u KiB, heap ceiling %u KiB\n",
-            p->pid, want / 1024u, (p->heap_end - p->heap_base) / 1024u);
+            p->pid, want / 1024u,
+            (PROC_OF(p)->heap_end - PROC_OF(p)->heap_base) / 1024u);
     return 1;
 }
 
@@ -3498,7 +3523,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
                       "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n", p->pid,
                       p->parent ? p->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
-                      busy / 1000u, p->win_size / 1024u,
+                      busy / 1000u, PROC_OF(p)->win_size / 1024u,
                       stk10 / 10u, stk10 % 10u, p->stack_size / 1024u, p->name);
         if (n > 0)
             off += (uint32_t)n;
