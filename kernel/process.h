@@ -9,7 +9,7 @@
  * There is one kernel stack.  Traps from user mode always enter on its top,
  * so nothing of a kernel call survives between traps - which is exactly what
  * makes switching cheap: a task's whole state is the register frame in
- * proc_t.saved, and "switching" is returning a different frame pointer to the
+ * thread_t.saved, and "switching" is returning a different frame pointer to the
  * trap epilogue.  Blocking is the same trick: the syscall saves its request
  * in the task and hands the CPU to somebody else; whoever completes the
  * request writes the result into the saved frame, so the task resumes
@@ -47,11 +47,11 @@ regs_t  *process_resched(regs_t *r);
 int      board_poll_installed(void);
 void     board_poll_deferred(void);
 
-/* The saved frame of a task that has not run yet.  proc_t is private to
+/* The saved frame of a task that has not run yet.  thread_t is private to
  * process.c, so a secondary CPU starting its first task (kernel/cpu.c)
  * cannot reach the member itself; this is the one accessor it needs. */
-struct proc;
-regs_t  *process_saved_frame(struct proc *p);
+struct thread;
+regs_t  *process_saved_frame(struct thread *p);
 
 /* The frame of the task this CPU is running.  Used by ports that have to
  * rewrite part of a frame when a task moves to another core - on ARM the
@@ -78,7 +78,7 @@ void     process_ktask_selftest(void);
  * pool at all. */
 int      process_ktask_info(int idx, const char **name, uint32_t *size,
                             uint32_t *used, uint32_t *hw);
-/* Opaque handle for the OSI layer (the current proc_t). */
+/* Opaque handle for the OSI layer (the current thread_t). */
 void    *process_current_task(void);
 void     process_ktask_sleep(uint32_t ticks);
 /* The thread library's heap lock: test-and-set and release of one user word. */

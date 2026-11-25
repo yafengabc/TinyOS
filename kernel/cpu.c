@@ -194,7 +194,7 @@ void cpu_secondary_main(void)
 #endif
 
     for (;;) {
-        struct proc *p = cpu_take_task();
+        struct thread *p = cpu_take_task();
 
         if (p) {
 #if TOS_DIAG

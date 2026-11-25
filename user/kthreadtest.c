@@ -21,7 +21,7 @@ TOS_HEAP(96 * 1024);
 TOS_STACK(4 * 1024);
 
 static int fails;
-static int codes[16];
+static int codes[40];
 
 static void ok(int cond, const char *what)
 {
@@ -149,11 +149,20 @@ static volatile int yran[YTHREADS];
 static uint32_t smp_base;
 static volatile uint32_t smp_sum[SMP_THREADS];
 static volatile int smp_err[SMP_THREADS];
+static volatile int smp_go;
 
 static void smp_sbrk(void *arg)
 {
     int id = (int)arg;
     uint32_t sum = 0;
+
+    /* The baseline is taken by the leader after this thread's stack has been
+     * allocated.  kthread_create() gets the stack from malloc, and malloc
+     * asks sbrk() for a new arena when the free list has nothing big enough;
+     * letting that happen inside the measured window counted the allocator's
+     * growth as if the threads had asked for those bytes. */
+    while (!smp_go)
+        ;
 
     for (unsigned i = 0; i < SMP_ITERS; i++) {
         void *p = sbrk(SMP_STEP);
@@ -241,7 +250,7 @@ static void forever(void *arg)
 int main(int argc, char *argv[])
 {
     int code, tid, n, i;
-    int tids[16];
+    int tids[40];
 
     if (argc > 1 && !strcmp(argv[1], "leave")) {
         tid = kthread_create(forever, 0, 4096);
@@ -267,17 +276,19 @@ int main(int argc, char *argv[])
 
     /* Exhaustion: threads exit immediately but hold their slot until joined,
      * exactly like an unwaited child.  What runs out is table slots, not
-     * memory: the stacks were carved out of the heap already. */
+     * memory, so the stacks are the API's minimum (512 B): with 4 KiB each
+     * the process heap would run out first and the loop would stop at a
+     * number that says nothing about the table. */
     n = 0;
-    for (i = 0; i < 16; i++) {
+    for (i = 0; i < 40; i++) {
         codes[i] = i + 1;
-        tid = kthread_create(give, &codes[i], 4096);
+        tid = kthread_create(give, &codes[i], 512);
         if (tid < 0)
             break;
         tids[n++] = tid;
     }
     printf("kthreadtest: %d thread slot(s) usable beside shell+self\n", n);
-    ok(n > 0 && n < 16, "slot exhaustion returns -1");
+    ok(n > 0 && n < 40, "slot exhaustion returns -1");
     for (i = 0; i < n; i++) {
         code = -1;
         if (kthread_join(tids[i], &code) != 0 || code != i + 1) {
@@ -397,13 +408,17 @@ int main(int argc, char *argv[])
         uint64_t got = 0;
         const uint64_t want = (uint64_t)SMP_THREADS * SMP_ITERS;
 
-        smp_base = (uint32_t)sbrk(0);
+        smp_go = 0;
         for (i = 0; i < SMP_THREADS; i++) {
             smp_sum[i] = 0;
             smp_err[i] = 0;
             tids[i] = kthread_create(smp_sbrk, (void *)i, 4096);
             bad |= tids[i] <= 0;
         }
+        /* Every stack exists now, so nothing but the sbrk() calls below can
+         * move the break until the phase is over. */
+        smp_base = (uint32_t)sbrk(0);
+        smp_go = 1;
         for (i = 0; i < SMP_THREADS; i++) {
             code = -1;
             if (tids[i] > 0 && kthread_join(tids[i], &code) != 0)

@@ -25,14 +25,14 @@ struct kstart {
 /* The stack and the start record are the library's allocation; the kernel
  * only ever sees the stack top.  join() is therefore the only place that can
  * give them back, and it needs to find them from the tid alone: one entry per
- * thread this process created.  Sized above the largest process table (18),
- * so the table cannot fill before thread creation does.  A thread nobody
+ * thread this process created.  Sized above the largest thread table (32), so
+ * the kernel table cannot fill before this bookkeeping does.  A thread nobody
  * joins keeps its entry and its stack until the process exits - the same
  * lifetime its kernel slot has.
  *
  * Not thread-safe: two threads calling kthread_create()/join() at the same
  * time race on this table, like the rest of the user-space library. */
-#define KT_TRACK 24
+#define KT_TRACK 40
 
 static struct {
     int tid;

@@ -19,7 +19,7 @@
  * The lock collapses to nothing on a uniprocessor, which is why the single
  * core boards pay no price for any of this. */
 
-struct proc;
+struct thread;
 
 /* Bytes of kernel stack per CPU.  The linker reserves
  * `KSTACK_BYTES * PLAT_MAX_CPUS` in .bss (start.S on rv32 and arm, entry.S on
@@ -72,7 +72,7 @@ typedef struct cpu {
     /* The task this CPU is running.  Named `cur` rather than `current`
      * because process.c reaches the same field through a macro called
      * `current`, and `cpus[i].current` would then expand twice. */
-    struct proc *cur;
+    struct thread *cur;
     int      quantum;          /* ticks left in this CPU's slice   */
     volatile int need_resched; /* get off this task at the next exit */
     int      rr;               /* round-robin cursor for this CPU  */
@@ -108,7 +108,7 @@ void cpu_secondary_main(void) __attribute__((noreturn));
 /* Take the first runnable task for this CPU, mark it running and return it;
  * NULL when nothing is ready.  Used by a secondary CPU that has no trap
  * frame yet - it starts a task by entering user mode directly. */
-struct proc *cpu_take_task(void);
+struct thread *cpu_take_task(void);
 
 /* ---- locks ----------------------------------------------------------- */
 
