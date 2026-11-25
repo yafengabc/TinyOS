@@ -180,23 +180,31 @@ DYING -> FREE     最后一个线程退出，退出码交给父进程/记忆
 
 - `struct proc procs[MAX_PROCS]`、`struct thread threads[MAX_THREADS]`。
 - `MAX_THREADS = max(2 * MAX_PROCS, 16)`，上限 32：16 个进程各一个主线程时，
-  工作线程是**所有进程共享**的余量；`kthreadtest` 一个进程就用 6 个。
-- 尺寸以 #59 的实测为准（E1b 用 `sizeof` 复核）：union 版 `thread` rv32 208 B /
-  ARM 144 B；去掉 `name`、加 `exit_code` 后约 204 / 140 B。`proc` 448 B；
-  `lag_pid/lag_code` 保持 int32、删 `wait_pid` 后约 460 B。`regs_t` 仍是最大项
-  （rv32 144 B / ARM 80 B），不再为省 12 B 改三个 arch 的帧。
-- 现状（`TOS_KEEP_SYMS` 实测）：`proc_t` rv32 368 B / ARM 304 B，加 `proc_res`
-  352 B，即每进程 720 / 656 B。净增：
+  工作线程是**所有进程共享**的余量；`kthreadtest` 会一直建到表满
+  （rv32 30 个，C3 14 个）。
+- 尺寸（E1b 实测，`clang -Xclang -fdump-record-layouts`）：
 
-| 目标 | 现在 | 新模型 | 净增 |
+| 架构 | `thread_t` | `+TOS_KTHREADS` | `proc_t` |
 |---|---|---|---|
-| C3（8 / 16） | 5,760 B | ~6,944 B | +1.2 KiB |
-| RV32（16 / 32） | 11,520 B | ~13,888 B | +2.4 KiB |
-| RP2040（8 / 16） | 5,248 B | ~5,920 B | +0.7 KiB |
-| M33（16 / 32） | 10,496 B | ~11,840 B | +1.3 KiB |
+| rv32（C3 / RP2040 / Pico 2 RV32） | 352 B | 360 B | 384 B |
+| ARM（M3 / M33 / M0+） | 288 B | 296 B | 384 B |
 
-  这是“统一模型”的必然成本：`TOS_KTHREADS` 只保留为用户 API/测试开关后，
-  **默认镜像也会付这笔表空间**（RP2040 的 264 KiB 里约 0.5%）。
+  拆分前一个槽位就是整块：rv32 712 B / ARM 648 B（`fds[12]` 与 `cwd[64]` 在槽里），
+  即每进程 712 / 648 B。E1b 之后每进程 736 / 672 B，但**表按线程数分配**，
+  所以默认镜像的 .bss 变大：
+
+| 目标（进程 / 线程） | E1b 表总量 | 拆分前 | 净增 |
+|---|---|---|---|
+| C3、RP2040（8 / 16） | 8,704 B | 5,696 B | +2.9 KiB |
+| RV32 virt（16 / 32） | 17,408 B | 11,392 B | +5.9 KiB |
+| arm / M33（16 / 32） | 15,360 B | 10,368 B | +4.9 KiB |
+| C3 8K 档（18 / 32） | 18,176 B | 12,816 B | +5.2 KiB |
+
+  （`TOS_KTHREADS` 每线程再 +8 B。数字按 `sizeof` × 表项算，不是从 ELF 量的。）
+  E0 的估计是 +0.7…+2.4 KiB；实测更大，原因有二：`thread_t` 比 #59 的 union
+  估计大（`regs_t` 144/80 B 加上等待与记账字段），以及 `MAX_THREADS` 取
+  2×进程数（上限 32）。这是“线程是调度单位”的必要成本，写在这里是为了
+  让 RP2040 一类 264 KiB 的板子有据可查。
 - 内核线程栈：RV32 继续 6 KiB 池（`/proc/ktask` 量高水位）；ARM 新增每线程栈池，
   大小用同样的 paint/高水位方式量（E3）。内核线程名和栈池放在一起
   （`const char *names[KTASK_SLOTS]` = 24 B，替代每线程 `name[8]`）。
@@ -240,8 +248,9 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 |---|---|---|
 | **E0** | 本文档 + 基线（commit、T0/T1/T2、C3、Pico 2 RV32 UP/SMP） | 无行为变化 |
 | **E1a** ✅ `2f8b49a` | 资源（win/heap/brk）搬进 proc 块，`entry`/`user_esp` 改局部，**删掉旧字段**；按槽扫块、退休只清本槽；窗口不变量断言 | T0/T1/T2、kthreadtest 10×、ktest、soak 10 轮、窗口泄漏用例、C3 真机 |
-| **E1b** | 拆 `procs[]`/`threads[]`，`current` 改线程；exec/线程/ktask 创建路径 | 同上 |
-| **E2** | 生命周期收口、wait/join、信号归属、ps//proc 两级 | 同上 + 现有 ps 解析脚本 |
+| **E1b-1** ✅ `948d5b6` | 拆 `procs[]`/`threads[]`；`t->proc`、`PROC_RES`/`PFD` 改指针；`current`/`cpu_take_task` 改线程；exec 分配 proc+主线程、线程共享 proc、ktask `proc == NULL` 并补齐空指针分支；退休只由主线程释放 proc | T0/T1/T2、kthreadtest ×3、ktest UP/SMP、C3 真机 |
+| **E1b-2** | 身份（pid/parent/exit/lag/name/stop）从主线程搬到 `proc`；wait/join/ps//proc 读进程身份 | 同上 + 现有 ps 解析脚本 |
+| **E2** | 生命周期收口：`proc->state` 状态机、信号归属（kill 落到进程）、ps//proc 两级输出、删掉线程槽里的身份残留 | 同上 + 现有 ps 解析脚本 |
 | **E3** | ARM 内核线程（#58）+ USB 泵迁移 | M3 QEMU + M33/RP2040 板测 |
 | **E4** | 全端口矩阵：rv32/rv32smp、C3、M3/M33、RP2040、x86；删旧模型残留 | 全 T3 + 板卡 |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
@@ -252,7 +261,8 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 ## 8. 删除清单
 
 - `proc_t` 中的资源/调度混合字段与线程槽里的资源拷贝。
-- `PROC_GROUP`/`PROC_OF` 的半模型特例（保留 `PROC_OF` 作为 `t->proc` 的读取）。
+- `PROC_GROUP`/`PROC_OF` 两套读取（E2 合并成一个 `t->proc` 读取；E1b 阶段 1 先保留
+  `PROC_GROUP` 给“谁是组长”用）。
 - ktask 的“特殊任务”分支，改为 `proc == NULL` 的线程。
 - 旧的“任务”命名与注释（process.c 的 task/process 混用）。
 - `TOS_KTHREADS` 作为内核模型开关；只保留用户 API/测试的编译开关。
