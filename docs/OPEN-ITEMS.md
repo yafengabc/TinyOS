@@ -893,7 +893,7 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 - 处理方向：先用 `-d int`/`gdb` 看是卡在 `sched_pick` 还是用户循环；如果只是 TCG 太慢，
   把 `ITERS` 调小或加一个 `threadbench small` 入口。
 
-## 19. S4：USB 泵线程的 Pico 2 RV32 板测（2026-11-25，UP 已跑；SMP 待补）
+## 19. S4：USB 泵线程的 Pico 2 RV32 板测（2026-11-25，UP + SMP 已跑）
 
 §21 的每核 trap 状态已修，SMP 镜像可直接用。代码在 `exp/thread-sched`
 （见 `docs/THREAD-MODEL.md` §2f）。镜像：
@@ -913,7 +913,8 @@ go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
    ```
 
    期望：UART0 走完全部阶段，`[usb] pump thread pid N on cpu 0` 出现一次，
-   CDC（2e8a:000a）出现并应答 shell。
+   CDC（2e8a:000a）出现并应答 shell。SMP 启动时这行可能被另一核的控制台输出
+   竞争吞掉（`kprintf` 是 trylock），以 `/proc/ktask` 里是否有 `usbpump` 为准。
 
 2. CDC 上：
    - `cat /proc/ktask`：应有一行 `usbpump`，size 6144，used/hw 是真实高水位
@@ -936,6 +937,14 @@ go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
 cpu 0`；`/proc/ktask` 为 `0 6144 652 652 usbpump`；`/bin/rcc` 23 000 B 经 CDC
 两轮均 23 138 B、逐字节一致；`heartbeat` 6/6；回退镜像无 `[usb] pump thread`。
 §21 随后由 `0cdb250` 修复，SMP 镜像的同一清单待补测。
+
+2026-11-25 SMP 实测（`0cdb250` 后，rpi-pico2-rv32-smp）：`cpus=2`、CDC 0.28 s
+出现并应答；`/proc/ktask` 仍为 `0 6144 652 652 usbpump`；`/bin/rcc` 两轮均
+23 138 B、完全一致；`crash` UART0/CDC 各 101–102 B、D/H=0，shell 继续；
+`smpbench` 1.89x（single 205 ms，dual 216+204 ms）；`heartbeat` 6/6。**启动那行
+3/3 次都没有出现**，但泵由 `/proc/ktask` 的 used=652（栈确实跑过）与 CDC 在
+`g_idle_poll=NULL` 下仍正常确认，判为启动期控制台竞争丢行，不是泵没起。
+回退镜像（默认 `-target rpi-pico2-rv32-smp`）无泵行、`/proc/ktask` 不存在。
 
 结果写 `docs/acceptance/`，注明板子、端口、镜像与 `cat /proc/ktask` 的 used/hw。
 
