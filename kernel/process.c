@@ -3401,6 +3401,12 @@ int process_thread_create(uint32_t entry, uint32_t arg,
 
     if (!main || !main->proc || PROC_RES(main)->win_size == 0)
         return -1;
+    /* A process that is already exiting must not gain a thread: the new
+     * slot would point at a window that is about to be retired.  The check
+     * is repeated under the lock at publish time, because the leader can
+     * start leaving while this one is being built. */
+    if (main->proc->state != PROC_LIVE || main->state == ST_DYING)
+        return -1;
     if (entry == 0 || (ustack & 15u) || usize == 0 || (usize & 3u))
         return -1;
     if (ustack <= PROC_RES(main)->win_base ||
@@ -3441,6 +3447,14 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     plat_frame_set_arg(&p->saved, arg);
 
     irq = plat_spin_lock_irqsave(&proc_lock);
+    if (p->proc->state != PROC_LIVE || main->state == ST_DYING) {
+        /* The leader started exiting while this thread was being built.
+         * Give the slot back - nothing reads it while it is FREE - and
+         * refuse: the process's window is on its way out. */
+        proc_retire_locked(p);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return -1;
+    }
     tid = next_pid++;
     p->tid = tid;
     proc_set_state(p, ST_READY);
@@ -3451,8 +3465,12 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     return tid;
 }
 
-/* Called with proc_lock held.  Closes the process's descriptors (the workers
- * are gone by now) and hands the main thread's exit code to its parent. */
+/* Called with proc_lock held, after the caller released the descriptors: a
+ * close can wake the other end of a pipe and take proc_lock itself, so it
+ * cannot happen in here (the uniprocessor hides that because its spin lock
+ * is a no-op; rv32smp deadlocked on exactly this, see kthreadtest pipes).
+ * Retires the zombie workers, hands the exit code to the parent and frees
+ * the entry. */
 static thread_t *finish_group_locked(thread_t *main)
 {
     thread_t *woke;
@@ -3467,7 +3485,6 @@ static thread_t *finish_group_locked(thread_t *main)
             proc_retire_locked(q);
     }
 
-    task_release(main);
     woke = reap_into_parent_locked(main, main->proc->exit_code);
     proc_retire_locked(main);
     return woke;
@@ -3551,10 +3568,23 @@ regs_t *process_thread_exit(regs_t *r, int code)
 
     if (p->proc->live_threads > 0)
         p->proc->live_threads--;
-    if (main && main->state == ST_DYING && p->proc->live_threads == 0)
-        woke_main = finish_group_locked(main);
+    int finishing = (main && main->state == ST_DYING &&
+                     p->proc->live_threads == 0);
 
     plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    if (finishing) {
+        /* Closing the process's descriptors may wake a pipe's other end,
+         * which takes proc_lock again - so it happens out here, the same
+         * order process_exit() uses.  Nothing can reuse the process or the
+         * main thread while we are out here: the entry is PROC_DYING and the
+         * main thread is ST_DYING, and this worker still holds its slot. */
+        task_release(main);
+
+        irq = plat_spin_lock_irqsave(&proc_lock);
+        woke_main = finish_group_locked(main);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+    }
 
     if (woke_main)
         preempt_if_higher(woke_main);
@@ -3595,6 +3625,17 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
         if (codeptr)
             *(int *)codeptr = code;
         return done(r, 0);
+    }
+
+    /* One joiner per tid.  A second one would park in ST_WAIT_THREAD after
+     * the first, and wake_joiner_locked() delivers to the first match only:
+     * the second would sleep until the process died.  POSIX leaves this
+     * undefined; refusing is the only answer that does not leak a slot. */
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (threads[i].state == ST_WAIT_THREAD && threads[i].join_tid == tid) {
+            plat_spin_unlock_irqrestore(&proc_lock, irq);
+            return done(r, -1);
+        }
     }
 
     me->join_tid = tid;
