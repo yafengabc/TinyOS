@@ -75,7 +75,6 @@ struct thread {                      /* ETHREAD：调度 */
     uint32_t cpu_ticks;
     int      kill_pending;
     int      exit_code;              /* ST_THREAD_ZOMBIE：join 的返回码  */
-    char     name[10];               /* 线程名；主线程可用进程名          */
 };
 ```
 
@@ -84,13 +83,21 @@ struct thread {                      /* ETHREAD：调度 */
 | 归属 | 内容 |
 |---|---|
 | 进程 | 窗口/堆/brk、fds、cwd、父进程、子进程/退出码记忆、live_threads、glock、name、stop |
-| 线程 | 帧、栈、state、prio/cpu/统计、等待对象、mutex、kill、exit_code、名字、is_main |
+| 线程 | 帧、栈、state、prio/cpu/统计、等待对象、mutex、kill、exit_code、is_main |
 | 派生 | `current` 是 `thread *`；`current_proc = current->proc`；内核线程为 NULL |
 | 不复制 | 线程不再有 heap/brk/cwd/fds 的拷贝；所有访问走 `t->proc` |
 | 一次性的 | `entry`、初始 `user_esp` 只在 `process_exec()` 构造初始帧时用，属于局部变量，**不进 proc** |
 
 辅助：`thread_is_kernel(t)` 即 `(t)->proc == NULL`；`tgid` 不存字段，用
 `t->proc ? t->proc->pid : t->tid`。`quantum` 属于每 CPU 的 `cpu_t`，不复制到线程。
+
+**命名**：进程名在 `proc->name`。**用户线程不存名字**，显示为
+`<进程名>#<tid>`（Windows 的任务管理器只给 TID，Linux 的 `/proc` comm 默认也是
+进程名；线程名是调试器/`prctl` 的可选功能，不是身份）。**内核线程没有 proc**，
+名字是它们唯一的身份，也是验收证据（`/proc/ktask ... usbpump`），所以放在内核
+线程栈池的元数据里（`const char *names[KTASK_SLOTS]`，6×4 B），`thread` 只留
+`kstack_slot`。这样比每线程 `name[8]` 省 8 B/线程，也不会截断名字；以后要
+`thread_setname` 再加可选 API。
 
 ## 2. 不变量
 
@@ -174,20 +181,25 @@ DYING -> FREE     最后一个线程退出，退出码交给父进程/记忆
 - `struct proc procs[MAX_PROCS]`、`struct thread threads[MAX_THREADS]`。
 - `MAX_THREADS = max(2 * MAX_PROCS, 16)`，上限 32：16 个进程各一个主线程时，
   工作线程是**所有进程共享**的余量；`kthreadtest` 一个进程就用 6 个。
-- 估算（E1b 用 `sizeof` 复核）：`proc` ≈ 452 B（fds 288 + cwd 64 + 字段）；
-  线程 rv32 ≈ 280 B（`regs_t` 144）、ARM ≈ 220 B（`regs_t` 80）。目标是 rv32
-  ≤ 300 B、ARM ≤ 240 B，不再坚持“≤250 B”。
-- 净增（相对现在）：
+- 尺寸以 #59 的实测为准（E1b 用 `sizeof` 复核）：union 版 `thread` rv32 208 B /
+  ARM 144 B；去掉 `name`、加 `exit_code` 后约 204 / 140 B。`proc` 448 B；
+  `lag_pid/lag_code` 保持 int32、删 `wait_pid` 后约 460 B。`regs_t` 仍是最大项
+  （rv32 144 B / ARM 80 B），不再为省 12 B 改三个 arch 的帧。
+- 现状（`TOS_KEEP_SYMS` 实测）：`proc_t` rv32 368 B / ARM 304 B，加 `proc_res`
+  352 B，即每进程 720 / 656 B。净增：
 
 | 目标 | 现在 | 新模型 | 净增 |
 |---|---|---|---|
-| C3（8 proc / 16 thr） | 5,696 B | ~8,096 B | +2.4 KiB |
-| RV32（16 proc / 32 thr） | 11,392 B | ~16,192 B | +4.8 KiB |
+| C3（8 / 16） | 5,760 B | ~6,944 B | +1.2 KiB |
+| RV32（16 / 32） | 11,520 B | ~13,888 B | +2.4 KiB |
+| RP2040（8 / 16） | 5,248 B | ~5,920 B | +0.7 KiB |
+| M33（16 / 32） | 10,496 B | ~11,840 B | +1.3 KiB |
 
   这是“统一模型”的必然成本：`TOS_KTHREADS` 只保留为用户 API/测试开关后，
-  **默认镜像也会付这笔表空间**（RP2040 的 264 KiB 里约 0.9%）。
+  **默认镜像也会付这笔表空间**（RP2040 的 264 KiB 里约 0.5%）。
 - 内核线程栈：RV32 继续 6 KiB 池（`/proc/ktask` 量高水位）；ARM 新增每线程栈池，
-  大小用同样的 paint/高水位方式量（E3）。
+  大小用同样的 paint/高水位方式量（E3）。内核线程名和栈池放在一起
+  （`const char *names[KTASK_SLOTS]` = 24 B，替代每线程 `name[8]`）。
 - `TOS_KTHREADS` 改为只控制**用户态线程 API 与测试程序**，不再是内核模型开关。
 
 ## 4. 各端口
@@ -215,8 +227,10 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 ## 6. ps / /proc
 
 - `ps` 保持现有列（pid ppid prio state c cpu% cpums wink stk/sz name），其中
-  pid 显示进程 id，线程行另加 `tid`/tgid 标识（E2 定格式；先保证
+  pid 显示进程 id，线程行另加 `tid` 标识（E2 定格式；先保证
   `cmd/tostest/emutest.go` 与 `scripts/rp2350/accept33.py` 的解析不破）。
+  `name` 列：用户线程显示 `proc->name`（主线程和工作线程一样，靠 tid 区分），
+  内核线程显示栈池里的名字；`/proc/ktask` 也从池里读名字。
 - 新增/保留 `/proc/threads`（或 `/proc/ps` 两级输出）：每行 `tgid tid state prio
   cpu stk/sz name`，供脚本和 `/proc/ktask` 对照。
 
