@@ -239,7 +239,7 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | 阶段 | 内容 | 门槛 |
 |---|---|---|
 | **E0** | 本文档 + 基线（commit、T0/T1/T2、C3、Pico 2 RV32 UP/SMP） | 无行为变化 |
-| **E1a** | 资源（win/heap/brk）搬进 proc 块，`entry`/`user_esp` 改局部，**删掉旧字段**；按槽扫块、退休只清本槽；窗口不变量断言 | T0/T1/T2、kthreadtest 10×、ktest、soak 2/2、窗口泄漏用例 |
+| **E1a** ✅ `2f8b49a` | 资源（win/heap/brk）搬进 proc 块，`entry`/`user_esp` 改局部，**删掉旧字段**；按槽扫块、退休只清本槽；窗口不变量断言 | T0/T1/T2、kthreadtest 10×、ktest、soak 10 轮、窗口泄漏用例、C3 真机 |
 | **E1b** | 拆 `procs[]`/`threads[]`，`current` 改线程；exec/线程/ktask 创建路径 | 同上 |
 | **E2** | 生命周期收口、wait/join、信号归属、ps//proc 两级 | 同上 + 现有 ps 解析脚本 |
 | **E3** | ARM 内核线程（#58）+ USB 泵迁移 | M3 QEMU + M33/RP2040 板测 |
