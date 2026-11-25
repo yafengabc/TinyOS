@@ -517,6 +517,19 @@ void plat_console_init(void)
         led_set(0);
 }
 
+/* The fault and panic reports go to UART0 only.  On the M0+ a HardFault runs
+ * above every interrupt, so while the handler prints neither the USB interrupt
+ * (which completes an IN transfer) nor the tick (which pumps the CDC ring) can
+ * run: a CDC mirror would receive the first packet and then stall the port
+ * until it was reopened.  UART0 needs no interrupt - the controller clocks the
+ * bytes out - so it keeps the whole dump. */
+static volatile int g_cdc_muted;
+
+void plat_console_mirror(int on)
+{
+    g_cdc_muted = on ? 0 : 1;
+}
+
 void plat_console_putc(char c)
 {
     BOOT_PROBE("[p] console putc");
@@ -530,7 +543,8 @@ void plat_console_putc(char c)
         if (!(mmio_read32(RP_UART_FR) & RP_UART_FR_TXFF))
             break;
     mmio_write32(RP_UART_DR, (uint8_t)c);
-    usb_cdc_putc(c);                 /* no-op until the host enumerates */
+    if (!g_cdc_muted)
+        usb_cdc_putc(c);             /* no-op until the host enumerates */
 }
 
 void plat_console_flush(void)

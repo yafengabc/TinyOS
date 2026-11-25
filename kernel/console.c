@@ -399,6 +399,11 @@ static void out_lock_give(void)
     spin_unlock(&out_lock);
 }
 
+__attribute__((weak)) void plat_console_mirror(int on)
+{
+    (void)on;
+}
+
 void console_putc(char c)
 {
     if (!out_lock_take())
@@ -474,6 +479,11 @@ size_t console_write_some(const char *s, size_t n)
 
 void panic(const char *fmt, ...)
 {
+    /* The report goes to the primary sink only: a mirror that cannot drain
+     * from this context would take half of it and then have to be reopened
+     * (see plat_console_mirror).  console_shutdown() after this does not
+     * restore it - the machine is dying. */
+    plat_console_mirror(0);
     kprintf("\n*** KERNEL PANIC ***\n");
     char buf[256];
     __builtin_va_list ap;

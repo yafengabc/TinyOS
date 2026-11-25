@@ -338,8 +338,22 @@ def main():
               "hello from ring 3!" in bare, "cwd exec")
 
         crash = b.cmd("crash")
-        check("fault isolation", PROMPT in crash and "KERNEL PANIC" not in crash,
-              "crash returned to prompt")
+        # The fault dump goes to UART0 only on this port: the M0+ runs
+        # HardFault above every interrupt, so while the handler prints neither
+        # the USB interrupt (IN completion) nor the tick (CDC ring pump) can
+        # run, and a CDC console would take the first packet and then need the
+        # port reopened.  board/rpi-pico implements plat_console_mirror() to
+        # mute the mirror for that report.  The UART0 row still checks this
+        # strictly; on a CDC console the item is reported as skipped, not
+        # failed, because the console under test is not the fault console.
+        if is_cdc:
+            check("fault isolation (skipped: dump is UART0-only)",
+                  PROMPT in crash and "KERNEL PANIC" not in crash,
+                  "cdc console; no dump expected, prompt must return")
+        else:
+            check("fault isolation",
+                  PROMPT in crash and "KERNEL PANIC" not in crash,
+                  "crash returned to prompt with its dump")
 
         # 4. the #46 regression: a >1 KB output must arrive whole.  Compare
         #    the listing with wc over the same directory - the pipe path

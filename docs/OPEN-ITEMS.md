@@ -401,6 +401,15 @@ RV32 的 `drivers/usb/rp2350rv`（1 KiB 环、泵只在 CPU 0）用同一机制�
   `fault isolation` FAIL 与 gap 无关（UART0 3 轮证明板级 fault 正常）。细节与逐轮数据见
   `docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`。
 
+  **决定（2026-11-25）：RP2040 的 fault / panic 报告只走 UART0。** 新增 weak 钩子
+  `plat_console_mirror(on)`（`kernel/plat/console.h`；`panic()` 与 `arch/arm/platform.c`
+  的两处转储在打印期间调用），`board/rpi-pico` 实现为"置位后 `plat_console_putc()`
+  不再镜像到 CDC"。理由就是上面这段：M0+ 的 HardFault 高于所有 IRQ，dump 期间
+  USB 完成中断和 tick 泵都进不来，镜像只能收到半份报告。`scripts/rp2040/accept.py`
+  在 CDC 控制台上把 `fault isolation` 记为 **skipped**（仍要求提示符返回、无 panic），
+  UART0 行保持严格检查。1536 B 的 CDC 环保留，但它不是这个问题的修法。
+  卡片：`docs/acceptance/2026-11-25-rp2040-fault-uart0.md`。
+
   **2026-11-25 定位更新（两个候选补丁均已撤回，修复未落地）**：在 ATK-DNRP2350AM ARM SMP
   上同时打开 UART0（COM14）与板载 CDC（COM26，DTR=True）抓同一次 `crash`，UART0
   997 B 完整、CDC 267–311 B，首差在 262/306 B，正是 256 B per-core TX ring 写穿；

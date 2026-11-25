@@ -35,6 +35,14 @@
 
 void plat_console_init(void);
 void plat_console_putc(char c);
+/* Mirror switch for a board whose console also feeds a second sink - the USB
+ * CDC on the RP2 boards.  The fault and panic paths turn it off before their
+ * report: on a port where that sink cannot drain while the exception owns the
+ * CPU (the M0+ runs HardFault above every interrupt, so neither the USB
+ * interrupt nor the tick can move a byte), the host would otherwise receive
+ * half a report and then need the port reopened.  A board with no mirror
+ * implements nothing; the weak default is a no-op. */
+void plat_console_mirror(int on);
 /* How many characters plat_console_putc() will take right now without
  * waiting for the transmitter.  Keystroke echo uses this to stay out of the
  * way: echo is produced inside the tick, and a blocking write there delays

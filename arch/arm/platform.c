@@ -130,6 +130,9 @@ regs_t *arm_handle_fault(regs_t *f)
             }
         }
 #endif
+        /* One report, one sink: see plat_console_mirror().  Restored before
+         * the task is reaped so the prompt that follows still reaches both. */
+        plat_console_mirror(0);
         kprintf("\n[pid %d] %s at 0x%08x", process_current_pid(),
                 vec_name(f->vec), f->pc);
         if (addr)
@@ -260,9 +263,11 @@ regs_t *arm_handle_fault(regs_t *f)
             kprintf("\n");
         }
 #endif
+        plat_console_mirror(1);
         return process_exit(f, 139);
     }
 
+    plat_console_mirror(0);             /* dying: primary sink only */
     kprintf("\n*** ARM EXCEPTION ***\n");
     kprintf("%s: pc=0x%08x lr=0x%08x xpsr=0x%08x\n",
             vec_name(f->vec), f->pc, f->lr, f->xpsr);
