@@ -685,7 +685,15 @@ static void usb_rxq_fill(void)
 #else
 #define USB_TX_CORES 1
 #endif
-#define USB_TX_Q 256
+/* Bytes buffered per core.  The ring has to hold one whole burst that cannot
+ * be drained while it is written: on the M0+ a HardFault runs above every
+ * IRQ, so the USB interrupt cannot move bytes to the controller during the
+ * ~1 KiB fault dump and a 256-byte ring truncated it mid-line (the prompt
+ * then landed in the full ring and the host saw no prompt at all, which is
+ * why accept.py's "fault isolation" failed over CDC but passed over UART0 -
+ * UART0's transmitter is clocked by the controller and needs no pump).
+ * 1536 leaves room for the dump plus the prompt and the shell's echo. */
+#define USB_TX_Q 1536
 static volatile uint8_t  usb_txq[USB_TX_CORES][USB_TX_Q];
 static volatile uint16_t usb_txq_head[USB_TX_CORES], usb_txq_tail[USB_TX_CORES];
 
