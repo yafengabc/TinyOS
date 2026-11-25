@@ -85,6 +85,7 @@
 #include "usb_cdc.h"
 #include "string.h"
 #include "cpu.h"
+#include "process.h"
 
 /* Code that must run from SRAM: XIP is off inside the flash window, and an
  * instruction fetch then bus-faults.  The linker script copies
@@ -2292,9 +2293,55 @@ void plat_board_init(void)
 
     /* The ARM USB controller receives IRQ 14, but TinyUSB's task loop still
      * belongs in thread context.  Install it here, before the scheduler
-     * starts, so a blocked shell lets the idle loop run it. */
+     * starts, so a blocked shell lets the idle loop run it.  With
+     * TOS_USB_PUMP the kernel thread built in plat_start_tasks() takes this
+     * over and the hook is cleared. */
     g_idle_poll = usb_idle_poll;
 }
+
+#ifdef TOS_USB_PUMP
+/* The polled controller's state machine as a kernel thread (E3, #58).
+ *
+ * Until now it ran from the idle loop and from this port's PendSV (the tick
+ * returning to Thread mode).  Both are workarounds for the same thing:
+ * tud_task() needs real thread context and has to keep running while a user
+ * task is runnable, and neither a tick nor a syscall may own it.  A kernel
+ * thread is that context by construction - privileged Thread mode on its own
+ * PSP stack, scheduled like any task, and blocked between polls.
+ *
+ * One millisecond is the cadence the tick used.  Priority 0 keeps it above
+ * every user task so a long console write cannot starve the drain (issue
+ * #46), and it is pinned to core 0 because the controller and its locks are
+ * core 0's.  The pool slot is 6 KiB whatever is requested; 4 KiB is the
+ * request so the high-water in /proc/ktask says whether that is right. */
+static void usb_pump_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        usb_cdc_poll();
+        process_ktask_sleep(1);
+    }
+}
+
+void plat_start_tasks(void)
+{
+    int pid;
+
+    if (!g_usb_ready)
+        return;
+    pid = process_ktask_create("usbpump", usb_pump_task, NULL, 4096, 0, 0);
+    if (pid < 0) {
+        /* Keeping the old hooks is the safe fallback: the board still works,
+         * it just pays the idle/PendSV pump again. */
+        kprintf("[usb] pump thread not started; keeping the polled hooks\n");
+        return;
+    }
+    /* One owner: leaving both would just make the reentrancy guard bounce. */
+    g_idle_poll = NULL;
+    kprintf("[usb] pump thread pid %d on cpu 0\n", pid);
+}
+#endif
 
 /* ---- power -------------------------------------------------------------- */
 
