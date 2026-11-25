@@ -13,7 +13,12 @@ RP2040 上 `Ctrl-D` 要进 BOOTSEL，必须同时满足三件事：
    `while (true) __wfi();`。
 2. **倒计时期间不能被我们自己 disarm**。本板 tick 里有一条"清除 bootrom 残留 watchdog"
    的防御；调用 ROM 前必须先关 SysTick，否则倒计时被清掉。
-3. **从 thread mode 调 ROM**，且 ROSC 使能（复位明确不复位 ROSC/XOSC，bootrom 的时钟就是它）。
+3. **从 core 0 的 SysTick 里调 ROM**。这里没有可用的 thread mode：本内核的 idle
+   循环由 `sched_switch()` 进入（`sched_idle()`），而 `sched_switch()` 本身在
+   SVCall 里，所以"没有任务可跑"时 `plat_console_getchar()` 看到的 IPSR 一直是
+   0x0b。ROM 的复位是 watchdog 硬件在倒计时结束时完成的，不依赖中断上下文；
+   前提只是 tick 在跑、SysTick 先停掉。ROSC 也要使能（复位明确不复位 ROSC/XOSC，
+   bootrom 的时钟就是它）。
 
 另外：**RP2350 不需要这些**。它的 ROM 提供 REBOOT2（`'R','B' = 0x4252`），是芯片级
 reboot 请求，不经过 watchdog。这就是同一段 Ctrl-D 代码在 Pico 2/ATK 上一直好用、在
@@ -60,13 +65,13 @@ pico-sdk/MicroPython 之所以总能成功，是因为 `runtime_init_clocks()` �
 | 文件 | 改动 |
 |---|---|
 | `board/rpi-pico/platform.c` | `clocks_init()`：先 `CTRL=0`、`LOAD=0x1fffff`，再写 `TICK = 12 | ENABLE`（1 MHz）。原来是**故意停掉** tick |
-| 同上 | `bootsel_try_direct()`：唯一入口。thread mode 才执行；调 ROM 前使能 ROSC；先停 SysTick（保护 ROM 的 10 ms 倒计时），再 `reset_usb_boot(0,0)` |
+| 同上 | `bootsel_try_direct()` → `bootsel_enter_rom()`：唯一入口。由 core 0 的 tick 调用；使能 ROSC；先停 SysTick（保护 ROM 的 10 ms 倒计时），再 `reset_usb_boot(0,0)`。**不是** thread mode：本内核的 idle 跑在 SVCall 里 |
 | 同上 | 删除 `bootsel_request()`（`scratch[0]="TOSB"` + PSM_WDSEL + 立即 TRIGGER）、`bootsel_rom_call()`（SOF 强制触发）、`bootsel_early_handover()`（复位后二次调 ROM）、`plat_bootsel_force_check()`、`g_bootsel_force`、`g_bootsel_rom_req`、Ctrl-B 分支 |
 | 同上 | `plat_timer_tick()`：保留"每 tick 清残留 watchdog"的防御，注释改成"BOOTSEL 路径不依赖它"；不再打印 "Ctrl-D disabled" |
 | `drivers/usb/rp2040/tusb_shim.c` | 删除 USB ISR 里那段"看到 scratch[4] 就强制 TRIGGER" |
 
 Ctrl-D 的数据流现在是：UART 轮询/控制台读到 `0x04` → `g_bootsel_req = 1` →
-`plat_console_getchar()`（thread，IPSR=0）→ `bootsel_try_direct()` → ROM。
+core 0 的下一个 tick 里 `bootsel_enter_rom()`（IPSR=0x0f，这是可以的）→ ROM。
 
 ---
 
@@ -95,9 +100,10 @@ Ctrl-D 的数据流现在是：UART 轮询/控制台读到 `0x04` → `g_bootsel
 依次做，能一次把范围砍一半：
 
 1. **看有没有走到 ROM**：串口应出现 `[bootsel] ROM reset_usb_boot()`。
-   - 没有 → Ctrl-D 没被收到（`plat_console_getchar` 没跑），先查 `0x4005802c` 的
-     `bit9`（tick 是否真的开了）与 Ctrl-D 是否被 tty 吃掉（用 `ttyraw` 无关，UART0 的
-     轮询在 tick 里，`deep` 卡住时也应该能收到）。
+   - 没有 → Ctrl-D 没被收到，或 core 0 的 tick 没在跑。先查 `0x4005802c` 的
+     `bit9`（tick 是否真的开了）与 `g_bootsel_req` 是否置位（tick 里
+     `bootsel_poll_uart()` 之后立即 `bootsel_enter_rom()`；UART0 的轮询在 tick 里，
+     shell 卡住时也应该能收到）。
    - 有但没盘 → 进 §5.2。
 2. **读三个寄存器**（在调用前后各读一次，或从另一条路读）：
    - `0x40058000` `WATCHDOG_CTRL`：调用后应短暂出现 `ENABLE(bit30)`，然后复位；
@@ -115,15 +121,29 @@ Ctrl-D 的数据流现在是：UART 轮询/控制台读到 `0x04` → `g_bootsel
 
 ## 6. 已知边界
 
-- **panic 之后**：`g_panic_poll = bootsel_poll_uart`，只负责收 Ctrl-D；真正调 ROM 仍要
-  回到 thread（panic 的 `for(;;)` 是 thread 上下文，`plat_panic_halt()` 里若调用了
-  `plat_console_getchar` 才会触发，否则不保证）。这条与本次改动无关，保持原样。
+- **panic 之后**：`g_panic_poll = bootsel_poll_uart` 只负责收 Ctrl-D 并置
+  `g_bootsel_req`；真正调 ROM 在 tick 里，而 panic 已经停了调度/tick，所以 panic
+  之后 Ctrl-D 不保证能进 BOOTSEL。该路径保持原样。
 - **SMP**：tick 只在 core 0 轮询 UART；core 1 收到 Ctrl-D 不会处理。要 Ctrl-D 就用
   core 0（默认 shell 在 core 0）。
 - **ROSC**：`xosc_start()` 失败时走 `keep_ref`（ROSC），tick 仍按 12 计数，倒计时会偏快；
   bootrom 能不能起 USB 取决于 ROSC 频率，属于"晶振坏了"的降级场景，不保证。
 - **`plat_reboot()`** 仍然用自己的 `watchdog trigger`（立即触发，与 tick 无关），不受本次
   改动影响。
+
+---
+
+## 6a. 2026-11-25 板测结果（rpi-pico-smp）
+
+这台机器上的板：RP2040 Pico，UART0 走 CH343（COM19，115200），CDC 为 2e8a:000a。
+
+- 镜像：`build/tinyos-rpi-pico-smp.uf2`（本提交构建），BOOTSEL 刷入。
+- UART0 发单字节 `0x04`：立即打印 `[bootsel] ROM reset_usb_boot()`，
+  **0.81 s** 后主机出现 `RPI-RP2`（F:）；串口没有新的 TinyOS 启动行。
+- 从该 `RPI-RP2` 把同一 UF2 拖回去：0.66 s 弹出，板子重新启动到 `tos>`。
+- 重复一次，结果相同（0.80 s / 0.81 s）。
+- 对照（本次合并前的远程实现，要求 IPSR==0）：Ctrl-D 只置位、无任何串口输出、无盘。
+  本内核的 idle 在 SVCall 里（IPSR=0x0b），所以那条路径永远走不到。
 
 ---
 

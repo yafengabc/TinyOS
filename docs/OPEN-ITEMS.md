@@ -82,12 +82,16 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
 USB 证据。证据与镜像 sha：`docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`。
 原 2026-11-23 的 `NOT RUN` 见 `docs/acceptance/2026-11-23-rp2040-back-in-matrix-1cc53c4.md`。
 
-**Ctrl-D 进 BOOTSEL（2026-11-25，待板测）**：以前一直不通，根因是 ROM 的
+**Ctrl-D 进 BOOTSEL（2026-11-25，板测 PASS）**：以前一直不通，根因是 ROM 的
 `reset_usb_boot()` 走 `watchdog_reboot(wrapper, SRAM_END, 10)`，而本板故意停了
 watchdog tick（RP2350 用 REBOOT2，所以那边一直好用）。现在 `clocks_init()` 启动
-1 MHz tick，Ctrl-D 只保留"thread mode 调 ROM"一条路，删掉了 scratch 魔法、SOF 强制
-触发和复位后二次调 ROM。操作与失败采集见 [`RP2040-BOOTSEL.md`](RP2040-BOOTSEL.md)，
-本机 `NOT RUN`。
+1 MHz tick，Ctrl-D 只保留一条 ROM 路径：core 0 的 tick 里调用（本内核的 idle 在
+SVCall 里，IPSR=0x0b，没有可达的 thread mode——远程版本的 `IPSR==0` 条件因此永远
+不成立，实测 Ctrl-D 无反应），先停 SysTick，再 `reset_usb_boot(0,0)`；scratch 魔法、
+SOF 强制触发和复位后二次调 ROM 都已删除。实测：UART0 发 `0x04` →
+`[bootsel] ROM reset_usb_boot()` → 0.81 s 出现 `RPI-RP2`，从该卷刷回同一镜像成功。
+操作与失败采集见 [`RP2040-BOOTSEL.md`](RP2040-BOOTSEL.md)，证据见
+`docs/acceptance/2026-11-25-rp2040-ctrl-d-bootsel.md`。
 
 ## 5b. USB：还有三件事
 

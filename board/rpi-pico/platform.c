@@ -215,7 +215,7 @@ static void clocks_init(void)
      * running by the bootrom would fire the moment the tick starts (that is
      * the "reboots every ~0.5 s" this block used to avoid by leaving the tick
      * off).  plat_timer_tick() keeps re-disarming anything that arms it
-     * later, and bootsel_try_direct() stops SysTick before the ROM call so the
+     * later, and bootsel_enter_rom() stops SysTick before the ROM call so the
      * ROM's own 10 ms countdown survives. */
     mmio_write32(0x40058000u, 0u);               /* CTRL: disable, no trigger */
     mmio_write32(0x40058004u, 0x001fffffu);      /* LOAD: max, no stale count */
@@ -316,25 +316,30 @@ typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 static volatile int g_replug_req, g_trace_req;
 static volatile int g_bootsel_req;
 
-/* The one place that talks to the ROM, in thread mode only: reset_usb_boot()
- * is documented noreturn and its watchdog reboot needs interrupts enabled and
- * a normal stack.  The request can be set from any context (tick, panic poll,
- * console); an SVC that sees it returns and the idle loop's tty_poll() reaches
- * plat_console_getchar(), which calls this with IPSR=0.
+/* The one place that talks to the ROM.  It is called from core 0's SysTick
+ * handler, not from thread mode, because this kernel's idle loop is not
+ * thread mode: sched_switch() enters sched_idle() from inside the SVCall, so
+ * every console read made while nothing is runnable sees IPSR=0x0b.  An
+ * earlier version of this file required IPSR==0 and therefore never ran -
+ * measurably: Ctrl-D set the request and nothing happened.
  *
- * The order matters: stop SysTick before the ROM arms the watchdog, otherwise
- * plat_timer_tick()'s "disarm anything the bootrom left running" check would
- * cancel the ROM's 10 ms countdown. */
-static void bootsel_try_direct(void)
+ * Exception context is fine for this call.  reset_usb_boot() only writes the
+ * pin masks to scratch[0..1] and calls watchdog_reboot(wrapper, SRAM_END, 10);
+ * the 10 ms countdown and the reset itself are done by the watchdog hardware,
+ * not by an interrupt the exception could block.  What it does need is the
+ * watchdog's 1 MHz tick (see clocks_init()) and that nothing disarms the
+ * counter before it expires - hence SysTick is stopped first, since this very
+ * handler disarms a watchdog it did not arm.
+ *
+ * The request can be set from any context (tick, panic poll, SVC console), so
+ * servicing it at the top of the tick keeps it independent of where the byte
+ * was seen. */
+static void bootsel_enter_rom(void)
 {
     rp_rom_usb_boot_t boot;
-    uint32_t ipsr;
 
     if (!g_bootsel_req)
         return;
-    __asm__ volatile("mrs %0, ipsr" : "=r"(ipsr));
-    if (ipsr != 0u)
-        return;                         /* not thread: let the idle loop run */
     g_bootsel_req = 0;
     dbg_uart_puts("[bootsel] ROM reset_usb_boot()\n");
     boot = (rp_rom_usb_boot_t)rp_rom_func(ROM_FUNC_RESET_USB_BOOT);
@@ -356,12 +361,17 @@ static void bootsel_try_direct(void)
             break;
     }
     mmio_write32(ARM_SYSTICK_CTRL, 0u);
-    mmio_write32(ARM_VTOR, 0u);
-    mmio_write32(ARM_NVIC_ICER(0), 0xFFFFFFFFu);
-    mmio_write32(ARM_SCS_BASE + 0x280u, 0xFFFFFFFFu);  /* ICPR0 */
-    __asm__ volatile("cpsie i" ::: "memory");
     boot(0u, 0u);
+
+    /* reset_usb_boot() is documented noreturn.  If it ever returns, the tick
+     * is still stopped, and without it nothing would run the scheduler again;
+     * put it back.  The vector table and NVIC are deliberately left alone:
+     * the ROM resets the chip through the watchdog, so it never runs from
+     * them here, and on this error path the system stays usable. */
     dbg_uart_puts("[bootsel] ROM returned\n");
+    mmio_write32(ARM_SYSTICK_LOAD, g_reload - 1u);
+    mmio_write32(ARM_SYSTICK_VAL, 0);
+    mmio_write32(ARM_SYSTICK_CTRL, 7u);
 }
 
 /* UART0 RX is polled from the tick, from console output and from the panic
@@ -544,7 +554,11 @@ int plat_console_getchar(void)
 {
     int c;
 
-    bootsel_try_direct();
+    /* bootsel_poll_uart() below may set g_bootsel_req, but the ROM call is
+     * not made from here: this runs either in the tick or in the SVCall that
+     * enters the idle loop, and the tick is the only place that can stop its
+     * own interrupt before handing the watchdog to the ROM.  See
+     * bootsel_enter_rom(). */
     c = uart0_getchar();
     if (c >= 0)
         return c;
@@ -638,7 +652,7 @@ void plat_timer_tick(void)
     /* Something in the bootrom/flash path keeps re-arming a ~0.5 s watchdog;
      * with the tick generator alive it resets the board during normal use.
      * Keep it disarmed every tick.  The BOOTSEL path does not rely on this
-     * timer: bootsel_try_direct() stops SysTick before calling the ROM, so
+     * timer: bootsel_enter_rom() stops SysTick before calling the ROM, so
      * the ROM's own 10 ms countdown is not cancelled here. */
     if (mmio_read32(0x40058000u) & 0x40000000u)
         mmio_write32(0x40058000u, 0u);
@@ -647,9 +661,11 @@ void plat_timer_tick(void)
      * steal keystrokes from plat_console_getchar(); it only makes Ctrl-D
      * work while the shell is blocked on a device. */
     bootsel_poll_uart();
-    /* Ctrl-D only sets g_bootsel_req; bootsel_try_direct() enters the ROM
-     * from thread mode (see plat_console_getchar()).  Do not consume the
-     * request here: the tick cannot call the ROM. */
+    /* Ctrl-D: hand over to the ROM from the tick.  This handler stops its own
+     * SysTick first, so the "disarm a leftover watchdog" line above cannot
+     * cancel the ROM's 10 ms countdown.  On success the watchdog resets the
+     * chip into BOOTSEL and nothing after this call runs. */
+    bootsel_enter_rom();
     usb_cdc_poll();
     if (g_replug_req) {
         g_replug_req = 0;
