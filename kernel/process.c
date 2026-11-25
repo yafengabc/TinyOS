@@ -24,14 +24,14 @@
 #endif
 
 /* Table sizes, measured with -Xclang -fdump-record-layouts (2026-11-26, E1b):
- *   rv32  thread_t 352 B (360 B with TOS_KTHREADS)   proc_t 384 B
- *   arm   thread_t 288 B (296 B)                     proc_t 384 B
+ *   rv32  thread_t 256 B (264 B with TOS_KTHREADS)   proc_t 484 B
+ *   arm   thread_t 192 B (200 B)                     proc_t 484 B
  * Before the split every slot paid for the whole structure - 712 B on rv32,
- * 648 B on ARM - because fds[12] and cwd[64] were inline even for a worker.
- * The split makes a worker cheap but the table is now sized in threads
- * (MAX_THREADS below), so .bss grows with the default 16 processes: +5.9 KiB
- * on rv32, +4.9 KiB on ARM, +2.9 KiB on the C3 (8 processes).  The numbers
- * and the reasoning are in docs/PROC-THREAD-MODEL.md.
+ * 648 B on ARM - because fds[12], cwd[64] and the identity were inline even
+ * for a worker.  The split makes a worker cheap but the table is now sized in
+ * threads (MAX_THREADS below), so .bss grows with the default 16 processes:
+ * +4.4 KiB on rv32, +3.4 KiB on ARM, +2.2 KiB on the C3 (8 processes).  The
+ * numbers and the reasoning are in docs/PROC-THREAD-MODEL.md.
  * max_procs is a menuconfig knob: 4 is the floor for a shell plus one child,
  * 16 keeps the historical default for boards that do not override it. */
 #ifndef TOS_MAX_PROCS
@@ -197,25 +197,23 @@ typedef struct {
  */
 typedef struct proc {
     uint8_t  state;              /* 0 = free, 1 = owned                */
-    spin_t   glock;              /* brk + fd table + cwd               */
+
+    /* Identity.  A process has one pid and one name; every thread of it
+     * answers with these, and the thread's own id is its tid.  A kernel
+     * thread has no process, so it answers with its tid and keeps its name
+     * in the stack pool. */
+    int      pid;
+    char     name[12];
+    struct proc *parent;         /* NULL for init (and for an orphan)   */
+    int      exit_code;          /* the leader's, handed to wait()      */
+    uint16_t live_threads;       /* workers that have not exited yet    */
+    int      stop_pending;       /* SIGSTOP: park every thread          */
+
+    spin_t   glock;              /* brk + fd table + cwd                */
     uint32_t win_base, win_size, wx_start;
     uint32_t heap_base, heap_end, brk;
     file_t   fds[MAX_FDS];
     char     cwd[TOS_PATH_MAX];
-} proc_t;
-
-/* A descriptor has to be duplicable to be inheritable, and both the child
- * inheritance path and dup2() need exactly the same rules.  One helper, so
- * they cannot disagree about which types are copyable. */
-static int  fd_clone(file_t *dst, const file_t *src);
-static char *kstrdup(const char *s);
-
-typedef struct thread {
-    struct proc *proc;       /* NULL = kernel thread; else its resources */
-    int      state;
-    int      prio;          /* PRIO_*, 0 = highest */
-    int      pid;
-    int      wait_pid;      /* ST_WAIT_CHILD: which child, -1 for any */
 
     /* Children that exited before anybody waited for them, as (pid, code)
      * pairs.  A single slot plus a counter is not enough: `piperace 2 64`
@@ -227,6 +225,23 @@ typedef struct thread {
     int      lag_pid[LAG_MAX];
     int      lag_code[LAG_MAX];
     uint8_t  lag_n;
+} proc_t;
+
+/* A descriptor has to be duplicable to be inheritable, and both the child
+ * inheritance path and dup2() need exactly the same rules.  One helper, so
+ * they cannot disagree about which types are copyable. */
+static int  fd_clone(file_t *dst, const file_t *src);
+static char *kstrdup(const char *s);
+
+typedef struct thread {
+    struct proc *proc;       /* NULL = kernel thread; else its process */
+    int      state;
+    int      prio;          /* PRIO_*, 0 = highest */
+    int      tid;           /* this thread's id; the process id is
+                             * proc->pid and is what wait() names */
+    int      wait_pid;      /* ST_WAIT_CHILD/ST_WAIT_THREAD: the id this
+                             * thread waits for, -1 for any child */
+
     uint32_t in_buf;        /* ST_WAIT_INPUT: where the line goes */
     uint32_t in_len;
     uint64_t wake_tick;     /* ST_WAIT_SLEEP */
@@ -235,7 +250,7 @@ typedef struct thread {
 
     /* The window, heap and break are the process's (struct proc); only the
      * thread's own stack stays on the slot. */
-    uint8_t  is_ktask;      /* runs in M-mode on its own stack, no window */
+    uint8_t  is_ktask;      /* runs in M-mode on its own stack, no process */
     uint8_t  kstack_slot;   /* index into the ktask stack pool          */
     uint32_t stack_top;
     uint32_t stack_size;    /* this task's stack right now: the board's
@@ -243,18 +258,14 @@ typedef struct thread {
                              * a stack fault grew it to (see
                              * process_stack_grow) */
 
-    char     name[10];
-    struct thread *parent;
-
     /* A process is a leader plus its workers.  A worker points at its
-     * leader (and at the process through `proc`); the leader has
+     * leader and at the process through `proc`; the leader has
      * leader == NULL.  Kernel threads are marked by proc == NULL.  Code,
-     * data, heap, fds and cwd belong to the process; the slot carries only
-     * the thread's saved frame, its stack and its scheduling state. */
+     * data, heap, fds, cwd and the process identity belong to the process;
+     * the slot carries only the thread's saved frame, its stack, its exit
+     * code for join() and its scheduling state. */
     struct thread *leader;  /* the process's main thread; NULL on it   */
-    int      tgid;          /* thread group id: the leader's pid       */
     int      exit_code;     /* ST_THREAD_ZOMBIE: value for join()      */
-    int      live_threads;  /* threads that have not exited yet        */
     /* The process's glock lives in struct proc (t->proc->glock). */
 #ifdef TOS_KTHREADS
     /* User-mutex state.  `held_mutex` is the word this thread owns through
@@ -263,7 +274,6 @@ typedef struct thread {
     volatile int *wmutex;
 #endif
     uint64_t start_ns;      /* uptime when created, for a ps %CPU column */
-    int      stop_pending;  /* SIGSTOP arrived: park at the trap exit */
     int      kill_pending;  /* SIGKILL aimed at the task on the CPU: die at
                              * the trap exit, see process_suspend() */
 
@@ -296,6 +306,13 @@ typedef struct thread {
     regs_t   saved;
     regs_t  *kframe;
 } thread_t;
+
+/* The id a syscall or /proc reports for this task: the process id for a
+ * user thread, its own id for a kernel thread (which has no process). */
+static int thread_pid(const thread_t *t)
+{
+    return t->proc ? t->proc->pid : t->tid;
+}
 
 /* One setter for task state.  A direct `p->state = ...` silently allows
  * states that make no sense (FREE->READY is the expensive one: the slot is
@@ -429,6 +446,11 @@ void process_ktask_trap_init(void) { }
 static uint8_t ktask_stacks[KTASK_SLOTS][KTASK_STACK_BYTES]
     __attribute__((aligned(16)));
 static uint32_t ktask_stack_used;
+/* Kernel-thread names, one per stack slot: a kernel thread has no process to
+ * keep a name in, so the name lives next to the stack (see
+ * docs/PROC-THREAD-MODEL.md).  The pointer belongs to the caller, which
+ * passes a literal or a static string. */
+static const char *ktask_names[KTASK_SLOTS];
 /* High-water mark per slot, in bytes below the slot top.  Measured by painting
  * the slot with KTASK_PAINT and scanning for the last byte the thread did not
  * touch.  M-mode kernel threads have no guard of their own (no MPU rule on the
@@ -547,12 +569,18 @@ static thread_t *proc_by_pid(int pid) __attribute__((noinline));
 static thread_t *proc_by_pid(int pid)
 {
     for (int i = 0; i < MAX_THREADS; i++) {
-        /* ST_NEW is a slot claimed by an exec() that has not picked a pid
+        thread_t *t = &threads[i];
+
+        /* ST_NEW is a slot claimed by an exec() that has not picked an id
          * yet: it still holds the previous task's number and must not be
          * mistaken for it. */
-        if (threads[i].state != ST_FREE && threads[i].state != ST_NEW &&
-            threads[i].pid == pid)
-            return &threads[i];
+        if (t->state == ST_FREE || t->state == ST_NEW)
+            continue;
+        /* The process's main thread carries the process id as its tid, so
+         * the first test is the common one; the second makes a process
+         * findable by its pid even if that ever stops being true. */
+        if (t->tid == pid || (t->proc && t->proc->pid == pid))
+            return t;
     }
     return NULL;
 }
@@ -1050,12 +1078,12 @@ static regs_t *sched_switch(regs_t *r)
                 int p0 = -1, s0 = -1, p1 = -1, s1 = -1;
 
                 if (cpus[0].cur) {
-                    p0 = cpus[0].cur->pid;
+                    p0 = thread_pid(cpus[0].cur);
                     s0 = (int)cpus[0].cur->state;
                 }
 #if MAX_CPUS > 1
                 if (cpus[1].cur) {
-                    p1 = cpus[1].cur->pid;
+                    p1 = thread_pid(cpus[1].cur);
                     s1 = (int)cpus[1].cur->state;
                 }
 #endif
@@ -1332,12 +1360,12 @@ regs_t *process_suspend(regs_t *r)
          * could not rip out the frame that was running.  It marked the task
          * instead; this is the first safe point to act on it. */
         current->kill_pending = 0;
-        kprintf("\n[pid %d] killed\n", current->pid);
+        kprintf("\n[pid %d] killed\n", thread_pid(current));
         return process_exit(r, 128 + 9);
     }
-    if (current && current->stop_pending && current->state == ST_RUNNING) {
-        current->stop_pending = 0;
-        kprintf("\n[pid %d] stopped\n", current->pid);
+    if (current && current->proc && current->proc->stop_pending &&
+        current->state == ST_RUNNING) {
+        kprintf("\n[pid %d] stopped\n", thread_pid(current));
         proc_set_state(current, ST_STOPPED);
         /* Leaving the CPU: `cpu` is what the scheduler uses to decide
          * ownership now, so it has to be cleared here as well.  A stopped
@@ -1417,7 +1445,7 @@ void process_init(void)
 
 int process_current_pid(void)
 {
-    return current ? current->pid : 0;
+    return current ? thread_pid(current) : 0;
 }
 
 void *process_current_task(void)
@@ -1456,7 +1484,7 @@ int process_console_reader(void)
 {
     for (int i = 0; i < MAX_THREADS; i++) {
         if (threads[i].state == ST_WAIT_INPUT)
-            return threads[i].pid;
+            return thread_pid(&threads[i]);
     }
     return 0;
 }
@@ -1493,11 +1521,11 @@ int process_ctrl_target(void)
 {
     int pid = process_console_reader();
 
-    if (pid > 0 && (!init_proc || pid != init_proc->pid))
+    if (pid > 0 && (!init_proc || pid != thread_pid(init_proc)))
         return pid;
 
     pid = foreground_job();
-    if (pid > 0 && (!init_proc || pid != init_proc->pid))
+    if (pid > 0 && (!init_proc || pid != thread_pid(init_proc)))
         return pid;
 
     thread_t *best = NULL;
@@ -1510,7 +1538,7 @@ int process_ctrl_target(void)
             (p->prio == best->prio && p->cpu_ms > best->cpu_ms))
             best = p;
     }
-    return best ? (int)best->pid : 0;
+    return best ? thread_pid(best) : 0;
 }
 
 /* Validate a user pointer against the current task's window.  Without an
@@ -1716,11 +1744,9 @@ static void proc_retire_locked(thread_t *p)
     int is_main = (p->leader == NULL && p->proc != NULL);
 
     proc_set_state(p, ST_FREE);
-    p->pid = 0;
-    p->parent = NULL;
+    p->tid = 0;
 #ifdef TOS_KTHREADS
     p->leader = NULL;
-    p->tgid = 0;
     p->held_mutex = NULL;
     p->wmutex = NULL;
 #endif
@@ -1805,7 +1831,7 @@ static uint32_t build_initial_stack(thread_t *p, char *const argv[], int argc)
     return sp;
 }
 
-static void set_name(thread_t *p, const char *path)
+static void set_name(proc_t *pr, const char *path)
 {
     const char *base = path;
 
@@ -1814,11 +1840,11 @@ static void set_name(thread_t *p, const char *path)
             base = s + 1;
     }
     int i = 0;
-    while (base[i] && i < (int)sizeof(p->name) - 1) {
-        p->name[i] = base[i];
+    while (base[i] && i < (int)sizeof(pr->name) - 1) {
+        pr->name[i] = base[i];
         i++;
     }
-    p->name[i] = '\0';
+    pr->name[i] = '\0';
 }
 
 #if defined(__riscv)
@@ -1899,17 +1925,10 @@ int process_ktask_info(int idx, const char **name, uint32_t *size,
     *size = KTASK_STACK_BYTES;
     *used = ktask_slot_used(idx);
     *hw = ktask_stack_hw[idx];
-    /* The slot bitmap says a thread exists; its thread slot carries the name.
-     * The table may change on another CPU while this runs, so a torn read is
-     * possible - the name is display data and the array is static. */
-    *name = "ktask";
-    for (int i = 0; i < MAX_THREADS; i++) {
-        if (threads[i].is_ktask && threads[i].kstack_slot == idx &&
-            threads[i].state != ST_FREE) {
-            *name = threads[i].name;
-            break;
-        }
-    }
+    /* The slot bitmap says a thread exists; the name pool next to the stacks
+     * says what it is called.  A torn read is possible on SMP - the name is
+     * display data and the pointer is static. */
+    *name = ktask_names[idx] ? ktask_names[idx] : "ktask";
     return 1;
 }
 
@@ -1999,7 +2018,7 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     p->cpu = -1;
     p->home_cpu = cpu < 0 ? -1 : cpu;   /* a device owner names its hart */
     p->start_ns = plat_uptime_ms();
-    set_name(p, name);
+    ktask_names[slot] = name ? name : "ktask";
 
     memset(&p->saved, 0, sizeof(p->saved));
     p->saved.mstatus = RV_MSTATUS_MPP_M;   /* MPIE=0: the stub enables it */
@@ -2011,11 +2030,11 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     p->kframe = &p->saved;
 
     spin_lock(&proc_lock);
-    p->pid = next_pid++;
+    p->tid = next_pid++;
     proc_set_state(p, ST_READY);
     spin_unlock(&proc_lock);
     plat_irq_restore(irq);
-    return p->pid;
+    return p->tid;
 }
 
 regs_t *process_ktask_syscall(regs_t *r)
@@ -2058,6 +2077,7 @@ regs_t *process_ktask_syscall(regs_t *r)
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
         ktask_stack_used &= ~(1u << p->kstack_slot);
+        ktask_names[p->kstack_slot] = NULL;
         p->is_ktask = 0;
         p->kstack_slot = 0;
         proc_retire_locked(p);
@@ -2557,12 +2577,12 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
      * is: two exec()s on two CPUs would otherwise hand out the same number,
      * and `wait(pid)` would then reap the wrong task. */
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
-    p->pid = next_pid++;
-    /* It is the process's main thread: its pid is the group id, it has no
-     * leader and it is the one live thread until thread_create() adds more. */
-    p->tgid = p->pid;
+    /* One id space: the main thread's tid *is* the process id, which is what
+     * wait() names and what ps prints.  It has no leader and no worker yet. */
+    p->tid = next_pid++;
+    p->proc->pid = p->tid;
     p->leader = NULL;
-    p->live_threads = 0;   /* workers only; see thread_create() */
+    p->proc->live_threads = 0;   /* workers only; see thread_create() */
     plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     /* Descriptors.  0/1/2 are the console by default; everything else is
@@ -2619,7 +2639,7 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
        the program can see. */
     memset((void *)(p->stack_top - stk), STACK_POISON, stk);
     PROC_RES(p)->brk = PROC_RES(p)->heap_base;
-    set_name(p, path);
+    set_name(p->proc, path);
 
     uint32_t sp = build_initial_stack(p, argv, argc);
     if (!sp) {
@@ -2703,9 +2723,10 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
         return -1;
 
     /* exec spawns; it does not run the child here.  The parent keeps its
-       slice and calls wait() when it wants the result. */
-    p->parent = current;
-    return (int)p->pid;
+       slice and calls wait() when it wants the result.  The link is between
+       processes: a worker thread may spawn, and wait() is a process call. */
+    p->proc->parent = (current && current->proc) ? current->proc : NULL;
+    return (int)p->proc->pid;
 }
 
 /* Move a task to another level.  pid 0 means the caller, so a program can
@@ -2788,8 +2809,8 @@ static void task_release(thread_t *p)
     if (used > stack_peak.bytes) {
         stack_peak.bytes = used;
         for (uint32_t i = 0; i + 1 < sizeof(stack_peak.name); i++) {
-            stack_peak.name[i] = p->name[i];
-            if (!p->name[i])
+            stack_peak.name[i] = p->proc->name[i];
+            if (!p->proc->name[i])
                 break;
         }
         stack_peak.name[sizeof(stack_peak.name) - 1] = '\0';
@@ -2806,35 +2827,53 @@ static void task_release(thread_t *p)
 #ifdef TOS_PIO
     /* A PIO state machine is system hardware: stop the ones this task owns
      * and put the pins back, or the next task inherits a running SM. */
-    plat_pio_release(p->pid);
+    plat_pio_release(thread_pid(p));
 #endif
 }
 
 /* Remember a child's exit code for a wait() that has not happened yet.
  * Called with the table lock held. */
-static void lag_push(thread_t *p, int pid, int code)
+static void lag_push(proc_t *pr, int pid, int code)
 {
-    if (p->lag_n >= LAG_MAX)
+    if (pr->lag_n >= LAG_MAX)
         return;                 /* the oldest is lost; see lag_pid/lag_code */
-    p->lag_pid[p->lag_n] = pid;
-    p->lag_code[p->lag_n] = code;
-    p->lag_n++;
+    pr->lag_pid[pr->lag_n] = pid;
+    pr->lag_code[pr->lag_n] = code;
+    pr->lag_n++;
 }
 
 /* Take the code of child `pid` (any child when pid < 0).  Returns 0 when
  * that child is not in the list.  Called with the table lock held. */
-static int lag_take(thread_t *p, int pid, int *code)
+static int lag_take(proc_t *pr, int pid, int *code)
 {
-    for (int i = 0; i < p->lag_n; i++) {
-        if (pid >= 0 && p->lag_pid[i] != pid)
+    for (int i = 0; i < pr->lag_n; i++) {
+        if (pid >= 0 && pr->lag_pid[i] != pid)
             continue;
-        *code = p->lag_code[i];
-        p->lag_n--;             /* order does not matter, so fill the hole */
-        p->lag_pid[i] = p->lag_pid[p->lag_n];
-        p->lag_code[i] = p->lag_code[p->lag_n];
+        *code = pr->lag_code[i];
+        pr->lag_n--;            /* order does not matter, so fill the hole */
+        pr->lag_pid[i] = pr->lag_pid[pr->lag_n];
+        pr->lag_code[i] = pr->lag_code[pr->lag_n];
         return 1;
     }
     return 0;
+}
+
+/* The thread of `pr` blocked in wait() for child `pid` (any child when
+ * pid < 0), or NULL.  The waiter is a *thread*: any thread of a process may
+ * call wait(), and it is that thread the code is delivered to.  Called with
+ * proc_lock held. */
+static thread_t *wait_waiter_locked(proc_t *pr, int pid)
+{
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_t *q = &threads[i];
+
+        if (q->state != ST_WAIT_CHILD || q->proc != pr)
+            continue;
+        if (pid >= 0 && q->wait_pid != pid)
+            continue;
+        return q;
+    }
+    return NULL;
 }
 
 /* Hand a dead task's exit code to whoever waits for it: an actual waiter
@@ -2848,26 +2887,35 @@ static int lag_take(thread_t *p, int pid, int *code)
  * it in the gap between "the code is recorded" and "the slot is free". */
 static thread_t *reap_into_parent_locked(thread_t *p, int code)
 {
-    thread_t *parent = p->parent;
+    proc_t *cp = p->proc;
+    proc_t *pp;
     thread_t *woke = NULL;
 
-    if (parent) {
-        if (parent->state == ST_WAIT_CHILD &&
-            (parent->wait_pid == p->pid || parent->wait_pid < 0)) {
+    if (!cp)
+        return NULL;            /* a kernel thread has no parent or children */
+
+    pp = cp->parent;
+    if (pp) {
+        thread_t *w = wait_waiter_locked(pp, cp->pid);
+
+        if (w) {
             /* Same as make_ready(), but the lock is already held and this
              * must not release it: the frame write and the state store stay
              * in the sender's critical section. */
-            plat_frame_set_ret(&parent->saved, (uint32_t)code);
-            proc_set_state(parent, ST_READY);
-            woke = parent;
+            plat_frame_set_ret(&w->saved, (uint32_t)code);
+            proc_set_state(w, ST_READY);
+            woke = w;
         } else {
-            lag_push(parent, p->pid, code);
+            lag_push(pp, cp->pid, code);
         }
     }
 
+    /* Children of the dying process go to its parent, or to init. */
     for (int i = 0; i < MAX_THREADS; i++) {
-        if (threads[i].state != ST_FREE && threads[i].parent == p)
-            threads[i].parent = parent ? parent : init_proc;
+        proc_t *c = threads[i].proc;
+
+        if (threads[i].state != ST_FREE && c && c->parent == cp)
+            c->parent = pp ? pp : (init_proc ? init_proc->proc : NULL);
     }
     return woke;
 }
@@ -2910,7 +2958,7 @@ static int task_kill_prepare_locked(thread_t *p, int code)
     /* A thread dies at its own trap exit so the live_threads accounting and
      * the group finalisation run in one place; a leader with live threads
      * follows the same deferred path process_exit() uses. */
-    if (p->leader || p->live_threads > 0) {
+    if (p->leader || (p->proc && p->proc->live_threads > 0)) {
         if (p->leader)
             p->kill_pending = 1;
         else
@@ -2957,13 +3005,13 @@ regs_t *process_exit(regs_t *r, int code)
      * free the window yet: mark the group dying and let the last thread
      * finish the reap.  This is also the only safe order on SMP, where a
      * sibling may be running on the other core at this instant. */
-    if (p->live_threads > 0) {
+    if (p->proc && p->proc->live_threads > 0) {
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
         begin_group_exit_locked(p, code);
         plat_spin_unlock_irqrestore(&proc_lock, irq);
 
-        mailbox_drop(p->pid);
+        mailbox_drop(thread_pid(p));
         return sched_switch(r);
     }
 #endif
@@ -2972,7 +3020,7 @@ regs_t *process_exit(regs_t *r, int code)
 
     /* Nothing can read messages addressed to a task that is leaving; give
      * their slots back now instead of waiting for the pool to fill up. */
-    mailbox_drop(p->pid);
+    mailbox_drop(thread_pid(p));
 
     int is_init = (p == init_proc);
     if (is_init) {
@@ -3017,14 +3065,19 @@ regs_t *process_wait(regs_t *r, int pid)
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     int code;
 
+    if (!p || !p->proc) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return done(r, -1);
+    }
+
     /* The scan and the sleep are one critical section.  A child exiting on
      * the other CPU does reap + retire under this same lock, so there are
      * only two orders and both are correct:
      *
      *   it exits first  -> the slot is already ST_FREE, the loop skips it,
      *                      and the code it recorded is taken below;
-     *   we scan first   -> it finds parent->state == ST_WAIT_CHILD and
-     *                      hands the code straight into our saved frame.
+     *   we scan first   -> reap finds this thread in ST_WAIT_CHILD and hands
+     *                      the code straight into its saved frame.
      *
      * The old code scanned outside the lock and slept afterwards, which left
      * a third order: recorded, then we sleep, then nobody ever wakes us. */
@@ -3032,15 +3085,21 @@ regs_t *process_wait(regs_t *r, int pid)
      * is what keeps the codes straight: several children can exit between
      * two wait() calls, and the one asked about is not necessarily the last
      * to go. */
-    if (lag_take(p, pid, &code)) {
+    if (lag_take(p->proc, pid, &code)) {
         plat_spin_unlock_irqrestore(&proc_lock, irq);
         return done(r, code);
     }
     for (int i = 0; i < MAX_THREADS; i++) {
         thread_t *c = &threads[i];
-        if (c->state == ST_FREE || c->parent != p)
+
+        /* One row per process: the main thread carries the id a child is
+         * waited for, its workers are the same child.  A kernel thread has
+         * no process and can never be a child. */
+        if (c->state == ST_FREE || c->leader || !c->proc)
             continue;
-        if (pid >= 0 && c->pid != pid)
+        if (c->proc->parent != p->proc)
+            continue;
+        if (pid >= 0 && c->proc->pid != pid)
             continue;
         p->wait_pid = pid;
         return block_locked(r, ST_WAIT_CHILD, irq);
@@ -3099,6 +3158,13 @@ int process_signal(int pid, int sig)
         victim = victim->leader;
 #endif
 
+    /* SIGSTOP and SIGCONT park or release a whole process.  A kernel thread
+     * has no process to park, so only SIGKILL applies to it. */
+    if (sig != SIGKILL && !victim->proc) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return -1;
+    }
+
     /* "Same as current" only means "on this CPU" while it is actually
      * running.  sched_switch() idles without clearing `current`, so a task
      * asleep with the CPU parked beside it is still `current` - and taking
@@ -3107,11 +3173,8 @@ int process_signal(int pid, int sig)
      * seconds.  Measured: ^C on a foreground `sleep 3000` did nothing until
      * the nap was over.  A blocked task has no live frame to protect; block()
      * copied its registers into ->saved before switching away. */
-    if (victim == current && victim->state == ST_RUNNING) {
-        if (sig == SIGKILL)
-            victim->kill_pending = 1;
-        else if (sig == SIGSTOP)
-            victim->stop_pending = 1;
+    if (victim == current && victim->state == ST_RUNNING && sig == SIGKILL) {
+        victim->kill_pending = 1;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
         return 0;
     }
@@ -3154,16 +3217,18 @@ int process_signal(int pid, int sig)
     if (sig == SIGSTOP) {
         int stopped = 0;
 
-        victim->stop_pending = 1;
-        /* A task blocked in the kernel (a sleeper, a console reader, a
-           parent waiting for a child) is already off the CPU and only
-           re-enters it through the trap exit that wakes it, which is where
-           process_suspend parks it.  A task that is NOT on the CPU and not
-           blocked is one waiting in the run queue: park it now, there is
-           no kernel stack to protect. */
-        if (victim->state == ST_READY) {
-            proc_set_state(victim, ST_STOPPED);
-            victim->stop_pending = 0;
+        /* The flag belongs to the process: a thread on the CPU parks at its
+         * next trap exit (process_suspend), the ones waiting in the run
+         * queue park now, and a blocked thread is already off the CPU and
+         * parks when it wakes.  SIGCONT is what clears the flag again. */
+        victim->proc->stop_pending = 1;
+        for (int i = 0; i < MAX_THREADS; i++) {
+            thread_t *q = &threads[i];
+
+            if (q->proc != victim->proc || q->state != ST_READY)
+                continue;
+            proc_set_state(q, ST_STOPPED);
+            q->cpu = -1;
             stopped = 1;
         }
         plat_spin_unlock_irqrestore(&proc_lock, irq);
@@ -3172,10 +3237,15 @@ int process_signal(int pid, int sig)
     } else { /* SIGCONT */
         int resumed = 0;
 
-        victim->stop_pending = 0;
-        if (victim->state == ST_STOPPED) {
-            proc_set_state(victim, ST_READY);
-            preempt_if_higher(victim);
+        victim->proc->stop_pending = 0;
+        for (int i = 0; i < MAX_THREADS; i++) {
+            thread_t *q = &threads[i];
+
+            if (q->proc != victim->proc || q->state != ST_STOPPED)
+                continue;
+            proc_set_state(q, ST_READY);
+            q->cpu = -1;
+            preempt_if_higher(q);
             resumed = 1;
         }
         plat_spin_unlock_irqrestore(&proc_lock, irq);
@@ -3241,7 +3311,7 @@ static thread_t *wake_joiner_locked(thread_t *tid_task, int code)
     for (int i = 0; i < MAX_THREADS; i++) {
         thread_t *q = &threads[i];
 
-        if (q->state != ST_WAIT_THREAD || q->wait_pid != tid_task->pid)
+        if (q->state != ST_WAIT_THREAD || q->wait_pid != tid_task->tid)
             continue;
         if (q->wbuf && group_user_ok(PROC_GROUP(q), q->wbuf, sizeof(int)))
             *(int *)q->wbuf = code;
@@ -3260,7 +3330,7 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     thread_t *p;
     uint32_t low;
     uint32_t irq;
-    int pid;
+    int tid;
 
     if (!leader || leader->is_ktask || PROC_RES(leader)->win_size == 0)
         return -1;
@@ -3284,9 +3354,7 @@ int process_thread_create(uint32_t entry, uint32_t arg,
 
     p->proc = leader->proc;
     p->leader = leader;
-    p->tgid = leader->tgid;
     p->prio = current->prio;
-    p->parent = leader;
     p->stack_top = ustack;
     /* A thread's stack now has a name and a size: the group's protection
      * cannot separate it from the heap around it (both are the same writable
@@ -3309,19 +3377,14 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     plat_frame_set_arg(&p->saved, arg);
 
     irq = plat_spin_lock_irqsave(&proc_lock);
-    pid = next_pid++;
-    p->pid = pid;
-    p->name[0] = 't';
-    p->name[1] = 'h';
-    p->name[2] = 'r';
-    p->name[3] = (char)('0' + (pid % 10));
-    p->name[4] = '\0';
+    tid = next_pid++;
+    p->tid = tid;
     proc_set_state(p, ST_READY);
     p->cpu = -1;
-    leader->live_threads++;
+    leader->proc->live_threads++;
     plat_spin_unlock_irqrestore(&proc_lock, irq);
 
-    return pid;
+    return tid;
 }
 
 /* Called with proc_lock held.  Closes the group's descriptors (the threads
@@ -3340,7 +3403,7 @@ static thread_t *finish_group_locked(thread_t *leader)
     }
 
     task_release(leader);
-    woke = reap_into_parent_locked(leader, leader->exit_code);
+    woke = reap_into_parent_locked(leader, leader->proc->exit_code);
     proc_retire_locked(leader);
     return woke;
 }
@@ -3353,7 +3416,7 @@ static thread_t *finish_group_locked(thread_t *leader)
  * finish_group_locked(). */
 static void begin_group_exit_locked(thread_t *leader, int code)
 {
-    leader->exit_code = code;
+    leader->proc->exit_code = code;
     proc_set_state(leader, ST_DYING);
     leader->cpu = -1;
 
@@ -3363,6 +3426,13 @@ static void begin_group_exit_locked(thread_t *leader, int code)
         if (q->leader != leader || q->state == ST_FREE)
             continue;
         q->kill_pending = 1;
+        if (q->state == ST_STOPPED) {
+            /* A stopped sibling would never reach a trap exit to die at;
+             * make it runnable so the group can finish. */
+            proc_set_state(q, ST_READY);
+            q->cpu = -1;
+            continue;
+        }
         if (q->state == ST_WAIT_CHILD || q->state == ST_WAIT_INPUT ||
             q->state == ST_WAIT_SLEEP || q->state == ST_WAIT_PIPE ||
             q->state == ST_WAIT_THREAD || q->state == ST_WAIT_MUTEX) {
@@ -3413,9 +3483,9 @@ regs_t *process_thread_exit(regs_t *r, int code)
         p->cpu = -1;
     }
 
-    if (leader->live_threads > 0)
-        leader->live_threads--;
-    if (leader->state == ST_DYING && leader->live_threads == 0)
+    if (leader->proc->live_threads > 0)
+        leader->proc->live_threads--;
+    if (leader->state == ST_DYING && leader->proc->live_threads == 0)
         woke_leader = finish_group_locked(leader);
 
     plat_spin_unlock_irqrestore(&proc_lock, irq);
@@ -3443,7 +3513,7 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
     irq = plat_spin_lock_irqsave(&proc_lock);
 
     for (int i = 0; i < MAX_THREADS; i++)
-        if (threads[i].state != ST_FREE && threads[i].pid == tid) {
+        if (threads[i].state != ST_FREE && threads[i].tid == tid) {
             t = &threads[i];
             break;
         }
@@ -3674,11 +3744,11 @@ int process_stack_guard(const regs_t *r)
         return 1;
 
     kprintf("\n[pid %d] %s overflow (sp 0x%08x, stack 0x%08x..0x%08x)\n",
-            p->pid, PROC_IS_THREAD(p) ? "thread stack" : "stack",
+            thread_pid(p), PROC_IS_THREAD(p) ? "thread stack" : "stack",
             sp, low, p->stack_top);
     *gw = USER_STACK_GUARD;          /* re-arm before the growth decision */
     if (!process_stack_grow(sp < low ? sp : low - 4u, sp)) {
-        kprintf("[pid %d] %s; killing\n", p->pid,
+        kprintf("[pid %d] %s; killing\n", thread_pid(p),
                 PROC_IS_THREAD(p) ? "a thread stack cannot grow in place"
                                   : "no room to grow it");
         return 0;
@@ -3737,7 +3807,7 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
          * brk in the way means the heap got the slack first. */
         kprintf("\n[pid %d] %u KiB stack and no room to double it; "
                 "declare TOS_STACK() for the depth you need\n",
-                p->pid, old / 1024u);
+                thread_pid(p), old / 1024u);
         return 0;
     }
 
@@ -3765,7 +3835,7 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     apply_protection(p);
 
     kprintf("\n[pid %d] stack grown to %u KiB, heap ceiling %u KiB\n",
-            p->pid, want / 1024u,
+            thread_pid(p), want / 1024u,
             (PROC_RES(p)->heap_end - PROC_RES(p)->heap_base) / 1024u);
     return 1;
 }
@@ -3863,7 +3933,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
         char cpubuf[4];
         uint32_t age, busy, pct10, stk10;
 
-        if (p->state == ST_FREE || p->is_ktask)
+        if (p->state == ST_FREE || !p->proc || p->is_ktask)
             continue;
 
         if (p->cpu < 0 || p->state != ST_RUNNING) {
@@ -3899,11 +3969,13 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
            column that shifts by one character when a stack doubles is a
            small price for not printing "%-2u" on the console. */
         n = ksnprintf(buf + off, cap - off,
-                      "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n", p->pid,
-                      p->parent ? p->parent->pid : 0, p->prio,
+                      "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n",
+                      thread_pid(p),
+                      p->proc->parent ? p->proc->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
-                      busy / 1000u, p->proc ? p->proc->win_size / 1024u : 0u,
-                      stk10 / 10u, stk10 % 10u, p->stack_size / 1024u, p->name);
+                      busy / 1000u, p->proc->win_size / 1024u,
+                      stk10 / 10u, stk10 % 10u, p->stack_size / 1024u,
+                      p->proc->name);
         if (n > 0)
             off += (uint32_t)n;
     }
