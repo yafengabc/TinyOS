@@ -199,19 +199,27 @@ static void clocks_init(void)
         if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
             break;
 
-    /* Start the 1 MHz tick generator inside the watchdog block.  pico-sdk's
-     * runtime_init_clocks() does this through start_all_ticks(); without it
-     * reset_usb_boot()'s watchdog_reboot() loads the counter but the tick
-     * never advances, so the ROM does watchdog_reboot() then spins in
-     * "while (true) __wfi();" forever - which is exactly the silent wedge
-     * Ctrl-D produced.  WATCHDOG_TICK: CYCLES bits 8:0, ENABLE bit 9;
-     * clk_ref is the 12 MHz crystal, so 12 gives 1 MHz. */
-    /* Leave the watchdog tick stopped.  Starting it makes the bootrom's
-     * leftover ~1 s watchdog count and reboots the board every ~0.5 s.
-     * reset_usb_boot()'s own timer also never fires reliably here, so Ctrl-D
-     * uses the USB-SOF force-trigger path in bootsel_rom_call() instead. */
-    mmio_write32(0x40058000u,
-                 mmio_read32(0x40058000u) & ~0x40000000u);
+    /* Start the 1 MHz tick generator inside the watchdog block - what
+     * pico-sdk's runtime_init_clocks() does through start_all_ticks() before
+     * main().  RP2040's ROM BOOTSEL path is watchdog based: reset_usb_boot()
+     * writes the pin/interface masks to scratch[0..1] and calls
+     * watchdog_reboot(wrapper, SRAM_END, 10), so its 10 ms countdown only
+     * runs while this tick ticks.  With the tick stopped the ROM stops in
+     * "while (true) __wfi();" and the board silently wedges instead of
+     * entering BOOTSEL (pico-sdk issue #2689 is the same report).  RP2350
+     * does not have this problem: its ROM uses REBOOT2 ('R','B'), which is a
+     * chip-level reboot with no watchdog in the path.
+     *
+     * WATCHDOG_TICK: CYCLES bits 8:0, ENABLE bit 9; clk_ref is the 12 MHz
+     * crystal here, so 12 gives 1 MHz.  Disarm first: a watchdog count left
+     * running by the bootrom would fire the moment the tick starts (that is
+     * the "reboots every ~0.5 s" this block used to avoid by leaving the tick
+     * off).  plat_timer_tick() keeps re-disarming anything that arms it
+     * later, and bootsel_try_direct() stops SysTick before the ROM call so the
+     * ROM's own 10 ms countdown survives. */
+    mmio_write32(0x40058000u, 0u);               /* CTRL: disable, no trigger */
+    mmio_write32(0x40058004u, 0x001fffffu);      /* LOAD: max, no stale count */
+    mmio_write32(0x4005802cu, 12u | (1u << 9));  /* TICK: 1 MHz, running      */
 
     /* Park clk_sys on clk_ref (12 MHz) and wait for the glitchless mux. */
     mmio_write32(CLOCKS_BASE + CLK_SYS_DIV_OFFSET, CLK_DIV_1);
@@ -259,7 +267,28 @@ keep_ref:
 
 /* Ctrl-D asks the ROM to mount BOOTSEL again, so a wedged image can be
  * replaced without a human holding BOOTSEL + RESET.  RP2040's function is
- * ROM_TABLE_CODE('U','B') = 'U' | ('B' << 8) = 0x4255. */
+ * ROM_TABLE_CODE('U','B') = 'U' | ('B' << 8) = 0x4255.  RP2350 has no such
+ * entry - it reboots through REBOOT2 ('R','B' = 0x4252, flags BOOTSEL) - which
+ * is why the two boards need different calls for the same trick.
+ *
+ * The RP2040 ROM implementation (pico-bootrom-rp2040, bootrom_main.c) is:
+ *
+ *     scratch[0] = usb_activity_gpio_pin_mask;
+ *     scratch[1] = disable_interface_mask;
+ *     watchdog_reboot(_usb_boot_reboot_wrapper, SRAM_END, 10);
+ *     while (true) __wfi();
+ *
+ * Two consequences shape the code here:
+ *   - the 10 ms countdown needs the watchdog's 1 MHz tick, started in
+ *     clocks_init() above;
+ *   - the program counter is the ROM's own wrapper, so nobody outside the
+ *     bootrom can reproduce the sequence by writing scratch[4..7] and
+ *     triggering the watchdog by hand.  Do not try: this file used to, and
+ *     the half-written record plus a forced trigger is why Ctrl-D sometimes
+ *     reset the board and still booted flash.
+ *
+ * So the only thing kept here is "remember the request, enter the ROM from
+ * thread mode". */
 typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 #define ROM_FUNC_RESET_USB_BOOT 0x4255u
 #define BOOTSEL_MAGIC_CHAR      0x04u
@@ -267,90 +296,35 @@ typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 #define TRACE_CHAR              0x14u   /* Ctrl-T: dump the USB IRQ trace */
 #define E15_CHAR                0x05u   /* Ctrl-E: E15 workaround ON      */
 #define E15_OFF_CHAR            0x17u   /* Ctrl-W: E15 workaround OFF     */
-#define BOOTSEL_ROM_CHAR        0x02u   /* Ctrl-B: test ROM call directly */
 
+/* ROSC_CTRL.ENABLE is bits 12.., 0xfab = on.  MicroPython's
+ * machine.bootloader() re-enables ROSC right before reset_usb_boot(): the
+ * reset deliberately leaves ROSC/XOSC alone (PSM_WDSEL), so ROSC is the clock
+ * the bootrom gets, and switching clk_sys to PLL_SYS can leave it off. */
+#define ROSC_CTRL_REG           0x40060000u
+#define ROSC_CTRL_ENABLE        (0x00fab000u)
+
+/* Watchdog block.  clocks_init() touches CTRL/LOAD/TICK by address (it runs
+ * before these macros are in scope); plat_reboot() uses them to do its own
+ * immediate trigger, which is a plain reset and does not need the ROM. */
 #define WD_BASE         0x40058000u
 #define WD_CTRL_REG     (*(volatile uint32_t *)(WD_BASE + 0x00u))
 #define WD_SCRATCH(n)   (*(volatile uint32_t *)(WD_BASE + 0x0cu + 4u * (n)))
 #define WD_CTRL_TRIGGER 0x80000000u
 #define PSM_WDSEL_REG   (*(volatile uint32_t *)(0x40010000u + 0x08u))
-#define BOOTSEL_SCRATCH_MAGIC 0x544f5342u   /* "TOSB"                    */
 
 static volatile int g_replug_req, g_trace_req;
 static volatile int g_bootsel_req;
-static volatile int g_bootsel_rom_req;
-static volatile int g_bootsel_force;
 
-/* Called from the USB trampoline while reset_usb_boot() is spinning in wfi.
- * The ROM wrote scratch[4..7] and enabled the watchdog timer; on this chip
- * the timer never fires (the ROM assumes watchdog_reboot's countdown works),
- * so a still-live USB interrupt forces WATCHDOG_CTRL.TRIGGER instead.  The
- * scratch magic makes the bootrom jump to _usb_boot_reboot_wrapper. */
-int plat_bootsel_force_check(void)
-{
-    if (!g_bootsel_force)
-        return 0;
-    if (mmio_read32(0x4005801cu) != 0xb007c0d3u)  /* scratch[4] */
-        return 0;                                /* ROM not there yet */
-    g_bootsel_force = 0;
-    return 1;
-}
-
-/* Measured failure: every console path that sees Ctrl-D runs in SVCall
- * (IPSR=0x0b), and a ROM call from ANY exception context wedges the board --
- * the ROM's USB interrupt cannot preempt the exception that invoked it on
- * Cortex-M0+.  Trying to defer to thread mode does not help because the
- * console syscall stays in SVCall for its whole lifetime.
+/* The one place that talks to the ROM, in thread mode only: reset_usb_boot()
+ * is documented noreturn and its watchdog reboot needs interrupts enabled and
+ * a normal stack.  The request can be set from any context (tick, panic poll,
+ * console); an SVC that sees it returns and the idle loop's tty_poll() reaches
+ * plat_console_getchar(), which calls this with IPSR=0.
  *
- * The guaranteed route is a watchdog reset: it puts every peripheral back
- * into its power-on state (including a clean USB disconnect), and the very
- * first thing plat_board_early() does is check a scratch register and hand
- * over to the ROM in THREAD mode, before clocks/VTOR/USB are touched at all.
- * That is bit-for-bit the state of a physical BOOT+RESET press. */
-static void bootsel_request(void)
-{
-    dbg_uart_puts("[bootsel] watchdog reboot\n");
-    /* Let the host see a real disconnect before the reset.  USBCTRL is reset
-     * by PSM_WDSEL, but the ROM re-attaches within milliseconds; a host that
-     * missed SE0 keeps the old device node and never enumerates the ROM's
-     * BOOTSEL volume.  200 ms is the same window usb_cdc_init() uses. */
-    usb_cdc_disconnect();
-    for (volatile uint32_t i = 0; i < (g_cpu_hz / 3000u) * 200u; i++)
-        ;
-    WD_SCRATCH(0) = BOOTSEL_SCRATCH_MAGIC;
-    /* scratch[4..7] are the ROM's "reboot to pc/sp" magic; clear them so a
-     * plain flash boot follows if the handover itself ever fails. */
-    for (unsigned i = 1; i < 8u; i++)
-        WD_SCRATCH(i) = 0u;
-    /* PSM_WDSEL resets to 0 (= reset nothing).  Mirror pico-sdk's
-     * _watchdog_enable(): reset all domains except ROSC/XOSC so the crystal
-     * keeps running (PSM_WDSEL_BITS & ~(ROSC|XOSC) == 0x0001fffc). */
-    PSM_WDSEL_REG = 0x0001fffcu;
-    /* UART0 is one of the domains the watchdog resets.  Let the last marker
-     * actually leave the FIFO first, otherwise it is truncated to a couple
-     * of framing-error bytes and the log looks like a silent wedge. */
-    for (uint32_t i = 0; i < 300000u; i++) {
-        uint32_t fr = mmio_read32(RP_UART_FR);
-        /* TXFE is bit 7 (bit 3 is BUSY).  Wait for BOTH "FIFO empty" and
-         * "shifter idle", otherwise the watchdog reset truncates the last
-         * marker into a framing-error byte. */
-        if ((fr & RP_UART_FR_TXFE) && !(fr & RP_UART_FR_BUSY))
-            break;
-    }
-    WD_CTRL_REG = WD_CTRL_TRIGGER;      /* immediate, self-clearing */
-    for (;;)
-        ;
-}
-
-
-
-/* Direct ROM hand-over from thread mode.  Every previous attempt called
- * reset_usb_boot() from SVCall (IPSR=11) or routed through a watchdog
- * reboot; the watchdog route gets as far as the ROM but the host never sees
- * a BOOTSEL volume.  pico-sdk's reset_usb_boot() is designed to be called
- * from a normal thread by an application, so try exactly that: the idle
- * loop's tty_poll() reaches plat_console_getchar() with IPSR=0.  If an SVC
- * path sees the request first, it returns and the idle loop retries. */
+ * The order matters: stop SysTick before the ROM arms the watchdog, otherwise
+ * plat_timer_tick()'s "disarm anything the bootrom left running" check would
+ * cancel the ROM's 10 ms countdown. */
 static void bootsel_try_direct(void)
 {
     rp_rom_usb_boot_t boot;
@@ -362,12 +336,15 @@ static void bootsel_try_direct(void)
     if (ipsr != 0u)
         return;                         /* not thread: let the idle loop run */
     g_bootsel_req = 0;
-    dbg_uart_puts("[bootsel] direct ROM from thread\n");
+    dbg_uart_puts("[bootsel] ROM reset_usb_boot()\n");
     boot = (rp_rom_usb_boot_t)rp_rom_func(ROM_FUNC_RESET_USB_BOOT);
     if (!boot) {
         dbg_uart_puts("[bootsel] ROM lookup failed\n");
         return;
     }
+    /* The bootrom runs on ROSC after the reset (PSM_WDSEL leaves it alone),
+     * and clk_sys on PLL_SYS can have left it disabled. */
+    mmio_write32(ROSC_CTRL_REG, ROSC_CTRL_ENABLE);
     /* Drop D+ first so the host tears down the (now mounted) CDC node.
      * ~100 ms at the current clk_sys; the tick is about to be stopped. */
     usb_cdc_disconnect();
@@ -385,60 +362,6 @@ static void bootsel_try_direct(void)
     __asm__ volatile("cpsie i" ::: "memory");
     boot(0u, 0u);
     dbg_uart_puts("[bootsel] ROM returned\n");
-}
-
-/* Called from the top of plat_board_early(); never returns on a hit.
- * The previous version handed the ROM a live VTOR (ours, in XIP flash) and
- * leftover NVIC/SysTick state: the ROM's USB IRQ then vectored into our dead
- * handler and the board wedged with no BOOTSEL volume.  Give it back the ROM
- * vector table, clear every enable/pending bit, stop SysTick and leave
- * PRIMASK clear - the ROM bootloader needs its own interrupts to run. */
-static void bootsel_early_handover(void)
-{
-    rp_rom_usb_boot_t boot;
-    uint32_t ipsr;
-
-    if (WD_SCRATCH(0) != BOOTSEL_SCRATCH_MAGIC)
-        return;
-    WD_SCRATCH(0) = 0u;                /* consume before the ROM starts   */
-    __asm__ volatile("mrs %0, ipsr" : "=r"(ipsr));
-    dbg_uart_puts("[bootsel] early handover ipsr=");
-    dbg_uart_hex(ipsr);
-    dbg_uart_puts("\n");
-    boot = (rp_rom_usb_boot_t)rp_rom_func(ROM_FUNC_RESET_USB_BOOT);
-    dbg_uart_puts("[bootsel] ptr=");
-    dbg_uart_hex((uint32_t)(uintptr_t)boot);
-    dbg_uart_puts("\n");
-    if (!boot)
-        return;                         /* fall through to a normal boot   */
-    dbg_uart_puts("[bootsel] calling ROM\n");
-    for (uint32_t i = 0; i < 300000u; i++) {
-        uint32_t fr = mmio_read32(RP_UART_FR);
-        /* TXFE is bit 7 (bit 3 is BUSY).  Wait for BOTH "FIFO empty" and
-         * "shifter idle", otherwise the watchdog reset truncates the last
-         * marker into a framing-error byte. */
-        if ((fr & RP_UART_FR_TXFE) && !(fr & RP_UART_FR_BUSY))
-            break;
-    }
-    /* Keep the running clock tree intact for the ROM.  QMK's RP2040
-     * bootloader calls reset_usb_boot() only after clocks_init(), with the
-     * warning "all clocks have to be enabled ... otherwise the bootrom will
-     * be stuck infinitely".  Earlier rounds switched clk_sys back to 12 MHz
-     * and powered PLL_SYS down here, which is the one state the ROM has
-     * never been fed.  Leave clk_sys at 125 MHz, PLL_SYS on and clk_peri
-     * following it; the ROM's own reboot sets up whatever it needs. */
-    mmio_write32(ARM_SYSTICK_CTRL, 0u);
-    mmio_write32(ARM_VTOR, 0u);
-    mmio_write32(ARM_NVIC_ICER(0), 0xFFFFFFFFu);
-    mmio_write32(ARM_SCS_BASE + 0x280u, 0xFFFFFFFFu);  /* ICPR0           */
-    __asm__ volatile("cpsie i" ::: "memory");
-    boot(0u, 0u);                      /* no activity LED, both ifaces on */
-    /* reset_usb_boot is documented noreturn; if it ever returns, say so
-     * instead of spinning with the UART still clocked for 125 MHz. */
-    dbg_uart_init(12000000u);
-    dbg_uart_puts("[bootsel] early ROM returned\n");
-    for (;;)
-        ;
 }
 
 /* UART0 RX is polled from the tick, from console output and from the panic
@@ -491,44 +414,6 @@ static int uart0_getchar(void)
     return -1;
 }
 
-/* Direct ROM call from the running system (SysTick/thread context both land
- * here).  QMK's RP2040 bootloader jump calls reset_usb_boot() only after
- * clocks_init(), with the comment "all clocks have to be enabled before
- * jumping to the bootloader function, otherwise the bootrom will be stuck
- * infinitely".  The earlier failures all called it in the early boot path
- * after switching clk_sys back to 12 MHz and powering PLL_SYS down.  Call it
- * with the system exactly as it runs: 125 MHz, PLL_USB alive, clk_usb alive. */
-static void bootsel_rom_call(void)
-{
-    rp_rom_usb_boot_t boot;
-
-    g_bootsel_req = 0;
-    dbg_uart_puts("[bootsel] ROM call (clocks running)\n");
-    boot = (rp_rom_usb_boot_t)rp_rom_func(ROM_FUNC_RESET_USB_BOOT);
-    if (!boot) {
-        dbg_uart_puts("[bootsel] ROM lookup failed\n");
-        return;
-    }
-    /* Keep the CDC attached: SOF must keep arriving so the USB IRQ can force
-     * the watchdog after reset_usb_boot() has written scratch[4..7].  The
-     * previous 200 ms D+ drop here removed the only interrupt source and the
-     * ROM sat in wfi forever.  The reset itself gives the host its SE0. */
-    for (uint32_t i = 0; i < 300000u; i++) {
-        uint32_t fr = mmio_read32(RP_UART_FR);
-        if ((fr & RP_UART_FR_TXFE) && !(fr & RP_UART_FR_BUSY))
-            break;
-    }
-    /* TinyUSB does not enable SOF interrupts normally, so a mounted but idle
-     * CDC device produces no IRQ once reset_usb_boot() is spinning in wfi.
-     * Enable DEV_SOF here: the 1 ms frame boundary is the heartbeat that
-     * lets the trampoline force the watchdog. */
-    mmio_write32(0x50110000u + 0x90u,
-                 mmio_read32(0x50110000u + 0x90u) | 0x00020000u);
-    g_bootsel_force = 1;      /* USB IRQ forces the reset after scratch[4] */
-    boot(0u, 0u);
-    dbg_uart_puts("[bootsel] ROM returned\n");
-}
-
 /* Also installed as g_panic_poll so it keeps working after the kernel dies. */
 static void bootsel_poll_uart(void)
 {
@@ -539,9 +424,6 @@ static void bootsel_poll_uart(void)
     switch (c) {
     case BOOTSEL_MAGIC_CHAR:
         g_bootsel_req = 1;       /* serviced from the idle thread */
-        return;
-    case BOOTSEL_ROM_CHAR:
-        g_bootsel_rom_req = 1;
         return;
     case REPLUG_CHAR: g_replug_req = 1; return;
     case TRACE_CHAR:  g_trace_req  = 1; return;
@@ -755,8 +637,9 @@ void plat_timer_tick(void)
     BOOT_PROBE("[p] first tick");
     /* Something in the bootrom/flash path keeps re-arming a ~0.5 s watchdog;
      * with the tick generator alive it resets the board during normal use.
-     * Keep it disarmed every tick.  The Ctrl-D path uses the USB-SOF force
-     * trigger, not this timer. */
+     * Keep it disarmed every tick.  The BOOTSEL path does not rely on this
+     * timer: bootsel_try_direct() stops SysTick before calling the ROM, so
+     * the ROM's own 10 ms countdown is not cancelled here. */
     if (mmio_read32(0x40058000u) & 0x40000000u)
         mmio_write32(0x40058000u, 0u);
     g_ticks++;
@@ -764,14 +647,9 @@ void plat_timer_tick(void)
      * steal keystrokes from plat_console_getchar(); it only makes Ctrl-D
      * work while the shell is blocked on a device. */
     bootsel_poll_uart();
-    if (g_bootsel_req) {
-        g_bootsel_req = 0;
-        dbg_uart_puts("[bootsel] Ctrl-D disabled: use the BOOTSEL button\n");
-    }
-    if (g_bootsel_rom_req) {
-        g_bootsel_rom_req = 0;
-        dbg_uart_puts("[bootsel] Ctrl-B disabled: use the BOOTSEL button\n");
-    }
+    /* Ctrl-D only sets g_bootsel_req; bootsel_try_direct() enters the ROM
+     * from thread mode (see plat_console_getchar()).  Do not consume the
+     * request here: the tick cannot call the ROM. */
     usb_cdc_poll();
     if (g_replug_req) {
         g_replug_req = 0;
@@ -1464,12 +1342,6 @@ void plat_board_early(void)
     dbg_uart_puts(g_cpu_hz == RP2040_SYS_CLK_HZ
                       ? "\n[rp2040] boot clk=125MHz\n"
                       : "\n[rp2040] boot clk=12MHz (PLL_SYS failed)\n");
-
-    /* A Ctrl-D left a magic in the watchdog scratch register and triggered a
-     * watchdog reset.  Hand over to the ROM now, in thread mode with a live
-     * console so the handover itself is observable.  Still before VTOR is
-     * repointed and before any interrupt is enabled. */
-    bootsel_early_handover();
 
     led_init();
     led_set(1);

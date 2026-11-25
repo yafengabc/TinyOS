@@ -57,17 +57,10 @@ static void usb_irq_trampoline(void)
 {
     uint32_t ints = mmio_read32(0x50110098u);   /* USBCTRL INTS, pre-handler */
 
-    /* reset_usb_boot() is spinning in wfi after writing scratch[4..7] and
-     * enabling the watchdog timer.  The tick never decrements that counter
-     * on this port, so use a live USB interrupt (SOF keeps arriving) to
-     * force WATCHDOG_CTRL.TRIGGER.  The bootrom then sees scratch[4] and
-     * jumps to its _usb_boot_reboot_wrapper instead of waiting forever. */
-    extern int plat_bootsel_force_check(void);
-    if (plat_bootsel_force_check()) {
-        mmio_write32(0x40058000u, 0x80000000u);  /* WATCHDOG_CTRL.TRIGGER */
-        for (;;)
-            ;
-    }
+    /* No BOOTSEL side channel here any more: reset_usb_boot() reboots through
+     * the watchdog, whose 1 MHz tick clocks_init() now starts, so there is
+     * nothing left for this interrupt to force.  See board/rpi-pico/platform.c
+     * and docs/RP2040-BOOTSEL.md. */
 
     g_usb_irq_count++;
     usb_cdc_trace_snap();       /* raw registers, before anything clears them */
