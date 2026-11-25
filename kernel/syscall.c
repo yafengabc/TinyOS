@@ -306,6 +306,14 @@ static regs_t *dispatch(regs_t *r)
 
     case SYS_THREAD_JOIN:
         return process_thread_join(r, (int)sc.a0, sc.a1);
+
+    case SYS_MUTEX_TRY:
+        plat_frame_set_ret(r, (uint32_t)process_mutex_try(sc.a0));
+        return r;
+
+    case SYS_MUTEX_UNLOCK:
+        plat_frame_set_ret(r, (uint32_t)process_mutex_unlock(sc.a0));
+        return r;
 #endif
 
     case SYS_REMOTE_TEST: {

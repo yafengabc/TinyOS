@@ -46,6 +46,34 @@ typedef char heap_hdr_align_check[
 static struct heap_blk *heap_head;
 static struct heap_blk *heap_tail;
 
+#ifdef TOS_KTHREADS
+/* Threads share this free list.  The test-and-set lives in the kernel
+ * (SYS_MUTEX_TRY): user mode has no atomics on the M0+ or the C3, and a plain
+ * flag loses to preemption even on one core.  A waiter yields - the holder is
+ * never blocked, so progress is at most one slice away.  Critical sections
+ * are a handful of instructions; the lock is compiled only when threads are
+ * possible, so single-threaded programs pay nothing. */
+int tos_mutex_try(int *word);
+int tos_mutex_unlock(int *word);
+int yield(void);
+
+static volatile int heap_lock;
+
+static void heap_lock_take(void)
+{
+    while (!tos_mutex_try((int *)&heap_lock))
+        yield();
+}
+
+static void heap_unlock(void)
+{
+    tos_mutex_unlock((int *)&heap_lock);
+}
+#else
+#define heap_lock_take()   ((void)0)
+#define heap_unlock()      ((void)0)
+#endif
+
 static int heap_adjacent(const struct heap_blk *a, const struct heap_blk *b)
 {
     return (const char *)a + HEAP_HDR + a->size == (const char *)b;
@@ -128,17 +156,22 @@ void *heap_alloc(unsigned int bytes)
         return 0;
     need = (bytes + (HEAP_ALIGN - 1u)) & ~(HEAP_ALIGN - 1u);
 
+    heap_lock_take();
     for (b = heap_head; b; b = b->next) {
         if (!b->freed || b->size < need)
             continue;
         heap_split(b, need);
         b->freed = 0;
+        heap_unlock();
         return (char *)b + HEAP_HDR;
     }
 
     b = heap_grow(need);
-    if (!b)
+    if (!b) {
+        heap_unlock();
         return 0;
+    }
+    heap_unlock();
     return (char *)b + HEAP_HDR;
 }
 
@@ -148,9 +181,12 @@ void heap_free(void *p)
 
     if (!p)
         return;
+    heap_lock_take();
     b = (struct heap_blk *)((char *)p - HEAP_HDR);
-    if (b->freed)                   /* double free: ignore, do not corrupt */
+    if (b->freed) {                 /* double free: ignore, do not corrupt */
+        heap_unlock();
         return;
+    }
     b->freed = HEAP_FREE;
 
     n = b->next;
@@ -159,4 +195,5 @@ void heap_free(void *p)
     n = b->prev;
     if (n && n->freed && heap_adjacent(n, b))
         heap_merge(n, b);
+    heap_unlock();
 }

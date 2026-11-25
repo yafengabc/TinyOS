@@ -46,6 +46,46 @@ static void give(void *arg)
 
 static volatile int woke;
 
+/* Concurrent malloc/free from four threads.  The free list is shared, and
+ * even on a uniprocessor the tick can preempt a thread in the middle of it;
+ * the checksum catches a block handed out twice (two threads writing each
+ * other's pattern).  This failed before user/heap.c took the kernel mutex. */
+#define HEAP_THREADS 4
+#define HEAP_ITERS   200
+static volatile int heap_bad[HEAP_THREADS];
+
+static void heaper(void *arg)
+{
+    int id = (int)arg;
+
+    for (int i = 0; i < HEAP_ITERS; i++) {
+        unsigned n = 32u + (unsigned)((i * 37 + id * 11) % 480);
+        volatile char *a = malloc(n);
+        volatile char *b = malloc(n);
+
+        if (!a || !b) {
+            heap_bad[id] = 1;
+            kthread_exit(1);
+        }
+        for (unsigned j = 0; j < n; j++) {
+            a[j] = (char)(j ^ (unsigned)id);
+            b[j] = (char)(j ^ (unsigned)(id + 1));
+        }
+        for (unsigned j = 0; j < n; j++) {
+            if (a[j] != (char)(j ^ (unsigned)id) ||
+                b[j] != (char)(j ^ (unsigned)(id + 1))) {
+                heap_bad[id] = 2;
+                break;
+            }
+        }
+        free((void *)a);
+        free((void *)b);
+        if (heap_bad[id])
+            kthread_exit(2);
+    }
+    kthread_exit(0);
+}
+
 /* Set from the sleeping thread so the compiler has to materialise its 768-byte
  * frame: a pointer that escapes cannot be scalar-replaced, which is what
  * happened when only two elements were read.  Only valid while that thread
@@ -389,6 +429,28 @@ int main(int argc, char *argv[])
            "sibling switches reused the protection regions");
         printf("kthreadtest: %u sibling switch(es), %u region set(s)\n",
                b.switches - a.switches, b.prot - a.prot);
+    }
+
+    /* The user heap is shared by the process's threads; the kernel mutex in
+     * heap.c has to keep every block intact under concurrent callers. */
+    {
+        int tids[HEAP_THREADS];
+        int i, code, bad = 0;
+
+        for (i = 0; i < HEAP_THREADS; i++) {
+            heap_bad[i] = 0;
+            tids[i] = kthread_create(heaper, (void *)i, 4096);
+            bad |= tids[i] <= 0;
+        }
+        for (i = 0; i < HEAP_THREADS; i++) {
+            code = -1;
+            if (tids[i] > 0 && kthread_join(tids[i], &code) != 0)
+                bad = 1;
+            if (code != 0)
+                bad = 1;
+            bad |= heap_bad[i] != 0;
+        }
+        ok(!bad, "concurrent malloc/free keeps every block intact");
     }
 
     printf("kthreadtest: %s (%d failure(s))\n",

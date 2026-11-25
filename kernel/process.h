@@ -75,6 +75,9 @@ int      process_ktask_info(int idx, const char **name, uint32_t *size,
 /* Opaque handle for the OSI layer (the current proc_t). */
 void    *process_current_task(void);
 void     process_ktask_sleep(uint32_t ticks);
+/* The thread library's heap lock: test-and-set and release of one user word. */
+int      process_mutex_try(uint32_t ptr);
+int      process_mutex_unlock(uint32_t ptr);
 void     process_ktask_yield(void);
 regs_t  *process_ktask_syscall(regs_t *r);
 

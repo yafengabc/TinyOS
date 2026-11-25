@@ -232,6 +232,21 @@ soak 2/2；`configs/rv32-kthreads.conf` 与 `configs/arm-kthreads.conf` 上
   扩展，链接直接报 `undefined symbol: __atomic_exchange_4` / `__atomic_store_4`，
   所以修法要么是内核辅助的 mutex、要么每线程堆，见 §20。本轮没有改 `heap.c`。
 
+## 2j. 用户堆的线程安全（2026-11-25）
+
+- 内核 mutex：`SYS_MUTEX_TRY`(54) / `SYS_MUTEX_UNLOCK`(55)。test-and-set 在系统
+  调用里完成：用户态在 M0+ / C3 上没有原子指令，单核上也是 trap 屏蔽中断才排除
+  抢占；SMP 用一把 `user_mutex_guard` 自旋锁串行化，解锁在 guard 的 release 屏障
+  里写 0。锁字是调用者窗口里的一个 `int`，每个进程各自一份。
+- `user/heap.c` 的 `heap_alloc`/`heap_free` 在 `TOS_KTHREADS` 下取锁，等待时
+  `yield()`；没有线程的程序不编译这段，代码和以前完全一样。
+- 回归：`kthreadtest` 的 4 线程 × 200 次 × 2 块（反向校验和）在 rv32 / rv32smp /
+  arm 各 10 次全过；修之前 rv32 10 次失败 2 次、rv32smp 1 次。
+- 代价与边界：线程程序每次 malloc/free 两次系统调用；`yield()` 等待在高优先级
+  线程等低优先级持有者时仍有理论上的优先级反转，阻塞式 mutex（unlock 唤醒）是
+  后续工作。`abi/syscalls.csv` 与 goc32 的 snapshot 已同步，goc32 `go test` 与
+  `hello.c` 样例编译都通过。
+
 ## 3. 不进 main 的理由
 
 - S2 保持"**槽死即窗口释放**"不变：资源块和槽同生命周期，按槽索引，领槽即清。

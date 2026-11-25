@@ -77,6 +77,13 @@
 /* C7 remote-endpoint shape check over the kernel's loopback lower; the real
  * LP/C6 lower only replaces the lower half.  0 = ok, -1 = the shape broke. */
 #define SYS_REMOTE_TEST   53
+/* User-space mutex for the thread library (TOS_KTHREADS).  The test-and-set
+ * runs in the kernel because user mode has no atomics on the M0+ or the C3,
+ * and a plain flag loses to preemption even on one core.  The word lives in
+ * the caller's window; TRY returns 1 when the caller now owns it, 0 when it
+ * is taken, -1 on a bad pointer.  UNLOCK writes 0 with the release barrier. */
+#define SYS_MUTEX_TRY     54 /* mutex_try(int *word) -> 1/0/-1          */
+#define SYS_MUTEX_UNLOCK  55 /* mutex_unlock(int *word) -> 0/-1         */
 
 /* Longest path the kernel accepts in one syscall, including the NUL.
  *

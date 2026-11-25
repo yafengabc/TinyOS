@@ -359,6 +359,19 @@ int schedstat(struct schedstat *st)
     return tos_sys1(SYS_SCHEDSTAT, (int)st);
 }
 
+#ifdef TOS_KTHREADS
+/* Used by user/heap.c; not part of the public lib.h surface. */
+int tos_mutex_try(int *word)
+{
+    return tos_sys1(SYS_MUTEX_TRY, (int)word);
+}
+
+int tos_mutex_unlock(int *word)
+{
+    return tos_sys1(SYS_MUTEX_UNLOCK, (int)word);
+}
+#endif
+
 int setprio(int pid, int prio)
 {
     return tos_sys2(SYS_SETPRIO, pid, prio);

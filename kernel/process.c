@@ -3338,6 +3338,45 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
 /* ---- misc ------------------------------------------------------------ */
 
 #ifdef TOS_KTHREADS
+/* One user-space mutex word at a time, across all processes.  The kernel is
+ * where a test-and-set can be atomic on every port: user mode has no atomics
+ * on the M0+ or the C3, and on a uniprocessor the trap (interrupts masked) is
+ * what excludes preemption.  On SMP the guard lock serialises the update, and
+ * its acquire/release barriers order the user's critical-section accesses
+ * around the word.  Critical sections are a few instructions (the heap free
+ * list), so one guard for the whole system is enough. */
+static spin_t user_mutex_guard = SPIN_INIT;
+
+int process_mutex_try(uint32_t ptr)
+{
+    volatile int *word;
+    uint32_t irq;
+    int got = 0;
+
+    if (!current || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
+        return -1;
+    irq = plat_spin_lock_irqsave(&user_mutex_guard);
+    word = (volatile int *)ptr;
+    if (*word == 0) {
+        *word = 1;
+        got = 1;
+    }
+    plat_spin_unlock_irqrestore(&user_mutex_guard, irq);
+    return got;
+}
+
+int process_mutex_unlock(uint32_t ptr)
+{
+    uint32_t irq;
+
+    if (!current || (ptr & 3u) || !process_user_ok(ptr, sizeof(int)))
+        return -1;
+    irq = plat_spin_lock_irqsave(&user_mutex_guard);
+    *(volatile int *)ptr = 0;
+    plat_spin_unlock_irqrestore(&user_mutex_guard, irq);
+    return 0;
+}
+
 int process_schedstat(uint32_t ptr)
 {
     struct { uint32_t sw, self, ticks, prot; } st;

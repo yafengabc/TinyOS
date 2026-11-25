@@ -928,7 +928,21 @@ go run ./cmd/tos build -config configs/rpi-pico2-rv32-usbpump.conf
 
 结果写 `docs/acceptance/`，注明板子、端口、镜像与 `cat /proc/ktask` 的 used/hw。
 
-## 20. 用户态 malloc/free 不是线程安全的（2026-11-25，合回 main 前必须解决）
+## 20. 用户态 malloc/free 不是线程安全的（2026-11-25，**已解决**）
+
+**已解决（2026-11-25，本提交）**：`SYS_MUTEX_TRY`(54) / `SYS_MUTEX_UNLOCK`(55)。
+test-and-set 在内核里做——用户态在 M0+ 和 C3 上没有原子指令，单核上也是 trap
+（中断已屏蔽）才排除抢占——SMP 用一把内核 guard 自旋锁串行化，解锁在 guard 的
+release 屏障里写 0。`user/heap.c` 只在 `TOS_KTHREADS` 下取这把锁，等待时 `yield()`；
+非线程程序一条指令都不多。`abi/syscalls.csv` 与 `goc32/abi/syscalls.snapshot.csv`
+同步。
+
+回归：4 线程 × 200 次 × 2 块（写反向校验和），rv32 / rv32smp / arm 各 10 次全过
+（此前 rv32 10 次失败 2 次、rv32smp 1 次）。已知代价：线程程序每次 malloc/free
+两次系统调用；等待是 `yield()`，高优先级线程等低优先级持有者时仍有理论上的优先级
+反转，**阻塞式 mutex（unlock 唤醒等待者）留作后续**。
+
+下面是当时的分析，保留作记录。
 
 `user/heap.c` 的自由链表属于整个进程，而线程共享窗口。`kthreadtest` 的压力用例
 （4 个线程各 200 次 malloc/free，两个块上写反向校验和）在 QEMU 上暴露了它：
