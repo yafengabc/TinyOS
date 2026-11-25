@@ -1,4 +1,6 @@
 #include "process.h"
+#include "file.h"
+#include "fd_internal.h"
 #include "tty.h"
 #include "elf.h"
 #include "ramdisk.h"
@@ -49,7 +51,6 @@
 #endif
 #define MAX_THREADS TOS_MAX_THREADS
 #define MAX_ARGS    12
-#define MAX_FDS     12
 
 /* Unwaited exit codes a parent remembers (see lag_pid/lag_code).  Costs
  * LAG_MAX * 8 bytes per table slot; eight is what a test bench that spawns
@@ -151,35 +152,6 @@ enum {
     ST_NEW,
 };
 
-/* What a descriptor points at.  A pipe needs its own type because the two
- * ends behave differently (a read end sees EOF, a write end sees EPIPE), and
- * console descriptors are marked rather than left implicit so dup2() can
- * replace one: fd 1 is FD_CONSOLE until somebody redirects it. */
-enum {
-    FD_NONE = 0,
-    FD_CONSOLE,
-    FD_FILE,
-    FD_PIPE_R,
-    FD_PIPE_W,
-    FD_CHRDEV,      /* /dev/... or /proc/...: a table of ops, not a file */
-};
-
-typedef struct {
-    uint8_t  type;
-    uint8_t  writable;     /* FD_FILE: created for writing (reopen as rw) */
-    int      fh;           /* FD_FILE: littlefs open-file handle */
-    uint32_t size;
-    uint32_t pos;
-    union {
-        struct pipe *pipe; /* FD_PIPE_R / FD_PIPE_W */
-        struct {
-            const dev_t *dev;  /* FD_CHRDEV: which device */
-            void *devpriv;     /* FD_CHRDEV: per-open state from ops->open() */
-        } chr;
-        char *path;        /* FD_FILE: heap copy, so a child can reopen it */
-    } u;
-} file_t;
-
 /* ---- EPROC: one entry per process, and what it owns -------------------
  *
  * E1b of the split (docs/PROC-THREAD-MODEL.md): the window, its heap, the
@@ -226,12 +198,6 @@ typedef struct proc {
     int      lag_code[LAG_MAX];
     uint8_t  lag_n;
 } proc_t;
-
-/* A descriptor has to be duplicable to be inheritable, and both the child
- * inheritance path and dup2() need exactly the same rules.  One helper, so
- * they cannot disagree about which types are copyable. */
-static int  fd_clone(file_t *dst, const file_t *src);
-static char *kstrdup(const char *s);
 
 typedef struct thread {
     struct proc *proc;       /* NULL = kernel thread; else its process */
@@ -516,10 +482,6 @@ static spin_t proc_lock = SPIN_INIT;
  * asked.  Set (under proc_lock) before init's slot is freed, so a CPU that
  * sees the empty queue is guaranteed to see the flag too. */
 static volatile int sys_down;
-
-/* Defined with the rest of the descriptor code at the bottom of the file;
- * task_release() (which runs when a task dies) needs it up here. */
-static void fd_close_in(thread_t *p, int fd);
 
 /* One kernel stack per CPU.  The stack start.S switches to before kmain is
  * the same one traps from user mode land on; on an SMP build each hart has
@@ -4002,209 +3964,6 @@ int process_dump(void)
     return count;
 }
 
-/* ---- file descriptors ------------------------------------------------- */
-
-static file_t *fd_slot(thread_t *p, int fd)
-{
-    if (!p || fd < 0 || fd >= MAX_FDS)
-        return NULL;
-    return &PFD(p)[fd];
-}
-
-/* The descriptor number *is* the table index.  open() starts at 3: 0/1/2
- * belong to the console and a program that opens a file must not be handed
- * its own stdout by mistake. */
-static int fd_alloc(thread_t *p)
-{
-    for (int i = 3; i < MAX_FDS; i++)
-        if (PFD(p)[i].type == FD_NONE)
-            return i;
-    return -1;
-}
-
-/* A path has to survive the descriptor if a child is ever going to reopen it
- * (see the inheritance path in proc_create).  Copying is the only option: the
- * caller's buffer is a syscall argument that is gone by the time a child
- * exists.  Failure is not fatal - the file simply becomes non-inheritable,
- * which is what every file used to be. */
-static char *kstrdup(const char *s)
-{
-    size_t n = strlen(s) + 1;
-    char *p = kmalloc(n);
-
-    if (p)
-        memcpy(p, s, n);
-    return p;
-}
-
-/* Make `dst` a second, independent instance of `src`.
- *
- * The rule that shapes this function: a descriptor owns something, and two
- * descriptors must never own it twice.  A pipe end is shared by refcount; a
- * file handle is *reopened* because it carries a read position and exactly
- * one close; a character device gets its own per-open state so /proc buffers
- * are not freed twice.
- *
- * Returns 0, or -1 when the source cannot be duplicated (a file whose path
- * was not saved, because the heap was full when it was opened). */
-static int fd_clone(file_t *dst, const file_t *src)
-{
-    if (!dst || !src)
-        return -1;
-    memset(dst, 0, sizeof(*dst));
-
-    switch (src->type) {
-    case FD_CONSOLE:
-        dst->type = FD_CONSOLE;
-        return 0;
-
-    case FD_PIPE_R:
-    case FD_PIPE_W:
-        *dst = *src;
-        if (src->type == FD_PIPE_R)
-            pipe_ref_reader(src->u.pipe);
-        else
-            pipe_ref_writer(src->u.pipe);
-        return 0;
-
-    case FD_FILE: {
-        int h;
-
-        if (!src->u.path)
-            return -1;
-        /* Reopen with the same access the original had.  A read-only handle
-         * would make `echo hi > f` fail in the child, which is the one case
-         * inheritance exists for now. */
-        h = src->writable ? ramdisk_open_rw(src->u.path)
-                          : ramdisk_open(src->u.path);
-        if (h < 0)
-            return -1;
-        /* The new handle starts at 0; the descriptor it replaces was
-         * somewhere else.  Without this a child reading a file it inherited
-         * halfway through would start over. */
-        if (ramdisk_seek(h, src->pos) < 0) {
-            ramdisk_close(h);
-            return -1;
-        }
-        dst->type     = FD_FILE;
-        dst->fh       = h;
-        dst->size     = ramdisk_size(h);
-        dst->pos      = src->pos;
-        dst->writable = src->writable;
-        dst->u.path     = kstrdup(src->u.path);
-        return 0;
-    }
-
-    case FD_CHRDEV: {
-        void *priv = src->u.chr.dev->priv;
-
-        if (src->u.chr.dev->ops->open && src->u.chr.dev->ops->open(src->u.chr.dev, &priv) < 0)
-            return -1;
-        dst->type    = FD_CHRDEV;
-        dst->u.chr.dev     = src->u.chr.dev;
-        dst->u.chr.devpriv = priv;
-        dst->pos     = src->pos;
-        return 0;
-    }
-
-    default:
-        return -1;
-    }
-}
-
-int process_fd_open(const char *path)
-{
-    const dev_t *d;
-    file_t *f;
-    int fd, h;
-
-    if (!current)
-        return -1;
-
-    /* Device paths are not on the filesystem, so this lookup failing is the
-     * normal case for every plain file open.  Trying devices first costs one
-     * strcmp chain and keeps ramdisk.c from needing to know about /dev. */
-    d = devfs_lookup(path);
-    if (d) {
-        void *priv = d->priv;
-
-        group_lock(current);
-        fd = fd_alloc(current);
-        if (fd < 0) {
-            group_unlock(current);
-            return -1;
-        }
-        if (d->ops->open && d->ops->open(d, &priv) < 0) {
-            PFD(current)[fd].type = FD_NONE;
-            group_unlock(current);
-            return -1;
-        }
-        f = &PFD(current)[fd];
-        f->type    = FD_CHRDEV;
-        f->u.chr.dev     = d;
-        f->u.chr.devpriv = priv;
-        f->pos     = 0;
-        f->size    = 0;
-        group_unlock(current);
-        return fd;
-    }
-
-    h = ramdisk_open(path);
-    if (h < 0)
-        return -1;
-
-    group_lock(current);
-    fd = fd_alloc(current);
-    if (fd < 0) {
-        group_unlock(current);
-        ramdisk_close(h);
-        return -1;
-    }
-    f = &PFD(current)[fd];
-    f->type = FD_FILE;
-    f->fh   = h;
-    f->size = ramdisk_size(h);
-    f->pos  = 0;
-    f->u.path = kstrdup(path);
-    group_unlock(current);
-    return fd;
-}
-
-int process_fd_create(const char *path)
-{
-    file_t *f;
-    int fd, h;
-
-    if (!current)
-        return -1;
-
-    /* Creating a device node is a boot-time act (devfs_register), not
-     * something a task does by opening a path for writing. */
-    if (devfs_lookup(path))
-        return -1;
-
-    h = ramdisk_create(path);
-    if (h < 0)
-        return -1;
-
-    group_lock(current);
-    fd = fd_alloc(current);
-    if (fd < 0) {
-        group_unlock(current);
-        ramdisk_close(h);
-        return -1;
-    }
-    f = &PFD(current)[fd];
-    f->type = FD_FILE;
-    f->fh   = h;
-    f->size = ramdisk_size(h);
-    f->pos  = 0;
-    f->u.path = kstrdup(path);
-    f->writable = 1;            /* a child inheriting this must be able to write */
-    group_unlock(current);
-    return fd;
-}
-
 /* Hand a pipe to one sleeping task: whoever moved data completes the transfer
  * on the waiter's behalf, so nothing has to be replayed when it resumes (the
  * same trick the console line hand-over uses).
@@ -4451,320 +4210,57 @@ regs_t *process_write(regs_t *r, int fd, uint32_t ubuf, uint32_t len)
     }
 }
 
-/* Close one descriptor of `p`.  Shared by the syscall (the caller is `p`)
- * and by task_release (a dead task, which is not necessarily current). */
-static void fd_close_in(thread_t *p, int fd)
+/* ---- descriptor table seam (kernel/fd.c) ------------------------------
+ *
+ * The table is a field of struct proc, and a pipe that loses an end has to
+ * wake whoever sleeps on the other side: two things only this file may
+ * touch.  fd.c owns the table operations and calls these small hooks
+ * instead (docs/ARCHITECTURE-REVIEW-2026-11-22.md, P0-2).
+ */
+file_t *proc_fd_table(thread_t *t)
 {
-    file_t *f = fd_slot(p, fd);
-
-    if (!f || f->type == FD_NONE)
-        return;
-
-    switch (f->type) {
-    case FD_FILE:
-        ramdisk_close(f->fh);
-        if (f->u.path)
-            kfree(f->u.path);
-        break;
-
-    case FD_CHRDEV:
-        if (f->u.chr.dev->ops->close)
-            f->u.chr.dev->ops->close(f->u.chr.devpriv);
-        break;
-
-    case FD_PIPE_R: {
-        struct pipe *pp = f->u.pipe;
-        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
-        thread_t *woke = NULL;
-        int last;
-
-        /* Drop the reference and look at what is left in one step: the last
-         * reader going away is what turns "empty but writers exist" into
-         * "no data will ever arrive", and a writer that checks in between
-         * would miss it.  The free is safe because a pipe with no
-         * references has no descriptor and therefore no task inside it. */
-        last = pipe_drop_reader(pp);
-        if (!last && pipe_readers(pp) == 0)
-            woke = pipe_wake_locked(pp, 1);     /* writers have nobody to write to */
-        plat_spin_unlock_irqrestore(&proc_lock, irq);
-
-        if (last)
-            kfree(pp);              /* no references left at all */
-        if (woke)
-            preempt_if_higher(woke);
-        break;
-    }
-
-    case FD_PIPE_W: {
-        struct pipe *pp = f->u.pipe;
-        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
-        thread_t *woke = NULL;
-        int last;
-
-        last = pipe_drop_writer(pp);
-        if (!last && pipe_writers(pp) == 0)
-            woke = pipe_wake_locked(pp, 0);     /* readers must see EOF */
-        plat_spin_unlock_irqrestore(&proc_lock, irq);
-
-        if (last)
-            kfree(pp);
-        if (woke)
-            preempt_if_higher(woke);
-        break;
-    }
-
-    default:
-        break;
-    }
-
-    memset(f, 0, sizeof(*f));
-    /* 0, 1 and 2 are never really closed: "close the redirect" means "back
-     * to the console", which is what the shell relies on after a pipeline
-     * puts fd 1 on a pipe. */
-    if (fd < 3)
-        f->type = FD_CONSOLE;
+    return t->proc ? t->proc->fds : NULL;
 }
 
-int process_fd_close(int fd)
+void proc_fd_lock(thread_t *t)   { group_lock(t); }
+void proc_fd_unlock(thread_t *t) { group_unlock(t); }
+
+/* The last reader (write_end == 0) or writer (1) of `p` went away: wake the
+ * other side so it sees EOF or EPIPE, and free the pipe when this was the
+ * last reference of any kind.  Split out of fd_close_in() because waking a
+ * task is this file's business. */
+void process_pipe_closed(struct pipe *p, int write_end)
 {
-    if (!current)
-        return -1;
-    if (fd < 0 || fd >= MAX_FDS)
-        return -1;
-    group_lock(current);
-    fd_close_in(current, fd);
-    group_unlock(current);
-    return 0;
-}
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+    thread_t *woke = NULL;
+    int last;
 
-/* Configuration on an open descriptor: the half of device access that is
- * neither a read nor a write.  Only character devices have an answer; for a
- * file or a pipe "set the mode" has no meaning, and -1 says so instead of
- * silently succeeding. */
-int process_ioctl(int fd, int cmd, int arg)
-{
-    file_t *f;
-
-    if (!current)
-        return -1;
-    f = fd_slot(current, fd);
-    if (!f || f->type != FD_CHRDEV || !f->u.chr.dev->ops->ioctl)
-        return -1;
-    return f->u.chr.dev->ops->ioctl(f->u.chr.devpriv, cmd, arg);
-}
-
-int process_pipe(int *fds)
-{
-    thread_t *me = current;
-    struct pipe *p;
-    int r, w;
-
-    if (!me || !fds)
-        return -1;
-
-    p = pipe_create();
-    if (!p)
-        return -1;
-
-    group_lock(me);
-    r = fd_alloc(me);
-    if (r < 0) {
-        group_unlock(me);
-        kfree(p);
-        return -1;
-    }
-    PFD(me)[r].type = FD_PIPE_R;    /* claim the slot before the next scan */
-    PFD(me)[r].u.pipe = p;
-    pipe_ref_reader(p);
-
-    w = fd_alloc(me);
-    if (w < 0) {
-        PFD(me)[r].type = FD_NONE;
-        group_unlock(me);
-        kfree(p);
-        return -1;
-    }
-    PFD(me)[w].type = FD_PIPE_W;
-    PFD(me)[w].u.pipe = p;
-    pipe_ref_writer(p);
-    group_unlock(me);
-
-    fds[0] = r;
-    fds[1] = w;
-    return 0;
-}
-
-int process_dup2(int oldfd, int newfd)
-{
-    thread_t *me = current;
-    file_t *o, *n, tmp;
-
-    if (!me)
-        return -1;
-
-    group_lock(me);
-    o = fd_slot(me, oldfd);
-    n = fd_slot(me, newfd);
-    if (!o || !n || o->type == FD_NONE) {
-        group_unlock(me);
-        return -1;
-    }
-    if (oldfd == newfd) {
-        group_unlock(me);
-        return newfd;
-    }
-
-    /* Build the copy first: if it fails (no descriptors, no heap) the target
-     * must be left alone rather than closed for nothing.  What "copy" means
-     * per type is fd_clone()'s business - the same rules a child inherits
-     * by. */
-    if (fd_clone(&tmp, o) < 0) {
-        group_unlock(me);
-        return -1;
-    }
-
-    fd_close_in(me, newfd);
-    *n = tmp;
-    group_unlock(me);
-    return newfd;
-}
-
-/* Duplicate onto the lowest free descriptor.  dup2() with the target chosen
- * from the table, so every type costs exactly what it costs there. */
-int process_dup(int fd)
-{
-    thread_t *me = current;
-    file_t *src;
-    int nfd;
-
-    if (!me)
-        return -1;
-    group_lock(me);
-    src = fd_slot(me, fd);
-    if (!src || src->type == FD_NONE) {
-        group_unlock(me);
-        return -1;
-    }
-    nfd = fd_alloc(me);
-    if (nfd < 0) {
-        group_unlock(me);
-        return -1;
-    }
-    /* fd_clone() zeroes the slot before it fills it and leaves it empty when
-     * it fails, so a failure needs no cleanup here. */
-    if (fd_clone(&PFD(me)[nfd], src) < 0) {
-        group_unlock(me);
-        return -1;
-    }
-    group_unlock(me);
-    return nfd;
-}
-
-/* Move a regular file's position.  The position lives in the descriptor and
- * the littlefs handle has to follow it, because read() advances the handle
- * itself.  A pipe or a device has no position, and a seek past either end of
- * the file is refused: this is the drive-a-file subset, not a way to grow
- * one. */
-int process_lseek(int fd, int off, int whence)
-{
-    thread_t *me = current;
-    file_t *f = fd_slot(me, fd);
-    int32_t base, pos;
-
-    if (!f || f->type != FD_FILE)
-        return -1;
-
-    switch (whence) {
-    case 0:  base = 0;                 break;   /* SEEK_SET */
-    case 1:  base = (int32_t)f->pos;   break;   /* SEEK_CUR */
-    case 2:  base = (int32_t)f->size;  break;   /* SEEK_END */
-    default:
-        return -1;
-    }
-    pos = base + off;
-    if (pos < 0 || (uint32_t)pos > f->size)
-        return -1;
-    if (ramdisk_seek(f->fh, (uint32_t)pos) < 0)
-        return -1;
-    f->pos = (uint32_t)pos;
-    return pos;
-}
-
-/* Describe an open descriptor the way path_stat() describes its path, so a
- * program that has the fd does not need to remember the name it opened. */
-int process_fstat(int fd, uint32_t *size, uint8_t *type)
-{
-    thread_t *me = current;
-    file_t *f = fd_slot(me, fd);
-
-    if (!f || f->type == FD_NONE)
-        return -1;
-    if (f->type == FD_FILE) {
-        *size = f->size;
-        *type = TOS_FTYPE_REG;
+    if (write_end) {
+        last = pipe_drop_writer(p);
+        if (!last && pipe_writers(p) == 0)
+            woke = pipe_wake_locked(p, 0);      /* readers must see EOF */
     } else {
-        /* Console, pipe, /dev or /proc: a character stream, which is what
-         * stat() says about the same node too. */
-        *size = 0;
-        *type = TOS_FTYPE_CHR;
+        last = pipe_drop_reader(p);
+        if (!last && pipe_readers(p) == 0)
+            woke = pipe_wake_locked(p, 1);      /* writers have nobody left */
     }
-    return 0;
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+
+    if (last)
+        kfree(p);               /* no references left at all */
+    if (woke)
+        preempt_if_higher(woke);
 }
 
-/* Readiness for poll().  Only the console can be "not yet": /proc and /dev
- * produce their text on demand, a file has a position and an EOF, and a pipe
- * has a count.  A regular file reports both directions because read() at EOF
- * returns 0 at once and write() either takes the bytes or fails at once. */
-short process_poll(int fd, short events)
+/* Readiness of a pipe end for poll(); same lock the ring is documented to
+ * use (pipe.h). */
+int process_pipe_ready(struct pipe *p, int write_end)
 {
-    thread_t *me = current;
-    file_t *f = fd_slot(me, fd);
-    short rev = 0;
+    uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+    int ready = write_end ? pipe_writable(p) : pipe_readable(p);
 
-    if (!f || f->type == FD_NONE)
-        return TOS_POLLNVAL;
-
-    switch (f->type) {
-    case FD_CONSOLE:
-        if (fd == 0) {
-            if (tty_is_raw() ? tty_raw_ready() : tty_line_ready())
-                rev |= TOS_POLLIN;
-        } else {
-            rev |= TOS_POLLOUT;
-        }
-        break;
-
-    case FD_FILE:
-        rev |= TOS_POLLIN | TOS_POLLOUT;
-        break;
-
-    case FD_CHRDEV:
-        rev |= TOS_POLLIN | TOS_POLLOUT;
-        break;
-
-    case FD_PIPE_R: {
-        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
-
-        if (pipe_readable(f->u.pipe))
-            rev |= TOS_POLLIN;
-        plat_spin_unlock_irqrestore(&proc_lock, irq);
-        break;
-    }
-
-    case FD_PIPE_W: {
-        uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
-
-        if (pipe_writable(f->u.pipe))
-            rev |= TOS_POLLOUT;
-        plat_spin_unlock_irqrestore(&proc_lock, irq);
-        break;
-    }
-
-    default:
-        break;
-    }
-
-    return rev & (events | TOS_POLLERR | TOS_POLLNVAL);
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+    return ready;
 }
 
 void process_start_shell(const char *path)
