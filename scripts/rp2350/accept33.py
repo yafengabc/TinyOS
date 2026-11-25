@@ -135,7 +135,11 @@ def cover_lines(text, echo):
 
 
 def msh_wink(ps_text):
-    """`wink` from the msh row: pid ppid prio state c cpu% cpums wink stk/sz name."""
+    """`wink` from the msh row.
+
+    Columns: pid tid ppid prio state c cpu% cpums wink stk/sz name.  Read
+    from the end, so a column inserted before wink does not move it.
+    """
     for line in ps_text.splitlines():
         t = line.split()
         if len(t) >= 4 and t[-1] == "msh":

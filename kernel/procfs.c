@@ -473,6 +473,8 @@ static int proc_open(const dev_t *d, void **priv)
 #endif
     else if (!strcmp(d->name, "proc/ps"))
         n = process_ps_text(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/threads"))
+        n = process_threads_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/execfmt"))
         n = process_execfmt_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/flash"))
@@ -558,6 +560,7 @@ void procfs_init(void)
     devfs_register("proc/cdcfix", &proc_ops, NULL);
     devfs_register("proc/cdcstat", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
+    devfs_register("proc/threads", &proc_ops, NULL);
 #ifdef PROC_KTASK_NODE
     devfs_register("proc/ktask",   &proc_ops, NULL);
 #endif

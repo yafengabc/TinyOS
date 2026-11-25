@@ -197,6 +197,9 @@ int  process_ioctl(int fd, int cmd, int arg);
 /* Format the process table into a buffer, for /proc/ps and for `ps`.
  * Returns the number of bytes written; output is truncated, not overrun. */
 uint32_t process_ps_text(char *buf, uint32_t cap);
+/* The same rows as ps, one line per thread, for /proc/threads: the tuple
+ * (tgid, tid) then state, cpu, prio, stk/sz and the process name. */
+uint32_t process_threads_text(char *buf, uint32_t cap);
 
 /* Format the registered exec handlers (container and image tables) with the
  * format revision each one implements, for /proc/execfmt.  Same truncation

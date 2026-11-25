@@ -3885,7 +3885,8 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
     if (!buf || cap < 64)
         return 0;
 
-    n = ksnprintf(buf, cap, " pid ppid prio state  c cpu%% cpums wink stk/sz  name\n");
+    n = ksnprintf(buf, cap,
+                  " pid  tid ppid prio state  c cpu%% cpums wink stk/sz  name\n");
     if (n < 0)
         return 0;
     off = (uint32_t)n;
@@ -3931,8 +3932,8 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
            column that shifts by one character when a stack doubles is a
            small price for not printing "%-2u" on the console. */
         n = ksnprintf(buf + off, cap - off,
-                      "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n",
-                      thread_pid(p),
+                      "%4d %4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n",
+                      p->proc->pid, p->tid,
                       p->proc->parent ? p->proc->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
                       busy / 1000u, p->proc->win_size / 1024u,
@@ -3940,6 +3941,46 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
                       p->proc->name);
         if (n > 0)
             off += (uint32_t)n;
+    }
+    return off;
+}
+
+/* One line per thread, for scripts and for /proc/threads: the tuple
+ * (tgid, tid) identifies a thread, the way Linux's /proc/<pid>/task does.
+ * ps above is the human view - same rows, with the process columns repeated
+ * so a thread can be read without looking at its leader.  Kernel threads are
+ * not here; /proc/ktask is their table. */
+uint32_t process_threads_text(char *buf, uint32_t cap)
+{
+    uint32_t off = 0;
+    int n = ksnprintf(buf, cap, " tgid  tid state  c prio stk/sz  name\n");
+
+    if (n < 0)
+        return 0;
+    off = (uint32_t)n;
+
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_t *p = &threads[i];
+        char cpubuf[3];
+        uint32_t stk10;
+
+        if (p->state == ST_FREE || !p->proc || p->is_ktask)
+            continue;
+        /* A character, like ps: the formatter pads a negative %d after the
+         * sign, so "-1" would come out as "- 1" and shift the row. */
+        cpubuf[0] = p->cpu < 0 ? '-' : (char)('0' + (p->cpu % 10));
+        cpubuf[1] = '\0';
+        stk10 = stack_used(p) * 10u / 1024u;
+        n = ksnprintf(buf + off, cap - off,
+                      "%5d %4d %s %2s %4d %4u.%u/%u  %s\n",
+                      p->proc->pid, p->tid, state_name(p->state),
+                      cpubuf, p->prio, stk10 / 10u, stk10 % 10u,
+                      p->stack_size / 1024u, p->proc->name);
+        if (n < 0)
+            break;
+        off += (uint32_t)n;
+        if (off >= cap - 1)
+            break;
     }
     return off;
 }

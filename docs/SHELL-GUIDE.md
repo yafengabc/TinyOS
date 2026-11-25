@@ -353,15 +353,15 @@ tos> nice 1 spin &
 tos> run spin &
 [3]
 tos> ps
- pid ppid prio state  c cpu% cpums wink stk/sz  name
-   1    0    0 run    -    0.0     0   32    0.6/8  sh
-   2    1    1 rdy    -   51.3     0   32    0.2/8  spin
-   3    1    0 rdy    -  100.0     0   32    0.2/8  spin
+ pid  tid ppid prio state  c cpu% cpums wink stk/sz  name
+   1    1    0    0 run  -    0.0     0   32    0.6/8  sh
+   2    2    1    1 rdy  -   51.3     0   32    0.2/8  spin
+   3    3    1    0 rdy  -  100.0     0   32    0.2/8  spin
 ```
 
 | 列 | 含义 |
 | --- | --- |
-| `pid` / `ppid` | 任务号 / 父任务号（shell 的孩子 ppid=1） |
+| `pid` / `tid` / `ppid` | 任务号 / 父任务号（shell 的孩子 ppid=1）；主线程的 tid 等于 pid，工作线程靠 tid 区分 |
 | `prio` | 当前级别，0–2。**就是这一列在决定谁先跑** |
 | `state` | `run` 在 CPU 上；`rdy` 可运行等轮转；`wait` 等子任务；`tty` 等一整行输入；`sleep` 睡到某个 tick；`stop` 被 `^Z` 停住（保留窗口和现场，**再按一次 `^Z` 恢复**，内核打 `[pid N] continued`） |
 | `cpu%` | 最近一段的 CPU 占用 |

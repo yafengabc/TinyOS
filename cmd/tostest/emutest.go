@@ -134,6 +134,9 @@ func cmdEmutest(args []string) int {
 		// counted frames the compiler dropped, would read 0.3.
 		{"stk 4", "stk 4 3000 &", []string{"tos>"}},
 		{"ps (stk)", "ps", []string{"  32    8.", "/16  stk"}},
+		// The machine view of the same rows: one line per thread, keyed by
+		// (tgid, tid).  A kernel thread has no process and is not here.
+		{"threads", "cat /proc/threads", []string{"tgid  tid", "msh"}},
 		// Let the parked task exit before the window tests below: they fill
 		// the user area exactly, so a leftover task would refuse the fifth
 		// hold and the failure would look like a window bug.

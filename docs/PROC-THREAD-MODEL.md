@@ -234,15 +234,15 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 
 ## 6. ps / /proc
 
-- `ps` 保持现有列（pid ppid prio state c cpu% cpums wink stk/sz name），其中
-  pid 显示进程 id，线程行另加 `tid` 标识（E2 定格式；先保证
-  `cmd/tostest/emutest.go` 与 `scripts/rp2350/accept33.py` 的解析不破）。
-  `name` 列：用户线程显示 `proc->name`（主线程和工作线程一样，靠 tid 区分），
-  内核线程显示栈池里的名字；`/proc/ktask` 也从池里读名字。E1b-2 已经把 pid 改成
-  进程 id、name 改成进程名，所以多线程程序在 E2 加 tid 列之前会有同 pid/同名的
-  几行——这是过渡状态，不是回归。
-- 新增/保留 `/proc/threads`（或 `/proc/ps` 两级输出）：每行 `tgid tid state prio
-  cpu stk/sz name`，供脚本和 `/proc/ktask` 对照。
+- `ps` 的列（E2 定稿，2026-11-26）：`pid tid ppid prio state c cpu% cpums wink
+  stk/sz name`。`pid` 是进程 id，`tid` 是线程 id（主线程两者相同，工作线程靠
+  tid 区分），`ppid` 是父进程。列插在 pid 之后：`cmd/tostest/emutest.go` 只查
+  子串，`scripts/rp2350/accept33.py` 从行尾读 `wink`，两者都不受影响。
+  `name` 列显示 `proc->name`（主线程和工作线程一样）；内核线程不在 ps 里，
+  它们的名字在栈池，`/proc/ktask` 从那里读。
+- `/proc/threads` 是同一批行的机器视图，每行
+  `tgid tid state cpu prio stk/sz name`（`state` 沿用 ps 的短名，`cpu` 为 -1
+  表示不在 CPU 上），供脚本用；内核线程仍只看 `/proc/ktask`。
 
 ## 7. 迁移
 
