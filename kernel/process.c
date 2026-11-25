@@ -23,12 +23,15 @@
 #define TOS_EXEC_MOCK 0
 #endif
 
-/* Per-target: sizeof(proc_t) is 856 bytes on the C3 (measured with
- * -fdump-record-layouts: fds[12] alone is 432, the saved trap frame 144,
- * cwd 64), so procs[8] is 6,848 B of .bss, not the 11,648 a 16-slot table
- * used to cost.  max_procs is a menuconfig knob: 4 is the floor for a shell
- * plus one child, 16 keeps the historical default for boards that do not
- * override it. */
+/* Per-target: an entry used to be 712 bytes on the C3 with fds[12] (288) and
+ * cwd[64] inline, and that storage was per slot even though only a process
+ * leader may use it.  Both live in proc_res[] now (one block per process,
+ * PROC_RES); a slot is 360 bytes, and procs[8] + proc_res[8] together cost
+ * 5,696 B of .bss - exactly what the old table did - while a thread slot
+ * stops paying for descriptors and a cwd it never owned.  TOS_KTHREADS adds
+ * the group fields (leader, tgid, exit code, live count, glock): 384 B.
+ * max_procs is a menuconfig knob: 4 is the floor for a shell plus one child,
+ * 16 keeps the historical default for boards that do not override it. */
 #ifndef TOS_MAX_PROCS
 #define TOS_MAX_PROCS 16
 #endif
@@ -164,6 +167,26 @@ typedef struct {
     } u;
 } file_t;
 
+/* Everything a *process* owns and a thread does not, in one block.
+ *
+ * The window, the heap break and the entry point are still proc_t fields (the
+ * window allocator hands them out per slot and a thread never owns one);
+ * the descriptor table and the working directory are here because they are
+ * the two that made a thread slot expensive for nothing.  A thread used to
+ * carry copies of them that it could not legally use - PFD() already went to
+ * the leader - so the copies were pure cost: fds is MAX_FDS * sizeof(file_t)
+ * and cwd is TOS_PATH_MAX, most of a slot on the small ports.
+ *
+ * One block per table entry, keyed by the leader's index (PROC_RES).  That
+ * makes allocation "the block that belongs to this entry" rather than a
+ * kmalloc that could fail or need a free path, and it keeps the total .bss
+ * the same: procs[] shrinks by exactly what proc_res[] adds.
+ */
+typedef struct proc_res {
+    file_t fds[MAX_FDS];
+    char   cwd[TOS_PATH_MAX];
+} proc_res_t;
+
 /* A descriptor has to be duplicable to be inheritable, and both the child
  * inheritance path and dup2() need exactly the same rules.  One helper, so
  * they cannot disagree about which types are copyable. */
@@ -239,11 +262,6 @@ typedef struct proc {
      * whichever scheduler put it there, and only ever read for display. */
     int      cpu;
 
-    /* Current working directory (always absolute, no trailing slash unless
-     * it is the root "/").  A child inherits the parent's cwd at exec time,
-     * so a program run from a subdirectory sees the same directory. */
-    char     cwd[TOS_PATH_MAX];
-
     /* ST_WAIT_PIPE: which channel we are waiting on, in which direction,
      * and for which user buffer.  The waker completes the transfer on our
      * behalf and writes the byte count into the saved frame - exactly how a
@@ -260,8 +278,6 @@ typedef struct proc {
      * sp from the frame address itself. */
     regs_t   saved;
     regs_t  *kframe;
-
-    file_t fds[MAX_FDS];
 } proc_t;
 
 /* One setter for task state.  A direct `p->state = ...` silently allows
@@ -325,6 +341,11 @@ static void proc_set_state(proc_t *p, int st)
 
 
 static proc_t procs[MAX_PROCS];
+/* Resource blocks, one per table entry (see proc_res_t).  A thread reaches its
+ * group's block through its leader, so only leaders ever read their own.
+ * proc_alloc() clears the entry it claims; nothing is allocated or freed
+ * here. */
+static proc_res_t proc_res[MAX_PROCS];
 static proc_t *init_proc;
 static int next_pid = 1;
 /* 1000 / tick_hz, computed once: the tick rate is fixed after boot and the
@@ -697,10 +718,16 @@ static void sched_idle(void)
  */
 #define PROC_OF(p) PROC_GROUP(p)
 
+/* The resource block of a task's process.  Keyed by the leader's table
+ * index, so there is no pointer to keep in sync and no allocation to fail:
+ * PROC_GROUP() already finds the owner, and procs[] is the array it lives
+ * in.  A ktask has a block of its own and never uses it. */
+#define PROC_RES(p) (&proc_res[PROC_GROUP(p) - procs])
+
 /* Descriptors are process state, not thread state: every thread of a group
  * sees the same open files and pipes, and a close() in one is a close() for
  * all of them (POSIX).  With the feature off, PROC_GROUP(p) is just p. */
-#define PFD(p) (PROC_GROUP(p)->fds)
+#define PFD(p) (PROC_RES(p)->fds)
 
 /* Serialises the group's mutable state: the heap break and the descriptor
  * table.  On a uniprocessor spin_lock()/spin_unlock() compile to nothing, so
@@ -1277,6 +1304,7 @@ static void layout_check(void)
 void process_init(void)
 {
     memset(procs, 0, sizeof(procs));
+    memset(proc_res, 0, sizeof(proc_res));
     current = NULL;
     init_proc = NULL;
     next_pid = 1;
@@ -1313,23 +1341,24 @@ void *process_current_task(void)
  * proc_t reads as after the memset in proc_create(). */
 const char *process_cwd_str(void)
 {
-    proc_t *g = current ? PROC_OF(current) : NULL;
+    const char *cwd = current ? PROC_RES(current)->cwd : NULL;
 
-    return (g && g->cwd[0]) ? g->cwd : "/";
+    return (cwd && cwd[0]) ? cwd : "/";
 }
 
 void process_set_cwd_str(const char *path)
 {
-    proc_t *g;
+    char *cwd;
 
     if (!current)
         return;
     /* Per process, not per thread: a chdir() in one thread must move every
      * thread of the group (POSIX/Windows agree on this; before the seam this
-     * wrote the calling slot's own copy). */
-    g = PROC_OF(current);
-    strncpy(g->cwd, path, sizeof(g->cwd) - 1);
-    g->cwd[sizeof(g->cwd) - 1] = '\0';
+     * wrote the calling slot's own copy).  The block is the group's, so the
+     * shared answer follows from the storage rather than from a convention. */
+    cwd = PROC_RES(current)->cwd;
+    strncpy(cwd, path, TOS_PATH_MAX - 1);
+    cwd[TOS_PATH_MAX - 1] = '\0';
 }
 
 int process_console_reader(void)
@@ -1544,6 +1573,10 @@ static proc_t *proc_alloc(void)
              * memset() the whole struct a hundred lines later, which wiped
              * this very claim (ST_FREE is 0) and reopened the race. */
             memset(p, 0, sizeof(*p));
+            /* The resource block is outside the slot now, so clearing the
+             * slot no longer resets it.  The entry is ST_FREE here, which
+             * means no leader owns it, so no thread can be pointing at it. */
+            memset(&proc_res[i], 0, sizeof(proc_res[i]));
             proc_set_state(p, ST_NEW);
             p->cpu = -1;
             break;
@@ -2328,11 +2361,15 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
      * parent's cwd so a program spawned
      * from a subdirectory lists and opens files relative to where the user
      * is, not always the root. */
-    p->cwd[0] = '/';
-    p->cwd[1] = '\0';
-    if (current && current->cwd[0]) {
-        strncpy(p->cwd, current->cwd, sizeof(p->cwd) - 1);
-        p->cwd[sizeof(p->cwd) - 1] = '\0';
+    {
+        char *cwd = PROC_RES(p)->cwd;
+
+        cwd[0] = '/';
+        cwd[1] = '\0';
+        if (current && PROC_RES(current)->cwd[0]) {
+            strncpy(cwd, PROC_RES(current)->cwd, TOS_PATH_MAX - 1);
+            cwd[TOS_PATH_MAX - 1] = '\0';
+        }
     }
     p->cpu = -1;        /* memset() above zeroed it; 0 is a real CPU */
     /* Pid allocation is under the table lock for the same reason the window
@@ -3057,17 +3094,14 @@ int process_thread_create(uint32_t entry, uint32_t arg, uint32_t ustack)
     p->parent = leader;
     p->stack_top = ustack;
     p->stack_size = 0;              /* protection comes from the group */
-    /* Copies, not shares: they are unreachable through PROC_OF() now and
-     * S2 replaces them with a pointer to the leader's resource block.  Kept
-     * until then so a stray direct access does not read zero. */
+    /* The heap fields are still copies; nothing reads them through a thread
+     * (PROC_OF() is the only accessor, and it goes to the leader), and S3
+     * reworks the stack guard before they can go away.  cwd and fds are the
+     * group's resource block now, so there is nothing to copy here. */
     p->heap_base = leader->heap_base;
     p->heap_end = leader->heap_end;
     p->brk = leader->brk;
-    memcpy(p->cwd, leader->cwd, sizeof(p->cwd));
     p->start_ns = plat_now_ns();
-
-    /* Descriptors are shared through PROC_GROUP(): the slot keeps no copy,
-     * and a close() in any thread closes it for the whole group. */
 
     plat_prepare_user_frame(&p->saved, entry, ustack);
     plat_frame_set_arg(&p->saved, arg);
