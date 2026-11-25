@@ -74,10 +74,13 @@ RP2040（`rpi-pico` / `rpi-pico-smp`）从 2026-11-23 起重新是 T3 必跑项
 python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
 ```
 
-**当前阻塞：测试台没有 RP2040**（只有 C3 的 CH343 在 COM4），所以本轮 `NOT RUN`。
-板子接上后，人工步骤只有"按键进 BOOTSEL"，其余由脚本判 PASS/FAIL；长输出那一项
-必须走板载 CDC（2e8a:000a），UART0 不算 USB 证据。见
-`docs/acceptance/2026-11-23-rp2040-back-in-matrix-1cc53c4.md`。
+**2026-11-25 已补跑**（`5260d28`，Pico `E0C912952D54`，COM19 UART / COM29 CDC）：
+`rpi-pico` **UART0 30/30 + CDC 30/30**（长输出经 USB 完整，#46 判据在 RP2040 单核成立）；
+`rpi-pico-smp` **UART0 30/30**，CDC **29/30**（仅 `fault isolation` FAIL：crash 后 10 s 内
+没读到结尾提示符；同板 UART0 上 3 轮 crash 均正常打印 HardFault、回提示符、uptime 连续
+不复位，见 §5d(b)）。人工步骤只有按键进 BOOTSEL；长输出必须走板载 CDC，UART0 不算
+USB 证据。证据与镜像 sha：`docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`。
+原 2026-11-23 的 `NOT RUN` 见 `docs/acceptance/2026-11-23-rp2040-back-in-matrix-1cc53c4.md`。
 
 ## 5b. USB：还有三件事
 
@@ -297,7 +300,9 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
 按“写路径反压 + 短写重试”修复后 ARM 两镜像已 MET；随后补上 RV32 的 PendSV
 等价边界，RV32 两镜像也 MET。ATK-DNRP2350AM 四镜像已板测（2026-11-25，
 `cat` 21 200 B 两路逐字节一致、各 3 轮，见本卡“ATK 四镜像板测”一节）。(c) RP2040
-仍未跑**。实测记录见 `docs/acceptance/2026-11-25-usb-tx-ring-pico2-d7a3c8a.md`
+已于 2026-11-25 补跑（单核 CDC 30/30、SMP CDC 29/30，详见下方 c 条与
+`docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`）**。Pico 2 实测记录见
+`docs/acceptance/2026-11-25-usb-tx-ring-pico2-d7a3c8a.md`
 （含修复后复测与 ATK 两节）。
 
 **ATK 板测顺带修掉一个面板镜像的挂死**（`kernel/screen.c` `putc_locked()` 的
@@ -377,13 +382,13 @@ RV32 的 `drivers/usb/rp2350rv`（1 KiB 环、泵只在 CPU 0）用同一机制�
   `ls -l /bin` 反复拼接），比较行数/字节数与源文件。**判据**：完整、结尾有换行、
   中途没有空洞。注意第 5 条已定的边界仍在：单次 >512 B 的系统调用写是有界丢字节，
   这轮没有改变它；验的是“连续输出不再在 ~192 B 停住”。
-- **c. RP2040**：`python scripts/rp2040/accept.py`（先刷 `build/tinyos-rpi-pico*.uf2`，
-  两个镜像各一次），**判据**：末行 `ACCEPT OK n/n`，且 `cat /proc/usbboot` 的
-  `D = 0`。然后把 `tools/tosput/sender.go` 的 `writePaced` gap 临时从 2 ms 改回
-  1 ms，42 KiB 与 128 KiB 各传 3 次，**判据**：`NAK` 计数为 0、CRC 通过、
-  `D = 0`。若仍有 `NAK`，记下 chunk 号与 `D`：`D > 0` 是环满（时序不够），
-  `D = 0` 则说明丢在别处（TinyUSB FIFO 或主机侧），两条路的下一步不同。
-  跑完把 gap 改回 2 ms，别把实验值提交。
+- **c. RP2040 —— 2026-11-25 已跑（`5260d28`）**：两镜像 `accept.py` 见 §2c；
+  `cat /proc/usbboot` 重插后基线 **N=0 U=0 D=0 H=758**（(a) 判据 PASS）。gap 2→1 ms
+  实验：42 KiB / 128 KiB 各 3 次，**NAK 全 0、CRC 全通过，但 D 从 836 涨到 7742**
+  （42 KiB ≈+710/次、128 KiB ≈+1428/次）——按判读是**环满（时序不够）**，D=0 未达成，
+  说明 2 ms gap 是必要值；实验值已用 finally 恢复为 2 ms、未提交。SMP CDC 的
+  `fault isolation` FAIL 与 gap 无关（UART0 3 轮证明板级 fault 正常）。细节与逐轮数据见
+  `docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`。
 
 若 (a) 出现 `N > 0` 或 (b) 仍截断，先看 `/proc/usbboot` 的 `handed` 是否还在增长：
 增长说明泵在工作、问题在主机/端点；停住说明泵没被调度，回到 §5b 第 5 条的 PendSV 检查。
@@ -403,11 +408,14 @@ ARMv8-M 上是 SecureFault（不是保留字节），也按 `ARM_PRIO_FAULT` 写
   smpbench 2.05x。父提交 `05a0e18` 上同一行是 `0x00404040`，见
   `docs/acceptance/2026-11-24-pico2-matrix-05a0e18.md` 注 5。ATK 板不在场，ARM hammer
   未重跑（不是关闭门槛，保持 `NOT RUN`）。
-- **b. RP2040（M0+）——仍 NOT RUN**：`start.S` 与 `arch/arm/platform.c` 的 `#ifdef`
-  之外的部分是 RP2040 共用的，`arm_default_handler` 的 IPSR 读取在 M0+ 上同样生效，
-  所以按 `AGENTS.md` 要跑 `scripts/rp2040/accept.py`，`rpi-pico` 与 `rpi-pico-smp` 各一次。
-  **判据**：末行 `ACCEPT OK n/n`，含 `fault isolation` 一项（`crash` 之后回到提示符）。
-  没有板主代跑，这一项就是 `NOT RUN`，不能在收口时写成 PASS。
+- **b. RP2040（M0+）—— 2026-11-25 已跑（`5260d28`，见 §2c 与验收卡）**：`rpi-pico`
+  UART0 + CDC 两路 `ACCEPT OK 30/30`（含 `fault isolation`）；`rpi-pico-smp` UART0
+  `ACCEPT OK 30/30`（含 `fault isolation`）。**SMP CDC 一行 29/30**：`fault isolation`
+  FAIL（crash 后 10 s 没读到结尾提示符），但同板 UART0 连续 3 轮 crash 都正常打印
+  `[pid N] HardFault at 0x2001409a`、回提示符、uptime 366→370→373→376 s 不复位
+  (`prompt_in_crash=True, panic=False`)。板级 `arm_default_handler` 的 IPSR 读取在 M0+
+  上生效无疑；CDC 那一项判为**串口/输出时序问题，不是 fault 逻辑**，单列待查，
+  不阻塞本补丁的板级结论。
 
 ## 6. goc32：工具链已自包含，剩下前端缺口
 
