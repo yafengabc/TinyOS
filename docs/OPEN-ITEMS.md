@@ -82,6 +82,13 @@ python scripts/rp2040/accept.py --uf2 build/tinyos-rpi-pico.uf2
 USB 证据。证据与镜像 sha：`docs/acceptance/2026-11-25-rp2040-open-items-5260d28.md`。
 原 2026-11-23 的 `NOT RUN` 见 `docs/acceptance/2026-11-23-rp2040-back-in-matrix-1cc53c4.md`。
 
+**Ctrl-D 进 BOOTSEL（2026-11-25，待板测）**：以前一直不通，根因是 ROM 的
+`reset_usb_boot()` 走 `watchdog_reboot(wrapper, SRAM_END, 10)`，而本板故意停了
+watchdog tick（RP2350 用 REBOOT2，所以那边一直好用）。现在 `clocks_init()` 启动
+1 MHz tick，Ctrl-D 只保留"thread mode 调 ROM"一条路，删掉了 scratch 魔法、SOF 强制
+触发和复位后二次调 ROM。操作与失败采集见 [`RP2040-BOOTSEL.md`](RP2040-BOOTSEL.md)，
+本机 `NOT RUN`。
+
 ## 5b. USB：还有三件事
 
 0. **RV32 端口不能删 `usb_cdc_wait()`**（2026-11-19 已回退）。Hazard3 端口没有 USB
@@ -843,3 +850,16 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 | 16.15 | ~~csc 的 native 表没有 `yield`/`poll`~~ **已加（2026-11-23）** | csc 表新增 `yield()` / `ready(fd)`；rvm 与 rcc 三个后端都实现 | `yield` 不再按 tick 量化；`ready` 是非阻塞 poll，事件循环可以只 step 就绪的 fd | 见 `files/tests/ready.c`；完整 `poll(fds,n,timeout)` 仍未暴露（csc 没有结构体指针） |
 | 16.16 | **内核 flash 占用：board 层内联膨胀**（2026-11-25 立项） | `board/rp2350-generic/platform.c` 单 TU：`-O2` 78.6 KiB、只给 10 个冷打印函数加 `noinline` 后 19.1 KiB、`-Oz` 9.3 KiB；`-fsave-optimization-record` 显示 `diag_*`+`early_*` 被内联 171 次 | 该 TU 占 RP2350 内核镜像 47 %（`rpi-pico2-smp` 179.7 KiB、ATK SMP 185.9 KiB），其中约 64 KiB 是复制出来的冷代码 | 专项研究见 [#56](https://github.com/yafengabc/TinyOS/issues/56)：P1 冷路径 `noinline`（RAMFUNC 只 noinline 不加 cold）→ P2 扫其它 TU → P3 再谈逐文件 `-Os`；判据与测试矩阵写在 issue 里 |
 | 2026-11-25 已落地一部分：`[target] opt` 旋钮（`TOS_OPT` > config > target > `-O2`），`esp32c3-generic` 默认 `-Oz`（板级 5 轮 A/B 无退化，app 100.7 → 81.6 KiB，C3 accept 42/42）。M33 的 `-Oz` 与 P1 仍未做 |
+
+## 17. x86 镜像超出 300 KiB（2026-11-25，pre-existing）
+
+`go run ./cmd/tos build all` 现在是 **17/18**：`x86` 在 `MKFS` 阶段报
+`lfs.c:691: No more free space`（`image already at the 307200-byte partition`）。
+在**未含本次 RP2040 改动**的 HEAD 上同样失败，所以不是这次引入的；`docs/CI.md` §8
+写过这个失败模式（"精简该目标的用户程序或扩大分区"）。
+
+怀疑与 2026-11-25 落地的控制台短写/`write_all` 改动（`1a5f3e3`，每个用户程序多几
+十字节）叠加后刚好压过 300 KiB，但没做 bisect。处理选项：
+① 把 x86 的 `ramdisk_sectors` 从 600 提到 800（+100 KiB，PC 上不心疼）；
+② 或从 x86 的默认程序表里去掉 `coremark`/`pio` 之类的大件；
+③ 或先只记录，等下次动 x86 时一起处理。
