@@ -128,6 +128,30 @@ static uint32_t fmt_usbboot(char *b, uint32_t cap)
                g_usb_stat[2], g_usb_stat[3]);
 }
 
+/* Kernel-thread stack pool: one line per live slot, size/used/high-water.
+ * "used" is the paint scan, "hw" the worst seen since the slot was taken.
+ * Only RV32 has this pool; the accessor returns 0 elsewhere, and then the
+ * node says so instead of printing an empty table. */
+static uint32_t fmt_ktask(char *b, uint32_t cap)
+{
+    uint32_t off = put(b, cap, 0, "ktask: slot   size   used     hw  name\n");
+    int any = 0;
+
+    for (int i = 0; i < 8; i++) {
+        const char *name = "?";
+        uint32_t size = 0, used = 0, hw = 0;
+
+        if (!process_ktask_info(i, &name, &size, &used, &hw))
+            continue;
+        any = 1;
+        off = put(b, cap, off, "  %d  %6u %6u %6u  %s\n",
+                  i, size, used, hw, name);
+    }
+    if (!any)
+        off = put(b, cap, off, "  no kernel threads\n");
+    return off;
+}
+
 static uint32_t fmt_cdc_state(char *b, uint32_t cap)
 {
     return put(b, cap, 0,
@@ -435,6 +459,8 @@ static int proc_open(const dev_t *d, void **priv)
         n = fmt_cdcfix(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/cdcstat"))
         n = fmt_cdcstat(b, PROC_CAP);
+    else if (!strcmp(d->name, "proc/ktask"))
+        n = fmt_ktask(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/ps"))
         n = process_ps_text(b, PROC_CAP);
     else if (!strcmp(d->name, "proc/execfmt"))
@@ -522,6 +548,7 @@ void procfs_init(void)
     devfs_register("proc/cdcfix", &proc_ops, NULL);
     devfs_register("proc/cdcstat", &proc_ops, NULL);
     devfs_register("proc/ps",     &proc_ops, NULL);
+    devfs_register("proc/ktask",   &proc_ops, NULL);
     devfs_register("proc/execfmt", &proc_ops, NULL);
     devfs_register("proc/flash",  &proc_ops, NULL);
     devfs_register("proc/usbpoll", &proc_ops, NULL);

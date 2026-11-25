@@ -65,6 +65,11 @@ regs_t  *process_current_frame(void);
 extern volatile int ktask_running;
 int      process_ktask_create(const char *name, void (*fn)(void *), void *arg,
                               uint32_t stack_bytes, int prio);
+/* Per-slot snapshot for /proc/ktask (kernel-thread stacks): slot size, bytes
+ * used, high-water.  Returns 0 for a free slot or when the port has no ktask
+ * pool at all. */
+int      process_ktask_info(int idx, const char **name, uint32_t *size,
+                            uint32_t *used, uint32_t *hw);
 /* Opaque handle for the OSI layer (the current proc_t). */
 void    *process_current_task(void);
 void     process_ktask_sleep(uint32_t ticks);

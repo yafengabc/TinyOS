@@ -349,14 +349,35 @@ volatile uint32_t ktask_entry_sp;
  * machinery is RV32-only: it rides the M-mode trap path and start.S. */
 #if defined(__riscv)
 #define KTASK_SLOTS       6
+/* Slot size.  Overridable so an experiment can build a smaller pool; the
+ * point of the measurement below is to find the number instead of guessing.
+ * Note that the request in process_ktask_create() only *records* a size - a
+ * ktask always gets a whole slot, because the pool is a uniform array. */
+#ifndef KTASK_STACK_BYTES
 #define KTASK_STACK_BYTES 6144u
+#endif
 static uint8_t ktask_stacks[KTASK_SLOTS][KTASK_STACK_BYTES]
     __attribute__((aligned(16)));
 static uint32_t ktask_stack_used;
+/* High-water mark per slot, in bytes below the slot top.  Measured by painting
+ * the slot with KTASK_PAINT and scanning for the last byte the thread did not
+ * touch.  M-mode kernel threads have no guard of their own (no MPU rule on the
+ * kernel side of RV32), so this is the only way to know whether a size is
+ * enough - and the only warning if it is not. */
+static uint32_t ktask_stack_hw[KTASK_SLOTS];
+#define KTASK_PAINT 0xA5u
 
 void ktask_trampoline(void (*fn)(void *), void *arg);
 static void ktask_exit(void) __attribute__((noreturn));
 extern void ktask_start_stub(void);
+#else
+/* No kernel-thread pool on this port (ARM): the accessor reports "none". */
+int process_ktask_info(int idx, const char **name, uint32_t *size,
+                       uint32_t *used, uint32_t *hw)
+{
+    (void)idx; (void)name; (void)size; (void)used; (void)hw;
+    return 0;
+}
 #endif
 
 /* ---- what became per-CPU ---------------------------------------------
@@ -1667,6 +1688,40 @@ void process_ktask_yield(void)
     __asm__ volatile("ecall" : : "r"(a7) : "memory");
 }
 
+/* Bytes a ktask slot has used, counted from the untouched paint at the
+ * bottom.  Cheap (one pass over at most KTASK_STACK_BYTES) and only called on
+ * exit or from /proc, never in the scheduler. */
+static uint32_t ktask_slot_used(int slot)
+{
+    const uint8_t *base = ktask_stacks[slot];
+    uint32_t i = 0;
+
+    while (i < KTASK_STACK_BYTES && base[i] == KTASK_PAINT)
+        i++;
+    {
+        uint32_t used = KTASK_STACK_BYTES - i;
+
+        if (used > ktask_stack_hw[slot])
+            ktask_stack_hw[slot] = used;
+        return used;
+    }
+}
+
+/* Per-slot snapshot for /proc/ktask: name, slot size, bytes used, high-water.
+ * Returns 0 for a free slot.  Called from procfs (thread context), never from
+ * the scheduler; the scan is bounded by KTASK_STACK_BYTES. */
+int process_ktask_info(int idx, const char **name, uint32_t *size,
+                       uint32_t *used, uint32_t *hw)
+{
+    if (idx < 0 || idx >= KTASK_SLOTS || !(ktask_stack_used & (1u << idx)))
+        return 0;
+    *size = KTASK_STACK_BYTES;
+    *used = ktask_slot_used(idx);
+    *hw = ktask_stack_hw[idx];
+    *name = "ktask";
+    return 1;
+}
+
 int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
                          uint32_t stack_bytes, int prio)
 {
@@ -1706,6 +1761,8 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
 
     p->is_ktask = 1;
     p->kstack_slot = (uint8_t)slot;
+    memset(ktask_stacks[slot], KTASK_PAINT, KTASK_STACK_BYTES);
+    ktask_stack_hw[slot] = 0;
     p->prio = prio;
     p->win_base = 0;
     p->win_size = 0;
