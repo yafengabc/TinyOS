@@ -186,6 +186,15 @@ typedef struct {
 typedef struct proc_res {
     file_t fds[MAX_FDS];
     char   cwd[TOS_PATH_MAX];
+
+    /* The address space and the heap belong to the process, not to the slot
+     * that happens to run first: this is E1a of the process/thread split
+     * (docs/PROC-THREAD-MODEL.md).  A thread reaches them through
+     * PROC_RES(t); the window allocator and the retirement paths use the
+     * slot's own block directly (proc_res[i]), because a thread slot must
+     * never alias its leader's window. */
+    uint32_t win_base, win_size, wx_start;
+    uint32_t heap_base, heap_end, brk;
 } proc_res_t;
 
 /* A descriptor has to be duplicable to be inheritable, and both the child
@@ -216,26 +225,15 @@ typedef struct proc {
     uint64_t cpu_ms;        /* CPU time actually spent on the CPU */
     uint32_t cpu_ticks;     /* whole ticks spent running, see cpu_ms */
 
-    /* This task's slice of the flat address space: image at the bottom,
-     * sbrk heap above it, stack at the top.  wx_start splits the image
-     * into non-writable code below and writable data above; win_size is how
-     * many bytes the allocator handed out (zero = no window, which is what
-     * a free table entry reads as). */
+    /* The window, heap and break are the process's (proc_res_t); only the
+     * thread's own stack stays on the slot. */
     uint8_t  is_ktask;      /* runs in M-mode on its own stack, no window */
     uint8_t  kstack_slot;   /* index into the ktask stack pool          */
-    uint32_t win_base;
-    uint32_t win_size;
-    uint32_t wx_start;
     uint32_t stack_top;
     uint32_t stack_size;    /* this task's stack right now: the board's
                              * default, its own TOS_STACK() request, or what
                              * a stack fault grew it to (see
                              * process_stack_grow) */
-    uint32_t heap_base;
-    uint32_t heap_end;
-    uint32_t entry;
-    uint32_t user_esp;
-    uint32_t brk;
 
     char     name[10];
     struct proc *parent;
@@ -839,10 +837,10 @@ static void apply_protection(proc_t *p)
     proc_t *g = PROC_GROUP(p);
     cpu_t *c = cpu_self();
     plat_seg_t segs[PLAT_SEG_MAX];
-    uint32_t win_base = g->win_base;
-    uint32_t win_end = win_base + g->win_size;
+    uint32_t win_base = PROC_RES(g)->win_base;
+    uint32_t win_end = win_base + PROC_RES(g)->win_size;
     uint32_t stack_low = g->stack_top - g->stack_size;
-    uint32_t brk = g->brk;
+    uint32_t brk = PROC_RES(g)->brk;
     int n = 0;
 
     /* The regions describe the process, not the thread: two threads of one
@@ -851,8 +849,8 @@ static void apply_protection(proc_t *p)
      * so a moved break or a grown stack is still programmed; see cpu_t.prot
      * for why that is stronger than a generation counter. */
     if (c->prot_valid &&
-        c->prot.win_base == win_base && c->prot.win_size == g->win_size &&
-        c->prot.wx_start == g->wx_start && c->prot.brk == brk &&
+        c->prot.win_base == win_base && c->prot.win_size == PROC_RES(g)->win_size &&
+        c->prot.wx_start == PROC_RES(g)->wx_start && c->prot.brk == brk &&
         c->prot.stack_top == g->stack_top &&
         c->prot.stack_size == g->stack_size)
         return;
@@ -861,16 +859,16 @@ static void apply_protection(proc_t *p)
      * between the break and stack_low is left out on purpose - it is the hole
      * `prot heap` and `prot stack` probe - so the pieces are not a partition
      * of the window, and a port must not join them. */
-    if (g->wx_start > win_base) {
+    if (PROC_RES(g)->wx_start > win_base) {
         segs[n].base = win_base;
-        segs[n].top  = g->wx_start;
+        segs[n].top  = PROC_RES(g)->wx_start;
         segs[n].attr = PLAT_SEG_CODE;
         n++;
     }
     if (brk > stack_low)
         brk = stack_low;                /* stale break: never overlap the stack */
-    if (brk > g->wx_start) {
-        segs[n].base = g->wx_start;
+    if (brk > PROC_RES(g)->wx_start) {
+        segs[n].base = PROC_RES(g)->wx_start;
         segs[n].top  = brk;
         segs[n].attr = PLAT_SEG_DATA;
         n++;
@@ -885,8 +883,8 @@ static void apply_protection(proc_t *p)
     plat_task_protect(segs, n);
 
     c->prot.win_base = win_base;
-    c->prot.win_size = g->win_size;
-    c->prot.wx_start = g->wx_start;
+    c->prot.win_size = PROC_RES(g)->win_size;
+    c->prot.wx_start = PROC_RES(g)->wx_start;
     c->prot.brk = brk;
     c->prot.stack_top = g->stack_top;
     c->prot.stack_size = g->stack_size;
@@ -1529,11 +1527,11 @@ int process_user_ok(uint32_t addr, uint32_t len)
         return 1;
     /* A thread has no window of its own: its addresses are the group's. */
     proc_t *g = PROC_GROUP(current);
-    if (addr < g->win_base)
+    if (addr < PROC_RES(g)->win_base)
         return 0;
     if (addr + len < addr)
         return 0;
-    return addr + len <= g->win_base + g->win_size;
+    return addr + len <= PROC_RES(g)->win_base + PROC_RES(g)->win_size;
 }
 
 /* ---- windows ---------------------------------------------------------
@@ -1575,8 +1573,8 @@ static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
            standing in. */
         for (int i = 0; i < MAX_PROCS; i++) {
             proc_t *q = &procs[i];
-            if (q->win_size != 0 && q->win_base >= cand && q->win_base < next)
-                next = q->win_base;
+            if (proc_res[i].win_size != 0 && proc_res[i].win_base >= cand && proc_res[i].win_base < next)
+                next = proc_res[i].win_base;
         }
 
         /* Prefer the alignment that needs the fewest protection blocks (the
@@ -1587,8 +1585,8 @@ static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
            win_layout.h for why both rules exist. */
         uint32_t base = win_place(cand, next, bytes, dom->grain);
         if (base != 0) {
-            p->win_base = base;
-            p->win_size = bytes;
+            PROC_RES(p)->win_base = base;
+            PROC_RES(p)->win_size = bytes;
             ok = 1;
             break;
         }
@@ -1597,8 +1595,8 @@ static int win_alloc(proc_t *p, const struct mem_domain *dom, uint32_t bytes)
 
         /* Too small: step over that window and look at the next gap. */
         for (int i = 0; i < MAX_PROCS; i++) {
-            if (procs[i].win_size != 0 && procs[i].win_base == next) {
-                cand = procs[i].win_base + procs[i].win_size;
+            if (proc_res[i].win_size != 0 && proc_res[i].win_base == next) {
+                cand = proc_res[i].win_base + proc_res[i].win_size;
                 break;
             }
         }
@@ -1627,16 +1625,16 @@ static uint32_t win_largest_free(const struct mem_domain *dom)
 
         for (int i = 0; i < MAX_PROCS; i++) {
             proc_t *q = &procs[i];
-            if (q->win_size != 0 && q->win_base >= cand && q->win_base < next)
-                next = q->win_base;
+            if (proc_res[i].win_size != 0 && proc_res[i].win_base >= cand && proc_res[i].win_base < next)
+                next = proc_res[i].win_base;
         }
         if (next - cand > best)
             best = next - cand;
         if (next >= end)
             break;
         for (int i = 0; i < MAX_PROCS; i++) {
-            if (procs[i].win_size != 0 && procs[i].win_base == next) {
-                cand = procs[i].win_base + procs[i].win_size;
+            if (proc_res[i].win_size != 0 && proc_res[i].win_base == next) {
+                cand = proc_res[i].win_base + proc_res[i].win_size;
                 break;
             }
         }
@@ -1704,8 +1702,13 @@ static void proc_retire_locked(proc_t *p)
     p->wmutex = NULL;
 #endif
     p->cpu = -1;
-    p->win_base = 0;
-    p->win_size = 0;
+    /* The slot's own block.  A retiring thread must never clear the window
+     * its leader still owns; a worker slot's block is always zero. */
+#ifdef TOS_KTHREADS
+    KASSERT_HALT(p->leader == NULL || proc_res[p - procs].win_size == 0);
+#endif
+    proc_res[p - procs].win_base = 0;
+    proc_res[p - procs].win_size = 0;
 }
 
 static void proc_retire(proc_t *p)
@@ -1966,12 +1969,8 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
     memset(ktask_stacks[slot], KTASK_PAINT, KTASK_STACK_BYTES);
     ktask_stack_hw[slot] = 0;
     p->prio = prio;
-    p->win_base = 0;
-    p->win_size = 0;
-    p->wx_start = 0;
     p->stack_top = (uint32_t)&ktask_stacks[slot][KTASK_STACK_BYTES];
     p->stack_size = stack_bytes;
-    p->brk = 0;
     p->cpu = -1;
     p->home_cpu = cpu < 0 ? -1 : cpu;   /* a device owner names its hart */
     p->start_ns = plat_uptime_ms();
@@ -2420,7 +2419,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
         proc_retire(p);
         return NULL;
     }
-    uint32_t base = p->win_base;
+    uint32_t base = PROC_RES(p)->win_base;
 
     /* The decompressor is given raw_size, so prove the destination really
      * has that many bytes before letting it write. */
@@ -2561,7 +2560,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
     p->start_ns = plat_uptime_ms();
     /* win_base/win_size were recorded by win_alloc() - under the lock, so
        nobody else can be handed this range while the image loads. */
-    p->wx_start = base + (link_wx - link_lo);
+    PROC_RES(p)->wx_start = base + (link_wx - link_lo);
     /* The stack occupies the very top of the window, so that its region is
        naturally aligned; the initial frame starts a little below.  Its size
        is this task's own now, and every later use - protection, the argv
@@ -2569,8 +2568,8 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        stack_size so the four cannot drift apart. */
     p->stack_top = base + win;
     p->stack_size = stk;
-    p->heap_base = base + span;
-    p->heap_end = p->stack_top - stk - HEAP_GUARD;
+    PROC_RES(p)->heap_base = base + span;
+    PROC_RES(p)->heap_end = p->stack_top - stk - HEAP_GUARD;
     if (plat_user_stack_guard())
         *((uint32_t *)(p->stack_top - stk) - 1) = USER_STACK_GUARD;
 
@@ -2581,8 +2580,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
        writes argv on top, so the arguments count as usage - they are memory
        the program can see. */
     memset((void *)(p->stack_top - stk), STACK_POISON, stk);
-    p->entry = entry;
-    p->brk = p->heap_base;
+    PROC_RES(p)->brk = PROC_RES(p)->heap_base;
     set_name(p, path);
 
     uint32_t sp = build_initial_stack(p, argv, argc);
@@ -2591,7 +2589,6 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
         proc_retire(p);
         return NULL;
     }
-    p->user_esp = sp;
 
     /* The very top of the stack is reserved for the handler path: an
        exception taken by a user task pushes its 8-word hardware frame (and
@@ -2620,7 +2617,7 @@ static proc_t *proc_create_claim(const char *path, char *const argv[], int argc,
 
     /* The frame this task will resume on.  Nothing else is needed to start
        it: the trap epilogue restores exactly this. */
-    plat_prepare_user_frame(&p->saved, p->entry, p->user_esp);
+    plat_prepare_user_frame(&p->saved, entry, sp);
 
     /* Publish it.  The state store is the last write and it happens under
        the table lock, so a scheduler on another CPU either sees a free slot
@@ -3195,7 +3192,7 @@ static int group_user_ok(proc_t *g, uint32_t addr, uint32_t len)
     end = addr + len;
     if (end < addr)
         return 0;
-    return addr >= g->win_base && end <= g->win_base + g->win_size;
+    return addr >= PROC_RES(g)->win_base && end <= PROC_RES(g)->win_base + PROC_RES(g)->win_size;
 }
 
 /* Called with proc_lock held.  Hands `code` to a sibling blocked in join()
@@ -3227,19 +3224,19 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     uint32_t irq;
     int pid;
 
-    if (!leader || leader->is_ktask || leader->win_size == 0)
+    if (!leader || leader->is_ktask || PROC_RES(leader)->win_size == 0)
         return -1;
     if (entry == 0 || (ustack & 15u) || usize == 0 || (usize & 3u))
         return -1;
-    if (ustack <= leader->win_base ||
-        ustack > leader->win_base + leader->win_size)
+    if (ustack <= PROC_RES(leader)->win_base ||
+        ustack > PROC_RES(leader)->win_base + PROC_RES(leader)->win_size)
         return -1;
     low = ustack - usize;
     /* The 4 bytes below the stack hold the guard word; the caller promises
      * them (struct tos_thread_stack).  Everything must still be inside the
      * process's window, or the canary write itself would be a wild store. */
-    if (low < leader->win_base + 8u ||
-        low - 4u < leader->win_base ||
+    if (low < PROC_RES(leader)->win_base + 8u ||
+        low - 4u < PROC_RES(leader)->win_base ||
         low > ustack)
         return -1;
 
@@ -3267,9 +3264,6 @@ int process_thread_create(uint32_t entry, uint32_t arg,
      * (PROC_OF() is the only accessor, and it goes to the leader), and S3
      * reworks the stack guard before they can go away.  cwd and fds are the
      * group's resource block now, so there is nothing to copy here. */
-    p->heap_base = leader->heap_base;
-    p->heap_end = leader->heap_end;
-    p->brk = leader->brk;
     p->start_ns = plat_now_ns();
 
     plat_prepare_user_frame(&p->saved, entry, ustack);
@@ -3564,14 +3558,14 @@ uint32_t process_sbrk(uint32_t bytes)
      * interrupts are already masked; the plain group lock is what the
      * descriptor table uses too. */
     group_lock(current);
-    old = g->brk;
+    old = PROC_RES(g)->brk;
     if (bytes != 0) {
         newbrk = old + bytes;
-        if (newbrk < g->heap_base || newbrk > g->heap_end) {
+        if (newbrk < PROC_RES(g)->heap_base || newbrk > PROC_RES(g)->heap_end) {
             group_unlock(current);
             return 0;
         }
-        g->brk = newbrk;
+        PROC_RES(g)->brk = newbrk;
     }
     group_unlock(current);
 
@@ -3618,7 +3612,7 @@ int process_stack_guard(const regs_t *r)
     proc_t *p = current;
     uint32_t low, sp, *gw;
 
-    if (!p || PROC_GROUP(p)->win_size == 0 || p->stack_size == 0)
+    if (!p || PROC_RES(p)->win_size == 0 || p->stack_size == 0)
         return 1;
     /* A process stack is covered by the port's own mechanism when it has
      * one (an MPU/PMP rule plus, on some boards, the same canary).  A thread
@@ -3660,7 +3654,7 @@ int process_stack_overflow_at(uint32_t sp)
 {
     proc_t *p = current;
 
-    if (!p || PROC_GROUP(p)->win_size == 0 || p->stack_size == 0)
+    if (!p || PROC_RES(p)->win_size == 0 || p->stack_size == 0)
         return 0;
     return sp < p->stack_top - p->stack_size;
 }
@@ -3670,7 +3664,7 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     proc_t *p = current;
     uint32_t old, want, low, poison_end;
 
-    if (!p || PROC_GROUP(p)->win_size == 0 || p->stack_size == 0)
+    if (!p || PROC_RES(p)->win_size == 0 || p->stack_size == 0)
         return 0;
 #ifdef TOS_KTHREADS
     /* A thread stack is a block inside the process heap: the bytes below it
@@ -3697,7 +3691,7 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
         return 0;                            /* the port cannot describe it */
 
     low = p->stack_top - want;
-    if (addr < low || p->brk + HEAP_GUARD > low) {
+    if (addr < low || PROC_RES(p)->brk + HEAP_GUARD > low) {
         /* Refused for want of room, not because the program is buggy: say
          * which knob turns, since the fault message alone only says "access
          * fault".  addr < low means the write jumped further than one step;
@@ -3726,14 +3720,14 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     memset((void *)low, STACK_POISON, poison_end - low);
 
     p->stack_size = want;
-    p->heap_end = low - HEAP_GUARD;
+    PROC_RES(p)->heap_end = low - HEAP_GUARD;
     if (plat_user_stack_guard())
         *((uint32_t *)low - 1) = USER_STACK_GUARD;
     apply_protection(p);
 
     kprintf("\n[pid %d] stack grown to %u KiB, heap ceiling %u KiB\n",
             p->pid, want / 1024u,
-            (PROC_OF(p)->heap_end - PROC_OF(p)->heap_base) / 1024u);
+            (PROC_RES(p)->heap_end - PROC_RES(p)->heap_base) / 1024u);
     return 1;
 }
 
@@ -3782,7 +3776,7 @@ static uint32_t stack_used(const proc_t *p)
     const uint8_t *low;
     uint32_t i = 0;
 
-    if (PROC_GROUP(p)->win_size == 0 || p->stack_top == 0 || p->stack_size == 0)
+    if (PROC_RES(p)->win_size == 0 || p->stack_top == 0 || p->stack_size == 0)
         return 0;
     low = (const uint8_t *)(p->stack_top - p->stack_size);
     while (i < p->stack_size && low[i] == STACK_POISON)
@@ -3868,7 +3862,7 @@ uint32_t process_ps_text(char *buf, uint32_t cap)
                       "%4d %4d %4d %s %2s %4u.%u %5u %4u %4u.%u/%u  %s\n", p->pid,
                       p->parent ? p->parent->pid : 0, p->prio,
                       state_name(p->state), cpubuf, pct10 / 10u, pct10 % 10u,
-                      busy / 1000u, PROC_OF(p)->win_size / 1024u,
+                      busy / 1000u, PROC_RES(p)->win_size / 1024u,
                       stk10 / 10u, stk10 % 10u, p->stack_size / 1024u, p->name);
         if (n > 0)
             off += (uint32_t)n;
