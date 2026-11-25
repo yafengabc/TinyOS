@@ -260,6 +260,12 @@ include/plat/diag.h
 
 拆分顺序建议：`uaccess` → `fd` → `exec_registry` → `window` → `sched/task`。每一步都用现有 QEMU smoke 和 soak 做行为等价验证。
 
+进度：`uaccess` 已在 2026-11-22 抽出（`kernel/uaccess.c`，卡
+`2026-11-22-uaccess-extract-d0cfe8d-qemu.md`）；`fd` 在 2026-11-26 抽出
+（`kernel/file.h` + `kernel/fd_internal.h` + `kernel/fd.c`，卡
+`2026-11-26-fd-module-e83b517.md`），read/write 与管道阻塞留在 `process.c`，用 5 个
+hook 反向调用。下一个按路线是 `exec_registry`。
+
 ---
 
 ## P1-1：WiFi 协议栈与芯片驱动、设备节点耦合过深
