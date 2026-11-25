@@ -1047,3 +1047,34 @@ kernel stack out of bounds: sp=800ffd40
 
 SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
 `configs/rpi-pico2-rv32-usbpump.conf`（`rpi-pico2-rv32-smp`）。
+
+## 22. M33 / RP2040 的线程矩阵待跑（2026-11-25）
+
+S4 的 USB 泵是 ktask，**只在 RV32**（`__riscv`）：M33（Pico 2 ARM / ATK）和
+RP2040 不跑泵，也不需要跑 §19。但 S1–S3b、用户线程库（join 归还栈、`kmutex`、
+堆锁）和线程栈守卫是共享代码，需要在 M-profile 上复验。本机只有 ESP32-C3
+（COM4），没有这两类板；QEMU 的 `arm` 目标是 mps2-an385（Cortex-M3），只能算
+M-profile 代理，不是 M33。
+
+已备好并构建通过的镜像：
+
+- `configs/rpi-pico-kthreads.conf`（RP2040 M0+ UP）
+- `configs/rpi-pico-smp-kthreads.conf`（RP2040 SMP）
+- `configs/rpi-pico2-smp-kthreads.conf`（Pico 2 M33 SMP）
+- `configs/atk-dnr2350am-smp-kthreads.conf` 与
+  `configs/atk-dnr2350am-rv32-smp-kthreads.conf`：修掉过时的 target 名
+  （`rp2350smp`/`rp2350rvsmp` 已不存在）
+
+板侧步骤（用板自己的 CDC 控制台）：
+
+1. 刷对应 UF2。
+2. `kthreadtest`：create/join、200 次循环、cwd、阻塞 mutex（`ps` 里 `mutex`）、
+   持有者 fault、并发 malloc/free、线程栈溢出。**RP2040 与 M33 都重点看溢出用例**：
+   线程栈在组的数据区，MPU 抓不到，只有软件 canary 能发现；期望打印
+   `thread stack overflow ... killing`，`join` 得到 139。
+3. `threadbench`。
+4. `ps`：睡眠线程应有 `thrN` 行，`stk/sz` 的分母是 4，分子是它自己的用量。
+5. 结果写 `docs/acceptance/`（板、端口、镜像、commit）。
+
+期望：`kthreadtest: all ok (0 failure(s))`；RP2040（无 MPU/无原子）与 M33（MPU+
+原子）都通过；M33 SMP 还要确认两个核都能跑线程（`cpu` 列变化）。

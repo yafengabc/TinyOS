@@ -109,6 +109,9 @@ Examples:
 | `configs/esp32c3-8k-float.conf` | the same, with `pvm-float = true`: pvm gets float/printf/args; pvm ~19K / 36K window |
 | `configs/esp32c3-rir.conf` | the 8 KiB C3 image with the experimental `csc` + `rvm` + `rcc` trio instead of `csa` + `pvm` (`csc` ~124 KiB, `rvm` 32 KiB, `rcc` 72 KiB windows) |
 | `configs/arm-kthreads.conf` | QEMU mps2 (Cortex-M3) with kernel threads |
+| `configs/rpi-pico-kthreads.conf` | RP2040 (Cortex-M0+) with kernel threads; the no-MPU/no-atomics thread test |
+| `configs/rpi-pico-smp-kthreads.conf` | RP2040 dual core with kernel threads; SIO-gate spinlocks under thread stress |
+| `configs/rpi-pico2-smp-kthreads.conf` | RP2350 Cortex-M33 (Pico 2 ARM) dual core with kernel threads |
 | `configs/rv32-kthreads.conf` | QEMU rv32 (virt) with kernel threads; the other half of the `kthreadtest`/`threadbench` pair |
 | `configs/rv32smp-kthreads.conf` | QEMU rv32 (virt, two harts) with kernel threads; where the concurrent `sbrk()` phase runs on two CPUs |
 | `configs/rv32-ktasktest.conf` | QEMU rv32 (virt) with the kernel-thread (ktask) selftest: pool, pinning, paint/high-water, `/proc/ktask` |
