@@ -284,6 +284,19 @@ unlock 后移交；以及线程持锁后故意 fault（store 到 0），内核�
   两个核一个跑 ktask、一个跑用户任务时，后者进 trap 会走错栈并 panic。修好后
   `configs/rv32smp-ktasktest.conf` 就是这条的回归用例，S4 的 SMP 泵镜像也重新可用。
 
+## 2m. C3 真机（2026-11-25）
+
+ESP32-C3（COM4，`1a41138` 的树）把这套线程机制在**没有原子扩展、单核**的目标上跑了一遍：
+
+- 默认镜像 `accept.py` **42/42**；`configs/c3-kthreads.conf` 镜像再跑一遍 **42/42**。
+- `configs/esp32c3-ktasktest.conf`：`[ktest] ktask ran 5 sleeps + yield, cpu_bad=0`，
+  `cat /proc/ktask` → `0 6144 577 577 ktest`。
+- `kthreadtest`（c3-kthreads）：**all ok**，6 个线程槽；`ps` 里 `sleep` 线程
+  `0.7/4`、`mutex` 等待者 `cpu 0.0`；408 次兄弟切换 / 0 次保护重编程；持有者
+  fault 后 `join` 139 且锁被交回；并发 malloc/free 通过。
+- `threadbench`：3 线程 × 300k **36 ms**，inline 34 ms，**ratio 106%**（真机）。
+- 结束后已刷回默认 C3 镜像。
+
 ## 3. 不进 main 的理由
 
 - S2 保持"**槽死即窗口释放**"不变：资源块和槽同生命周期，按槽索引，领槽即清。

@@ -113,6 +113,7 @@ Examples:
 | `configs/rv32smp-kthreads.conf` | QEMU rv32 (virt, two harts) with kernel threads; where the concurrent `sbrk()` phase runs on two CPUs |
 | `configs/rv32-ktasktest.conf` | QEMU rv32 (virt) with the kernel-thread (ktask) selftest: pool, pinning, paint/high-water, `/proc/ktask` |
 | `configs/rv32smp-ktasktest.conf` | the same on two harts; the regression for the per-hart trap state (OPEN-ITEMS 21) |
+| `configs/esp32c3-ktasktest.conf` | ESP32-C3 (real hardware) with the ktask selftest; the uniprocessor/no-atomics environment |
 | `configs/atk-dnr2350am-smp-kthreads.conf` | RP2350 Cortex-M33 dual core with kernel threads |
 | `configs/atk-dnr2350am-rv32-smp-kthreads.conf` | RP2350 Hazard3 RISC-V dual core with kernel threads |
 | `configs/rpi-pico2-rv32-usbpump.conf` | RP2350 Hazard3 dual core with the USB pump as a pinned kernel thread (`usb_pump`, S4) |
