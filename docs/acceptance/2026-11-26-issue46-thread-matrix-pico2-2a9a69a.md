@@ -14,8 +14,9 @@ T0:                NOT RUN（本轮无代码改动，只验收）
 T1:                四个镜像构建通过
 T2:                rv32 `wheap` 正常；`soak.py --cycles 3 --targets rv32` 3/3 PASS（1:27）
 T3:                四镜像 CDC 长输出 + 六项心跳 + 线程矩阵（见下）
-T4:                NOT RUN
-logs:              build/testlogs/issue46-<image>.log、build/testlogs/soak-rv32-current.log
+T4:                四镜像逐项 PASS（每个 dd/rm 100 轮 + soak_board 20 轮，见下）
+logs:              build/testlogs/issue46-<image>.log、build/testlogs/t4-all4.log、
+                   build/testlogs/soakboard-<image>.log、build/testlogs/soak-rv32-current.log
                    （本地，不入库）
 ```
 
@@ -52,6 +53,22 @@ RV32 的那一条是 `the holder died on its fault`：用例要求线程在访�
 但 RP2350 bootrom 把 PMP 8..10 硬编码，地址 0 在 U 态不 fault——已知平台事实
 （ATK RV32 同样），不是这次的回归。四个镜像的线程栈溢出用例都通过：
 `thread stack overflow ... killing`、`killed only the thread`、`leader survived`。
+
+## T4：逐镜像压力（TESTING.md §6 的新要求）
+
+`772dd29` 把 T4 改成按镜像算——ARM/RV32、UP/SMP 不能互相顶替，`dd` 落的也是各自板上的
+flash。四个镜像逐个刷机后跑 `dd_stress.py --rounds 100` 与 `soak_board.py -n 20`：
+
+| 镜像 | dd/rm 100 轮 | soak_board 20 轮 |
+|---|---|---|
+| `rpi-pico2` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
+| `rpi-pico2-smp` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
+| `rpi-pico2-rv32` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
+| `rpi-pico2-rv32-smp` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
+
+`soak_board` 的判据是 `free` 前后 kernel heap/tasks 不允许漂移（峰值水位除外），
+四个镜像的 `free` 报告逐项一致。第一次跑时把判定行 `tail -5` 截掉了，重跑了一遍
+把完整输出留在本地日志里。
 
 ## §24：本机复核，不复现
 
