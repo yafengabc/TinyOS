@@ -1306,6 +1306,12 @@ static RAMFUNC void wdt_enable(void)
     wdt_feed();
 }
 
+/* For kernel/driver code that runs before the tick (kernel/plat/tasks.h). */
+void plat_watchdog_feed(void)
+{
+    wdt_feed();
+}
+
 #if TOS_DIAG
 /* ---- flash-park / tick diagnostics ------------------------------------- */
 static void diag_kv(const char *k, uint32_t v)

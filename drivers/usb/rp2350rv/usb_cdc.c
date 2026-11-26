@@ -567,6 +567,8 @@ static void usb_cdc_wait(uint32_t clk_hz)
             return;
         if ((uint32_t)(usb_boot_us() - t0) >= USB_BOOT_WAIT_US)
             return;
+        if ((polls & 0xfffu) == 0u)
+            plat_watchdog_feed();
         usb_cdc_poll();
     }
 }

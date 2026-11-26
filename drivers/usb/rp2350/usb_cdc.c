@@ -377,14 +377,22 @@ static void usb_cdc_boot_pump(void)
         n = 200000u;                         /* never more than ~1.3 s */
     if (n < 4000u)
         n = 4000u;                           /* and always a few ms' worth */
-    for (uint32_t i = 0; i < n && !tud_mounted(); i++)
+    /* The count is calibrated on -O2 code; a size-optimised kernel spends more
+     * wall time per poll, and the watchdog (armed at [B], ~2 s) would reset the
+     * board inside this wait before [E] ever printed.  Pet it here: the wait
+     * is allowed to be slow, it is not allowed to look like a hang. */
+    for (uint32_t i = 0; i < n && !tud_mounted(); i++) {
+        if ((i & 0xfffu) == 0u)
+            plat_watchdog_feed();
         usb_cdc_poll();
+    }
 }
 
 void usb_cdc_console_init(uint32_t clk_hz)
 {
     (void)clk_hz;
     usb_cdc_init();
+    plat_watchdog_feed();       /* init has its own delays; start the pump fresh */
     usb_cdc_boot_pump();
 }
 

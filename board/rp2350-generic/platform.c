@@ -1123,6 +1123,12 @@ static RAMFUNC void wdt_enable(void)
     wdt_feed();
 }
 
+/* For kernel/driver code that runs before the tick (kernel/plat/tasks.h). */
+void plat_watchdog_feed(void)
+{
+    wdt_feed();
+}
+
 /* ---- boot-progress marks ------------------------------------------------ */
 
 /* kmain() calls plat_boot_stage() between its stages.  Only the RV32 port had

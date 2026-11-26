@@ -21,4 +21,10 @@ void plat_start_tasks(void);
  * /proc/cpuinfo exposes it as "memprot: on|off". */
 int plat_has_memprot(void);
 
+/* Pet the board's watchdog.  Weak no-op; a port that arms one during boot
+ * implements it so a long pre-scheduler wait (USB enumeration on RP2350, ~2 s
+ * of poll budget at -O2 and longer at -Oz) cannot reset the board mid-boot.
+ * One register write, safe from any context. */
+void plat_watchdog_feed(void);
+
 #endif /* TINYOS_PLAT_TASKS_H */
