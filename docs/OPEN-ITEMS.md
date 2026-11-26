@@ -1140,3 +1140,18 @@ M-profile 代理，不是 M33。
 没做的事：没看 `wheap` 具体用了哪些路径 syscall、没确认 `resolve_path()` 返回 -1 之后
 哪个调用点进了死循环。`a004448` 的提交说明里写 soak 3/3，与这里矛盾，先怀疑两边
 镜像/工具链差异，但 A/B 在同一台机器上是稳定的。
+
+**复测（2026-11-26，`4614b4c` + 当前工具链）**：不复现。
+
+```text
+tos> wheap
+wheap: 12 KiB declared, 12 KiB taken, pattern intact
+tos>
+python scripts/soak.py --cycles 3 --targets rv32
+rv32     PASS  tasks      20054016     19584  (3 cycles)
+```
+
+同一份 `kernel/syscall.c`（只改 `resolve_path`/`path_segments` 的返回值）在干净的
+`build/kernel-rv32.elf` 上跑 `wheap` 与 soak 都通过，所以原 A/B 很可能跑在未重新链接的
+旧镜像或另一棵树上。板侧若能给出当时 `build/build-config.txt` 与镜像的 sha256，
+可以再对一次；在那之前本条按“未复现”记录，不加代码改动。
