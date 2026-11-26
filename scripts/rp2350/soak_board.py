@@ -92,7 +92,11 @@ def read_until(stop, sec):
         if d:
             buf.extend(d)
             if stop in bytes(buf):
-                t2 = time.time() + 0.25
+                # A program can emit its last byte after the shell has already
+                # printed its prompt (seen on RP2040: "piperace: otos> k").
+                # Keep draining briefly so the verdict line is complete before
+                # run() hands it to the checker.
+                t2 = time.time() + 0.75
                 while time.time() < t2:
                     m = s.read(4096)
                     if m:
