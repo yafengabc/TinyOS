@@ -10,33 +10,46 @@
 
 ## 全局锁清单与顺序
 
+E1/E2 之后进程与线程是两张表：`threads[]` 是调度单位，`procs[]` 装资源，FD 表与
+cwd 属于**进程**，由每进程的 `glock` 保护，不再是 `proc_lock` 的一部分。锁序
+（`docs/PROC-THREAD-MODEL.md`）：
+
 ```text
 允许的嵌套（只按这个方向）：
 
-  proc_lock ──→ p->lock, glock
-  proc_lock ──→ out_lock          （只允许 trylock：抢不到就丢整块输出）
+  glock ──→ fs_lock ──→ heap_lock     （关文件：fd_close_in → ramdisk_close → kmalloc）
+  glock ──→ proc_lock ──→ p->lock     （关管道：process_pipe_closed 唤醒对端）
+  proc_lock ──→ out_lock              （只允许 trylock：抢不到就丢整块输出）
   fs_lock   ──→ heap_lock
-  g_tx_lock ──→ USB 控制器锁        （驱动内部，见「USB 锁序」）
+  g_tx_lock ──→ USB 控制器锁           （驱动内部，见「USB 锁序」）
 
 禁止的嵌套：
 
-  proc_lock ──✗→ fs_lock, g_tx_lock, heap_lock
-  heap_lock ──✗→ fs_lock, proc_lock
+  proc_lock ──✗→ glock, fs_lock, g_tx_lock, heap_lock
+  fs_lock   ──✗→ proc_lock, glock
+  heap_lock ──✗→ 任何锁
+  glock     ──✗→ g_tx_lock
 
 mb_lock     (独立，不与上面任何锁嵌套)
 ```
 
-- `proc_lock`（`kernel/process.c`）：保护进程表、调度状态、FD 表。SMP 上两个核同时
-  从表里挑任务，一把锁覆盖整张表是诚实的选择——临界区只有 16 项扫描加一次状态
-  写入，细分锁在边界检查上的开销比省下的争用更大。**不提前拆。**
+- `proc_lock`（`kernel/process.c`）：保护**线程表与进程表的存在性**（`threads[]`、
+  `procs[]`、`proc->state`、调度状态、等待队列）。SMP 上两个核同时从表里挑任务，
+  一把锁覆盖整张表是诚实的选择——临界区只有 16/32 项扫描加一次状态写入，细分锁
+  在边界检查上的开销比省下的争用更大。**不提前拆。** FD 表和 cwd 不在它下面。
+- `glock`（`proc->glock`，`kernel/process.c`，由 `kernel/fd.c` 通过
+  `proc_fd_lock()` 使用）：每进程一把，保护该进程的 heap break、FD 表和 cwd。
+  系统调用可以只持它（`open`/`sbrk`/`chdir`），所以它**在** `proc_lock` 之上：
+  关一个文件或在管道上唤醒对端时，它会再取 `fs_lock` / `proc_lock`。
+  反向（持 `proc_lock` 再取 `glock`）是 ABBA，禁止。
 - `fs_lock`（`kernel/ramdisk.c`）：保护 littlefs 的 ofile 表和块设备访问。
   顺序必须是 `fs_lock → heap_lock`，因为 littlefs 通过 `kmalloc` 分配；反向没有
   任何调用点。
 - `heap_lock`（`kernel/heap.c`）：保护内核堆的空闲链表，是最底层。`kmalloc()` 可以
   在没有锁的上下文直接调用；允许在 `fs_lock` 之下拿（littlefs 分配内存），**禁止**
   在 `proc_lock` 之下拿，也禁止在它下面再进文件系统。
-- `p->lock`（`kernel/pipe.h`）：pipe ring 的叶子锁，在 `proc_lock` 之下。ring 和
-  挂在它上面的任务由同一次调用决定——"pipe 空了"和"我睡了"必须是一步。
+- `p->lock`（`kernel/pipe.h`）：pipe 引用计数/ring 的叶子锁，在 `proc_lock` 之下。
+  ring 和挂在它上面的任务由同一次调用决定——"pipe 空了"和"我睡了"必须是一步。
 - `out_lock`（`kernel/console.c`）：只保护控制台的输出序列化。`console_write()`
   抢不到锁时整块丢，但同核重入必须等待，否则命令行 ≥16 字符会没输出。
 - `g_tx_lock`（`drivers/usb/rp2350rv/usb_cdc.c`）：只保护 USB TX ring。它与 USB
@@ -46,8 +59,10 @@ mb_lock     (独立，不与上面任何锁嵌套)
 `proc_lock` 之上/旁边的锁里，`fs_lock`、`g_tx_lock`、`heap_lock` 在持 `proc_lock`
 时一律不得再取；反过来取就是 ABBA 的一半，哪怕现在还没有形成环。`out_lock` 是
 唯一的例外，而且只能用 `console_write()` 的 trylock 路径：console 从不取
-`proc_lock`，抢不到时整块丢弃，所以不构成环。任何新增的嵌套关系必须先改上面两张
-表，再改代码。
+`proc_lock`，抢不到时整块丢弃，所以不构成环。`glock` 的方向是单向的
+（`glock → proc_lock`），而 `glock` 自己又会在关文件时进 `fs_lock`，所以
+`glock` 下面能进 `fs_lock` 和 `proc_lock`，不能再往下进 `heap_lock`（那是 fs 的事）。
+任何新增的嵌套关系必须先改上面两张表，再改代码。
 
 ## `plat_spin_lock_irqsave()` 的语义
 
