@@ -1050,6 +1050,16 @@ SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
 
 ## 22. M33 / RP2040 的线程矩阵待跑（2026-11-25）
 
+**状态（2026-11-26）**：E3 已把 ARM 内核线程做成可用的执行上下文（特权 Thread mode +
+每线程 PSP 栈，`238d381`），泵镜像为 `configs/rpi-pico2-usbpump.conf`。
+
+- **M33（Pico 2 ARM）**：板侧已复验（2026-11-26）。命令、镜像和日志待补进
+  `docs/acceptance/` 的卡；在那之前这里不写 PASS 细节。
+- **RV32（Pico 2 Hazard3）**：还没验，板侧回头补。RV32 的泵镜像在
+  `configs/rpi-pico2-rv32-usbpump.conf`，`/proc/ktask` 里看 `usbpump` 的 size/used。
+- **RP2040**：泵还在 tick 里（不是 `g_idle_poll`），且需要“一槽/更小池”的构建旋钮，
+  尚未迁移；它的 kthread 镜像照旧按下面的清单跑。
+
 S4 的 USB 泵是 ktask，**只在 RV32**（`__riscv`）：M33（Pico 2 ARM / ATK）和
 RP2040 不跑泵，也不需要跑 §19。但 S1–S3b、用户线程库（join 归还栈、`kmutex`、
 堆锁）和线程栈守卫是共享代码，需要在 M-profile 上复验。本机只有 ESP32-C3
