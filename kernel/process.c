@@ -445,7 +445,23 @@ void process_ktask_trap_init(void) { }
  * a thread and the instruction it uses to block are per architecture (rv32
  * runs it in M-mode, arm in privileged Thread mode). */
 #if defined(__riscv) || defined(__arm__)
-#define KTASK_SLOTS       6
+/* How many kernel threads an image can have at once, which is all the pool
+ * needs to hold: the WiFi OSI layer is the only user that needs several (its
+ * blob parks on queues that are pumped by different threads), the USB pump is
+ * one, and the selftest creates two (one that sleeps, one that exits).  A
+ * uniform array cannot hand out a partial slot, so this is the image's peak,
+ * not its average - an image with one pump thread pays 6 KiB, not 36. */
+#ifndef KTASK_SLOTS
+#if defined(TOS_WIFI)
+#define KTASK_SLOTS 6
+#elif defined(TOS_KTASK_TEST) && defined(TOS_USB_PUMP)
+#define KTASK_SLOTS 3
+#elif defined(TOS_KTASK_TEST)
+#define KTASK_SLOTS 2
+#else
+#define KTASK_SLOTS 1
+#endif
+#endif
 /* Slot size.  Overridable so an experiment can build a smaller pool; the
  * point of the measurement below is to find the number instead of guessing.
  * Note that the request in process_ktask_create() only *records* a size - a
