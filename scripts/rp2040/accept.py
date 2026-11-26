@@ -240,16 +240,28 @@ def main():
     if target is None and args.uf2:
         target = os.path.basename(args.uf2).replace("tinyos-", "").replace(".uf2", "")
 
+    # Flash first: while the board sits in BOOTSEL its native CDC is not
+    # enumerated, so picking the port before the copy makes --uf2 unusable
+    # on the board's own USB console (2e8a:000a).  UART0 stays present either
+    # way and is unaffected.
+    if args.uf2 and not flash(args.uf2, args.bootsel_timeout):
+        return 2
+
+    # After a UF2 copy the drive ejects before the native CDC re-enumerates;
+    # on this host COM29 showed up a moment later.  Poll briefly instead of
+    # declaring the console missing (CH343 UART0, when present, is immediate).
     port, is_cdc = pick_port(args.port)
+    for _ in range(75):
+        if port is not None:
+            break
+        time.sleep(0.2)
+        port, is_cdc = pick_port(args.port)
     if port is None:
         print("no RP2040 console found: attach the board's CDC (2e8a:000a) "
               "or the CH343 UART, or pass -p", file=sys.stderr)
         return 2
     if is_cdc:
         args.dtr = True
-
-    if args.uf2 and not flash(args.uf2, args.bootsel_timeout):
-        return 2
 
     b = attach(port, args.dtr)
     if b is None:
