@@ -14,10 +14,10 @@ T0:                NOT RUN（本轮无代码改动，只验收）
 T1:                四个镜像构建通过
 T2:                rv32 `wheap` 正常；`soak.py --cycles 3 --targets rv32` 3/3 PASS（1:27）
 T3:                四镜像 CDC 长输出 + 六项心跳 + 线程矩阵（见下）
-T4:                四镜像逐项 PASS（每个 dd/rm 100 轮 + soak_board 20 轮，见下）
+T4:                四镜像逐项 PASS（每个 dd/rm 100 轮 + soak_board -m 30 墙钟 30 分钟，见下）
 logs:              build/testlogs/issue46-<image>.log、build/testlogs/t4-all4.log、
-                   build/testlogs/soakboard-<image>.log、build/testlogs/soak-rv32-current.log
-                   （本地，不入库）
+                   build/testlogs/t4-30min-all4.log、build/testlogs/soakboard-<image>.log、
+                   build/soak-<image>.log、build/soak-rv32-current.log（本地，不入库）
 ```
 
 ## #46：四个镜像的 CDC 长输出全部完整
@@ -57,18 +57,22 @@ RV32 的那一条是 `the holder died on its fault`：用例要求线程在访�
 ## T4：逐镜像压力（TESTING.md §6 的新要求）
 
 `772dd29` 把 T4 改成按镜像算——ARM/RV32、UP/SMP 不能互相顶替，`dd` 落的也是各自板上的
-flash。四个镜像逐个刷机后跑 `dd_stress.py --rounds 100` 与 `soak_board.py -n 20`：
+flash；`d6b7217` 又把 soak 从 20 轮改成 `-m 30` 墙钟，让六块板受同样的压力。四个镜像逐个
+刷机后跑 `dd_stress.py --rounds 100` 与 `soak_board.py -m 30`：
 
-| 镜像 | dd/rm 100 轮 | soak_board 20 轮 |
-|---|---|---|
-| `rpi-pico2` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
-| `rpi-pico2-smp` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
-| `rpi-pico2-rv32` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
-| `rpi-pico2-rv32-smp` | DD OK 100/100 | PASS（20 cycles, 10 commands） |
+| 镜像 | dd/rm 100 轮 | soak_board 30 分钟 | cycles |
+|---|---|---|---|
+| `rpi-pico2` | DD OK 100/100 | PASS（30 min, 10 commands） | 237 |
+| `rpi-pico2-smp` | DD OK 100/100 | PASS（30 min, 10 commands） | 229 |
+| `rpi-pico2-rv32` | DD OK 100/100 | PASS（30 min, 10 commands） | 244 |
+| `rpi-pico2-rv32-smp` | DD OK 100/100 | PASS（30 min, 10 commands） | 241 |
 
-`soak_board` 的判据是 `free` 前后 kernel heap/tasks 不允许漂移（峰值水位除外），
-四个镜像的 `free` 报告逐项一致。第一次跑时把判定行 `tail -5` 截掉了，重跑了一遍
-把完整输出留在本地日志里。
+每轮 `deep 3` 都有 `stack grown` + `journal intact`，`piperace` 都是 `ok`；`free` 前后
+除峰值水位外一致，全程无 `KERNEL PANIC` / `System halted`。
+
+两次修订之间跑过 `-n 20` 的版本（四个镜像也都 PASS），但那不满足 `d6b7217` 的墙钟判据，
+所以上表是重跑的 `-m 30` 结果。第一次跑 `-n 20` 时把判定行 `tail -5` 截掉了，也重跑保存了
+完整输出。
 
 ## §24：本机复核，不复现
 
