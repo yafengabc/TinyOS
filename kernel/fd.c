@@ -35,7 +35,14 @@ static struct thread *fd_current(void)
 
 file_t *fd_slot(struct thread *p, int fd)
 {
-    if (!p || fd < 0 || fd >= MAX_FDS)
+    /* A kernel thread has no process and therefore no descriptor table.  The
+     * null check is not decoration: proc_retire() closes every slot of a task
+     * whose exec() never got a process entry, and indexing the NULL table read
+     * twelve words below the first page - seen on the C3 emulator as
+     * "[bus] unmapped read @0x18" right after "process or thread table full".
+     * A missing table means "no such descriptor", which is what every caller
+     * already handles. */
+    if (!p || !PFD(p) || fd < 0 || fd >= MAX_FDS)
         return NULL;
     return &PFD(p)[fd];
 }

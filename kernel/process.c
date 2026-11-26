@@ -1842,9 +1842,16 @@ static void proc_retire(thread_t *p)
      * references fd_clone() took.  Retiring the slot without closing them
      * leaks pipe readers/writers: measured on mps2 as a writer count stuck
      * at 1 with no task holding the end, and a reader parked forever on a
-     * pipe nobody will ever close. */
-    for (int i = 0; i < MAX_FDS; i++)
-        fd_close_in(p, i);
+     * pipe nobody will ever close.
+     *
+     * Only the process's main thread has descriptors.  A slot that never got
+     * a process entry (the "process or thread table full" path in
+     * proc_create_claim) reaches here with p->proc == NULL, and fd_slot()
+     * would index the absent table; nothing was inherited, so there is
+     * nothing to close either. */
+    if (p->proc)
+        for (int i = 0; i < MAX_FDS; i++)
+            fd_close_in(p, i);
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     proc_retire_locked(p);
     plat_spin_unlock_irqrestore(&proc_lock, irq);
