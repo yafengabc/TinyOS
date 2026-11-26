@@ -110,9 +110,11 @@ func TestFeatureAllowlistCoversCode(t *testing.T) {
 	}
 	// Features with no feature() call site: they are consumed as defines.
 	defineOnly := map[string]bool{
-		"ktask_test":    true, // -DTOS_KTASK_TEST: kernel/process.c selftest
-		"softfloat-min": true, // -DTOS_SOFTFLOAT_MIN in user/softfloat32.c
-		"wifi":          true, // build.go: also forced by the TOS_WIFI_LIB env
+		"ktask_test":        true, // -DTOS_KTASK_TEST: kernel/process.c selftest
+		"softfloat-min":     true, // -DTOS_SOFTFLOAT_MIN in user/softfloat32.c
+		"usb_pump":          true, // -DTOS_USB_PUMP: the pump as a kernel thread
+		"usb_pump_fallback": true, // -DTOS_USB_PUMP_FALLBACK: opt-in fallback state
+		"wifi":              true, // build.go: also forced by the TOS_WIFI_LIB env
 	}
 	for _, f := range featureNames {
 		if !used[f] && !defineOnly[f] {

@@ -1063,11 +1063,12 @@ SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
   threadbench 57%、26,502 B rcc 两轮一致、crash ×5）。
 - **RV32（Pico 2 Hazard3）**：还没验，板侧回头补。RV32 的泵镜像在
   `configs/rpi-pico2-rv32-usbpump.conf`，`/proc/ktask` 里看 `usbpump` 的 size/used。
-- **RP2040**：泵已迁到内核线程（`fc70612`），真机按下面的清单跑。
-  **回退已删除（2026-11-26）**：tick/idle 泵代码不再存在，`usb_pump` 也不是
-  feature 了——有 `kthreads` 的镜像必然创建泵线程，创建失败直接 `panic`，
-  让板测立刻看见，而不是被 tick 泵掩盖。所以 #68 关闭；泵的成功路径由
-  #60–#67 的 30 分钟浸泡与长输出覆盖，失败路径仍缺一个“制造失败”的测试钩子。
+- **RP2040**：泵已迁到内核线程（`fc70612`），真机按下面的清单跑。**默认行为**是
+  “泵线程是唯一 owner，创建失败直接 panic”——这样板测看到的是失败，不是被
+  遮住的假象。`usb_pump_fallback = true` 是**补充状态**（可选）：泵启动失败时
+  改用 tick/idle 轮询，控制台继续工作；它不是第二个泵，只在创建失败后进入。
+  回退状态没有板测，也没有一个干净的“制造失败”钩子；真要发布那种镜像时，
+  用 `scripts/rp2040/accept.py` 跑一块板并把结果写卡。
 
 S4 的 USB 泵是 ktask，**只在 RV32**（`__riscv`）：M33（Pico 2 ARM / ATK）和
 RP2040 不跑泵，也不需要跑 §19。但 S1–S3b、用户线程库（join 归还栈、`kmutex`、

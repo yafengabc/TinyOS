@@ -315,6 +315,10 @@ typedef void (*rp_rom_usb_boot_t)(uint32_t gpio_mask, uint32_t disable_mask);
 #define PSM_WDSEL_REG   (*(volatile uint32_t *)(0x40010000u + 0x08u))
 
 static volatile int g_replug_req, g_trace_req;
+/* Set while the pump thread owns the controller.  Clearing it puts the tick
+ * back in charge: that is the fallback state a TOS_USB_PUMP_FALLBACK image
+ * enters when the thread cannot be created. */
+static volatile int g_pump_thread;
 static volatile int g_bootsel_req;
 
 /* The one place that talks to the ROM.  It is called from core 0's SysTick
@@ -708,6 +712,22 @@ void plat_timer_tick(void)
     /* Ctrl-D is handled inside bootsel_poll_uart() (it calls
      * bootsel_enter_rom()), so the panic loop - where this tick no longer runs
      * - reaches the same code. */
+    /* The pump thread owns the controller once it exists.  Until it does, and
+     * again if a fallback-enabled image fails to create it, the tick polls:
+     * that is the fallback state, not a second pump running in parallel. */
+    if (!g_pump_thread) {
+        usb_cdc_poll();
+        if (g_replug_req) {
+            g_replug_req = 0;
+            dbg_uart_puts("[usb] replug cycle\n");
+            usb_cdc_replug_cycle();
+        }
+        if (g_trace_req) {
+            g_trace_req = 0;
+            usb_dump("[usbt] ");
+            usb_cdc_trace_dump();
+        }
+    }
     /* Two late snapshots, off by default: by 1 s the host has had time to
      * enumerate with interrupts unmasked, which is what the USB bring-up
      * needed to see - but they dump the whole interrupt ring and the TinyUSB
@@ -1461,6 +1481,7 @@ void plat_timer_irq_unmask(void)
         mmio_write32(ARM_SYSTICK_CTRL, ctrl | 2u);
 }
 
+#ifdef TOS_USB_PUMP
 /* The pump as a kernel thread (E3, #58).
  *
  * Until now usb_cdc_poll() ran in the tick - interrupt context on this port -
@@ -1468,9 +1489,11 @@ void plat_timer_irq_unmask(void)
  * The thread has its own stack, is scheduled like any task and blocks in
  * process_ktask_sleep(1) between polls, exactly like the RP2350 images.
  *
- * One owner: the tick no longer touches the controller.  There is no plan
- * B either - a failed creation panics, so the failure is visible instead of
- * being papered over by a tick pump that answers on the console. */
+ * One owner once it exists.  By default the tick is disabled *before* the
+ * attempt and a failure panics - a pump test has to see the failure, not a
+ * fallback that looks like a pass.  TOS_USB_PUMP_FALLBACK adds a fallback
+ * *state*: if the thread cannot be created, the tick keeps polling instead
+ * of the board dying.  The tick never runs next to the thread. */
 static void usb_pump_task(void *arg)
 {
     (void)arg;
@@ -1494,12 +1517,22 @@ void plat_start_tasks(void)
 {
     int pid;
 
+    g_pump_thread = 1;              /* the tick stops polling for the attempt */
     pid = process_ktask_create("usbpump", usb_pump_task, NULL, 4096, 0, 0);
-    if (pid < 0)
-        panic("[usb] pump thread creation failed (no ktask slot/stack); "
+    if (pid < 0) {
+        kprintf("[usb] pump thread not started (no slot or stack)\n");
+#ifdef TOS_USB_PUMP_FALLBACK
+        g_pump_thread = 0;
+        kprintf("[usb] fallback state: the tick keeps polling\n");
+        return;
+#else
+        panic("[usb] pump creation failed and no fallback is built; "
               "the console has no owner");
+#endif
+    }
     kprintf("[usb] pump thread pid %d on cpu 0\n", pid);
 }
+#endif
 
 /* ---- power -------------------------------------------------------------- */
 

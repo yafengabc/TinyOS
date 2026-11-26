@@ -29,6 +29,7 @@ import (
 var featureNames = []string{
 	"dma", "exec_mock", "i2c", "kthreads", "ktask_test", "net", "pio",
 	"pwm", "rir", "scripting", "softfloat-min", "spi", "uart1",
+	"usb_pump", "usb_pump_fallback",
 	"wifi",
 }
 

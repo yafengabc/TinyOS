@@ -1580,10 +1580,18 @@ int plat_console_can_take(int need)
  * state machine from the scheduler's idle loop instead and let the console
  * read path touch only the completed-byte queue.
  *
- * The state machine does not live here any more: plat_start_tasks() creates
- * the kernel thread that is its only owner (E3, #58).  g_idle_poll stays NULL
- * so neither the idle loop nor PendSV can poll the controller a second time.
- */
+ * This is also the board's deferred-work hook (g_idle_poll), so arch/arm
+ * runs it from PendSV once per tick as well - the idle loop is not reached
+ * while a task is runnable, and that is exactly when a long console write
+ * has to keep draining (issue #46). */
+extern void (*g_idle_poll)(void);
+
+static void usb_idle_poll(void)
+{
+    if (plat_cpu_id() == 0 && g_usb_ready)
+        usb_cdc_poll();
+}
+
 int plat_console_getchar(void)
 {
     int c;
@@ -2284,10 +2292,13 @@ void plat_board_init(void)
 #endif
 
     /* The ARM USB controller receives IRQ 14, but TinyUSB's task loop still
-     * belongs in thread context: plat_start_tasks() creates the kernel thread
-     * that owns it, and g_idle_poll stays NULL (one owner). */
+     * belongs in thread context.  The pump thread created in
+     * plat_start_tasks() owns it; the hook stays NULL unless that creation
+     * fails on a TOS_USB_PUMP_FALLBACK image, which then enters the fallback
+     * state and installs usb_idle_poll(). */
 }
 
+#ifdef TOS_USB_PUMP
 /* The polled controller's state machine as a kernel thread (E3, #58).
  *
  * Until now it ran from the idle loop and from this port's PendSV (the tick
@@ -2317,23 +2328,35 @@ void plat_start_tasks(void)
     int pid;
 
     if (!g_usb_ready) {
-        /* Not a pump failure: the controller itself never came up, so there is
-         * nothing to poll.  Say so over UART0 instead of starting a thread
-         * around a dead device (the console will be UART-only). */
         kprintf("[usb] controller not ready; no pump thread\n");
         return;
     }
 
-    /* No fallback: the thread is the only owner of the controller.  A tick
-     * pump kept as a plan B would answer on the console after a failed
-     * creation, and a board test would read that as a pass.  Failing here is
-     * the point - the panic goes out over UART0, which does not need a pump. */
+    /* The thread is the only owner: that is the default, and it is the only
+     * configuration a release image uses.  TOS_USB_PUMP_FALLBACK adds a
+     * fallback *state* to this pump: if the thread cannot be created, the
+     * idle/PendSV hook is installed and keeps polling, so the console keeps
+     * working instead of dying.  The fallback is not a second pump running
+     * next to the thread - it only exists after a failed start, and that is
+     * why a default image panics here instead of looking healthy. */
+    g_idle_poll = NULL;
+
     pid = process_ktask_create("usbpump", usb_pump_task, NULL, 4096, 0, 0);
-    if (pid < 0)
-        panic("[usb] pump thread creation failed (no ktask slot/stack); "
+    if (pid < 0) {
+        kprintf("[usb] pump thread NOT started (no slot or stack)\n");
+#ifdef TOS_USB_PUMP_FALLBACK
+        g_idle_poll = usb_idle_poll;
+        kprintf("[usb] fallback state: polling from the idle/PendSV hook\n");
+        return;
+#else
+        panic("[usb] pump creation failed and no fallback is built; "
               "the console has no owner");
+#endif
+    }
+    g_idle_poll = NULL;             /* one owner: the guard would bounce */
     kprintf("[usb] pump thread pid %d on cpu 0\n", pid);
 }
+#endif
 
 /* ---- power -------------------------------------------------------------- */
 
