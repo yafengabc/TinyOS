@@ -1096,6 +1096,11 @@ M-profile 代理，不是 M33。
 期望：`kthreadtest: all ok (0 failure(s))`；RP2040（无 MPU/无原子）与 M33（MPU+
 原子）都通过；M33 SMP 还要确认两个核都能跑线程（`cpu` 列变化）。
 
+**板级行的跟踪（2026-11-26）**：上面需要板子的项已拆成独立 issue，一项一项关闭——
+#60–#63（RP2350 四个镜像的 T4）、#64–#65（RP2040 两个镜像的 T4）、
+#66–#67（RP2040 的 T3：accept + kthreadtest + `/proc/ktask`）、
+#68（`usb_pump = false` 回退对照）。线程探针的清单仍以本节为准。
+
 ## 23. `tostest emu|emutest|bench` 指向退役的 C 模拟器（2026-11-26）**已解决**
 
 **已解决（2026-11-26）**：三个入口都改到仓内的 Go `rv32emu/`，`emutest` 也重新
