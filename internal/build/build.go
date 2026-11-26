@@ -66,6 +66,13 @@ type Target struct {
 	// experiment does not have to edit the target list.
 	Opt string
 
+	// UserOpt is the -O level for user programs ("" = inherit the kernel's,
+	// which is what every image did before this knob existed).  A per-program
+	// user/<name>/opt file still wins.  TOS_OPT reaches every C file, so this
+	// is how an image runs a size-optimised kernel while benchmarks and
+	// interpreters keep -O2.
+	UserOpt string
+
 	// How the filesystem reaches the kernel:
 	//   disk      PC: written into the boot disk after the kernel
 	//   embedded  rv32: linked into the kernel image as a RAM disk
@@ -287,10 +294,13 @@ type Builder struct {
 	WiFiLDSymbol   string
 	LDExtra        []string
 	// Config overrides for the kernel; 0/"" keeps the target's default.
-	HeapBytes  int
-	MaxProcs   int
-	KStack     int
-	Opt        string
+	HeapBytes int
+	MaxProcs  int
+	KStack    int
+	Opt       string
+	// UserOpt overrides the -O level for user programs; "" inherits the
+	// kernel's (see Target.UserOpt).
+	UserOpt    string
 	Threads    bool
 	HistBytes  int
 	ProcLite   bool
@@ -358,6 +368,19 @@ func (b *Builder) runTool(name string, args []string, label string) error {
 		return fmt.Errorf("%s failed: %v\n%s", label, err, out.String())
 	}
 	return nil
+}
+
+// userOptFlag is the -O level for user programs: TOS_USER_OPT, then
+// [build] user_opt, then the target's own choice.  Empty means "inherit the
+// kernel's", which is the historical behaviour (ccFlags() applies it).
+func (b *Builder) userOptFlag() string {
+	if v := os.Getenv("TOS_USER_OPT"); v != "" {
+		return v
+	}
+	if b.UserOpt != "" {
+		return b.UserOpt
+	}
+	return b.Target.UserOpt
 }
 
 func (b *Builder) ccFlags(includes []string, extra ...string) []string {
@@ -915,7 +938,11 @@ func (b *Builder) writeBuildConfig() error {
 	if opt == "" {
 		opt = "-O2"
 	}
-	opt = opt + " (kernel) / -Oz (size-opt programs)"
+	opt = opt + " (kernel)"
+	userOpt := b.userOptFlag()
+	if userOpt == "" {
+		userOpt = "inherit kernel"
+	}
 	cpus := b.Target.CPUs
 	if cpus == 0 {
 		cpus = 1
@@ -948,6 +975,7 @@ func (b *Builder) writeBuildConfig() error {
 		"check-grain " + fmt.Sprintf("%d bytes", grain),
 		"check-stack " + fmt.Sprintf("%d bytes", stack),
 		"check-guard " + fmt.Sprintf("%d bytes", guard),
+		"user_opt    " + userOpt,
 		"features    " + strings.Join(feats, ","),
 		"user-defines " + strings.Join(b.userDefines(), " "),
 		"rcc_arch    " + rccArchLabel(b.Target.RCCArch),
@@ -987,6 +1015,14 @@ func (b *Builder) writeBuildConfig() error {
 	} else if b.Target.Opt != "" {
 		optSrc = targetSrc
 	}
+	userOptSrc := "inherit kernel"
+	if os.Getenv("TOS_USER_OPT") != "" {
+		userOptSrc = "TOS_USER_OPT:" + os.Getenv("TOS_USER_OPT")
+	} else if b.UserOpt != "" {
+		userOptSrc = "config:" + cfgName
+	} else if b.Target.UserOpt != "" {
+		userOptSrc = targetSrc
+	}
 	prov := []string{
 		"",
 		"# provenance: the layer each effective value came from",
@@ -998,6 +1034,7 @@ func (b *Builder) writeBuildConfig() error {
 		"#   max_procs   " + src(b.MaxProcs != 0, cfgName, targetSrc),
 		"#   kstack      " + src(b.KStack != 0, cfgName, targetSrc),
 		"#   opt         " + optSrc,
+		"#   user_opt    " + userOptSrc,
 		"#   check-grain " + boardSrc,
 		"#   check-stack " + boardSrc,
 		"#   check-guard " + boardSrc,
@@ -1584,6 +1621,12 @@ func (b *Builder) buildUser() ([]string, error) {
 		userPIEFlags = append(userPIEFlags, isaNoC...)
 	}
 	userCFlags := append([]string{}, userPIEFlags...)
+	// The kernel opt is in ccFlags() for every C file, so a user-level
+	// override has to come after it.  A per-program user/<name>/opt file is
+	// appended even later and still wins (that is what msh/py rely on).
+	if uo := b.userOptFlag(); uo != "" {
+		userCFlags = append(userCFlags, uo)
+	}
 
 	// crt0 is per architecture, not per board: an esp32c3 user binary is
 	// bit-identical to an rv32 one (same ISA, same syscall ABI).

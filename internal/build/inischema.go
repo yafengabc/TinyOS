@@ -59,7 +59,8 @@ var configSchema = iniSchema{
 	sections: map[string]map[string]bool{
 		"build": {
 			"target": true, "heap": true, "max_procs": true, "kstack": true,
-			"opt": true, "xip_code_offset": true, "xip_map_base": true,
+			"opt": true, "user_opt": true,
+			"xip_code_offset": true, "xip_map_base": true,
 			"threads": true, "hist": true, "proc_lite": true, "devnodes": true,
 			"boot_trace": true, "panel": true, "fs_ro": true, "mailbox": true,
 			"features": true,
@@ -98,6 +99,7 @@ var targetSchema = iniSchema{
 			"name": true, "aliases": true, "board": true, "arch": true,
 			"march": true, "rcc_arch": true, "cpus": true, "heap": true,
 			"kstack": true, "max_procs": true, "opt": true,
+			"user_opt": true,
 		},
 	},
 }

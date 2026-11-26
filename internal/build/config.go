@@ -48,6 +48,7 @@ type Config struct {
 	MaxProcs  int
 	KStack    int
 	Opt       string
+	UserOpt   string
 	// XIP placement override, for a variant that puts the code inside the
 	// mapped page (e.g. C3 at 0x2000 instead of 0x10000).  Zero means "use
 	// the board's xip_flash_base".  XipMapBaseSet distinguishes an explicit
@@ -82,6 +83,16 @@ type Config struct {
 	LDExtra       []string
 	UserExclude   map[string]bool
 	SourceExclude map[string]bool
+}
+
+// validOpt accepts the flags the compiler humans actually use; anything else
+// is a typo that would otherwise reach clang and fail there.
+func validOpt(v string) error {
+	switch v {
+	case "", "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz":
+		return nil
+	}
+	return fmt.Errorf("must be one of -O0..-O3, -Os, -Oz (got %q)", v)
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -121,6 +132,13 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, bad("kstack", err)
 		}
 		c.Opt = strings.TrimSpace(s["opt"])
+		c.UserOpt = strings.TrimSpace(s["user_opt"])
+		if err := validOpt(c.Opt); err != nil {
+			return nil, bad("opt", err)
+		}
+		if err := validOpt(c.UserOpt); err != nil {
+			return nil, bad("user_opt", err)
+		}
 		if raw := strings.TrimSpace(s["xip_code_offset"]); raw != "" {
 			n, err := parseSize(raw)
 			if err != nil {
@@ -428,6 +446,7 @@ func (b *Builder) ApplyConfig(c *Config) error {
 	b.MaxProcs = c.MaxProcs
 	b.KStack = c.KStack
 	b.Opt = c.Opt
+	b.UserOpt = c.UserOpt
 	if c.XipCodeOffset != 0 {
 		b.Target.XipFlashBase = c.XipCodeOffset
 		if c.XipMapBaseSet {

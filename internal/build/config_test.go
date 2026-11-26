@@ -31,6 +31,21 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestConfigUserOpt(t *testing.T) {
+	c, err := build.LoadConfig(writeConfig(t, "[build]\nopt = -Oz\nuser_opt = -O2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Opt != "-Oz" || c.UserOpt != "-O2" {
+		t.Fatalf("opt=%q user_opt=%q", c.Opt, c.UserOpt)
+	}
+	for _, bad := range []string{"[build]\nuser_opt = -Ofast\n", "[build]\nopt = fast\n"} {
+		if _, err := build.LoadConfig(writeConfig(t, bad)); err == nil {
+			t.Errorf("accepted invalid opt: %s", bad)
+		}
+	}
+}
+
 func TestConfigAcceptsExplicitFalse(t *testing.T) {
 	c, err := build.LoadConfig(writeConfig(t,
 		"[build]\ntarget = rpi-pico\nheap = 16k\ndevnodes = 0\n"+
