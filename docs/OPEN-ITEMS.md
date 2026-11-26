@@ -1096,29 +1096,51 @@ M-profile 代理，不是 M33。
 期望：`kthreadtest: all ok (0 failure(s))`；RP2040（无 MPU/无原子）与 M33（MPU+
 原子）都通过；M33 SMP 还要确认两个核都能跑线程（`cpu` 列变化）。
 
-## 23. `tostest emu|emutest|bench` 还指着已退役的 C 模拟器（2026-11-26）
+## 23. `tostest emu|emutest|bench` 指向退役的 C 模拟器（2026-11-26）**已解决**
 
-项目现在的模拟器是仓库里的 **Go `rv32emu/`**（CI 构建成 `dist/tools/rv32emu`，用法
-`rv32emu -flashimg tinyos-esp32c3-generic-full.bin`）。但 `cmd/tostest` 的三个
-命令仍按旧的 C 实现工作：
+**已解决（2026-11-26）**：三个入口都改到仓内的 Go `rv32emu/`，`emutest` 也重新
+成了判据。改动：
 
-- `findEmu()` 找 `build/rv32emu-c(.exe)`（`rv32emu-c/` 已不在树里）；
-- `startEmulator()` 传 `-elf <kernel> -ramdisk <ramdisk>`，新模拟器要的是
-  `-flashimg <full.bin>`（整片 flash 镜像，含文件系统）；
-- `emutest` 的期望清单（ps 窗口、`sleep` 文案、`script`/`python`、`/dev` 条目、
-  `deep` 的栈增长等）也是按当年的 C 模拟器 + 当年镜像写的。
+- `findEmu()` 找 `build/rv32emu(.exe)`；`emu build` 在 `rv32emu/` 里
+  `go build -trimpath -o build/rv32emu(.exe) .`，与 release 的
+  `dist/tools/rv32emu` 同一个二进制。
+- `startEmulator()` 去掉 `-clk wall`（Go 版没有这个开关，它按 APB 周期计时），
+  仍是 `-elf <kernel> -ramdisk <ramdisk>`：这是 `-flashimg` 之外的第二种入口，
+  emutest 用它拿到干净的 littlefs 镜像。
+- `emutest` 的期望按当前 C3 镜像重写，并且**漏一条就失败**（以前只打印 WARN，
+  退出码照样是 0，所以清单烂了很久没人发现）。新增两条不变式：
+  `KERNEL PANIC`/`System halted`/`[bus] unmapped` 任一出现即失败。
+- `reboot` 检查挪到进程表填满之前：`reboot` 本身是 /bin 程序，表满时根本启动
+  不了——旧清单最后的 "reboot observed=false" 就是这么来的，不是模拟器不支持。
 
-所以 2026-11-26 那次跑出来的 WARN 和 reboot 超时**不能说明当前模拟器或 C3 镜像**——
-它跑的是退役的 C 二进制。要恢复这条线，需要：
+顺带修掉两个真问题：
 
-1. `findEmu()` 指向 `rv32emu`（`dist/tools` 或 `TOS_EMU`）；
-2. `startEmulator()` 改传 `-flashimg`，镜像用 `tos build` 产出的
-   `tinyos-esp32c3-generic-full.bin`；
-3. 按当前镜像逐条核对 `emutest` 的期望，再决定 reboot 那条怎么判。
+1. **内核**：`exec` 在进程表满但线程槽还有空时走 `proc_retire()`，而那条线程
+   `p->proc == NULL`，`proc_retire()` 无条件关 12 个描述符 → `proc_fd_table()`
+   返回 NULL，`fd_slot()` 对 NULL 表做下标。C3 模拟器上表现为
+   `exec: process or thread table full` 之后 11 行 `[bus] unmapped read @0x18..`。
+   现在 `fd_slot()` 对没有进程表的线程返回 NULL，`proc_retire()` 只对主线程关
+   描述符；emutest 的 `[bus] unmapped` 不变式会盯住这个回归。
+2. **测试**：`script` 那条一直在**默认 shell（msh）**里 `source etc/demo.sh`，
+   而 msh 明确不支持 if/while/`$(...)`（`user/msh/msh.c` 开头写着），于是每行都
+   被当成程序执行（`exec: '/bin/if' not found`）。脚本语言在 `/bin/sh` 里，
+   夹具本身没问题；现在跑 `sh etc/demo.sh`，六个标记齐全。
 
-在完成之前：`emutest` 不做判据；C3 的判据仍是 `scripts/esp-c3/accept.py`
-（42/42）+ `kthreadtest`，CI 的模拟器覆盖是 `cd rv32emu && go test ./internal/...`
-和 release 的 `-flashimg` 冒烟。
+仍然存在的覆盖缺口（不是回归，记在这里免得下次又以为是）：
+
+- **Python**：`py` 在 `defaultUserExclude` 里，任何镜像都不带，所以原来的
+  `py demo.py` / `py pytest.py` 检查删掉了。要恢复得先决定解释器进不进镜像。
+- **窗口耗尽**：C3 是 `max_procs = 8`，shell + 7 个 `hold` 就把进程表填满，
+  先撞到的是进程表而不是窗口分配器，所以 `largest free block is 0 KiB` 这条在
+  C3 上到不了。现在断言的是 `process or thread table full`；窗口耗尽的路径要
+  一个有 10+ 窗口的目标才测得到。
+- **栈增长**：C3 默认栈 4 KiB、窗口只留一步增长，`deep 6` 必死（`deep.c` 的注释
+  早就这么写）。检查改成 `deep 3`（4→8 KiB 后存活、journal 完整），
+  `deep 6 0 8` 则断言 "malloc stopped" + "stack overflow ... killing"。
+
+现在的证据：`tostest emutest` → `EMU TEST OK (boot 89 ms, reboot 146 ms,
+0 missing)`；`emu test` → `SMOKE TEST OK`。C3 真机判据仍是
+`scripts/esp-c3/accept.py`（42/42）+ `kthreadtest`。
 
 ## 24. rv32 QEMU：`wheap` 在 `a004448` 之后挂死（2026-11-26）
 

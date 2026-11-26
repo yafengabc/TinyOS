@@ -286,47 +286,52 @@ $env:TOS_QEMU = "D:\qemu\qemu-system-i386.exe"
 > 是 ESP 生态标准，芯片只能通过它的下载模式协议写入），只在接板子时才需要。
 > 构建、模拟器测试和 CI 全部用 Go，不需要 Python。
 
-### 4. RV32 模拟器（Go 在仓内；C 移植可选）
+### 4. RV32 模拟器（Go，仓内）
 
 RV32 的功能回归默认跑在本仓库的 Go 模拟器 `rv32emu/`（对齐 ESP32-C3，支持
-`-elf` 与 `-flashimg`）和 QEMU 上。C11 移植
-[RV32EMU-C](https://github.com/yafengabc/RV32EMU-C) 不再作为子模块分发；
-需要它时自行加入再构建：
+`-elf`/`-ramdisk` 与 `-flashimg`）和 QEMU 上。C11 移植
+[RV32EMU-C](https://github.com/yafengabc/RV32EMU-C) 已退役，不再作为子模块分发；
+`tostest` 也不再找它。
 
 ```powershell
-git submodule add https://github.com/yafengabc/RV32EMU-C rv32emu-c
-go run ./cmd/tostest emu build     # -> build/rv32emu-c.exe
+go run ./cmd/tostest emu build     # -> build/rv32emu.exe（在 rv32emu/ 里 go build）
 go run ./cmd/tostest emu test      # 启动 esp32c3 内核 + uptime/ls 冒烟
+go run ./cmd/tostest emutest       # 完整功能回归（见下）
 ```
 
 装了 make 的话也可以 `make emu` / `make test-emu`；否则直接用上面的 Go 入口。
-`tostest bench`、`tostest emutest` 也会自动找 `build/rv32emu-c.exe`，
-`TOS_EMU` 可覆盖：
+`tostest bench`、`tostest emutest` 用的是同一个 `build/rv32emu.exe`，
+`TOS_EMU` 可覆盖（差分测试时有用，包括指向旧的 C 二进制）：
 
 ```powershell
-$env:TOS_EMU = "C:\path\to\rv32emu.exe"    # 例如用 Go 版做差分测试
+$env:TOS_EMU = "C:\path\to\rv32emu.exe"
 ```
 
-> **时钟**：模拟器早先按「一条指令一个 TIMG 计数」驱动定时器，而且完全忽略
-> `T0CONFIG` 的 13:28 分频字段——TinyOS 按读到的 APB 写入除数，模拟器却当成 1，
-> 于是 tick 密了 20 倍；时间片恰好是一个 tick，用户程序在两次切换之间连一次
-> syscall 都走不完。症状是内核打印到 `starting /bin/sh ...` 就停，`exceptions=0`
-> ——从未发出第一个 `ecall`。现在默认走主机墙钟、分频字段生效、三个时基各按
-> 自己的频率计数，默认参数即可启动，`tick self-check` 显示 1。
+`emutest` 现在把每条期望当判据：漏一条、出现 `KERNEL PANIC` /
+`System halted` / `[bus] unmapped`，退出码就不是 0。它跑的是
+`build/kernel-esp32c3-generic.elf` + `tinyos-ramdisk-esp32c3-generic.bin`，
+所以期望值跟 C3 镜像走（16 KiB 的 shell 窗口、4 KiB 默认栈、`max_procs = 8`）；
+rv32 QEMU 的 32 KiB/16 进程数字不要照搬。`reboot` 检查刻意放在进程表填满之前：
+`reboot` 本身是 /bin 程序，表满时它连启动都做不到。
+
+> **时钟**：Go 模拟器按 APB 周期计时——一条指令一个周期、80 MHz，没有 `-clk`
+> 开关（旧 C 版的 `-clk wall` 没有对应物）。真实的宿主机速度大约是这个
+> 名义频率的四分之一，所以**客户机的 `sleep 500` 约等于 2 秒墙钟**，
+> `hold 3` 约 12 秒。`emutest` 的等待上限（40 s）就是按这个比例给的；按 4 秒
+> 卡，命令会被截断，后面的检查就都在看前一条命令的输出。
 >
 > 时钟树本身也建模了：`SYSTEM_SYSCLK_CONF` / `SYSTEM_CPU_PER_CONF` 复位为真机
 > 读数（XTAL/2，20 MHz），BBPLL 的 I2C 寄存器文件应答锁定位，所以内核的
 > `plat_clock_init()` 能走完整个 PLL 启动序列，打印 `[clk] CPU 160 MHz, APB 80 MHz`
 > ——与真机一致。TIMG 的计数率因此从时钟树推导，而不是写死 20 MHz：APB 变了，
-> 模拟器与固件仍然对同一个数。`-clk insn` 保留按指令计时的可复现模式；`tostest`
-> 的三个入口仍显式带 `-clk wall`，对旧版模拟器二进制同样成立。指令语义一直
-> 没问题：`rv32emu-bench.exe check` 四个负载与 QEMU + 独立参考模型全部一致。
+> 模拟器与固件仍然对同一个数。指令语义一直没问题：`rv32emu` 的四个基准负载与
+> QEMU + 独立参考模型全部一致。
 
 为什么 QEMU 只做功能验证、不做性能：QEMU 的 TCG 在 store 落到已翻译的代码页时
 会作废整个 TB，`memcpy` 每次迭代都要重新翻译同一段循环——实测同 5 个 TB 被翻译了
-8000 多次，所以 `bench` 在 QEMU 上慢两三个数量级（`rv32emu-c` 的 `bench` Go 工具
-`check` 里可以复现）。`tos run -target rv32` 继续用于启动/兼容性检查，速度与回归以
-`rv32emu/`（Go）为准；细节见 `docs/PLATFORM-DESIGN.md`。
+8000 多次，所以 `bench` 在 QEMU 上慢两三个数量级。`tos run -target rv32` 继续
+用于启动/兼容性检查，速度与回归以 `rv32emu/`（Go）为准；细节见
+`docs/PLATFORM-DESIGN.md`。
 
 ### 5. 检查
 
