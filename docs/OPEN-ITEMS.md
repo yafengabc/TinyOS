@@ -1224,6 +1224,11 @@ rv32     PASS  tasks      20054016     19584  (3 cycles)
 体积收益是真实的：M33 `.text` 200,064 → 86,128 B（−57%），RV32 132,304 → 92,704 B
 （−30%）。但 `-Oz` 目前只能算“能编译，不能启动”，性能数据无法采集。
 
+复测（2026-11-27，`f3fc47d` 含 `e0845db`）：喂狗把停点从 `[D]` 之后推到 `[E] usb`
+之后，但仍在 `[Q]` 后约 5 秒复位一次（20 秒 4 次 `[A]`），没有 shell；`[PREV]` 全零，
+`-O2` 正常（CoreMark 478、smpbench 2.00x、`memprot: on`）。修复未完成，下一步做
+`wdt_enable()` 空操作对照，确认剩余复位是否仍是看门狗。
+
 证据与命令：`docs/acceptance/2026-11-27-kernel-opt-o2-vs-oz-9518609.md`；原始启动
 日志 `build/opt/Oz/boot6s.raw`、`build/opt/Oz-up/boot8s.raw`、
 `build/opt/Oz-rv32/boot15s.raw`（本地）。和 #56 的 P1/P2 是两条线：P1 是 `-O2`
