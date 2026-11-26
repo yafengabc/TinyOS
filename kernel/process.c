@@ -462,15 +462,34 @@ void process_ktask_trap_init(void) { }
 #define KTASK_SLOTS 1
 #endif
 #endif
-/* Slot size.  Overridable so an experiment can build a smaller pool; the
- * point of the measurement below is to find the number instead of guessing.
- * Note that the request in process_ktask_create() only *records* a size - a
- * ktask always gets a whole slot, because the pool is a uniform array. */
-#ifndef KTASK_STACK_BYTES
-#define KTASK_STACK_BYTES 6144u
+/* The stacks come from one arena, in grain-sized pieces: a thread asks for
+ * the size its work needs (process_ktask_create's stack_bytes) and gets
+ * exactly that, rounded up to 16 bytes.  Sizes differ by an order of
+ * magnitude - the USB pump's TinyUSB chain measured 652 B on RV32, the
+ * ESP32-C3 WiFi blob asks for 6 KiB - so a uniform slot either wastes 5 KiB
+ * on a pump or has to be sized for the blob.  The arena is per image and the
+ * allocation map is one bit per 512-byte grain, so the bookkeeping is a few
+ * words and there is no free list to corrupt. */
+#ifndef KTASK_ARENA_BYTES
+#if defined(TOS_WIFI)
+#define KTASK_ARENA_BYTES 40960u    /* wifi 6144 + net 4096 + timer 4096 + OSI */
+#elif defined(TOS_KTASK_TEST) && defined(TOS_USB_PUMP)
+#define KTASK_ARENA_BYTES 12288u    /* ktest 6144 + kexit 1024 + pump 4096 */
+#elif defined(TOS_KTASK_TEST)
+#define KTASK_ARENA_BYTES 8192u     /* ktest 6144 + kexit 1024 */
+#elif defined(TOS_USB_PUMP)
+#define KTASK_ARENA_BYTES 4096u     /* the pump's request */
+#else
+#define KTASK_ARENA_BYTES 1024u
 #endif
-static uint8_t ktask_stacks[KTASK_SLOTS][KTASK_STACK_BYTES]
-    __attribute__((aligned(16)));
+#endif
+#define KTASK_GRAIN       512u
+#define KTASK_GRAINS      (KTASK_ARENA_BYTES / KTASK_GRAIN)
+#define KTASK_STACK_MIN   1024u
+static uint8_t ktask_arena[KTASK_ARENA_BYTES] __attribute__((aligned(16)));
+/* One bit per grain: set = handed out.  Same rule as the slot bitmap below -
+ * written with interrupts masked. */
+static uint32_t ktask_grains[(KTASK_GRAINS + 31u) / 32u];
 static uint32_t ktask_stack_used;
 /* Kernel-thread names, one per stack slot: a kernel thread has no process to
  * keep a name in, so the name lives next to the stack (see
@@ -484,6 +503,40 @@ static const char *ktask_names[KTASK_SLOTS];
  * enough - and the only warning if it is not. */
 static uint32_t ktask_stack_hw[KTASK_SLOTS];
 #define KTASK_PAINT 0xA5u
+
+/* First free run of `n` grains, marked used, or -1.  Called with interrupts
+ * masked.  Marking is the whole contract: an allocator that only finds the
+ * run hands every thread the same block, and the second stack then grows
+ * into the first one's paint. */
+static int ktask_grain_alloc(uint32_t n)
+{
+    uint32_t run = 0;
+
+    for (uint32_t i = 0; i < KTASK_GRAINS; i++) {
+        if (ktask_grains[i / 32u] & (1u << (i % 32u))) {
+            run = 0;
+            continue;
+        }
+        if (++run == n) {
+            uint32_t first = i + 1u - n;
+
+            for (uint32_t k = first; k <= i; k++)
+                ktask_grains[k / 32u] |= 1u << (k % 32u);
+            return (int)first;
+        }
+    }
+    return -1;
+}
+
+/* Give `size` bytes back, starting at `base` (which came from the arena). */
+static void ktask_grain_free(uint32_t base, uint32_t size)
+{
+    uint32_t first = (base - (uint32_t)ktask_arena) / KTASK_GRAIN;
+    uint32_t n = (size + KTASK_GRAIN - 1u) / KTASK_GRAIN;
+
+    for (uint32_t i = first; i < first + n && i < KTASK_GRAINS; i++)
+        ktask_grains[i / 32u] &= ~(1u << (i % 32u));
+}
 
 void ktask_trampoline(void (*fn)(void *), void *arg);
 static void ktask_exit(void) __attribute__((noreturn));
@@ -1943,39 +1996,51 @@ void process_ktask_yield(void)
 }
 #endif
 
-/* Bytes a ktask slot has used, counted from the untouched paint at the
- * bottom.  Cheap (one pass over at most KTASK_STACK_BYTES) and only called on
- * exit or from /proc, never in the scheduler. */
+/* Bytes the thread in `slot` has used, counted from the untouched paint at
+ * the bottom of its own block.  Cheap (one pass over its block) and only
+ * called on exit or from /proc, never in the scheduler. */
 static uint32_t ktask_slot_used(int slot)
 {
-    const uint8_t *base = ktask_stacks[slot];
-    uint32_t i = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_t *t = &threads[i];
+        const uint8_t *base;
+        uint32_t touched = 0, used;
 
-    while (i < KTASK_STACK_BYTES && base[i] == KTASK_PAINT)
-        i++;
-    {
-        uint32_t used = KTASK_STACK_BYTES - i;
-
+        if (t->state == ST_FREE || t->proc || t->kstack_slot != slot)
+            continue;
+        base = (const uint8_t *)(t->stack_top - t->stack_size);
+        while (touched < t->stack_size && base[touched] == KTASK_PAINT)
+            touched++;
+        used = t->stack_size - touched;
         if (used > ktask_stack_hw[slot])
             ktask_stack_hw[slot] = used;
         return used;
     }
+    return 0;
 }
 
-/* Per-slot snapshot for /proc/ktask: name, slot size, bytes used, high-water.
- * Returns 0 for a free slot.  Called from procfs (thread context), never from
- * the scheduler; the scan is bounded by KTASK_STACK_BYTES. */
+/* Per-slot snapshot for /proc/ktask: name, the thread's own stack size, bytes
+ * used, high-water.  Returns 0 for a free slot.  Called from procfs (thread
+ * context), never from the scheduler. */
 int process_ktask_info(int idx, const char **name, uint32_t *size,
                        uint32_t *used, uint32_t *hw)
 {
     if (idx < 0 || idx >= KTASK_SLOTS || !(ktask_stack_used & (1u << idx)))
         return 0;
-    *size = KTASK_STACK_BYTES;
+    *size = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_t *t = &threads[i];
+
+        if (t->state != ST_FREE && !t->proc && t->kstack_slot == idx) {
+            *size = t->stack_size;
+            break;
+        }
+    }
     *used = ktask_slot_used(idx);
     *hw = ktask_stack_hw[idx];
-    /* The slot bitmap says a thread exists; the name pool next to the stacks
-     * says what it is called.  A torn read is possible on SMP - the name is
-     * display data and the pointer is static. */
+    /* The slot bitmap says a thread exists; the name pool says what it is
+     * called.  A torn read is possible on SMP - the name is display data and
+     * the pointer is static. */
     *name = ktask_names[idx] ? ktask_names[idx] : "ktask";
     return 1;
 }
@@ -2038,7 +2103,7 @@ static void ktest_fn(void *arg)
                 !strcmp(nm, "kexit"))
                 freed = 0;
         }
-        t = process_ktask_create("kexit2", kexit_fn, NULL, 512, 0, 0);
+        t = process_ktask_create("kexit2", kexit_fn, NULL, 1024, 0, 0);
         if (freed && t > 0) {
             kprintf("[ktest] ktask exit recycled its slot\n");
         } else {
@@ -2054,8 +2119,8 @@ static void ktest_fn(void *arg)
 
 void process_ktask_selftest(void)
 {
-    int pid = process_ktask_create("ktest", ktest_fn, NULL, 4096, 0, 0);
-    int pid2 = process_ktask_create("kexit", kexit_fn, NULL, 512, 0, 0);
+    int pid = process_ktask_create("ktest", ktest_fn, NULL, 6144, 0, 0);
+    int pid2 = process_ktask_create("kexit", kexit_fn, NULL, 1024, 0, 0);
 
     kprintf("[ktest] create pid=%d exit=%d\n", pid, pid2);
 }
@@ -2069,8 +2134,16 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
 
     if (!fn)
         return -1;
-    if (stack_bytes == 0 || stack_bytes > KTASK_STACK_BYTES)
-        stack_bytes = KTASK_STACK_BYTES;
+    /* The caller states what the thread needs; the arena hands out exactly
+     * that (rounded to 16 bytes), so a simple thread costs ~1 KiB and the
+     * WiFi blob can still have its 6 KiB.  The floor is the trap frame plus
+     * the syscall path, measured at ~600 B. */
+    if (stack_bytes < KTASK_STACK_MIN)
+        stack_bytes = KTASK_STACK_MIN;
+    if (stack_bytes > KTASK_ARENA_BYTES)
+        stack_bytes = KTASK_ARENA_BYTES;
+    uint32_t want = (stack_bytes + 15u) & ~15u;
+    uint32_t grains = (want + KTASK_GRAIN - 1u) / KTASK_GRAIN;
 
     /* Plain interrupt masking, not plat_spin_lock_irqsave(): the lock that
      * guards the process table is *not* held across this region.  proc_alloc()
@@ -2091,8 +2164,17 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
         return -1;
     }
 
+    int g = ktask_grain_alloc(grains);
+    if (g < 0) {
+        ktask_stack_used &= ~(1u << slot);
+        plat_irq_restore(irq);
+        return -1;
+    }
+
     p = proc_alloc();
     if (!p) {
+        ktask_grain_free((uint32_t)ktask_arena + (uint32_t)g * KTASK_GRAIN,
+                         want);
         ktask_stack_used &= ~(1u << slot);
         plat_irq_restore(irq);
         return -1;
@@ -2100,11 +2182,11 @@ int process_ktask_create(const char *name, void (*fn)(void *), void *arg,
 
     p->proc = NULL;                 /* a kernel thread owns no process */
     p->kstack_slot = (uint8_t)slot;
-    memset(ktask_stacks[slot], KTASK_PAINT, KTASK_STACK_BYTES);
+    memset(ktask_arena + (uint32_t)g * KTASK_GRAIN, KTASK_PAINT, want);
     ktask_stack_hw[slot] = 0;
     p->prio = prio;
-    p->stack_top = (uint32_t)&ktask_stacks[slot][KTASK_STACK_BYTES];
-    p->stack_size = stack_bytes;
+    p->stack_top = (uint32_t)ktask_arena + (uint32_t)g * KTASK_GRAIN + want;
+    p->stack_size = want;
     p->cpu = -1;
     p->home_cpu = cpu < 0 ? -1 : cpu;   /* a device owner names its hart */
     p->start_ns = plat_uptime_ms();
@@ -2186,6 +2268,7 @@ regs_t *process_ktask_syscall(regs_t *r)
     case SYS_KTASK_EXIT: {
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
 
+        ktask_grain_free(p->stack_top - p->stack_size, p->stack_size);
         ktask_stack_used &= ~(1u << p->kstack_slot);
         ktask_names[p->kstack_slot] = NULL;
         p->kstack_slot = 0;
