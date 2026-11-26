@@ -2290,12 +2290,19 @@ void plat_board_init(void)
      * XIP off for a moment (the other core is parked out of flash on SMP).
      * Kept in g_flash_detected so /proc/flash can show the true capacity
      * instead of the configured 4 MiB (ATK) / 8 MiB (Pico 2) upper bound. */
+    /* Marks around the JEDEC probe only: plat_boot_stage() lives in flash, so
+     * it must not be called inside the XIP-off window the probe opens.  With
+     * these, a boot reset in the probe reports 0x40 on the next boot, and one
+     * reset after it reports 0x41 - .noinit survives the reset. */
+    plat_boot_stage(0x40u);
     g_flash_detected = rp2350_flash_detect();
+    plat_boot_stage(0x41u);
 #if TOS_BOOT_TRACE
     early_puts("[F] flash id/detected=");
     early_put_hex(g_flash_detected);
     early_puts("\r\n");
 #endif
+    plat_boot_stage(0x42u);
 
     /* The ARM USB controller receives IRQ 14, but TinyUSB's task loop still
      * belongs in thread context.  The pump thread created in

@@ -269,6 +269,13 @@ void usb_cdc_init(void)
     g_hw_ready = 0;
     g_init_stage = 0;
 
+    /* Boot marks around every step that can take wall time.  plat_boot_stage()
+     * stores one word in .noinit (survives a reset) and feeds the watchdog on
+     * this board, so a boot that is reset inside USB bring-up reports where it
+     * stopped on the *next* boot instead of leaving no trace.  Stage numbers
+     * 0x50.. are the USB bring-up (0x3a/0x3b are the RV32 wait). */
+    plat_boot_stage(0x50u);             /* USB bring-up entered */
+
     /* /proc/usbboot: what the boot path left behind.  USBCTRL is released
      * only by a boot path that used it - the BOOTSEL mass-storage ROM - so
      * this one bit separates "the host is still holding the device node from
@@ -276,7 +283,9 @@ void usb_cdc_init(void)
      * signal for skipping the 200 ms D+ drop on cold boots (OPEN-ITEMS 3). */
     g_usb_boot[0] = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
     g_usb_boot[1] = (g_usb_boot[0] & RESETS_USBCTRL) ? 0u : 1u;
+    plat_boot_stage(0x51u);             /* before serial_from_chip_id */
     serial_from_chip_id();
+    plat_boot_stage(0x52u);             /* chip id / flash read done */
 
     /* A warm boot (panic path, soft reboot) can land with a cross-core USB
      * spinlock still held by the previous run - the SIO block survives a core
@@ -291,23 +300,30 @@ void usb_cdc_init(void)
      * depends on the clock), then the pads, then TinyUSB - whose dcd_init()
      * resets the controller itself and would undo any register-level setup
      * done before it. */
+    plat_boot_stage(0x53u);             /* before USB clock/PLL and reset */
     if (usb_clock_init() != 0) {
         BM("[u2x]");
+        plat_boot_stage(0x5fu);
         return;
     }
+    plat_boot_stage(0x54u);             /* clock and reset done */
 
     usb_pads_setup();
+    plat_boot_stage(0x55u);             /* pads set up */
 
     /* Mark ready before TinyUSB can raise an interrupt: the handler bails
      * out on !g_hw_ready, and an interrupt that is never drained keeps
      * re-asserting, which is how an earlier build spun forever. */
     g_hw_ready = 1;
 
+    plat_boot_stage(0x56u);             /* before TinyUSB init */
     if (!tud_init(0)) {
         g_hw_ready = 0;
         BM("[u4x]");
+        plat_boot_stage(0x5eu);
         return;
     }
+    plat_boot_stage(0x57u);             /* TinyUSB init done */
 
     /* And again, now that TinyUSB's dcd_init() has reset the controller and
      * cleared MAIN_CTRL.PHY_ISO.  The same writes issued *before* that reset
@@ -336,6 +352,7 @@ void usb_cdc_init(void)
     g_ss_retrig = usb_hw->sie_status;
     g_usb_boot[4] = g_ss_pads;
     g_usb_boot[5] = g_ss_retrig;
+    plat_boot_stage(0x58u);             /* USB bring-up complete */
 }
 
 /* Open the NVIC gate for IRQ 14.  Kept separate from init so the ordering is
@@ -393,7 +410,9 @@ void usb_cdc_console_init(uint32_t clk_hz)
     (void)clk_hz;
     usb_cdc_init();
     plat_watchdog_feed();       /* init has its own delays; start the pump fresh */
+    plat_boot_stage(0x59u);     /* boot pump starting */
     usb_cdc_boot_pump();
+    plat_boot_stage(0x5au);     /* boot pump done */
 }
 
 /* ---- cross-core USB exclusion ------------------------------------------- */
