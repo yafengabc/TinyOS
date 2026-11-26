@@ -29,7 +29,7 @@ var (
 )
 
 // cmdBench implements `tostest bench`, the Go port of scripts/bench.py +
-// scripts/esp-c3/benchtime.py: time the guest bench on RV32EMU-C or QEMU.
+// scripts/esp-c3/benchtime.py: time the guest bench on the Go rv32emu or QEMU.
 // The guest prints START/END marker lines; the host timestamps them because
 // `uptime()` is an instruction-count tick on the emulator but wall time on
 // QEMU, so guest ticks are reported next to host wall time.
@@ -66,7 +66,7 @@ func cmdBench(args []string) int {
 	} else {
 		emu := findEmu()
 		if !fileExists(emu) {
-			fmt.Fprintf(os.Stderr, "RV32EMU-C not found: %s (run 'tostest emu build')\n", emu)
+			fmt.Fprintf(os.Stderr, "rv32emu not found: %s (run 'tostest emu build')\n", emu)
 			return 1
 		}
 		elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3-generic.elf")

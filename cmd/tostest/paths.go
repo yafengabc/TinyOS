@@ -34,13 +34,14 @@ func exeName(base string) string {
 	return base
 }
 
-// findEmu resolves the standard test runtime: $TOS_EMU, then an rv32emu-c
-// checkout built into build/rv32emu-c.exe (see cmdEmu build).
+// findEmu resolves the standard test runtime: $TOS_EMU, then the Go rv32emu
+// in this tree, built into build/rv32emu(.exe) (see cmdEmu build).  The old
+// C emulator (rv32emu-c) is retired; TOS_EMU still works for a manual build.
 func findEmu() string {
 	if p := os.Getenv("TOS_EMU"); p != "" {
 		return p
 	}
-	return filepath.Join(repoRoot(), "build", exeName("rv32emu-c"))
+	return filepath.Join(repoRoot(), "build", exeName("rv32emu"))
 }
 
 // findQEMU locates the QEMU binary for the given target name, mirroring the

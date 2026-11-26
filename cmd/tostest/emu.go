@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// cmdEmu implements `tostest emu build|test`, the Go port of scripts/emu.py:
-// build the rv32emu-c checkout into build/rv32emu-c.exe, then boot the
-// esp32c3 kernel on it and poke the shell.
+// cmdEmu implements `tostest emu build|test`: build the Go rv32emu in this
+// tree into build/rv32emu(.exe), then boot the esp32c3 kernel on it and poke
+// the shell.
 func cmdEmu(args []string) int {
 	action := "test"
 	if len(args) > 0 && (args[0] == "build" || args[0] == "test") {
@@ -37,41 +37,15 @@ func cmdEmu(args []string) int {
 }
 
 func emuSubmoduleReady() bool {
-	return fileExists(filepath.Join(repoRoot(), "rv32emu-c", "src", "main.c"))
+	return fileExists(filepath.Join(repoRoot(), "rv32emu", "main.go"))
 }
 
-// emuBuild compiles an rv32emu-c checkout with its own Go build tool and
-// copies the result into build/rv32emu-c.exe.  It reuses the compiler paths
-// tos already knows about (TOS_BIN, then the MSYS2 UCRT64 default).
+// emuBuild builds the Go rv32emu in this tree into build/rv32emu(.exe), the
+// binary the emulator-backed tests use.  It is the same build the release
+// workflow ships as dist/tools/rv32emu.
 func emuBuild() bool {
 	if !emuSubmoduleReady() {
-		fmt.Fprintln(os.Stderr, "rv32emu-c/ is not part of this tree; to use the C emulator:\n  git submodule add https://github.com/yafengabc/RV32EMU-C rv32emu-c")
-		return false
-	}
-	cmd := exec.Command("go", "run", "./cmd/rv32emu-build", "emu")
-	cmd.Dir = filepath.Join(repoRoot(), "rv32emu-c")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	extra := splitList(os.Getenv("TOS_BIN"))
-	if def := `C:\msys64\ucrt64\bin`; isDir(def) {
-		extra = append(extra, def)
-	}
-	if len(extra) > 0 {
-		cmd.Env = append(os.Environ(),
-			"PATH="+strings.Join(extra, string(os.PathListSeparator))+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "rv32emu-c build failed: %v\n", err)
-		return false
-	}
-	src := filepath.Join(repoRoot(), "rv32emu-c", "build", exeName("rv32emu-c"))
-	if !fileExists(src) {
-		fmt.Fprintf(os.Stderr, "build finished but %s is missing\n", src)
-		return false
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "reading build output: %v\n", err)
+		fmt.Fprintln(os.Stderr, "rv32emu/ is not part of this tree; the emulator lives there")
 		return false
 	}
 	out := findEmu()
@@ -79,15 +53,19 @@ func emuBuild() bool {
 		fmt.Fprintf(os.Stderr, "mkdir: %v\n", err)
 		return false
 	}
-	if err := os.WriteFile(out, data, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "writing %s: %v\n", out, err)
+	cmd := exec.Command("go", "build", "-trimpath", "-o", out, ".")
+	cmd.Dir = filepath.Join(repoRoot(), "rv32emu")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "rv32emu build failed: %v\n", err)
 		return false
 	}
-	fmt.Printf("ok -> %s (%d bytes)\n", relPath(out), len(data))
+	fmt.Printf("ok -> %s\n", relPath(out))
 	return true
 }
 
-// emuSmoke boots the esp32c3 kernel on RV32EMU-C and checks uptime + ls.
+// emuSmoke boots the esp32c3 kernel on the Go rv32emu and checks uptime + ls.
 func emuSmoke() int {
 	elf := filepath.Join(repoRoot(), "build", "kernel-esp32c3-generic.elf")
 	rd := filepath.Join(repoRoot(), "build", "tinyos-ramdisk-esp32c3-generic.bin")
@@ -119,9 +97,12 @@ func emuSmoke() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	// The marker used to be "ms (" from a previous uptime format; the current
-	// line is "uptime: 0.820 s (820 ms)  tick=..." so match the label.
-	ok, _ = s.waitFor([]byte("uptime:"), 5*time.Second)
+	// The marker is the tail of the line ("uptime: 0.820 s (820 ms)  tick=1000
+	// Hz ..."), not its label: the label alone can match while only "uptime: 0"
+	// of the numbers has reached the host, and "Hz" alone matches the boot
+	// banner's clock line.  The console drains slowly enough that a 60-byte
+	// line is worth waiting for.
+	ok, _ = s.waitFor([]byte("pid="), 10*time.Second)
 	if !ok {
 		fmt.Fprintln(os.Stderr, "`uptime` produced no answer; last output:")
 		fmt.Fprintln(os.Stderr, s.tail(800))
@@ -161,7 +142,7 @@ func emuSmoke() int {
 	return 0
 }
 
-// startEmulator boots a kernel under RV32EMU-C with the console wired to our
+// startEmulator boots a kernel under the Go rv32emu with the console wired to our
 // pipe.
 //
 // The explicit -clk wall is a compatibility measure, not a hint: emulator
@@ -174,9 +155,10 @@ func emuSmoke() int {
 // 136 kHz), so the flag is now just "the behaviour we want" spelled out; it
 // also keeps TOS_EMU pointing at an older binary working.
 func startEmulator(emu, elf, ramdisk string) (*session, error) {
+	// The Go rv32emu counts the host clock by default and has no -clk flag;
+	// the kernel ELF + littlefs ramdisk pair is still its -elf/-ramdisk mode.
 	cmd := exec.Command(emu, "-elf", elf, "-ramdisk", ramdisk,
-		"-rxdelay", "5000000", "-rxrate", "64", "-rxperiod", "20000",
-		"-clk", "wall")
+		"-rxdelay", "5000000", "-rxrate", "64", "-rxperiod", "20000")
 	return startSession(cmd, true)
 }
 

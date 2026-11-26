@@ -31,10 +31,10 @@ usage:
                    build an rv32emu-c checkout into build/rv32emu-c.exe, or
                    boot the esp32c3 kernel on it and poke the shell
   tostest emutest
-                   full functional test on RV32EMU-C (boot, user programs,
+                   full functional test on the Go rv32emu (boot, user programs,
                    crash isolation, source, reboot)
   tostest bench  [-qemu [port]] [payload]
-                   time the guest bench payload on RV32EMU-C (default) or a
+                   time the guest bench payload on the Go rv32emu (default) or a
                    QEMU TCP serial port
 
 environment:
