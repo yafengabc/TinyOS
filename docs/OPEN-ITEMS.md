@@ -1185,6 +1185,10 @@ rv32     PASS  tasks      20054016     19584  (3 cycles)
 
 **板侧复核（2026-11-26，`2a9a69a`）**：不复现。`wheap` 正常返回
 `12 KiB declared, 12 KiB taken, pattern intact`，`soak.py --cycles 3 --targets rv32`
-3/3 PASS。本机早先那次 A/B 的 soak 跑了 8:48，本轮串行只用了 1:27——当时与板测的
-dd/heartbeat/reboot 并行，QEMU TCG 的 15 s 命令窗口被挤爆是可能的解释。按"未复现"
-结案，不加代码改动；证据在 `docs/acceptance/2026-11-26-issue46-thread-matrix-pico2-2a9a69a.md`。
+3/3 PASS。本机早先那次 A/B 的 soak 跑了 8:48，本轮串行只用了 1:27。原因不是 A/B 里的
+`syscall.c`，而是时序：被测镜像的 `build/build-config.txt` 是
+`opt -O2 (kernel) / -Oz (size-opt programs)`，QEMU TCG 解释执行 -Oz 的用户程序本来就慢，
+而 `soak.py` 给每条命令只有 15 s（`--commandwait-ms` 默认 15000）。那次又同时跑着
+板测的 dd/heartbeat/reboot，`wheap` 的长输出越过窗口后，后面 27 条命令全被串进同一段
+输出，于是整轮被判失败。这是**测试超时假象**，不是内核 bug，也不是 `a004448` 的回归。
+按"未复现"结案，不加代码改动；证据在 `docs/acceptance/2026-11-26-issue46-thread-matrix-pico2-2a9a69a.md`。
