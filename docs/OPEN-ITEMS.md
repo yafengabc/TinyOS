@@ -1197,3 +1197,15 @@ rv32     PASS  tasks      20054016     19584  (3 cycles)
 板测的 dd/heartbeat/reboot，`wheap` 的长输出越过窗口后，后面 27 条命令全被串进同一段
 输出，于是整轮被判失败。这是**测试超时假象**，不是内核 bug，也不是 `a004448` 的回归。
 按"未复现"结案，不加代码改动；证据在 `docs/acceptance/2026-11-26-issue46-thread-matrix-pico2-2a9a69a.md`。
+
+## 25. B-6b：`remote_ep` 的真实 lower（LP / C6 companion）等硬件（2026-11-26）
+
+`docs/ARCHITECTURE-NEXT.md` 的 C7 已经把 `remote_ep_send/recv/poll`、
+`link_state(ep)`、`last_rx_tick`、`remote_ep_irq()` 与容量参数 `remote_ep_caps()`
+的形状冻结，mock + QEMU 那一半是 B-6a。**B-6b 是另一半：LP 与 C6 companion 各实现
+一份真实 lower**，需要那块硬件或对应的 companion 端，目前没有对象可接，所以
+`remote_ep_poll`/`remote_ep_irq` 仍只由 selftest 驱动。
+
+这一项原来挂在 issue #2 的 Phase 表里；#2 在 2026-11-26 关闭（索引已过期：目标数
+从 12 变 18、Phase A/B 全部收口），B-6b 是唯一没有收口的条目，迁到这里。硬件到位
+时单独开 issue，**实现时不要改 C7 的契约形状**。
