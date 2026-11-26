@@ -107,7 +107,11 @@ def run_cmd(con, line, timeout):
     text = con.read_until_prompt(timeout)
     m = re.search(re.escape(line.split()[0]) + r".*?\r?\n(.*)", text, re.S)
     body = m.group(1) if m else text
-    return [ln.rstrip("\r") for ln in re.sub(r"tos>\s*$", "", body).splitlines()]
+    # rvm prints a timing trailer after the program's output; it is not in
+    # expected/*.txt, so compare without it (source mode drives rvm via
+    # run_cmd, pre-staged images via run_one).
+    return [ln.rstrip("\r") for ln in re.sub(r"tos>\s*$", "", body).splitlines()
+            if not ln.startswith("result=")]
 
 
 def run_one(con, name, timeout):
@@ -119,7 +123,11 @@ def run_one(con, name, timeout):
     if m:
         body = m.group(1)
     body = re.sub(r"tos>\s*$", "", body)
-    return [ln.rstrip("\r") for ln in body.splitlines()]
+    # rvm appends a timing trailer ("result=... ir=... reps=... exec_ms=...")
+    # after the program's own output.  It is not part of the transcript the
+    # expected/*.txt files were captured from, so strip it before comparing.
+    return [ln.rstrip("\r") for ln in body.splitlines()
+            if not ln.startswith("result=")]
 
 
 def expected_lines(name):
