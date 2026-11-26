@@ -117,9 +117,14 @@ def bad_tokens(text):
     return [b for b in BAD if b in text]
 
 
-def workload(n):
+def workload(n, has_py):
     """One cycle of allocation-heavy commands.  Everything is foreground:
-    the sample after it must see the shell alone."""
+    the sample after it must see the shell alone.
+
+    `py` is only in the cycle when the image ships it: the interpreter is in
+    defaultUserExclude now (internal/build/config.go), so every image answers
+    `exec: '/bin/py' not found` and the soak used to call that a kernel error.
+    """
     cmds = [
         "hello",
         "echo abc def | wc",
@@ -137,7 +142,7 @@ def workload(n):
         cmds.append("deep 6")
     else:
         cmds.append("run sh etc/demo.sh")
-    if n % 8 == 0:
+    if has_py and n % 8 == 0:
         cmds.append("py demo.py")
     if n % 10 == 0:
         cmds += [
@@ -194,7 +199,10 @@ def main():
         df0 = b.cmd("df")
         log.write(df0)
         names0 = parse_ps(b.cmd("ps"))
-        print(f"[soak] baseline heap {base}, tasks {names0}")
+        binlist = b.cmd("ls /bin")
+        log.write("=== /bin ===\n" + binlist)
+        has_py = re.search(r"(?:^|\s)py(?:\s|$)", binlist) is not None
+        print(f"[soak] baseline heap {base}, tasks {names0}, py={has_py}")
 
         prev_up = 0
         resets = 0
@@ -212,7 +220,7 @@ def main():
                 break
 
             cycle_bad = []
-            for line in workload(n):
+            for line in workload(n, has_py):
                 out = b.cmd(line)
                 log.write(f"\n--- cycle {n}: {line} ---\n" + out)
                 hits = bad_tokens(out)

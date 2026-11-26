@@ -1139,8 +1139,13 @@ M-profile 代理，不是 M33。
   `deep 6 0 8` 则断言 "malloc stopped" + "stack overflow ... killing"。
 
 现在的证据：`tostest emutest` → `EMU TEST OK (boot 89 ms, reboot 146 ms,
-0 missing)`；`emu test` → `SMOKE TEST OK`。C3 真机判据仍是
-`scripts/esp-c3/accept.py`（42/42）+ `kthreadtest`。
+0 missing)`；`emu test` → `SMOKE TEST OK`。同一棵树刷 C3 真机（COM4）：
+`accept.py` 42/42、`soak.py` 20 轮 0 error（卡
+`2026-11-26-c3-real-board-646e92d.md`）。
+
+顺带：`scripts/esp-c3/soak.py` 的循环里也有 `py demo.py`，同样假设镜像带解释器，
+第一次上板就报了 3 个 `exec: '/bin/py' not found`。现在先看 `ls /bin`，没有 `py`
+就不排这条（日志里写 `py=False`）。
 
 ## 24. rv32 QEMU：`wheap` 在 `a004448` 之后挂死（2026-11-26）
 
