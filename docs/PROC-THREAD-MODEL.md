@@ -204,12 +204,12 @@ DYING -> FREE     最后一个线程退出，退出码交给父进程/记忆
   估计大（`regs_t` 144/80 B 加上等待、栈与记账字段），以及 `MAX_THREADS` 取
   2×进程数（上限 32）。这是“线程是调度单位”的必要成本，写在这里是为了
   让 RP2040 一类 264 KiB 的板子有据可查。
-- 内核线程栈：两个 ISA 共用同一个池和同一套 paint/高水位计量
-  （`/proc/ktask`）。槽数按镜像最多同时几个内核线程：WiFi 6、自测 2、
-  泵 1（`KTASK_SLOTS` 可覆盖），所以单线程的泵镜像只付 6 KiB，不是 36；
-  池只在有 ktask 使用者的镜像里链接（`--gc-sections`）。名字和栈池放在一起
-  arm 默认 178,336 B vs ktasktest 215,240 B 的 .bss）。内核线程名和栈池放在一起
-  （`const char *names[KTASK_SLOTS]` = 24 B，替代每线程 `name[8]`）。
+- 内核线程栈：每线程的栈按 `process_ktask_create()` 的 `stack_bytes` 从
+  一个 512 B 粒度的 arena 分配（16 B 对齐、下限 1 KiB、退出归还），
+  `/proc/ktask` 的 size 列就是请求值；arena 按镜像给（WiFi 40 KiB、
+  自测+泵 12 KiB、自测 8 KiB、泵 4 KiB，可 `-DKTASK_ARENA_BYTES` 覆盖）。
+  池只在有 ktask 使用者的镜像里链接（`--gc-sections`）；线程名放在 arena 旁的
+  `const char *names[KTASK_SLOTS]`（每槽 4 B），`thread` 只留 `kstack_slot`。
 - `TOS_KTHREADS` 改为只控制**用户态线程 API 与测试程序**，不再是内核模型开关。
 
 ## 4. 各端口
