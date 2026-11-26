@@ -256,7 +256,7 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | **E2-B1** ✅ `f6949ab` | 线程槽只留线程自己的东西：`wait_pid` 拆 `wait_child`/`join_tid`、`leader` → `proc->main`、`is_ktask` 删除（`proc == NULL` 就是内核线程） | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
 | **E2-B2** ✅ `35f0118` | `proc->state`（FREE/NEW/LIVE/DYING）状态机 + KASSERT；ps//proc/threads 跳过 NEW；kthreadtest 新增“线程表满时 exec 失败不漏进程条目”与“表清空后 exec 恢复”两条 | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
 | **E3-M3** ✅ `238d381` | ARM 内核线程：特权 Thread mode + 每线程 PSP 栈；帧内 `priv` 位与 `arm_resume`；SVC 路由到 ktask syscall；tick 不抢占；`configs/arm-ktasktest.conf` | M3 QEMU（priv=1）+ T0/T1/T2 |
-| **E3-board** | USB 泵迁到内核线程 + M33/RP2040 真机验收（#58） | 板卡（OPEN-ITEMS §22） |
+| **E3-board** | USB 泵迁到内核线程（RP2350 ARM 已完成 `22ebd16`）；M33/RP2040 真机 + RP2040 的泵（tick 路径、池大小） | 板卡（OPEN-ITEMS §22） |
 | **E4** | 全端口矩阵：rv32/rv32smp、C3、M3/M33、RP2040、x86；删旧模型残留 | 全 T3 + 板卡 |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
 
