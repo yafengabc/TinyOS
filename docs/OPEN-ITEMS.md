@@ -1095,3 +1095,20 @@ M-profile 代理，不是 M33。
 
 期望：`kthreadtest: all ok (0 failure(s))`；RP2040（无 MPU/无原子）与 M33（MPU+
 原子）都通过；M33 SMP 还要确认两个核都能跑线程（`cpu` 列变化）。
+
+## 23. emutest 的期望与 C3 镜像漂移（2026-11-26）
+
+`cmd/tostest emutest`（RV32EMU-C 上跑 `kernel-esp32c3-generic.elf`）不是 CI 门禁，
+但已经不能当作“C3 功能通过”的证据：2026-11-26 跑了一遍，除了已知的 reboot 超时
+（2026-11-19 卡）之外，还有一批期望值与镜像不符。
+
+- `ps` 的三条窗口期望写死 32 KiB：C3 镜像的 msh 实际是 **16 KiB**，`stk 4` 是
+  **24 KiB**（ps: `16` / `24`，stk/sz `8.3/16`）。这不是回归，是
+  `TOS_PATH_MAX`/窗口 grain/RVC 回退几次改动之后的漂移。
+- 另有约 15 条与镜像内容相关：`sleep 99999999` 的报错文本、`script`/`python`
+  的若干行、`ls /dev` 的 `gpio0`/`gpio21`、`deep` 的 “stack grown to 16 KiB” 与
+  journal、以及 `wait out stk` 之后没等到提示符。
+
+修它需要按当前镜像逐条核对输出（不是改三行数字），并且 reboot 那条要单独决定
+（模拟器的复位路径）。在那之前：**不要把 emutest 的 WARN/FAIL 当 C3 回归**，
+C3 的判据仍然是 `scripts/esp-c3/accept.py`（42/42）+ `kthreadtest`。
