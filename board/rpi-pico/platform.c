@@ -708,22 +708,6 @@ void plat_timer_tick(void)
     /* Ctrl-D is handled inside bootsel_poll_uart() (it calls
      * bootsel_enter_rom()), so the panic loop - where this tick no longer runs
      * - reaches the same code. */
-#ifndef TOS_USB_PUMP
-    /* With TOS_USB_PUMP the pump thread owns the controller (see
-     * usb_pump_task below); the tick stays out of it entirely, which is what
-     * keeps the state machine out of interrupt context. */
-    usb_cdc_poll();
-    if (g_replug_req) {
-        g_replug_req = 0;
-        dbg_uart_puts("[usb] replug cycle\n");
-        usb_cdc_replug_cycle();
-    }
-    if (g_trace_req) {
-        g_trace_req = 0;
-        usb_dump("[usbt] ");
-        usb_cdc_trace_dump();
-    }
-#endif
     /* Two late snapshots, off by default: by 1 s the host has had time to
      * enumerate with interrupts unmasked, which is what the USB bring-up
      * needed to see - but they dump the whole interrupt ring and the TinyUSB
@@ -1477,7 +1461,6 @@ void plat_timer_irq_unmask(void)
         mmio_write32(ARM_SYSTICK_CTRL, ctrl | 2u);
 }
 
-#ifdef TOS_USB_PUMP
 /* The pump as a kernel thread (E3, #58).
  *
  * Until now usb_cdc_poll() ran in the tick - interrupt context on this port -
@@ -1485,11 +1468,9 @@ void plat_timer_irq_unmask(void)
  * The thread has its own stack, is scheduled like any task and blocks in
  * process_ktask_sleep(1) between polls, exactly like the RP2350 images.
  *
- * One owner, and the strict rule the RP2350 side uses: the tick pump is
- * compiled out when this feature is on (see the #ifndef in the tick), so a
- * failed creation leaves the controller with no pump at all and the console
- * goes deaf - which a board test notices at once, unlike a silent fallback
- * to the tick pump. */
+ * One owner: the tick no longer touches the controller.  There is no plan
+ * B either - a failed creation panics, so the failure is visible instead of
+ * being papered over by a tick pump that answers on the console. */
 static void usb_pump_task(void *arg)
 {
     (void)arg;
@@ -1514,13 +1495,11 @@ void plat_start_tasks(void)
     int pid;
 
     pid = process_ktask_create("usbpump", usb_pump_task, NULL, 4096, 0, 0);
-    if (pid < 0) {
-        kprintf("[usb] pump thread not started; the console has no pump\n");
-        return;
-    }
+    if (pid < 0)
+        panic("[usb] pump thread creation failed (no ktask slot/stack); "
+              "the console has no owner");
     kprintf("[usb] pump thread pid %d on cpu 0\n", pid);
 }
-#endif
 
 /* ---- power -------------------------------------------------------------- */
 

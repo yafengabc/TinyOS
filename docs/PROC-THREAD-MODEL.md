@@ -259,7 +259,7 @@ ARM 内核线程的要求见 #58：只跑已知不阻塞路径、PendSV 优先�
 | **E2-B2** ✅ `35f0118` | `proc->state`（FREE/NEW/LIVE/DYING）状态机 + KASSERT；ps//proc/threads 跳过 NEW；kthreadtest 新增“线程表满时 exec 失败不漏进程条目”与“表清空后 exec 恢复”两条 | T0/T1/T2、kthreadtest ×3、ktest、C3 真机 |
 | **E3-M3** ✅ `238d381` | ARM 内核线程：特权 Thread mode + 每线程 PSP 栈；帧内 `priv` 位与 `arm_resume`；SVC 路由到 ktask syscall；tick 不抢占；`configs/arm-ktasktest.conf` | M3 QEMU（priv=1）+ T0/T1/T2 |
 | **E3-board** | USB 泵迁到内核线程（RP2350 ARM 已完成 `22ebd16`）；M33/RP2040 真机 + RP2040 的泵（tick 路径、池大小） | 板卡（OPEN-ITEMS §22） |
-| **E4-A** ✅ | 旧模型残留清扫（leader/is_ktask/wait_pid/proc_res 全无）；RP2350 板级默认 kthreads + usb_pump；rp2350-generic 的用户集调整；HISTORY 记录 | T0/T1，板级矩阵由板侧跑（`c33d897` 卡） |
+| **E4-A** ✅ | 旧模型残留清扫（leader/is_ktask/wait_pid/proc_res 全无）；RP2350 板级默认 kthreads + usb_pump（2026-11-26 起 `usb_pump` 不是 feature：有 kthreads 就必然创建泵线程，失败即 panic）；rp2350-generic 的用户集调整；HISTORY 记录 | T0/T1，板级矩阵由板侧跑（`c33d897` 卡） |
 | **E5** | 收尾：文档、`docs/HISTORY`、合并 main 的决定 | — |
 
 窗口泄漏用例（E1a 新增）：shell 里连续 exec 20 个程序，再反复 create/join 线程，

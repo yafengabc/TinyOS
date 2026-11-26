@@ -454,12 +454,10 @@ void process_ktask_trap_init(void) { }
 #ifndef KTASK_SLOTS
 #if defined(TOS_WIFI)
 #define KTASK_SLOTS 6
-#elif defined(TOS_KTASK_TEST) && defined(TOS_USB_PUMP)
-#define KTASK_SLOTS 3
 #elif defined(TOS_KTASK_TEST)
-#define KTASK_SLOTS 2
+#define KTASK_SLOTS 3               /* ktest + kexit + the USB pump */
 #else
-#define KTASK_SLOTS 1
+#define KTASK_SLOTS 1               /* the USB pump, on every kthreads board */
 #endif
 #endif
 /* The stacks come from one arena, in grain-sized pieces: a thread asks for
@@ -473,12 +471,10 @@ void process_ktask_trap_init(void) { }
 #ifndef KTASK_ARENA_BYTES
 #if defined(TOS_WIFI)
 #define KTASK_ARENA_BYTES 40960u    /* wifi 6144 + net 4096 + timer 4096 + OSI */
-#elif defined(TOS_KTASK_TEST) && defined(TOS_USB_PUMP)
-#define KTASK_ARENA_BYTES 12288u    /* ktest 6144 + kexit 1024 + pump 4096 */
 #elif defined(TOS_KTASK_TEST)
-#define KTASK_ARENA_BYTES 8192u     /* ktest 6144 + kexit 1024 */
-#elif defined(TOS_USB_PUMP)
-#define KTASK_ARENA_BYTES 4096u     /* the pump's request */
+#define KTASK_ARENA_BYTES 12288u    /* ktest 6144 + kexit 1024 + pump 4096 */
+#elif defined(TOS_KTHREADS)
+#define KTASK_ARENA_BYTES 4096u     /* the pump's request: every such image starts it */
 #else
 #define KTASK_ARENA_BYTES 1024u
 #endif
