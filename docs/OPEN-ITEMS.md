@@ -1096,22 +1096,29 @@ M-profile 代理，不是 M33。
 期望：`kthreadtest: all ok (0 failure(s))`；RP2040（无 MPU/无原子）与 M33（MPU+
 原子）都通过；M33 SMP 还要确认两个核都能跑线程（`cpu` 列变化）。
 
-## 23. emutest 的期望与 C3 镜像漂移（2026-11-26）
+## 23. `tostest emu|emutest|bench` 还指着已退役的 C 模拟器（2026-11-26）
 
-`cmd/tostest emutest`（RV32EMU-C 上跑 `kernel-esp32c3-generic.elf`）不是 CI 门禁，
-但已经不能当作“C3 功能通过”的证据：2026-11-26 跑了一遍，除了已知的 reboot 超时
-（2026-11-19 卡）之外，还有一批期望值与镜像不符。
+项目现在的模拟器是仓库里的 **Go `rv32emu/`**（CI 构建成 `dist/tools/rv32emu`，用法
+`rv32emu -flashimg tinyos-esp32c3-generic-full.bin`）。但 `cmd/tostest` 的三个
+命令仍按旧的 C 实现工作：
 
-- `ps` 的三条窗口期望写死 32 KiB：C3 镜像的 msh 实际是 **16 KiB**，`stk 4` 是
-  **24 KiB**（ps: `16` / `24`，stk/sz `8.3/16`）。这不是回归，是
-  `TOS_PATH_MAX`/窗口 grain/RVC 回退几次改动之后的漂移。
-- 另有约 15 条与镜像内容相关：`sleep 99999999` 的报错文本、`script`/`python`
-  的若干行、`ls /dev` 的 `gpio0`/`gpio21`、`deep` 的 “stack grown to 16 KiB” 与
-  journal、以及 `wait out stk` 之后没等到提示符。
+- `findEmu()` 找 `build/rv32emu-c(.exe)`（`rv32emu-c/` 已不在树里）；
+- `startEmulator()` 传 `-elf <kernel> -ramdisk <ramdisk>`，新模拟器要的是
+  `-flashimg <full.bin>`（整片 flash 镜像，含文件系统）；
+- `emutest` 的期望清单（ps 窗口、`sleep` 文案、`script`/`python`、`/dev` 条目、
+  `deep` 的栈增长等）也是按当年的 C 模拟器 + 当年镜像写的。
 
-修它需要按当前镜像逐条核对输出（不是改三行数字），并且 reboot 那条要单独决定
-（模拟器的复位路径）。在那之前：**不要把 emutest 的 WARN/FAIL 当 C3 回归**，
-C3 的判据仍然是 `scripts/esp-c3/accept.py`（42/42）+ `kthreadtest`。
+所以 2026-11-26 那次跑出来的 WARN 和 reboot 超时**不能说明当前模拟器或 C3 镜像**——
+它跑的是退役的 C 二进制。要恢复这条线，需要：
+
+1. `findEmu()` 指向 `rv32emu`（`dist/tools` 或 `TOS_EMU`）；
+2. `startEmulator()` 改传 `-flashimg`，镜像用 `tos build` 产出的
+   `tinyos-esp32c3-generic-full.bin`；
+3. 按当前镜像逐条核对 `emutest` 的期望，再决定 reboot 那条怎么判。
+
+在完成之前：`emutest` 不做判据；C3 的判据仍是 `scripts/esp-c3/accept.py`
+（42/42）+ `kthreadtest`，CI 的模拟器覆盖是 `cd rv32emu && go test ./internal/...`
+和 release 的 `-flashimg` 冒烟。
 
 ## 24. rv32 QEMU：`wheap` 在 `a004448` 之后挂死（2026-11-26）
 
