@@ -94,7 +94,7 @@ struct thread {                      /* ETHREAD：调度 */
 `<进程名>#<tid>`（Windows 的任务管理器只给 TID，Linux 的 `/proc` comm 默认也是
 进程名；线程名是调试器/`prctl` 的可选功能，不是身份）。**内核线程没有 proc**，
 名字是它们唯一的身份，也是验收证据（`/proc/ktask ... usbpump`），所以放在内核
-线程栈池的元数据里（`const char *names[KTASK_SLOTS]`，6×4 B），`thread` 只留
+线程栈池的元数据里（`const char *names[KTASK_SLOTS]`，KTASK_SLOTS×4 B），`thread` 只留
 `kstack_slot`。这样比每线程 `name[8]` 省 8 B/线程，也不会截断名字；以后要
 `thread_setname` 再加可选 API。
 
@@ -204,8 +204,10 @@ DYING -> FREE     最后一个线程退出，退出码交给父进程/记忆
   估计大（`regs_t` 144/80 B 加上等待、栈与记账字段），以及 `MAX_THREADS` 取
   2×进程数（上限 32）。这是“线程是调度单位”的必要成本，写在这里是为了
   让 RP2040 一类 264 KiB 的板子有据可查。
-- 内核线程栈：两个 ISA 共用同一个 6×6 KiB 池和同一套 paint/高水位计量
-  （`/proc/ktask`）；池只在有 ktask 使用者的镜像里链接（`--gc-sections`，
+- 内核线程栈：两个 ISA 共用同一个池和同一套 paint/高水位计量
+  （`/proc/ktask`）。槽数按镜像最多同时几个内核线程：WiFi 6、自测 2、
+  泵 1（`KTASK_SLOTS` 可覆盖），所以单线程的泵镜像只付 6 KiB，不是 36；
+  池只在有 ktask 使用者的镜像里链接（`--gc-sections`）。名字和栈池放在一起
   arm 默认 178,336 B vs ktasktest 215,240 B 的 .bss）。内核线程名和栈池放在一起
   （`const char *names[KTASK_SLOTS]` = 24 B，替代每线程 `name[8]`）。
 - `TOS_KTHREADS` 改为只控制**用户态线程 API 与测试程序**，不再是内核模型开关。
