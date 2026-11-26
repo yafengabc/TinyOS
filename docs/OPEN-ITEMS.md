@@ -1214,22 +1214,31 @@ rv32     PASS  tasks      20054016     19584  (3 cycles)
 从 12 变 18、Phase A/B 全部收口），B-6b 是唯一没有收口的条目，迁到这里。硬件到位
 时单独开 issue，**实现时不要改 C7 的契约形状**。
 
-## 26. M33 的 `-Oz` 内核起不来（2026-11-27）
+## 26. M33 的 `-Oz` 内核起不来（2026-11-27，**已修复** `83d9b0e`）
 
 `TOS_OPT=-Oz` 构建 `atk-dnr2350am-smp` / `atk-dnr2350am` 后，UART0 输出到
 `[D] cpu0` 和 `TinyOS/RP2350 ...` 就反复重启（M33 UP/SMP 都是），没有 `[E] usb`、
-没有 CDC、没有 shell；`-O2` 同镜像正常。RV32 的 `-Oz` 能走到 `[U] usb hw=1 cfg=1`
-和 banner，但之后 UART0 静默、CDC 枚举出来却打不开/无 shell。
+没有 CDC、没有 shell；RV32 的 `-Oz` 能走到 `[U] usb hw=1 cfg=1` 和 banner，随后静默。
+`-O2` 同镜像正常。`-Os` 也一样，不是 `-Oz` 特有。
 
-体积收益是真实的：M33 `.text` 200,064 → 86,128 B（−57%），RV32 132,304 → 92,704 B
-（−30%）。但 `-Oz` 目前只能算“能编译，不能启动”，性能数据无法采集。
+**根因**：`rp2350_flash_detect_jedec()` 里的 `uint8_t tx[5] = {0x9f,...}` 在
+`-Os/-Oz` 下被 clang 提升成 flash 里的 `.L__const.rp2350_flash_detect_jedec.tx`。
+这个函数在 `[B]` 之后、XIP 关闭的窗口里执行 QMI direct-mode 交换，`tx[i]` 一读
+flash 就 fault/复位；`-O2` 把数组放栈上，所以只有 size 级别出事。`wdt_enable()`
+空操作对照仍然复位，排除了看门狗。
 
-复测（2026-11-27，`f3fc47d` 含 `e0845db`）：喂狗把停点从 `[D]` 之后推到 `[E] usb`
-之后，但仍在 `[Q]` 后约 5 秒复位一次（20 秒 4 次 `[A]`），没有 shell；`[PREV]` 全零，
-`-O2` 正常（CoreMark 478、smpbench 2.00x、`memprot: on`）。修复未完成，下一步做
-`wdt_enable()` 空操作对照，确认剩余复位是否仍是看门狗。
+**修复**（`83d9b0e`）：两个 RP2350 端口都不再用数组，直接写立即数
+`i == 0u ? 0x9fu : 0x00u`。验证：ATK 上 M33 `-Oz`/`-Os` 和 RV32 `-Oz` 都能进
+shell；O2 不变（CoreMark 478、smpbench 37–38 ms / 2.00x）。
+
+**性能测量注意**：`TOS_OPT` 同时作用于内核和用户程序（`internal/build`
+的 `ccFlags()`），所以“O2 内核 vs Oz 内核”的 CoreMark 对比里，CoreMark 自己
+也被换了 `-O2`/`-Oz`。隔离实验：O2 内核 + Oz CoreMark = 290 iter/s，Oz 内核 +
+Oz CoreMark = 289；Oz 内核 + O2 CoreMark = 477，O2 内核 + O2 CoreMark = 478。
+即分数差几乎全部来自 CoreMark 的编译等级，不是内核。要量内核本身，需要把
+用户程序固定在同一优化等级（或给 build 加独立的 user opt 旋钮，尚未做）。
 
 证据与命令：`docs/acceptance/2026-11-27-kernel-opt-o2-vs-oz-9518609.md`；原始启动
 日志 `build/opt/Oz/boot6s.raw`、`build/opt/Oz-up/boot8s.raw`、
-`build/opt/Oz-rv32/boot15s.raw`（本地）。和 #56 的 P1/P2 是两条线：P1 是 `-O2`
-冷路径内联膨胀，这里是 `-Oz` 整内核的启动回归。未定位到具体函数/编译选项。
+`build/opt/Oz-rv32/boot15s.raw`、`build/fix/Oz/boot8s.raw`（本地）。和 #56 的
+P1/P2 是两条线：P1 是 `-O2` 冷路径内联膨胀，这里是 `-Oz` 的 XIP-off 常量读。
