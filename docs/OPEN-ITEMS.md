@@ -1213,3 +1213,18 @@ rv32     PASS  tasks      20054016     19584  (3 cycles)
 这一项原来挂在 issue #2 的 Phase 表里；#2 在 2026-11-26 关闭（索引已过期：目标数
 从 12 变 18、Phase A/B 全部收口），B-6b 是唯一没有收口的条目，迁到这里。硬件到位
 时单独开 issue，**实现时不要改 C7 的契约形状**。
+
+## 26. M33 的 `-Oz` 内核起不来（2026-11-27）
+
+`TOS_OPT=-Oz` 构建 `atk-dnr2350am-smp` / `atk-dnr2350am` 后，UART0 输出到
+`[D] cpu0` 和 `TinyOS/RP2350 ...` 就反复重启（M33 UP/SMP 都是），没有 `[E] usb`、
+没有 CDC、没有 shell；`-O2` 同镜像正常。RV32 的 `-Oz` 能走到 `[U] usb hw=1 cfg=1`
+和 banner，但之后 UART0 静默、CDC 枚举出来却打不开/无 shell。
+
+体积收益是真实的：M33 `.text` 200,064 → 86,128 B（−57%），RV32 132,304 → 92,704 B
+（−30%）。但 `-Oz` 目前只能算“能编译，不能启动”，性能数据无法采集。
+
+证据与命令：`docs/acceptance/2026-11-27-kernel-opt-o2-vs-oz-9518609.md`；原始启动
+日志 `build/opt/Oz/boot6s.raw`、`build/opt/Oz-up/boot8s.raw`、
+`build/opt/Oz-rv32/boot15s.raw`（本地）。和 #56 的 P1/P2 是两条线：P1 是 `-O2`
+冷路径内联膨胀，这里是 `-Oz` 整内核的启动回归。未定位到具体函数/编译选项。
