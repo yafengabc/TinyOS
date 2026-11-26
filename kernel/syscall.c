@@ -60,8 +60,14 @@ static int copy_user_string(char *dst, uint32_t src, int max)
 /* Append one path's segments to the normalized buffer.  A segment is
  * consumed in place, so this needs no `tmp` and no per-segment `seg[64]`:
  * the old resolver kept four buffers (cwd, tmp, norm, seg) on every path
- * syscall, which is a lot of the 4 KiB stack on the RP2040. */
-static void path_segments(char *norm, int cap, int *no, const char *src)
+ * syscall, which is a lot of the 4 KiB stack on the RP2040.
+ *
+ * Returns -1 when the result would not fit.  Silently stopping at cap was a
+ * real defect (OPEN-ITEMS 59 B): the syscall then acted on a *different*,
+ * shorter path - `create("/" + 70 chars)` made a file named its 63-char
+ * prefix, and `open`/`stat` answered about the wrong name.  The caller now
+ * fails with -1 instead. */
+static int path_segments(char *norm, int cap, int *no, const char *src)
 {
     int si = 0;
 
@@ -88,25 +94,32 @@ static void path_segments(char *norm, int cap, int *no, const char *src)
             continue;
         }
 
-        if (*no < cap - 1)
-            norm[(*no)++] = '/';
-        for (int s = 0; s < len && *no < cap - 1; s++)
+        /* Room for the separator, the segment and the terminator. */
+        if (*no + 1 + len >= cap)
+            return -1;
+        norm[(*no)++] = '/';
+        for (int s = 0; s < len; s++)
             norm[(*no)++] = src[start + s];
     }
+    return 0;
 }
 
 /* Resolve `in` against the calling task's cwd into an absolute, normalized
  * path written to `out` (outlen bytes, always NUL-terminated).  A leading
  * '/' makes the path absolute (cwd ignored); otherwise it is joined onto the
- * cwd.  '.' and '..' are collapsed, and '..' above the root stays at '/'. */
-static void resolve_path(const char *in, char *out, int outlen)
+ * cwd.  '.' and '..' are collapsed, and '..' above the root stays at '/'.
+ * Returns -1 when the normalized path does not fit, so no caller can act on
+ * a shortened name. */
+static int resolve_path(const char *in, char *out, int outlen)
 {
     char norm[TOS_PATH_MAX];
     int no = 0;
 
-    if (!in || in[0] != '/')
-        path_segments(norm, (int)sizeof(norm), &no, process_cwd_str());
-    path_segments(norm, (int)sizeof(norm), &no, in ? in : "");
+    if ((!in || in[0] != '/') &&
+        path_segments(norm, (int)sizeof(norm), &no, process_cwd_str()) < 0)
+        return -1;
+    if (path_segments(norm, (int)sizeof(norm), &no, in ? in : "") < 0)
+        return -1;
 
     if (no == 0)
         norm[no++] = '/';
@@ -116,6 +129,7 @@ static void resolve_path(const char *in, char *out, int outlen)
         strncpy(out, norm, (size_t)(outlen - 1));
         out[outlen - 1] = '\0';
     }
+    return 0;
 }
 
 /* stat() for any path: device directories and device nodes first, then
@@ -172,7 +186,10 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
      * that calls exec() the same order. */
     char rpath[TOS_PATH_MAX];
 
-    resolve_path(path, rpath, sizeof(rpath));
+    if (resolve_path(path, rpath, sizeof(rpath)) < 0) {
+        plat_frame_set_ret(r, (uint32_t)-1);
+        return r;
+    }
 
     if (!strchr(path, '/')) {
         uint32_t size;
@@ -393,7 +410,10 @@ static regs_t *dispatch(regs_t *r)
             return r;
         }
         char path[TOS_PATH_MAX];
-        resolve_path(upath, path, sizeof(path));
+        if (resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         plat_frame_set_ret(r, (uint32_t)process_fd_open(path));
         return r;
     }
@@ -405,7 +425,10 @@ static regs_t *dispatch(regs_t *r)
             return r;
         }
         char path[TOS_PATH_MAX];
-        resolve_path(upath, path, sizeof(path));
+        if (resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         plat_frame_set_ret(r, (uint32_t)process_fd_create(path));
         return r;
     }
@@ -417,7 +440,10 @@ static regs_t *dispatch(regs_t *r)
             return r;
         }
         char path[TOS_PATH_MAX];
-        resolve_path(upath, path, sizeof(path));
+        if (resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         /* Device nodes and the two device directories are not files.  Refuse
          * explicitly: letting littlefs answer "no such file" for something
          * `ls` just showed is the kind of error that reads as a bug. */
@@ -484,7 +510,10 @@ static regs_t *dispatch(regs_t *r)
             plat_frame_set_ret(r, (uint32_t)-1);
             return r;
         }
-        resolve_path(upath, path, sizeof(path));
+        if (resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         n = list_name_at(path, (uint32_t)req.index, name, (int)sizeof(name));
         if (n <= 0) {
             plat_frame_set_ret(r, 0);
@@ -561,7 +590,10 @@ static regs_t *dispatch(regs_t *r)
             return r;
         }
         char path[TOS_PATH_MAX];
-        resolve_path(upath, path, sizeof(path));
+        if (resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         uint32_t ptr = sc.a1;          /* struct stat * in user space */
         uint32_t size = 0;
         uint8_t  type = 0;
@@ -825,7 +857,10 @@ static regs_t *dispatch(regs_t *r)
             return r;
         }
         char path[TOS_PATH_MAX];
-        resolve_path(upath, path, sizeof(path));
+        if (resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
         /* The root always exists and is a directory; for anything else ask
          * path_stat, so "/dev" and "/proc" are enterable exactly when they
          * are listable (same helper, same answer). */
