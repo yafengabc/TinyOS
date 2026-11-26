@@ -93,6 +93,13 @@
 #include "board.h"
 #include "board_internal.h"
 #include "rp2350rv_memmap.h"
+/* Cold diagnostic printers: one out-of-line copy each.  At -O2 these
+ * were inlined into every call site - #56 measured the RP2350 board TU
+ * at 78.6 KiB against 19.1 KiB with the ten diag/early printers kept out
+ * of line, and that duplication is what makes the *default* image look
+ * large.  The trace strings stay; the copies do not. */
+#define DIAGFUNC __attribute__((noinline, cold))
+
 #include "rp2350_xosc.h"   /* XOSC is a chip fact shared with the ARM port */
 #include "console.h"
 #include "usb_cdc.h"
@@ -112,8 +119,8 @@
 
 static void wdt_feed(void);        /* defined with the RAM helpers below */
 static void wdt_enable(void);
-static void early_puts(const char *s);
-static void early_put_hex(uint32_t v);
+static DIAGFUNC void early_puts(const char *s);
+static DIAGFUNC void early_put_hex(uint32_t v);
 static uint32_t measure_clk_src_khz(uint32_t src);
 
 /* measure_clk_khz() is the common case: clk_sys itself. */
@@ -788,13 +795,13 @@ void plat_board_panic_poll(void)
         rom_enter_bootsel();
 }
 
-static void early_puts(const char *s)
+static DIAGFUNC void early_puts(const char *s)
 {
     while (*s)
         plat_console_putc(*s++);
 }
 
-static void early_put_hex(uint32_t v)
+static DIAGFUNC void early_put_hex(uint32_t v)
 {
     static const char hex[] = "0123456789abcdef";
     int i;
@@ -1314,7 +1321,7 @@ void plat_watchdog_feed(void)
 
 #if TOS_DIAG
 /* ---- flash-park / tick diagnostics ------------------------------------- */
-static void diag_kv(const char *k, uint32_t v)
+static DIAGFUNC void diag_kv(const char *k, uint32_t v)
 {
     early_puts(k);
     early_put_hex(v);

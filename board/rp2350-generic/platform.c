@@ -86,6 +86,13 @@
 #include "string.h"
 #include "cpu.h"
 #include "process.h"
+/* Cold diagnostic printers: one out-of-line copy each.  At -O2 these
+ * were inlined into every call site - #56 measured the RP2350 board TU
+ * at 78.6 KiB against 19.1 KiB with the ten diag/early printers kept out
+ * of line, and that duplication is what makes the *default* image look
+ * large.  The trace strings stay; the copies do not. */
+#define DIAGFUNC __attribute__((noinline, cold))
+
 
 /* Code that must run from SRAM: XIP is off inside the flash window, and an
  * instruction fetch then bus-faults.  The linker script copies
@@ -512,8 +519,8 @@ static void rom_stop_other_core(void);   /* defined with the flash helpers */
 static RAMFUNC void wdt_feed(void);       /* defined with the flash helpers */
 
 /* Used by pll_sys_init() long before their definitions. */
-static void early_puts(const char *s);
-static void early_put_hex(uint32_t v);
+static DIAGFUNC void early_puts(const char *s);
+static DIAGFUNC void early_put_hex(uint32_t v);
 static uint32_t measure_clk_src_khz(uint32_t src);
 
 static void rom_enter_bootsel(void)
@@ -1039,8 +1046,8 @@ int plat_gpio_drive_probe(uint32_t *out)
  * the tick, and the tick is exactly what stops when the machine wedges).
  * Called from the kernel's spin-wait loop, so the last line before the freeze
  * says what each core was doing. */
-static void diag_char(char c);        /* defined below */
-static void diag_str(const char *s);
+static DIAGFUNC void diag_char(char c);        /* defined below */
+static DIAGFUNC void diag_str(const char *s);
 TOS_NOINIT static uint32_t g_diag_poll_n;
 
 void plat_diag_poll(void)
@@ -1159,7 +1166,7 @@ void plat_boot_stage(uint32_t n)
 
 #if TOS_DIAG
 /* Straight to the PL011, bypassing the console ring. */
-static void diag_char(char c)
+static DIAGFUNC void diag_char(char c)
 {
     uint32_t spins;
 
@@ -1169,13 +1176,13 @@ static void diag_char(char c)
     mmio_write32(RP_UART_DR, (uint8_t)c);
 }
 
-static void diag_str(const char *s)
+static DIAGFUNC void diag_str(const char *s)
 {
     while (*s)
         diag_char(*s++);
 }
 
-static void diag_u32(uint32_t v)
+static DIAGFUNC void diag_u32(uint32_t v)
 {
     char b[12];
     int n = 0;
@@ -1230,7 +1237,7 @@ TOS_NOINIT static uint32_t g_stall_ctr[2];
 TOS_NOINIT static uint32_t g_stall_at[2];
 TOS_NOINIT static uint32_t g_stall_said;
 
-static void diag_hex(uint32_t v)
+static DIAGFUNC void diag_hex(uint32_t v)
 {
     static const char hex[] = "0123456789abcdef";
 
@@ -1238,7 +1245,7 @@ static void diag_hex(uint32_t v)
         diag_char(hex[(v >> i) & 0xfu]);
 }
 
-static void diag_kv(const char *k, uint32_t v)
+static DIAGFUNC void diag_kv(const char *k, uint32_t v)
 {
     diag_str(k);
     diag_u32(v);
@@ -1427,13 +1434,13 @@ static void rom_stop_other_core(void)
 #endif
 }
 
-static void early_puts(const char *s)
+static DIAGFUNC void early_puts(const char *s)
 {
     while (*s)
         plat_console_putc(*s++);
 }
 
-static void early_put_hex(uint32_t v)
+static DIAGFUNC void early_put_hex(uint32_t v)
 {
     static const char hex[] = "0123456789abcdef";
     for (int i = 28; i >= 0; i -= 4)
