@@ -1064,7 +1064,10 @@ SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
 - **RV32（Pico 2 Hazard3）**：还没验，板侧回头补。RV32 的泵镜像在
   `configs/rpi-pico2-rv32-usbpump.conf`，`/proc/ktask` 里看 `usbpump` 的 size/used。
 - **RP2040**：泵已迁到内核线程（`fc70612`，默认 kthreads + usb_pump），
-  真机按下面的清单跑；`usb_pump = false` 的回退镜像保留 tick 泵。
+  真机按下面的清单跑；`usb_pump = false` 的回退镜像保留 tick 泵（RV32 UP/SMP 已
+PASS，RP2040 与 Pico 2 ARM 的四个回退镜像在 #68）。运行时回退
+`TOS_USB_PUMP_FALLBACK`（线程创建失败后 tick 泵接管）还没有板测，也还没有
+一个干净的“制造失败”钩子。
   尚未迁移；它的 kthread 镜像照旧按下面的清单跑。
 
 S4 的 USB 泵是 ktask，**只在 RV32**（`__riscv`）：M33（Pico 2 ARM / ATK）和
@@ -1099,7 +1102,7 @@ M-profile 代理，不是 M33。
 **板级行的跟踪（2026-11-26）**：上面需要板子的项已拆成独立 issue，一项一项关闭——
 #60–#63（RP2350 四个镜像的 T4）、#64–#65（RP2040 两个镜像的 T4）、
 #66–#67（RP2040 的 T3：accept + kthreadtest + `/proc/ktask`）、
-#68（`usb_pump = false` 回退对照）、#69（RP2350 RV32 板上工具链）、
+#68（`usb_pump = false` 回退：RP2040 两镜像 + Pico 2 ARM 两镜像，RV32 UP/SMP 已有卡）、#69（RP2350 RV32 板上工具链）、
 #70（ATK 四镜像，非门槛）、#71（Pico 2 冷启动的 USB 重连取舍）。线程探针的清单仍以本节为准。
 
 ## 23. `tostest emu|emutest|bench` 指向退役的 C 模拟器（2026-11-26）**已解决**
