@@ -1,5 +1,11 @@
 # USB 泵：删除 tick 回退，创建失败直接 panic（2026-11-26）
 
+> **被取代（2026-11-26，`0252af9`）**：本卡记录的“删除 fallback”太彻底。现在
+> 默认仍是泵线程唯一 owner（失败 panic），但 fallback 作为**可选状态**保留：
+> `usb_pump_fallback = true`。见
+> [`2026-11-26-usb-pump-fallback-state-0252af9.md`](2026-11-26-usb-pump-fallback-state-0252af9.md)。
+
+
 ```text
 commit:            bcb89e5
 change:            三个端口删除 tick/idle 泵与 TOS_USB_PUMP_FALLBACK；usb_pump 不再是
