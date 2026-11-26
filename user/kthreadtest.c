@@ -411,6 +411,37 @@ static int probe_double_join(void)
     return fails;
 }
 
+/* /proc/cpuinfo says whether this port enforces user-memory protection.  The
+ * fault probe below writes to address 0 and expects the thread to die with
+ * 139; on a port with no MPU (RP2040) that store is allowed, so the probe
+ * would test an assumption the platform cannot satisfy.  Read the capability
+ * instead of guessing - and answer "on" when the file or the line is missing,
+ * so an unknown port keeps the strict check. */
+static int memprot_on(void)
+{
+    char buf[256];
+    char *p;
+    int fd, n;
+
+    fd = open("/proc/cpuinfo");
+    if (fd < 0)
+        return 1;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 1;
+    buf[n] = 0;
+    p = strstr(buf, "memprot");
+    if (!p)
+        return 1;
+    p = strchr(p, ':');
+    if (!p)
+        return 1;
+    while (*++p == ' ' || *p == '\t')
+        ;
+    return strncmp(p, "off", 3) != 0;
+}
+
 int main(int argc, char *argv[])
 {
     int code, tid, n, i;
@@ -683,12 +714,24 @@ int main(int argc, char *argv[])
 
     {
         int code = -1;
+        int prot = memprot_on();
 
         deadmutex = 0;
         tid = kthread_create(die_holding, 0, 4096);
         ok(tid > 0, "create a thread that dies holding a mutex");
-        ok(kthread_join(tid, &code) == 0 && code == 139,
-           "the holder died on its fault");
+        if (prot) {
+            ok(kthread_join(tid, &code) == 0 && code == 139,
+               "the holder died on its fault");
+        } else {
+            /* No MPU/PMP here: the store to address 0 is not a fault, so the
+             * thread exits normally.  Say so instead of pretending the probe
+             * ran; the half that matters on this port - a thread that goes
+             * away while holding a mutex must not pin it - is checked below
+             * and is not weakened. */
+            ok(kthread_join(tid, &code) == 0,
+               "join the thread that wrote to address 0 (memprot: off)");
+            printf("kthreadtest: N/A the holder died on its fault (memprot: off)\n");
+        }
         ok(kmutex_try(&deadmutex) == 1, "a dead holder released the mutex");
         kmutex_unlock(&deadmutex);
     }

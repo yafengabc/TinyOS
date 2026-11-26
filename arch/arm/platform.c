@@ -440,6 +440,16 @@ regs_t *arm_handle_tick(regs_t *f)
 
 /* ---- boot ------------------------------------------------------------ */
 
+/* Cortex-M0+ (RP2040) has no MPU at all; the M3/M33 ports program one. */
+int plat_has_memprot(void)
+{
+#if defined(TOS_ARM_M0P) || defined(TOS_ARM_NO_MPU)
+    return 0;
+#else
+    return 1;
+#endif
+}
+
 void plat_early_init(void)
 {
     plat_board_early();

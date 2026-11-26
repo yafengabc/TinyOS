@@ -14,4 +14,11 @@
  * to the hart that owns it; the scheduler will not pick it anywhere else. */
 void plat_start_tasks(void);
 
+/* Does this port enforce user-memory protection (MPU/PMP)?  The weak default
+ * is 0: a port that cannot answer is assumed to have none, which is the
+ * conservative answer for a test that expects a fault.  RP2040 (Cortex-M0+)
+ * returns 0; the ARM M3/M33 ports and the RISC-V PMP ports return 1.
+ * /proc/cpuinfo exposes it as "memprot: on|off". */
+int plat_has_memprot(void);
+
 #endif /* TINYOS_PLAT_TASKS_H */

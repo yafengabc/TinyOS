@@ -303,6 +303,8 @@ static uint32_t fmt_cpuinfo(char *b, uint32_t cap)
     off = put(b, cap, off, "board\t\t: %s\n", plat_board_name());
     off = put(b, cap, off, "cpus\t\t: %d\n", n);
     off = put(b, cap, off, "tick Hz\t\t: %u\n", plat_tick_hz());
+    off = put(b, cap, off, "memprot\t\t: %s\n",
+              plat_has_memprot() ? "on" : "off");
     return off;
 }
 #endif

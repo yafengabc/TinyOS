@@ -60,6 +60,9 @@ __attribute__((weak)) void plat_start_tasks(void)
 {
 }
 
+/* No answer means "no protection": see kernel/plat/tasks.h. */
+__attribute__((weak)) int plat_has_memprot(void) { return 0; }
+
 void kmain(void)
 {
     plat_early_init();

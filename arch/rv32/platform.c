@@ -213,6 +213,13 @@ static void pmp_deny_user(void)
     __asm__ volatile("csrw pmpcfg3, zero");
 }
 
+/* Every RISC-V port programs PMP per task (pmp_deny_user() at boot, then
+ * plat_task_protect()), so U-mode access outside the window faults. */
+int plat_has_memprot(void)
+{
+    return 1;
+}
+
 void plat_early_init(void)
 {
     plat_board_early();
