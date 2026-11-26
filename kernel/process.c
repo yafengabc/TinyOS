@@ -158,7 +158,7 @@ enum {
  * descriptor table and the working directory are per process and live here;
  * a thread points at its process with t->proc and owns none of it.  Before
  * this, every slot carried copies of fds (MAX_FDS * sizeof(file_t)) and cwd
- * (TOS_PATH_MAX) that only a process leader could legally use - most of a
+ * (TOS_PATH_MAX) that only a process could legally use - most of a
  * slot on the small ports and pure cost for a worker.
  *
  * The two tables are independent: procs[] is indexed by its own scan and a
@@ -3538,7 +3538,7 @@ int process_thread_create(uint32_t entry, uint32_t arg,
         return -1;
     /* A process that is already exiting must not gain a thread: the new
      * slot would point at a window that is about to be retired.  The check
-     * is repeated under the lock at publish time, because the leader can
+     * is repeated under the lock at publish time, because the main thread can
      * start leaving while this one is being built. */
     if (main->proc->state != PROC_LIVE || main->state == ST_DYING)
         return -1;
@@ -3583,7 +3583,7 @@ int process_thread_create(uint32_t entry, uint32_t arg,
 
     irq = plat_spin_lock_irqsave(&proc_lock);
     if (p->proc->state != PROC_LIVE || main->state == ST_DYING) {
-        /* The leader started exiting while this thread was being built.
+        /* The main thread started exiting while this thread was being built.
          * Give the slot back - nothing reads it while it is FREE - and
          * refuse: the process's window is on its way out. */
         proc_retire_locked(p);

@@ -76,9 +76,14 @@ func TestBoardUserExcludes(t *testing.T) {
 	// The generic baselines claim no panel, so the display programs are out
 	// there; the ATK boards compile the panel driver and keep them.
 	generic := append(append([]string{}, wifi...), "screen", "lcdconsole", "splash", "fb")
+	// The rp2350 chip baseline keeps a 300 KiB filesystem.  With kthreads and
+	// the USB pump on by default (docs/PROC-THREAD-MODEL.md) the three kthread
+	// test programs no longer fit there; the board images have room and keep
+	// them.
+	baseline := append(append([]string{}, generic...), "kthreadtest", "threadbench", "prodcons")
 	want := map[string][]string{
 		"rpi-pico":           append(append([]string{}, wifi...), "prot"),
-		"rp2350-generic":     generic,
+		"rp2350-generic":     baseline,
 		"rp2350rv-generic":   generic,
 		"atk-dnr2350am":      wifi,
 		"atk-dnr2350am-rv32": wifi,

@@ -5739,3 +5739,31 @@ CDC 正常、心跳 **6/6**（连 ARM 单核才有的 #46 截断都没有）、`
 heartbeat 6/6、CSC 3/3，两个 SMP 镜像 smptest 11/11、dd 200/200、
 smpbench 2.05x / 2.00x、reboot 20/20，ARM 侧 `shpr1=0x00404040`。Pico 2 的
 完整矩阵见 `docs/acceptance/2026-11-24-pico2-matrix-05a0e18.md`。
+
+## 108. 2026-11-26 进程（资源）/线程（调度）模型：E1–E4 落地
+
+分支 `exp/thread-sched` 用两表替换了旧任务模型：`procs[]` 只装资源（窗口/堆/brk、
+fds、cwd、身份），`threads[]` 是唯一的调度单位，`current` 是线程，内核线程是
+`proc == NULL` 的线程。设计依据与每个阶段的实测在
+`docs/PROC-THREAD-MODEL.md`，每次运行的摘要和命令在 `docs/acceptance/`。
+
+- **E1a** `2f8b49a`：窗口/堆/brk 搬进进程块；线程不再为资源付槽位。
+- **E1b** `948d5b6` + `fd16196`：拆两表；身份（pid/name/parent/exit/live/stop/lag）
+  搬进 `proc`；`wait()` 交给真正等待的线程；SIGSTOP/CONT 作用于进程；内核线程名
+  进栈池。
+- **E2** `9f41f18` + `f6949ab` + `35f0118`：ps 加 `tid` 与 `/proc/threads`；
+  线程槽只留线程自己的东西（`wait_child`/`join_tid`、`proc->main`、删除
+  `is_ktask`）；`proc->state` 换成 FREE/NEW/LIVE/DYING 状态机并加断言。
+- **E3** `238d381` + `22ebd16` + `092b831`：ARM 内核线程跑在特权 Thread mode 与
+  自己的 PSP 栈上（帧内 `priv` 位），SVC 路由到 ktask syscall，tick 不抢占；RP2350
+  的 USB 泵迁到内核线程；栈按请求从 arena 分配（512 B 粒度）。
+- **E4**：旧模型残留清扫（`leader`/`is_ktask`/`wait_pid`/`proc_res` 全部消失）；
+  RP2350 板级默认 `kthreads + usb_pump`（`c33d897`，四镜像板测见
+  `2026-11-26-kthreads-usb-pump-default-pico2-c33d897.md`）；`rp2350-generic`
+  的 300 KiB 文件系统装不下三个线程测试程序，改为不打包（构建与测试同步）。
+
+评审提的三个线程退出缺陷（SMP 管道死锁、double-join、退出中创建线程）在
+`a957cbd` 修复；`#59 B` 的超长路径静默截断在 `a004448` 修复。
+
+表空间的代价是实测的：默认 16 进程时 .bss 比 main 多 3.2–6.0 KiB（
+`docs/PROC-THREAD-MODEL.md` §3），线程槽从 712/648 B 降到 256/192 B。
