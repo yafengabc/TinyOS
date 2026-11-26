@@ -1112,3 +1112,24 @@ M-profile 代理，不是 M33。
 修它需要按当前镜像逐条核对输出（不是改三行数字），并且 reboot 那条要单独决定
 （模拟器的复位路径）。在那之前：**不要把 emutest 的 WARN/FAIL 当 C3 回归**，
 C3 的判据仍然是 `scripts/esp-c3/accept.py`（42/42）+ `kthreadtest`。
+
+## 24. rv32 QEMU：`wheap` 在 `a004448` 之后挂死（2026-11-26）
+
+同一份 `build/kernel-rv32.elf`，只切换 `kernel/syscall.c` 做 A/B：
+
+- `a004448`（超长路径改为拒绝）：`wheap` 无任何输出，15 s 不回提示符；
+  `python scripts/soak.py --targets rv32` 因此整轮失败——`wheap` 是 cycle 里第一条
+  批量命令，它一挂，后面 27 条命令全部被吞（`piperace ok 0/3`、`protection faults 0`、
+  `deep ran 1/3` 都是这个原因，不是各自的问题）。
+- `a004448^`（旧 resolver）：`wheap: 12 KiB declared, 12 KiB taken, pattern intact`，
+  提示符正常返回。
+
+所以不是 RP2350 默认 features 那一轮引入的：改动文件里没有 rv32 路径，而且回退一个
+文件就恢复。`rv32smp` 与 `arm` 的同一轮 soak 都通过，说明是 rv32 单目标特有的路径。
+
+与 §18 不是同一件事：§18 是 `threadbench` 在 **kthreads 配置**下挂，这里 `wheap` 在
+默认配置下挂。
+
+没做的事：没看 `wheap` 具体用了哪些路径 syscall、没确认 `resolve_path()` 返回 -1 之后
+哪个调用点进了死循环。`a004448` 的提交说明里写 soak 3/3，与这里矛盾，先怀疑两边
+镜像/工具链差异，但 A/B 在同一台机器上是稳定的。
