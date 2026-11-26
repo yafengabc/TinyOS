@@ -1053,8 +1053,10 @@ SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
 **状态（2026-11-26）**：E3 已把 ARM 内核线程做成可用的执行上下文（特权 Thread mode +
 每线程 PSP 栈，`238d381`），泵镜像为 `configs/rpi-pico2-usbpump.conf`。
 
-- **M33（Pico 2 ARM）**：板侧已复验（2026-11-26）。命令、镜像和日志待补进
-  `docs/acceptance/` 的卡；在那之前这里不写 PASS 细节。
+- **M33（Pico 2 ARM）**：板侧已复验（2026-11-26），证据与结果在
+  `docs/acceptance/2026-11-26-e3-usbpump-m33-09da1cd.md`
+  （`/proc/ktask 4096 248 248 usbpump`、三个退出探针、smpbench 2.00x、
+  threadbench 57%、26,502 B rcc 两轮一致、crash ×5）。
 - **RV32（Pico 2 Hazard3）**：还没验，板侧回头补。RV32 的泵镜像在
   `configs/rpi-pico2-rv32-usbpump.conf`，`/proc/ktask` 里看 `usbpump` 的 size/used。
 - **RP2040**：泵还在 tick 里（不是 `g_idle_poll`），且需要“一槽/更小池”的构建旋钮，
