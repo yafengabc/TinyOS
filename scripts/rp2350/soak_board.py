@@ -12,6 +12,12 @@ heap's peak watermark.
 
     scripts/rp2350/soak_board.py COM14 8 [log]
     scripts/rp2350/soak_board.py -p COM19 -n 20 --image rpi-pico2-smp
+    scripts/rp2350/soak_board.py -p COM19 -m 30 --image rpi-pico2-smp
+
+`-n` counts cycles, `-m` runs for wall-clock minutes.  T4 uses `-m 30`: a cycle
+takes a different number of seconds on each board, so "20 cycles" is a
+different amount of stress on a Pico 2 than on an RP2040; the same 30 minutes
+is comparable across the six images (docs/TESTING.md section 6).
 
 Both boards run the same cycle.  The list is filtered against `ls /bin` first,
 so a program this image does not carry is skipped with a note instead of
@@ -36,12 +42,15 @@ ap.add_argument("-n", "--cycles", dest="cycles_opt", type=int, metavar="N",
                 default=None)
 ap.add_argument("-l", "--log", dest="log_opt", metavar="FILE", default=None)
 ap.add_argument("--image", default="", help="label for the log, e.g. rpi-pico2-smp")
+ap.add_argument("-m", "--minutes", type=float, default=0.0, metavar="MIN",
+                help="run for MIN minutes instead of a cycle count (0 = use -n)")
 ap.add_argument("--no-filter", action="store_true",
                 help="send every command, even ones this image may not carry")
 args = ap.parse_args()
 
 PORT = args.port_opt or args.port or "COM14"
 CYCLES = args.cycles_opt or args.cycles or 8
+MINUTES = args.minutes
 LOG = args.log_opt or args.log or "build/soak-board.log"
 IMAGE = args.image or PORT
 
@@ -163,12 +172,23 @@ for ln in free_before.strip().splitlines():
 
 deep_ok = race_ok = 0
 died = None
-for c in range(CYCLES):
+deadline = (T0 + MINUTES * 60.0) if MINUTES > 0 else None
+c = 0
+while True:
+    # A wall-clock run is what makes the six images comparable: a cycle on the
+    # Pico 2 is not the same number of seconds as one on the RP2040, so "20
+    # cycles" means different amounts of stress on each board.
+    if deadline is not None:
+        if time.time() >= deadline:
+            break
+    elif c >= CYCLES:
+        break
+    c += 1
     for cmd in cycle:
         try:
             t = run(cmd)
         except serial.SerialException as e:
-            died = "cycle %d, command %r: %r" % (c + 1, cmd, e)
+            died = "cycle %d, command %r: %r" % (c, cmd, e)
             break
         low = t.lower()
         if cmd == "deep 3":
@@ -178,11 +198,17 @@ for c in range(CYCLES):
             if "piperace: ok" in low:
                 race_ok += 1
         if "kernel panic" in low or "system halted" in low:
-            died = "cycle %d, command %r: panic in output" % (c + 1, cmd)
+            died = "cycle %d, command %r: panic in output" % (c, cmd)
             break
     if died:
         break
-    say("cycle %d/%d done  deep=%d piperace=%d" % (c + 1, CYCLES, deep_ok, race_ok))
+    if deadline is not None:
+        left = max(0.0, deadline - time.time())
+        say("cycle %d done  deep=%d piperace=%d  %.0fs left"
+            % (c, deep_ok, race_ok, left))
+    else:
+        say("cycle %d/%d done  deep=%d piperace=%d"
+            % (c, CYCLES, deep_ok, race_ok))
 
 free_after = run("free") if not died else ""
 ps = run("ps") if not died else ""
@@ -201,14 +227,19 @@ if len(rows) < 2:
     problems.append("could not parse both free reports")
 elif rows[0] != rows[-1]:
     problems.append("free drifted %s -> %s" % (rows[0], rows[-1]))
-if deep_present and deep_ok < CYCLES:
-    problems.append("deep 3 grew the stack %d/%d times" % (deep_ok, CYCLES))
-if race_present and race_ok < CYCLES:
-    problems.append("piperace ok %d/%d" % (race_ok, CYCLES))
+ran = c if deadline is not None else CYCLES
+if deep_present and deep_ok < ran:
+    problems.append("deep 3 grew the stack %d/%d times" % (deep_ok, ran))
+if race_present and race_ok < ran:
+    problems.append("piperace ok %d/%d" % (race_ok, ran))
 
 say("")
-say("%-24s %s  (%d cycles, %d commands)" %
-    (IMAGE, "PASS" if not problems else "FAIL", CYCLES, len(cycle)))
+if deadline is not None:
+    say("%-24s %s  (%.0f min, %d cycles, %d commands)" %
+        (IMAGE, "PASS" if not problems else "FAIL", MINUTES, c, len(cycle)))
+else:
+    say("%-24s %s  (%d cycles, %d commands)" %
+        (IMAGE, "PASS" if not problems else "FAIL", CYCLES, len(cycle)))
 for p in problems:
     say("    " + p)
 for ln in (ps + uptime).strip().splitlines()[-6:]:

@@ -398,21 +398,25 @@ RP2350 与 RP2040 的 T4 **按镜像算**：RP2350 的四个镜像（`rpi-pico2`
 （`rpi-pico`、`rpi-pico-smp`）每个都要有自己的 T4 结果行。ARM/RV32、UP/SMP 之间
 不能互相顶替：ISA 不同、调度路径不同、`dd` 落的是各自板上的 flash。
 
+每块板都是 **30 分钟墙钟**（`soak_board -m 30`），不是固定圈数：一圈在 Pico 2 和
+RP2040 上的秒数不同，`-n 20` 在两个板子上代表的压力不是一个量级；30 分钟才让六行
+可比，也和 C3 的 `--minutes 30` 对齐。
+
 ```sh
-# RP2350（Pico 2）四镜像：每个 dd 100 轮 + soak 20 轮
+# RP2350（Pico 2）四镜像：每个 30 分钟浸泡 + dd 100 轮
 for img in rpi-pico2 rpi-pico2-smp rpi-pico2-rv32 rpi-pico2-rv32-smp; do
   python scripts/rp2350/dd_stress.py -p COM19 --target "$img" --rounds 100
-  python scripts/rp2350/soak_board.py -p COM19 -n 20 --image "$img"
+  python scripts/rp2350/soak_board.py -p COM19 -m 30 --image "$img"
 done
 
-# RP2040 两镜像：soak 20 轮 + accept.py 全项复跑（板载 CDC，2e8a:000a）
-python scripts/rp2350/soak_board.py -p COM17 -n 20 --image rpi-pico
+# RP2040 两镜像：每个 30 分钟浸泡 + accept.py 全项复跑（板载 CDC，2e8a:000a）
+python scripts/rp2350/soak_board.py -p COM17 -m 30 --image rpi-pico
 python scripts/rp2040/accept.py -p COM17 --dtr
-python scripts/rp2350/soak_board.py -p COM17 -n 20 --image rpi-pico-smp
+python scripts/rp2350/soak_board.py -p COM17 -m 30 --image rpi-pico-smp
 python scripts/rp2040/accept.py -p COM17 --dtr
 
-# ATK（不是关闭门槛；有板就记，四镜像同样逐个）
-python scripts/rp2350/soak_board.py COM17 100 build/soak-board.log
+# ATK（不是关闭门槛；有板就记，四镜像同样逐个，同样 30 分钟）
+python scripts/rp2350/soak_board.py COM17 -m 30 --image atk-dnr2350am-smp
 
 # C3 flash/窗口
 python scripts/esp-c3/soak.py -p COM4 --minutes 30
@@ -423,8 +427,8 @@ python scripts/soak.py --cycles 8 --targets rv32,rv32smp,arm
 
 `soak_board.py` 的循环只依赖 shell 的 `free` / `ls /bin`，并且先按 `ls /bin` 过滤
 命令，所以 RP2040 也能用；万一某块板跑不起来，替代方案是把该镜像的
-`scripts/rp2040/accept.py` 连跑 5 遍，并在验收卡里写明为什么用替代方案——
-**不能因此把这一行留成 `NOT RUN` 就关闭**。
+`scripts/rp2040/accept.py` 连跑 5 遍（累计时间不得少于 30 分钟），并在验收卡里写明
+为什么用替代方案——**不能因此把这一行留成 `NOT RUN` 就关闭**。
 
 判定：`free` 前后的 kernel heap/free 和 tasks 数字只允许峰值水位变化；出现一次窗口未归还、段陈旧或 `free` 漂移就是失败。每块板/每个镜像的结果单独一行，不许合并成「Pico 2 已通过」。
 
