@@ -902,7 +902,13 @@ func (b *Builder) writeBuildConfig() error {
 		}
 		return d
 	}
-	opt := b.Opt
+	// The environment wins over the config, exactly as in the compiler flags,
+	// so the artifact records the opt that was actually used (a TOS_OPT=-Oz
+	// image used to claim -O2 here).
+	opt := os.Getenv("TOS_OPT")
+	if opt == "" {
+		opt = b.Opt
+	}
 	if opt == "" {
 		opt = b.Target.Opt
 	}
@@ -974,7 +980,9 @@ func (b *Builder) writeBuildConfig() error {
 	// choice (see Target.Opt).  The effective value is already in `opt`;
 	// this only records which layer supplied it.
 	optSrc := "built-in:-O2"
-	if b.Opt != "" {
+	if os.Getenv("TOS_OPT") != "" {
+		optSrc = "TOS_OPT:" + os.Getenv("TOS_OPT")
+	} else if b.Opt != "" {
 		optSrc = "config:" + cfgName
 	} else if b.Target.Opt != "" {
 		optSrc = targetSrc
