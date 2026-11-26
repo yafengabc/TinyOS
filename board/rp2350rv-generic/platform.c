@@ -2218,17 +2218,23 @@ void plat_start_tasks(void)
 
     if (!g_usb_ready)
         return;
+
+    /* Strict by default: the thread is the only owner of the controller, so
+     * the idle/deferred hooks are cleared before the attempt, not after it.
+     * Keeping them as a fallback would keep the console answering when the
+     * thread never started, which looks exactly like a pass on a board test.
+     * An image that must survive a missing pool slot opts in with
+     * TOS_USB_PUMP_FALLBACK. */
+#ifndef TOS_USB_PUMP_FALLBACK
+    g_idle_poll = NULL;
+#endif
+
     pid = process_ktask_create("usbpump", usb_pump_task, NULL, 4096, 0, 0);
     if (pid < 0) {
-        /* Keeping the old hooks is the safe fallback: the board still works,
-         * it just pays the trap-exit/idle pump again. */
-        kprintf("[usb] pump thread not started; keeping the polled hooks\n");
+        kprintf("[usb] pump thread NOT started (no slot or stack)\n");
         return;
     }
-    /* One owner.  The idle/deferred hook existed because the state machine
-     * had to run outside interrupt context; the thread is that context now,
-     * and leaving both would just make the reentrancy guard bounce. */
-    g_idle_poll = NULL;
+    g_idle_poll = NULL;             /* one owner: the guard would bounce */
     kprintf("[usb] pump thread pid %d on cpu 0\n", pid);
 }
 #endif
