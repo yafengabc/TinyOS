@@ -31,6 +31,15 @@ CORE_STRICT = [
     "float3", "fmt", "fold", "funcs", "mixed", "mod", "ops", "sa3", "sb3",
     "sieve3", "str", "strings2", "struct3",
 ]
+# Cases that only exist as host-compiled images.  --source runs the board's own
+# csc and rcc, and these two are past the on-board budgets by design:
+#   bigbody: ~450 AST nodes, on-board csc is NODE_MAX 256 (OPEN-ITEMS 12.1)
+#   hugeir: 59 KiB of RIR2, on-board rcc is RIR_MAX 40 KiB (OPEN-ITEMS 12.2)
+# They stay covered by the precompiled run (--set all without --source).
+SOURCE_HOST_ONLY = {
+    "bigbody": "csc NODE_MAX 256 < ~450 AST nodes (OPEN-ITEMS 12.1)",
+    "hugeir": "rcc RIR_MAX 40 KiB < 59 KiB (OPEN-ITEMS 12.2)",
+}
 CORE_EYEBALL = ["capture1", "dir1", "exec1", "file1", "native"]
 EXTRA_STRICT = [
     "bigbody", "bigswitch", "cmp2", "floatfold", "flow", "flow2", "globals2",
@@ -168,6 +177,9 @@ def main():
     try:
         emit(con.read_until_prompt(args.timeout))
         for name in strict:
+            if args.source and name in SOURCE_HOST_ONLY:
+                emit("INFO  %-12s host-only: %s" % (name, SOURCE_HOST_ONLY[name]))
+                continue
             if args.source:
                 # One program, three stages: csc -> rvm, rcc -> native run.
                 rir = "/t1-" + name + ".rir"
