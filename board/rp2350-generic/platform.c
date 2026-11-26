@@ -294,7 +294,6 @@ static uint32_t g_clk_hz;
  * returns 0 (mirrors the ESP32-C3 port's flash_detect_from_rom()). */
 static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
 {
-    uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
     uint32_t id, spins = 0;
     /* Fail fast.  This runs inside the XIP-off window, before the tick exists
@@ -356,7 +355,10 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
                 break;
         if (spins == bound)
             break;
-        mmio_write32(QMI_DIRECT_TX, tx[i]);
+        /* The opcode is an immediate on purpose: an initialised local array
+         * becomes .L__const...tx in flash under -Os/-Oz, and this loop runs
+         * with XIP off, so reading it faults (issue 73). */
+        mmio_write32(QMI_DIRECT_TX, i == 0u ? 0x9fu : 0x00u);
         for (spins = 0; spins < bound; spins++)
             if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY))
                 break;

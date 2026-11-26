@@ -269,7 +269,6 @@ static RAMFUNC uint32_t qmi_spin_limit(void)
 
 static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
 {
-    uint8_t tx[5] = {0x9fu, 0x00u, 0x00u, 0x00u, 0x00u};
     volatile uint8_t rx[5];
     uint32_t id, spins = 0;
     const uint32_t bound = qmi_spin_limit();
@@ -300,7 +299,9 @@ static RAMFUNC uint32_t rp2350_flash_detect_jedec(void)
                 break;
         if (spins == bound)
             break;
-        mmio_write32(QMI_DIRECT_TX, tx[i]);
+        /* Immediate, not a local array: -Os/-Oz put {0x9f,0,0,0,0} in
+         * .rodata, and this loop runs with XIP off (issue 73). */
+        mmio_write32(QMI_DIRECT_TX, i == 0u ? 0x9fu : 0x00u);
         for (spins = 0; spins < bound; spins++)
             if (!(mmio_read32(QMI_DIRECT_CSR) & QMI_DIRECT_CSR_RXEMPTY))
                 break;
