@@ -869,6 +869,10 @@ TestPinnedToolchainSources ./...` 全绿，所以影响面仅限这一对一致�
 
 ## 17. x86 镜像超出 300 KiB（2026-11-25，pre-existing）
 
+**已解决（2026-11-26，`fc20ca6`）**：PC 镜像的 littlefs 从 75 块/300 KiB
+增到 113 块/452 KiB（`ramdisk_sectors` 904、`PLAT_LFS_BLOCKS` 113），
+18 个目标全部可构建；x86 在 QEMU 里起机并通过 smoke。下面的原始记录保留。
+
 `go run ./cmd/tos build all` 现在是 **17/18**：`x86` 在 `MKFS` 阶段报
 `lfs.c:691: No more free space`（`image already at the 307200-byte partition`）。
 在**未含本次 RP2040 改动**的 HEAD 上同样失败，所以不是这次引入的；`docs/CI.md` §8
