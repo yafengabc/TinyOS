@@ -1182,3 +1182,9 @@ rv32     PASS  tasks      20054016     19584  (3 cycles)
 `build/kernel-rv32.elf` 上跑 `wheap` 与 soak 都通过，所以原 A/B 很可能跑在未重新链接的
 旧镜像或另一棵树上。板侧若能给出当时 `build/build-config.txt` 与镜像的 sha256，
 可以再对一次；在那之前本条按“未复现”记录，不加代码改动。
+
+**板侧复核（2026-11-26，`2a9a69a`）**：不复现。`wheap` 正常返回
+`12 KiB declared, 12 KiB taken, pattern intact`，`soak.py --cycles 3 --targets rv32`
+3/3 PASS。本机早先那次 A/B 的 soak 跑了 8:48，本轮串行只用了 1:27——当时与板测的
+dd/heartbeat/reboot 并行，QEMU TCG 的 15 s 命令窗口被挤爆是可能的解释。按"未复现"
+结案，不加代码改动；证据在 `docs/acceptance/2026-11-26-issue46-thread-matrix-pico2-2a9a69a.md`。
