@@ -1059,7 +1059,8 @@ SMP 的回归用例是 `configs/rv32smp-ktasktest.conf`；泵的板测用
   threadbench 57%、26,502 B rcc 两轮一致、crash ×5）。
 - **RV32（Pico 2 Hazard3）**：还没验，板侧回头补。RV32 的泵镜像在
   `configs/rpi-pico2-rv32-usbpump.conf`，`/proc/ktask` 里看 `usbpump` 的 size/used。
-- **RP2040**：泵还在 tick 里（不是 `g_idle_poll`），且需要“一槽/更小池”的构建旋钮，
+- **RP2040**：泵已迁到内核线程（`fc70612`，默认 kthreads + usb_pump），
+  真机按下面的清单跑；`usb_pump = false` 的回退镜像保留 tick 泵。
   尚未迁移；它的 kthread 镜像照旧按下面的清单跑。
 
 S4 的 USB 泵是 ktask，**只在 RV32**（`__riscv`）：M33（Pico 2 ARM / ATK）和
