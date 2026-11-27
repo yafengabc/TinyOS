@@ -273,7 +273,14 @@ static void print_prompt(void)
  * rules as open(), "bin/ls" from /tests would mean /tests/bin/ls. */
 static int spawn(char *argv[], int argc)
 {
-    return exec(argv[0], argv, argc);
+    int pid = exec(argv[0], argv, argc);
+
+    /* Not a program of its own: an applet in /bin/tools, dispatched on
+     * argv[0] (still the typed name).  The kernel only prints a not-found
+     * for explicit paths, so this retry does not shout first. */
+    if (pid < 0)
+        pid = exec("/bin/tools", argv, argc);
+    return pid;
 }
 
 static int run_program(char *argv[], int argc, int bg)

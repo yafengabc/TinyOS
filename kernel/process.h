@@ -96,7 +96,8 @@ regs_t  *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len);
 
 /* Spawn a child and return its pid; the caller keeps running and uses
  * wait() to collect the exit code. */
-int      process_exec(regs_t *r, const char *path, char *const argv[], int argc);
+int      process_exec(regs_t *r, const char *path, char *const argv[], int argc,
+                        int report_not_found);
 
 int      process_current_pid(void);
 int      process_current_is_kernel(void);

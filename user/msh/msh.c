@@ -217,7 +217,15 @@ static int spawn(char *argv[], int argc)
      * otherwise, and `run ./prog` / `run sub/prog` work as written.  Keeping
      * the order in the kernel gives scripts and ordinary programs the same
      * answer as the prompt. */
-    return exec(argv[0], argv, argc);
+    int pid = exec(argv[0], argv, argc);
+
+    /* A name that is not a program of its own is an applet in /bin/tools;
+     * argv[0] stays the typed name so the binary dispatches on it.  The
+     * kernel keeps the not-found message for explicit paths only, which is
+     * why this retry is silent. */
+    if (pid < 0)
+        pid = exec("/bin/tools", argv, argc);
+    return pid;
 }
 
 static int run_script(const char *path);

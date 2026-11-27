@@ -2581,7 +2581,7 @@ uint32_t process_execfmt_text(char *buf, uint32_t cap)
 }
 
 static thread_t *proc_create_claim(const char *path, char *const argv[], int argc,
-                                 int claim)
+                                 int claim, int report)
 {
     uint32_t raw_size = 0;
     lz4_window_hint_t hint = {0, 0, 0};
@@ -2602,7 +2602,11 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
         }
     }
     if (!cfmt) {
-        kprintf("exec: '%s' not found or not a loadable program\n", path);
+        /* An explicit path is a caller's error worth printing.  A bare name
+         * is resolved by the caller (the shell tries the cwd, /bin and then
+         * /bin/tools), so printing here would fire before its fallback. */
+        if (report)
+            kprintf("exec: '%s' not found or not a loadable program\n", path);
         return NULL;
     }
 
@@ -2903,12 +2907,14 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
     return p;
 }
 
-static thread_t *proc_create(const char *path, char *const argv[], int argc)
+static thread_t *proc_create(const char *path, char *const argv[], int argc,
+                             int report)
 {
-    return proc_create_claim(path, argv, argc, 0);
+    return proc_create_claim(path, argv, argc, 0, report);
 }
 
-int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
+int process_exec(regs_t *r, const char *path, char *const argv[], int argc,
+                 int report)
 {
     if (!current)
         return -1;
@@ -2922,7 +2928,7 @@ int process_exec(regs_t *r, const char *path, char *const argv[], int argc)
         return -1;
 #endif
 
-    thread_t *p = proc_create(path, argv, argc);
+    thread_t *p = proc_create(path, argv, argc, report);
     if (!p)
         return -1;
 
@@ -4599,7 +4605,7 @@ void process_start_shell(const char *path)
     /* Published already claimed: see proc_create_claim().  On an SMP build
      * the other core's idle loop is scanning for READY tasks from the moment
      * cpu_init() returns, and the shell must not be one of them. */
-    thread_t *p = proc_create_claim(path, NULL, 0, 1);
+    thread_t *p = proc_create_claim(path, NULL, 0, 1, 1);
     if (!p)
         panic("cannot load initial program '%s'", path);
 
