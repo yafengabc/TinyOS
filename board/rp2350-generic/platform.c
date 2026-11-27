@@ -623,7 +623,7 @@ static void clocks_init(void)
                  (CLK_PERI_CTRL_AUXSRC_CLK_SYS << 5));
 }
 
-/ * The 64-bit TIMER only counts while TICKS TIMER0 emits its 1 MHz tick:
+/* The 64-bit TIMER only counts while TICKS TIMER0 emits its 1 MHz tick:
  * TIMER0_CTRL.ENABLE plus TIMER0_CYCLES = clk_ref / 1 MHz (measured on the
  * Pico 2; the field is the divisor itself, not "count - 1").  The ROM sets
  * this up for its boot clock and releases TIMER0 from reset on a flash boot,
