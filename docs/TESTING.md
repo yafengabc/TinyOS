@@ -395,24 +395,22 @@ python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
 
 ## 6. T4：压力
 
-RP2350 与 RP2040 的 T4 **按镜像算**：RP2350 是 Pico 2 的四个镜像
-（`rpi-pico2`、`rpi-pico2-smp`、`rpi-pico2-rv32`、`rpi-pico2-rv32-smp`），
-RP2040 是 `rpi-pico`、`rpi-pico-smp`。两个端口都是 ARM/RV32、UP/SMP 全矩阵，
-因为 ISA 和核数是真正不同的代码路径；`dd` 负载会真的压到 flash。
+RP2350 与 RP2040 的 T4 **只跑 SMP 镜像**：Pico 2 的 `rpi-pico2-smp`（ARM）
+和 `rpi-pico2-rv32-smp`（Hazard3），RP2040 的 `rpi-pico-smp`。单核镜像
+（`rpi-pico2`、`rpi-pico2-rv32`、`rpi-pico`）不做 T4：同一 ISA 的代码路径由
+SMP 镜像覆盖，T3 的 `accept33` 已经跑过 dd/rm、窗口和段表检查。想额外看一眼
+单核，跑一次 `accept33` 就够，不要 30 分钟 soak。
 
 **时长分两档**：
 
-- **常规回归（每个发布）**：`soak_board -m 10`，每个镜像 10 分钟。10 分钟已经
-  覆盖窗口分配器、段表、栈边界的累积错误；Pico 2 与 RP2040 两块板可以并行，
-  墙钟约 40 分钟。
-- **调度器/内核代际验收（一次性）**：`-m 30`，只跑 SMP 镜像（Pico 2 的
-  `rpi-pico2-smp`、`rpi-pico2-rv32-smp`，RP2040 的 `rpi-pico-smp`）。仅在
-  调度器、锁、console、内存/flash 路径重写之后做一次，之后回到 10 分钟。
-  2026-11-27 这次（E1–E4 线程模型）就是代际验收，所以 #74–#77 用 30 分钟。
+- **常规回归（每个发布）**：`-m 10`。三个 SMP 镜像；Pico 2 两个串行 20 分钟，
+  RP2040 一个 10 分钟，两块板并行 → 墙钟约 20 分钟。
+- **调度器/内核代际验收（一次性）**：`-m 30`，同样只这三个镜像；在调度器、锁、
+  console、内存/flash 路径重写之后做一次。2026-11-27（E1–E4）是代际验收，所以
+  #75/#77 用 30 分钟。
 
 **ATK 不默认跑**：只有改动触及 `board/atk-*`、`board/rp2350-generic` 的
-LCD/TF/flash/引脚，或做一次大版本时，才跑 `atk-dnr2350am-smp` 一个镜像
-（时长同上：常规 10、代际 30）。ATK 的其它三个镜像由 T3 的 `accept33` 覆盖。
+LCD/TF/flash/引脚时才跑 `atk-dnr2350am-smp` 一个镜像（常规 10、代际 30）。
 
 **失败升级**：10 分钟里出现重启、panic 或 `free` 不匹配，升到 30 分钟复现，
 不算通过。**同一 RC 之后的提交**：只改文档/工具不重跑；改到上述路径只重跑受
@@ -422,19 +420,17 @@ LCD/TF/flash/引脚，或做一次大版本时，才跑 `atk-dnr2350am-smp` 一�
 `dd_stress`（soak 的 cycle 是 `deep/mem/wheap/piperace/...`，不含 dd）。
 
 ```sh
-# 常规回归：每个镜像 10 分钟；Pico 2 与 RP2040 可以并行
-for img in rpi-pico2 rpi-pico2-smp rpi-pico2-rv32 rpi-pico2-rv32-smp; do
+# 常规回归：三个 SMP 镜像，各 10 分钟；Pico 2 与 RP2040 可以并行
+for img in rpi-pico2-smp rpi-pico2-rv32-smp; do
   python scripts/rp2350/soak_board.py -p COM19 -m 10 --image "$img"
 done
+python scripts/rp2350/soak_board.py -p COM17 -m 10 --image rpi-pico-smp
+python scripts/rp2040/accept.py -p COM17 --dtr   # RP2040 的 T3 走板载 USB CDC（2e8a:000a）
 
-# 调度器/内核代际验收：SMP 镜像 30 分钟，一次
+# 调度器/内核代际验收：同样三个镜像，-m 30，一次
 python scripts/rp2350/soak_board.py -p COM19 -m 30 --image rpi-pico2-smp
 python scripts/rp2350/soak_board.py -p COM19 -m 30 --image rpi-pico2-rv32-smp
-
-# RP2040：两个镜像 10 分钟 + accept.py（走板子的 USB CDC，2e8a:000a）
-python scripts/rp2350/soak_board.py -p COM17 -m 10 --image rpi-pico
-python scripts/rp2350/soak_board.py -p COM17 -m 10 --image rpi-pico-smp
-python scripts/rp2040/accept.py -p COM17 --dtr
+python scripts/rp2350/soak_board.py -p COM17 -m 30 --image rpi-pico-smp
 
 # ATK：仅当板级/LCD/TF/flash 改动时，一个镜像
 python scripts/rp2350/soak_board.py COM17 -m 10 --image atk-dnr2350am-smp
