@@ -86,6 +86,8 @@ exclude = ping,net,dhcp
 - `[wifi]` supplies the Espressif blob directory, the ROM symbol linker
   script and the symbol that keeps `wifi_probe` alive.
 - `[user] exclude` drops named `user/*.c` programs or `user/<dir>` programs.
+  `msh` is frozen in `internal/build` (sh is the shell, kernel/main.c starts
+  `/bin/sh`) and is never packed, so it cannot be re-added with a config.
 - `[sources] exclude` drops individual kernel/driver source paths.
 - `[ld] extra` appends free-form linker flags.
 

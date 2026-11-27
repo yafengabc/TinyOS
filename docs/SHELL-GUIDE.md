@@ -8,7 +8,7 @@
 tos> help
 TinyOS help
 
-Shell builtins (sh and msh):
+Shell builtins (sh):
   cd [dir]           change directory (default /); pwd prints it
   echo [args...]     print arguments
   history            list recent commands (up/down recalls them)
@@ -23,11 +23,12 @@ Shell builtins (sh and msh):
   exit [code]        shut TinyOS down (end the script, in a script)
 
 Tools in /bin/tools (also `tools <name>`):
-  cat cp dd df du echo flashinfo free grep head help kill mkdir rmdir stat tail tee uptime wc wfile
+  cat cp dd df du echo flashinfo free grep head kill mkdir rmdir stat tail tee uptime wc wfile
 
 Programs in /bin:
-  ls edit reboot gpio adc spi i2c pwm uart fb screen splash
+  ls edit help reboot gpio adc spi i2c pwm uart fb screen splash
   lcdconsole smp ping host net http dhcp wificonn wifiscan ...
+  msh is frozen and not in a default image (sh is the shell)
 
 Files, devices and pipes:
   cat /proc/ps       the task table as a file
@@ -37,7 +38,7 @@ Files, devices and pipes:
   A | B              send A's stdout to B's stdin
   run sh <file>      run a script as a task
 
-Script syntax (sh only; msh runs programs, pipes and variables):
+Script syntax (sh):
   name=text          set a variable (also `name=$(prog args)`)
   incr name [n]      add n (default 1) to an integer variable
   $name  ${name}  $? text substitution; $(prog) captures stdout
@@ -51,10 +52,13 @@ Line editing: ^A/^E home/end, ^U kill line, ^K kill to end,
 
 命令分三类：**内建**（`cd`、`pwd`、`rm`、`ps`、`exit`、`source`、`run`、
 `nice`、`prio`，以及脚本用的 `incr`、`true`、`false`）、**脚本内内建 +
-控制台/后台程序**（`echo`、`sleep`）和**程序**（`bin/` 下的每个 ELF，以及
-`/bin/tools` 里的 applet：`ls`、`cat`、`uptime`……）。`help` 也是 applet，
-两个 shell 共用同一份文本，所以 `msh` 下同样可用，`help > f` 也照常工作。
-`incr` 是唯一必须留在 shell 里的命令：它改的是调用者的变量，子进程改不了。
+控制台/后台程序**（`echo`、`sleep`）和**程序**（`/bin` 下的每个 ELF，以及
+`/bin/tools` 里的 applet：`cat`、`uptime`……）。`help`、`reboot`、`ls` 都是
+普通程序：`help > f`、`reboot &` 和重定向照常工作。`incr` 是唯一必须留在
+shell 里的命令——它改的是调用者的变量，子进程改不了。
+
+`msh` 已冻结：源码还在（16 KiB 窗口大小的记录），但默认镜像不再打包它，
+内核直接启动 `/bin/sh`；`sh` 是唯一的 shell，脚本、变量、控制流都在这里。
 
 名字怎么变成路径，由 `exec()` 决定，和 `open()`/`stat()` 同一套规则：
 

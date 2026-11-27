@@ -76,8 +76,9 @@ tos> nosuchcmd                 -> tools: unknown applet nosuchcmd
 （`gpio adc spi i2c pwm uart`）和网络（`ping host net http dhcp wificonn
 wifiscan`）命令——后两组要按 feature 门控，留作第二轮。
 
-代价：窗口按 `span + 4 KiB stack + 4 KiB guard` 算，不按文件大小。
-2026-11-28 复测当时这棵树：rv32 span 20 KiB → 窗口 28 KiB，ARM span 24 KiB →
-窗口 32 KiB，比单独的 `cat`（4–8 KiB 窗口）大；C3 无压力，RP2040 的 264 KiB
-上单/双个并发仍可接受。`help` 移进来之后两档都涨 4 KiB，见
+代价：窗口按 `span + 4 KiB stack + 4 KiB grow + 4 KiB guard` 算，不按文件大小
+（程序不声明 `TOS_STACK` 时内核多留一步给栈增长）。2026-11-28 复测当时这棵树：
+rv32 span 20 KiB → 窗口 32 KiB，ARM span 24 KiB → 窗口 36 KiB，比单独的 `cat`
+（4 KiB span → 16 KiB 窗口）大；C3 无压力，RP2040 的 264 KiB 上单/双个并发仍
+可接受。`help` 移进来之后两档都涨 4 KiB，见
 [help applet](2026-11-28-help-applet-6fe6653.md)。

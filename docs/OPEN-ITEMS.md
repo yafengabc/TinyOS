@@ -1136,10 +1136,11 @@ M-profile 代理，不是 M33。
    `exec: process or thread table full` 之后 11 行 `[bus] unmapped read @0x18..`。
    现在 `fd_slot()` 对没有进程表的线程返回 NULL，`proc_retire()` 只对主线程关
    描述符；emutest 的 `[bus] unmapped` 不变式会盯住这个回归。
-2. **测试**：`script` 那条一直在**默认 shell（msh）**里 `source etc/demo.sh`，
-   而 msh 明确不支持 if/while/`$(...)`（`user/msh/msh.c` 开头写着），于是每行都
-   被当成程序执行（`exec: '/bin/if' not found`）。脚本语言在 `/bin/sh` 里，
-   夹具本身没问题；现在跑 `sh etc/demo.sh`，六个标记齐全。
+2. **测试**：`script` 那条以前一直在**当时的默认 shell（msh）**里
+   `source etc/demo.sh`，而 msh 不支持 if/while/`$(...)`，于是每行都被当成程序
+   执行（`exec: '/bin/if' not found`）。脚本语言在 `/bin/sh` 里，夹具本身没
+   问题；当时改成跑 `sh etc/demo.sh`。现在 msh 已冻结、sh 是内核启动的 shell，
+   这条不会再出现。
 
 仍然存在的覆盖缺口（不是回归，记在这里免得下次又以为是）：
 

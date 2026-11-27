@@ -437,7 +437,8 @@ xip_flash_base/drivers/default_features 来自 `board.conf`，由 `applyBoard()`
 - 通用 `plat_core_pause/resume`；
 - 全量驱动 upper/lower 迁移；
 - P4 第一阶段 PSRAM 可执行窗口；
-- 合并 msh/sh 或两份 libc；
+- 合并 msh/sh 的**代码**——2026-11-28 的结论是冻结 `msh`、`sh` 做唯一 shell
+  （`msh` 不再进默认镜像），而不是把两份实现合成一份；两份 libc 仍不做；
 - 为了架构好看改任何既有目标的运行时语义。
 
 ---

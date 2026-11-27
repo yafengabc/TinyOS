@@ -302,7 +302,7 @@ python scripts/rp2350/kthread_accept.py --uf2 build/tinyos-atk-dnr2350am-smp.uf2
 ```
 
 - 启动日志至少要看到 `[A]/[B]/[C]/[D]/[E]`、`2 of 2 CPU(s) online`、USB CDC `2e8a:000a`。
-- 信号路径：`sh` 里 `sleep 3000` 后发 `^C`，控制台必须回到 `msh`，无 HardFault/死锁。
+- 信号路径：`sh` 里 `sleep 3000` 后发 `^C`，控制台必须回到 `sh`，无 HardFault/死锁。
 
 ### 5.3 RP2040（`rpi-pico` / `rpi-pico-smp`）
 
