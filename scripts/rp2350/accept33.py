@@ -45,8 +45,11 @@ BAD = ("KERNEL PANIC", "System halted", "MSTKERR", "HardFault")
 # Hazard3-only boot marker (the [A] clock snapshot), and df is the littlefs
 # partition in bytes (flash_bytes - lfs_offset from the board's board.conf).
 # Both boards put littlefs after the first 512 KiB, so the ATK's 4 MiB part
-# reports 4*1024*1024 - 512*1024 and the Pico 2's 8 MiB part reports
-# 8*1024*1024 - 512*1024.
+# reports 4*1024*1024 - 512*1024 and the 8 MiB part of the Pico 2 clone this
+# port was written on reports 8*1024*1024 - 512*1024.  Raspberry Pi's own
+# Pico 2 has a 4 MB W25Q32, not the clone's 8 MiB W25Q64, so run an official
+# board with `--df 3670016`; the kernel takes the smaller JEDEC detection and
+# simply reports the 4 MB number.
 IMAGES = {
     "atk-dnr2350am":          dict(cpus=1, rv=False, df=3670016),
     "atk-dnr2350am-smp":      dict(cpus=2, rv=False, df=3670016),
@@ -191,6 +194,10 @@ def image_programs(con):
 def run_checks(con, image, results, opts, boot_text):
     """The body of section 33, in the order the list asks for it."""
     spec = IMAGES[image]
+    # A Pico 2 image also runs on an ATK board (same RP2350) and the kernel
+    # sizes littlefs from the flash it actually finds, so the expected total
+    # has to follow the board, not the image.  --df overrides it.
+    df_want = getattr(opts, "df", 0) or spec["df"]
     have = image_programs(con)
 
     # --- 33.4: what the ROM handed over, and the clock tree that followed ---
@@ -209,8 +216,8 @@ def run_checks(con, image, results, opts, boot_text):
 
     # --- 33.0: 3.5 MiB partition, grown without a warning ---
     check(results, "B no fs-grow warning", boot_text, avoid=("fs grow",))
-    check(results, "B df total %d" % spec["df"], con.cmd("df"),
-          want=(str(spec["df"]),))
+    check(results, "B df total %d" % df_want, con.cmd("df"),
+          want=(str(df_want),))
 
     # --- 33.1/33.2: windows, isolation, stack ---
     wink = msh_wink(con.cmd("ps"))
@@ -382,6 +389,10 @@ def main():
     ap.add_argument("--dd-rounds", type=int, default=0)
     ap.add_argument("--replay", help="check a saved console log instead")
     ap.add_argument("--log", help="where to save the raw console log")
+    ap.add_argument("--df", type=int, default=0,
+                    help="expected littlefs total in bytes; default is the "
+                         "image's own capacity.  Pass the board's when a "
+                         "Pico 2 image runs on another RP2350 board.")
     args = ap.parse_args()
 
     results = []

@@ -1266,3 +1266,28 @@ core0 worker 12M 迭代 400 → **353 ms**（与 core1 相同），smpbench 1.87
 目标默认 `-Os` 的决定不变。`#73` 里 `-Oz` 的 1.85–1.90x 是带着这个 bug 测的，
 若要重新评估 `-Oz`，必须用本修复后的镜像重跑，不能引用旧数。证据：
 `docs/acceptance/2026-11-27-tick-32bit-cadence-809774c.md`。
+
+## 28. `board/rpi-pico2` 的 8 MiB 是克隆板，官方 Pico 2 只有 4 MB（2026-11-27）
+
+`board/rpi-pico2/board.conf` 写 `flash_bytes = 8m`，注释也说 “The Pico 2 carries a
+W25Q64”。这是**克隆板**的事实：本端口开发时用的是一块 RP2350A 克隆板，焊 W25Q64
+（8 MiB），历史验收卡也都写着“Pico 2 克隆板（RP2350A，8 MiB W25Q64）”。
+Raspberry Pi 官方的 Pico 2 焊的是 W25Q32，**4 MB**，与 ATK 相同。
+
+影响面很小：`flash_bytes` 只作为 littlefs 上限（`TOS_FLASH_BYTES`）和构建期
+“镜像是否超过分区”的校验，不进 UF2 打包；而 `plat_lfs_blocks()` 只向下自适应
+（探测值小于配置值就用探测值），所以同一张 `rpi-pico2` 镜像刷 4 MB 板会得到
+`df` 3,670,016，和在 ATK 上实测一致，不会越界。
+
+**因此 4 MB 的官方板不需要单独 target**，但要清楚两件事：① 它拿不到克隆板的 8 MiB
+余量；② 板级外设仍是 Pico 2 的 pinout（GP25 LED 高电平、无用户键、无 panel、无 TF），
+这一点在 ATK 上代跑镜像覆盖不到。官方 4 MB 板尚未实测，`board.conf` 的 `8m`
+仍按克隆板保留（改成 4m 会让克隆板少用 4 MiB，且要重跑一遍验收）。
+
+补三条已核实的证据（2026-11-27）：ATK 与官方 Pico 2 用的是同一颗 4 MiB W25Q32
+（JEDEC `EF 40 16`），克隆板的 W25Q64 才是不同的那一个；四张 Pico 2 UF2 的真实写入
+范围是 `0x10000000..0x10100000`（1 MiB），4 MB 板余 3 MiB，`0x10ffff00` 的 256 B
+是 RP2350-E10 的 ignore 块、ROM 不写；把 `flash_bytes` 临时改成 `4m` 构建，与 `8m`
+的产物**逐字节相同**（`925328b1…`，2,097,664 B），因为该值只作 littlefs 上限和构建期
+校验，不进镜像。所以“官方 Pico 2 的 4 MB 上能跑”在软件与 flash 条件上已经验证，
+板上 `df` = 3,670,016 也印证 lfs 被裁到 4 MiB − 512 KiB。
