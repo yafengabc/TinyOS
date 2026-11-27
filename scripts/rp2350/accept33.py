@@ -45,8 +45,11 @@ BAD = ("KERNEL PANIC", "System halted", "MSTKERR", "HardFault")
 # Hazard3-only boot marker (the [A] clock snapshot), and df is the littlefs
 # partition in bytes (flash_bytes - lfs_offset from the board's board.conf).
 # Both boards put littlefs after the first 512 KiB, so the ATK's 4 MiB part
-# reports 4*1024*1024 - 512*1024 and the Pico 2's 8 MiB part reports
-# 8*1024*1024 - 512*1024.
+# reports 4*1024*1024 - 512*1024 and the 8 MiB part of the Pico 2 clone this
+# port was written on reports 8*1024*1024 - 512*1024.  Raspberry Pi's own
+# Pico 2 has a 4 MB W25Q32, not the clone's 8 MiB W25Q64, so run an official
+# board with `--df 3670016`; the kernel takes the smaller JEDEC detection and
+# simply reports the 4 MB number.
 IMAGES = {
     "atk-dnr2350am":          dict(cpus=1, rv=False, df=3670016),
     "atk-dnr2350am-smp":      dict(cpus=2, rv=False, df=3670016),
