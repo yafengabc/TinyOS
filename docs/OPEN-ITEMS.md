@@ -1242,3 +1242,5 @@ Oz CoreMark = 289；Oz 内核 + O2 CoreMark = 477，O2 内核 + O2 CoreMark = 47
 日志 `build/opt/Oz/boot6s.raw`、`build/opt/Oz-up/boot8s.raw`、
 `build/opt/Oz-rv32/boot15s.raw`、`build/fix/Oz/boot8s.raw`（本地）。和 #56 的
 P1/P2 是两条线：P1 是 `-O2` 冷路径内联膨胀，这里是 `-Oz` 的 XIP-off 常量读。
+
+**决定（2026-11-27）**：RP2350 的八个硬件目标默认 `opt = -Os` + `user_opt = -O2`。隔离测量（三版内核的用户程序逐字节相同）：CoreMark O2/Os/Oz = 478/487/476，smpbench 三轮均值 1.95/2.02/1.87——`-Os` 比 `-O2` 小 30%、单线程快 1.9%、SMP 最好；`-Oz` 体积再小 12 KiB，但 SMP 扩展性掉到 1.85–1.90。C3 保持 `-Oz`；QEMU 目标保持 `-O2`；`rp2350-generic` 与 `rp2350rv-generic` 两个芯片基线仍 `-O2`（bring-up 用）。证据：`docs/acceptance/2026-11-27-user-opt-knob-a626381.md` 的板测一节。

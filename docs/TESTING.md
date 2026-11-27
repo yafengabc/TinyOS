@@ -361,6 +361,8 @@ python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-smp --rounds 100
 python scripts/rp2350/dd_stress.py -p COM19 --target rpi-pico2-rv32-smp --rounds 100
 
 # 双核扩展性：在 shell 里 smpbench 1250000，期望 >= 1.8x
+# 比较不同内核 opt 时先把基准固定：TOS_USER_OPT=-O2（或 [build] user_opt）
+# 只改内核的 TOS_OPT，否则 TOS_OPT 也会改基准自己，测到的是基准的优化级别。
 
 # 重启稳定性（每次都要 < 2 s，且新 shell 自己的 uptime 必须归零）
 python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
