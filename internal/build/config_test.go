@@ -31,6 +31,19 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+// The release image is the one users flash.  rx is the console receiver
+// tosput and tosedit drive to write a file; excluding it (as 79b9aad did by
+// accident, issue #81) makes every upload fail on a release image.
+func TestReleaseConfigKeepsRx(t *testing.T) {
+	c, err := build.LoadConfig("../../configs/release.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UserExclude["rx"] {
+		t.Fatal("configs/release.conf excludes rx: tosput/tosedit cannot write files on a release image")
+	}
+}
+
 func TestConfigUserOpt(t *testing.T) {
 	c, err := build.LoadConfig(writeConfig(t, "[build]\nopt = -Oz\nuser_opt = -O2\n"))
 	if err != nil {
