@@ -1,22 +1,20 @@
-/* help - the command map, for both shells.
+/* help - the command map.
  *
- * This was a sh builtin: 2.6 KiB of strings that msh could not print at all
- * because it has no room for them.  As an applet both shells reach it through
- * spawn()'s /bin/tools retry, `help > file` writes the text like any other
- * command, and sh's image lost the strings.
+ * A program of its own, not a tools applet: the text is 2.6 KiB and it used
+ * to drag the multi-call binary into the next window class (24 KiB span
+ * instead of 20 on rv32).  As /bin/help only `help` pays for it: 4 KiB span,
+ * a 12 KiB window.  Both shells find it by name; `help > f` works like any
+ * other program.
  *
  * The applet list is printed from tools/applets.h so it cannot go stale.
  */
 #include "lib.h"
 #include "tools/applets.h"
 
-int applet_help(int argc, char **argv)
+int main(void)
 {
-    (void)argc;
-    (void)argv;
-
     puts("TinyOS help\n\n");
-    puts("Shell builtins (sh and msh):\n");
+    puts("Shell builtins (sh):\n");
     puts("  cd [dir]           change directory (default /); pwd prints it\n");
     puts("  echo [args...]     print arguments\n");
     puts("  history            list recent commands (up/down recalls them)\n");
@@ -34,8 +32,9 @@ int applet_help(int argc, char **argv)
     TOS_APPLETS(X)
 #undef X
     puts("\n\nPrograms in /bin:\n");
-    puts("  ls edit reboot gpio adc spi i2c pwm uart fb screen splash\n");
+    puts("  ls edit help reboot gpio adc spi i2c pwm uart fb screen splash\n");
     puts("  lcdconsole smp ping host net http dhcp wificonn wifiscan ...\n");
+    puts("  msh is frozen and not in a default image (sh is the shell)\n");
     puts("\nFiles, devices and pipes:\n");
     puts("  cat /proc/ps       the task table as a file\n");
     puts("  echo 1 > /dev/gpio4  pins and ADC channels are files: write to\n");
@@ -43,7 +42,7 @@ int applet_help(int argc, char **argv)
     puts("  cmd > file         send stdout to a file or a device\n");
     puts("  A | B              send A's stdout to B's stdin\n");
     puts("  run sh <file>      run a script as a task\n");
-    puts("\nScript syntax (sh only; msh runs programs, pipes and variables):\n");
+    puts("\nScript syntax (sh):\n");
     puts("  name=text          set a variable (also `name=$(prog args)`)\n");
     puts("  incr name [n]      add n (default 1) to an integer variable\n");
     puts("  $name  ${name}  $? text substitution; $(prog) captures stdout\n");
