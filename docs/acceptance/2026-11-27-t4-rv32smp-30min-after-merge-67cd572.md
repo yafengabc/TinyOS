@@ -1,8 +1,13 @@
-# T4：合并后的 RV32 SMP 30 分钟 dd（2026-11-27）
+# T4 的 dd 子项：合并后的 RV32 SMP 1800 轮长跑（2026-11-27）
+
+> 这不是 T4 的全部。按 `AGENTS.md` 的 soak 预算和 `docs/TESTING.md` §6，T4 的
+> 30 分钟是 **`soak_board.py -m 30`** 的墙钟浸泡（窗口/段/堆抖动），dd 只是同一轮
+> T4 里的 flash 写读子项。本文件只记录 dd 这一半；完整 T4 见
+> `2026-11-27-t4-rv32smp-soak30-after-merge-67cd572.md`。
 
 ```text
 commit:            67cd572（merge exp/thread-sched 之后的 main）
-change:            none —— 在合并后的 main 上重跑 RV32 SMP 的 30 分钟 T4
+change:            none —— 在合并后的 main 上重跑 RV32 SMP 的 dd 子项（T4 的另一半是 soak_board -m 30）
 baseline:          3f07c44（同一天合并前的那一轮，见 2026-11-27-t4-rv32smp-30min-3f07c44.md）
 target/config:     rpi-pico2-rv32-smp / defaults（board.conf 默认 features = pio, rir, kthreads, usb_pump）
 board/port/image:  Raspberry Pi Pico 2（RP2350A，8 MiB W25Q64 克隆板）
@@ -13,7 +18,7 @@ T0:                NOT RUN（本次只做 T4）
 T1:                NOT RUN
 T2:                NOT RUN
 T3:                NOT RUN（烧写后 smoke 7/7；T3 另有四镜像回归卡）
-T4:                PASS —— 1800 轮 dd，约 31 分钟，ok=1800
+T4(dd):            PASS —— 1800 轮 dd，约 31 分钟，ok=1800（T4 的 soak 半项见另一张卡）
 logs:              build/t4-rv32smp-30min-merged.log（原始日志不入库）
 ```
 
