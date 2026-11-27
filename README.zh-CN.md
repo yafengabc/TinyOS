@@ -18,10 +18,10 @@
   没有厂商构建系统：boot2 桩、ROM 函数表、pad 寄存器、TinyUSB 要的那层 pico-sdk
   形状的门面，都 vendored 在 `third_party/` 和 `board/` 里。**加一块板子是加一个
   目录，不是装一套 SDK。**
-- **甚至编译器都准备了**。`goc32`一条命令把 C 语言编译成可以直接运行的二进制程序，
+- **甚至编译器都准备了**。`toscc`一条命令把 C 语言编译成可以直接运行的二进制程序，
 - 通过tosput命令+串口传到内置的littlsfs文件系统，然后直接通过shell运行。**不需
-  要外部工具链**：（goc32 编译的代码比 clang 大一些，大约1.3倍的体积；这没关系
-  ——发布镜像和预编译的程序继续用 clang，goc32 负责快速单文件开发。）
+  要外部工具链**：（toscc 编译的代码比 clang 大一些，大约1.3倍的体积；这没关系
+  ——发布镜像和预编译的程序继续用 clang，toscc 负责快速单文件开发。）
 - **一套内核、一套用户态、12 个目标**——包括同一颗 RP2350 硅片上的两种指令集，
   以及一台 PC。
 - **小到能读完**——内核约 70 KiB flash、约 45 KiB RAM，整个系统是一个下午能从头
@@ -98,7 +98,7 @@ go run ./cmd/tostest smoke -target rv32
 更不需要重新刷机：
 
 ```sh
-goc32 user/foo.c -target atk-dnr2350am -o build/foo.tos   # C -> LZ4TOS blob
+toscc user/foo.c -target rp2350 -o build/foo.tos   # C -> LZ4TOS blob
 tosput COM14 build/foo.tos /bin/foo            # base64 + CRC32，走控制台
 tos> foo
 ```
@@ -110,7 +110,7 @@ CRC32），所以任何有控制台的板子都能用，内核侧只需要 `ttyr
 
 上一次 `tos build` 的功能宏（`TOS_THREADS`、`TOS_MAILBOX`、`TOS_NET` 等）会
 自动复用；构建配置打开线程/kthread 时，运行时也会一起链接。clang 生成的目标码仍比
-`goc32` 小一些，所以发布镜像继续用 clang；上面这个循环是给"十秒钟一轮"的开发用的。
+`toscc` 小一些，所以发布镜像继续用 clang；上面这个循环是给"十秒钟一轮"的开发用的。
 
 ## 测试
 

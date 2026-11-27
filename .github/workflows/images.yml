@@ -31,7 +31,7 @@ jobs:
         run: test -s goc32/abi/syscalls.snapshot.csv
       - name: Unit tests
         run: go test ./...
-      - name: goc32 tests
+      - name: toscc tests (goc32/)
         run: cd goc32 && go test ./... -count=1
       - name: rv32emu tests
         run: cd rv32emu && go test ./internal/... -count=1
@@ -222,7 +222,9 @@ jobs:
           mkdir -p dist/tools
           go build -trimpath -ldflags "-s -w" -o "dist/tools/tos${{ matrix.ext }}" ./cmd/tos
           go build -trimpath -ldflags "-s -w" -o "dist/tools/tostest${{ matrix.ext }}" ./cmd/tostest
-          (cd goc32 && go build -trimpath -ldflags "-s -w" -o "../dist/tools/goc32${{ matrix.ext }}" .)
+          (cd goc32 && go build -trimpath -ldflags "-s -w" -o "../dist/tools/toscc${{ matrix.ext }}" .)
+          # One-cycle alias: existing docs and scripts say goc32.
+          cp "dist/tools/toscc${{ matrix.ext }}" "dist/tools/goc32${{ matrix.ext }}"
           (cd tools/tosput && go build -trimpath -ldflags "-s -w" -o "../../dist/tools/tosput${{ matrix.ext }}" .)
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd tools/tosput && go build -trimpath -ldflags "-s -w -H windowsgui" -o ../../dist/tools/tosput-gui.exe .)
@@ -237,9 +239,11 @@ jobs:
               rv32emu -flashimg tinyos-esp32c3-generic-full.bin
             Download that image from the TinyOS release page.
 
-          goc32
+          toscc (goc32)
             Build a user program (no clang needed):
-              goc32 -target esp32c3 -o hello.tos user/hello.c
+              toscc -target esp32c3 -o hello.tos user/hello.c
+            The binary is still also named goc32 for this release; the
+            tree and the modules are goc32/.
 
           tosput
             Send a .tos to a running board over its console:
@@ -252,6 +256,13 @@ jobs:
             Build images and run QEMU smoke tests.  These still need
             clang + ld.lld on PATH; they are not needed just to try
             TinyOS or to build a single user program.
+
+          tinyos-sdk
+            The user-program SDK: bin/toscc plus include/, kernel/types.h,
+            user/ and arch/.  Unpack it, then:
+              bin/toscc -target esp32c3 -o hello.tos examples/hello.c
+            It is the same compiler, just with the files it needs next to
+            it, so a full TinyOS checkout is not required.
           EOF
 
       - name: Pack the tools
@@ -265,6 +276,34 @@ jobs:
         shell: bash
         run: |
           tar -C dist/tools -czf "dist/tinyos-tools-${{ matrix.name }}.tar.gz" .
+
+      - name: Pack the SDK
+        # The user-program SDK is toscc with the files it reads
+        # (include/, kernel/types.h, user/, arch/) next to it, so people do
+        # not need a full checkout to compile one program.
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=python3
+          command -v "$py" >/dev/null 2>&1 || py=python
+          extra=""
+          if [ -f "dist/tools/tosput${{ matrix.ext }}" ]; then
+            extra="--tosput dist/tools/tosput${{ matrix.ext }}"
+          fi
+          "$py" scripts/mksdk.py \
+            --out dist/sdk \
+            --toscc "dist/tools/toscc${{ matrix.ext }}" \
+            --version "${GITHUB_REF_NAME:-dev}" \
+            $extra \
+            --archive "dist/tinyos-sdk-${{ matrix.name }}.${{ matrix.archive }}"
+
+      - name: Upload the SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyos-sdk-${{ matrix.name }}
+          path: dist/tinyos-sdk-${{ matrix.name }}.*
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload the tools
         uses: actions/upload-artifact@v4

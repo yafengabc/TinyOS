@@ -1,15 +1,15 @@
 [English](README.md) | [中文](README.zh.md)
 
-# goc32 — TinyOS 用户态 C 编译器（RV32 + Thumb）
+# toscc — TinyOS 用户态 C 编译器（RV32 + Thumb）
 
-`goc32` 是 TinyOS 用户程序用的精简 C 编译器，**不依赖 libLLVM**。它是
+`toscc` 是 TinyOS 用户程序用的精简 C 编译器，**不依赖 libLLVM**。它是
 [TinyOS](https://github.com/yafengabc/TinyOS) 的子项目，前端直接继承自
 [goc](https://github.com/yafengabc/goc)。
 
 一条命令就能把 C 源码变成 TinyOS 放进 littlefs 的那种 **LZ4TOS** 信封：
 
 ```
-goc32 user/hello.c
+toscc user/hello.c
 ```
 
 流水线：
@@ -26,7 +26,7 @@ C -> goc 前端 -> 纯 Go 的 IR 文本 -> native32 -> RV32IM / Thumb 汇编
 ## 构建
 
 ```powershell
-.\build.ps1            # -> bin/goc32.exe
+.\build.ps1            # -> bin/toscc.exe
 ```
 
 或者 `bash build.sh`。需要 Go 1.25+。
@@ -35,13 +35,13 @@ C -> goc 前端 -> 纯 Go 的 IR 文本 -> native32 -> RV32IM / Thumb 汇编
 
 ```powershell
 # 在 TinyOS 检出目录里运行（或在任意地方用 -tos DIR）。默认目标 rv32。
-goc32 user/hello.c
+toscc user/hello.c
 # -> hello.tos
 
-goc32 -target esp32c3 -o build/hello.tos user/hello.c
-goc32 -target rp2040  -o build/hello.tos user/hello.c
-goc32 -target rp2350  -o build/hello.tos user/hello.c
-goc32 -target arm     -o build/hello.tos user/hello.c
+toscc -target esp32c3 -o build/hello.tos user/hello.c
+toscc -target rp2040  -o build/hello.tos user/hello.c
+toscc -target rp2350  -o build/hello.tos user/hello.c
+toscc -target arm     -o build/hello.tos user/hello.c
 ```
 
 目标：
@@ -58,7 +58,7 @@ goc32 -target arm     -o build/hello.tos user/hello.c
 `-v`、`-pack`（不编译，只把已链接的 ELF 包进 LZ4TOS）、`-ll`（把输入当作
 LLVM IR 文本并输出汇编）。额外 include/宏：`-I`、`-D`。链接时设
 `GOC32_MAP=1` 会打印每个存活段的名字和地址。
-功能宏跟随构建：`goc32` 会读 `tos build` 留下的
+功能宏跟随构建：`toscc` 会读 `tos build` 留下的
 `build/build-config-<target>.txt`（或共享的 `build-config.txt`），套用同一组
 用户程序宏：`TOS_THREADS`、`TOS_MAILBOX`，以及每个启用的 menuconfig 功能对应
 的 `TOS_<FEATURE>`。有 `TOS_THREADS` 时还会链接 `user/thread.c` 和

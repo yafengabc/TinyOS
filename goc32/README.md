@@ -1,8 +1,11 @@
 [English](README.md) | [中文](README.zh.md)
 
-# goc32 — TinyOS user-space C compiler (RV32 + Thumb)
+# toscc — TinyOS user-space C compiler (RV32 + Thumb)
 
-`goc32` is a trimmed, libLLVM-free C compiler for TinyOS user programs. It is a
+`toscc` is the command; the tree and the Go module are still `goc32/`.
+The 0.5.x packages also carry a `goc32` alias for one release.
+
+`toscc` is a trimmed, libLLVM-free C compiler for TinyOS user programs. It is a
 subproject of [TinyOS](https://github.com/yafengabc/TinyOS) and a direct
 descendant of the [goc](https://github.com/yafengabc/goc) front end.
 
@@ -10,7 +13,7 @@ One command takes a C source and produces the exact **LZ4TOS** envelope TinyOS
 places in littlefs:
 
 ```
-goc32 user/hello.c
+toscc user/hello.c
 ```
 
 Pipeline:
@@ -28,7 +31,7 @@ checkout (for `user.ld`, the libc sources and the headers).
 ## Build
 
 ```powershell
-.\build.ps1            # -> bin/goc32.exe
+.\build.ps1            # -> bin/toscc.exe
 ```
 
 or `bash build.sh`. Go 1.25+ is required.
@@ -37,13 +40,13 @@ or `bash build.sh`. Go 1.25+ is required.
 
 ```powershell
 # Run from a TinyOS checkout (or pass -tos DIR). The target defaults to rv32.
-goc32 user/hello.c
+toscc user/hello.c
 # -> hello.tos
 
-goc32 -target esp32c3 -o build/hello.tos user/hello.c
-goc32 -target rp2040  -o build/hello.tos user/hello.c
-goc32 -target rp2350  -o build/hello.tos user/hello.c
-goc32 -target arm     -o build/hello.tos user/hello.c
+toscc -target esp32c3 -o build/hello.tos user/hello.c
+toscc -target rp2040  -o build/hello.tos user/hello.c
+toscc -target rp2350  -o build/hello.tos user/hello.c
+toscc -target arm     -o build/hello.tos user/hello.c
 ```
 
 Targets:

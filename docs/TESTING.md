@@ -16,7 +16,7 @@
 
 | 级别 | 内容 | 是否阻塞提交 | 典型耗时 |
 |---|---|---|---|
-| **T0 静态/单元** | gofmt、`go build`、`go vet`、`go test`（含 skip 审计）、goc32/native32 测试 | **总是** | 1–3 min |
+| **T0 静态/单元** | gofmt、`go build`、`go vet`、`go test`（含 skip 审计）、toscc（goc32）/native32 测试 | **总是** | 1–3 min |
 | **T1 构建矩阵** | 所有可构建目标 + 受影响的板级 target；检查产物和 `build/build-config.txt` | 代码/构建改动**总是** | 3–10 min |
 | **T2 QEMU** | rv32 / rv32smp / arm 的 smoke + soak；必要时 compat | 内核/arch/驱动/用户态改动**总是** | 3–8 min |
 | **T3 真机** | 两块门槛：**心跳级**（新板最低线，§5.0）与**平权级**（C3、ATK RP2350 ARM/RV32、RP2040 的验收/目视项） | 板级/驱动/控制台/SMP 改动**按需但必须明确** | 5 min（心跳）/ 10–40 min（平权） |
@@ -47,14 +47,14 @@ grep -- '--- SKIP' build/testlogs/go-test.log || true
 # PowerShell:
 # Select-String -Path build\testlogs\go-test.log -Pattern '--- SKIP'
 
-# 6) goc32 单文件循环（动过 user/lib.h、include/*.h 或 ABI 结构时必跑）
+# 6) toscc（goc32） 单文件循环（动过 user/lib.h、include/*.h 或 ABI 结构时必跑）
 cd goc32
-go run . ../user/hello.c -o ../build/goc32-hello.tos
+go run . ../user/hello.c -o ../build/toscc-hello.tos
 cd ..
 ```
 
-**为什么第 6 步在 T0 里**：goc32 不是 clang，它自己解析共享头。`tos_abi.h` 里的
-`offsetof` 断言（`__builtin_offsetof`）就曾让**所有**用户程序在 goc32 下编译失败，
+**为什么第 6 步在 T0 里**：toscc 不是 clang，它自己解析共享头。`tos_abi.h` 里的
+`offsetof` 断言（`__builtin_offsetof`）就曾让**所有**用户程序在 toscc 下编译失败，
 而 clang 构建、QEMU、真机全部通过——只有这一条能发现。
 
 **规则**
@@ -445,7 +445,7 @@ python scripts/soak.py --cycles 8 --targets rv32,rv32smp,arm
 | 驱动 | ✅ | ✅ | 可模拟的部分 | 带该设备的板 | — |
 | 用户态/libc/shell | ✅ | ✅ | smoke | 控制台相关板 | — |
 | LZ4TOS / ELF / ABI / 协议 | ✅ | ✅ | 全量 | 兼容向量 + 板 | — |
-| goc32 / native32 | ✅（含两个子模块测试） | 相关目标 | 单文件 dev loop | 相关板（可选） | — |
+| toscc（goc32）/ native32 | ✅（含两个子模块测试） | 相关目标 | 单文件 dev loop | 相关板（可选） | — |
 
 ## 8. 大重构专用协议
 

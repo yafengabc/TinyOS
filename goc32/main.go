@@ -1,6 +1,6 @@
 package main
 
-// goc32 builds one TinyOS user program in one step:
+// toscc (the goc32 tree) builds one TinyOS user program in one step:
 //
 //   C -> goc front end -> gocl IR text -> native32 asm -> goc32/as -> goc32/ld
 //     -> LZ4TOS envelope
@@ -10,10 +10,10 @@ package main
 // LZ4TOS blob `tos build` would place in littlefs.
 //
 // Examples:
-//   goc32 user/hello.c
-//   goc32 -target esp32c3 -o build/hello.tos user/hello.c
-//   goc32 -target rp2040 user/hello.c
-//   goc32 -S user/hello.c          # assembly only, for debugging
+//   toscc user/hello.c
+//   toscc -target esp32c3 -o build/hello.tos user/hello.c
+//   toscc -target rp2040 user/hello.c
+//   toscc -S user/hello.c          # assembly only, for debugging
 
 import (
 	"embed"
@@ -82,7 +82,14 @@ type options struct {
 	inputs      []string
 }
 
+// prog is the name the usage and error messages use.  It follows argv[0], so
+// the goc32 alias the 0.5.x packages carry still reports goc32.
+var prog = "toscc"
+
 func main() {
+	if len(os.Args) > 0 {
+		prog = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+	}
 	o := options{target: "rv32"}
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -137,7 +144,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`usage: goc32 [options] file.c|dir ...
+	fmt.Printf(`usage: %s [options] file.c|dir ...
 
   -target NAME   rv32 (default), esp32c3, rv32nc, arm, rp2040, rp2350
   -tos DIR       TinyOS checkout (default: find user/lib.c walking up)
@@ -153,11 +160,11 @@ func usage() {
   -no-build-defines
                  do not import the -D flags recorded by the last tos build
   -v             print the pipeline steps
-`)
+`, prog)
 }
 
 func fatalf(f string, a ...interface{}) {
-	fmt.Fprintf(os.Stderr, "goc32: "+f+"\n", a...)
+	fmt.Fprintf(os.Stderr, prog+": "+f+"\n", a...)
 	os.Exit(1)
 }
 

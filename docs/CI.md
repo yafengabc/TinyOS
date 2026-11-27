@@ -112,7 +112,7 @@ TinyOS。
   `scripts/soak.py --cycles 3`。**打 tag 时 `release` 依赖它**——内核起不来的提交
   不会发出镜像。
 - `mklfs` 是构建期 host 工具，由同一个 clang 编译。
-- 官方镜像里的用户程序使用 clang 构建；`goc32` 是独立的用户态 C 编译器（自带汇
+- 官方镜像里的用户程序使用 clang 构建；`toscc`（goc32） 是独立的用户态 C 编译器（自带汇
   编器和链接器，不依赖 clang），不在这个默认构建链路里。
 - RP2040 的 littlefs 分区是 300 KiB。如果一个新增程序把文件系统撑爆，
   mklfs 会报 `No more free space`；这时需要精简该目标的用户程序或扩大分区
