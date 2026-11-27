@@ -1244,3 +1244,25 @@ Oz CoreMark = 289；Oz 内核 + O2 CoreMark = 477，O2 内核 + O2 CoreMark = 47
 P1/P2 是两条线：P1 是 `-O2` 冷路径内联膨胀，这里是 `-Oz` 的 XIP-off 常量读。
 
 **决定（2026-11-27）**：RP2350 的八个硬件目标默认 `opt = -Os` + `user_opt = -O2`。隔离测量（三版内核的用户程序逐字节相同）：CoreMark O2/Os/Oz = 478/487/476，smpbench 三轮均值 1.95/2.02/1.87——`-Os` 比 `-O2` 小 30%、单线程快 1.9%、SMP 最好；`-Oz` 体积再小 12 KiB，但 SMP 扩展性掉到 1.85–1.90。C3 保持 `-Oz`；QEMU 目标保持 `-O2`；`rp2350-generic` 与 `rp2350rv-generic` 两个芯片基线仍 `-O2`（bring-up 用）。证据：`docs/acceptance/2026-11-27-user-opt-knob-a626381.md` 的板测一节。
+
+
+## 27. RP2350 tick 的 64 位取模：`-Oz` SMP 损失的根因（2026-11-27）**已修** `809774c`
+
+`board/rp2350*-generic/platform.c` 的 tick 用 `g_ticks % {10,50,500,1000}` 做
+看门狗、`[U] cfg` 跟踪、1 Hz LED 和 BOOTSEL 串口逃生，而 `g_ticks` 是 `uint64_t`。
+`-O2` / `-Os` 把它强度削减成乘法，`-Oz` 不削减，生成 `__aeabi_uldivmod`
+（RV32 是 `__umoddi3`）调用：一个 tick 四次，每次约 3k 周期，150 MHz 下约 12.5k
+周期 = 83 µs。只有 core0 执行这一段（core1 在 `[U] cfg` 之前就返回），所以表现
+是“只有 core0 慢”，与调度器、tick 频率、USB 泵都无关——之前那些排除实验
+（无 pump、屏蔽 USB IRQ）之所以全部无效，是因为它们都没碰到这里。
+
+**修法**：tick 里从 `(uint32_t)g_ticks` 取节拍。周期最大 1000 tick，截断只在
+49.7 天回绕时改变相位，且 `plat_timer_init()` 每次启动清零 `g_ticks`。RV32 板同改。
+
+**板侧测量**（ATK M33 SMP，DWT）：core0 tick 体 12,508 → **219 周期**，
+core0 worker 12M 迭代 400 → **353 ms**（与 core1 相同），smpbench 1.87 → **2.01**。
+
+**影响**：`-Os` 不受影响（本就强度削减，smpbench 2.02），所以八个 RP2350 硬件
+目标默认 `-Os` 的决定不变。`#73` 里 `-Oz` 的 1.85–1.90x 是带着这个 bug 测的，
+若要重新评估 `-Oz`，必须用本修复后的镜像重跑，不能引用旧数。证据：
+`docs/acceptance/2026-11-27-tick-32bit-cadence-809774c.md`。
