@@ -40,6 +40,15 @@
 #define UART1_BASE      0x40078000u
 #define SPI0_BASE       0x40080000u
 #define SPI1_BASE       0x40088000u
+/* 64-bit 1 MHz TIMER0 and the TICKS block that drives it (issue #80).
+ * TIMERAWH/TIMERAWL are raw reads with no latch, so a 64-bit sample needs
+ * the high word on both sides of the low word (pico-sdk's read order). */
+#define TIMER0_BASE     0x400b0000u
+#define TIMERAWH        (TIMER0_BASE + 0x24u)
+#define TIMERAWL        (TIMER0_BASE + 0x28u)
+#define TICKS_BASE      0x40108000u
+#define TICKS_TIMER0_CTRL_OFFSET   0x18u
+#define TICKS_TIMER0_CYCLES_OFFSET 0x1cu
 #define PLL_SYS_BASE    0x40050000u
 #define ADC_BASE        0x400a0000u
 #define SIO_BASE        0xd0000000u
@@ -57,6 +66,8 @@
 #define RESET_SPI1      (1u << 19)
 /* PLL_SYS is bit 14 on the RP2350 (PLL_USB is 15 - see usb_cdc.c). */
 #define RESET_PLL_SYS   (1u << 14)
+/* TIMER0 feeds the 64-bit microsecond counter (issue #80). */
+#define RESET_TIMER0    (1u << 23)
 /* DMA sits on bit 2 here (RP2040 used bit 1). */
 #define RESET_DMA       (1u << 2)
 /* The ADC block resets asserted and unclocked, which is why every conversion

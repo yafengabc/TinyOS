@@ -623,6 +623,32 @@ static void clocks_init(void)
                  (CLK_PERI_CTRL_AUXSRC_CLK_SYS << 5));
 }
 
+/ * The 64-bit TIMER only counts while TICKS TIMER0 emits its 1 MHz tick:
+ * TIMER0_CTRL.ENABLE plus TIMER0_CYCLES = clk_ref / 1 MHz (measured on the
+ * Pico 2; the field is the divisor itself, not "count - 1").  The ROM sets
+ * this up for its boot clock and releases TIMER0 from reset on a flash boot,
+ * but after a RUN reset the block stays held in reset with the counter
+ * frozen.  Run this after plat_board_early() clears RESET_TIMER0 and after
+ * clk_ref has reached its final source; writing it while reset is asserted
+ * can be dropped.  A rough divisor is better than a stopped counter: ROSC
+ * gets the datasheet's nominal 6.5 MHz rather than no tick at all. */
+static void ticks_init(void)
+{
+    uint32_t khz;
+
+    if (mmio_read32(CLOCKS_BASE + CLK_REF_SELECTED_OFFSET) & (1u << 2))
+        khz = 12000u;           /* clk_ref = XOSC 12 MHz */
+    else
+        khz = 6500u;            /* clk_ref = ROSC: nominal, but it counts */
+
+    /* Measured on the Pico 2: TIMER0_CYCLES is the divisor itself, not the
+     * usual "count - 1".  12 MHz / 11 gave a 1.0909 MHz counter (9.09% fast);
+     * 12 gives the intended 1 MHz.  The RV32 port's -1 form does not apply
+     * to the ARM view of this block. */
+    mmio_write32(TICKS_BASE + TICKS_TIMER0_CYCLES_OFFSET, khz / 1000u);
+    mmio_write32(TICKS_BASE + TICKS_TIMER0_CTRL_OFFSET, 1u);
+}
+
 /* Move clk_sys onto PLL_SYS from SRAM.
  *
  * No QMI re-timing here, on purpose.  Measured on the Pico 2 (standalone
@@ -1645,6 +1671,27 @@ int plat_console_getchar(void)
 
 static volatile uint64_t g_ticks;
 static uint32_t g_reload;
+/* Wall clock (issue #80): g_ticks stops while a core is parked in RAM for a
+ * flash write, the 1 MHz TIMER does not.  Save its boot-time count so uptime
+ * still starts at zero without ever writing the counter hardware. */
+static uint64_t g_timer_zero;
+
+/* Raw high-low-high read of the 64-bit microsecond counter.  TIMERAWH and
+ * TIMERAWL do not latch each other, so a wrap between the two halves has to
+ * be detected by sampling the high word twice (pico-sdk's read order).  It
+ * runs with interrupts masked from both the tick and user code; the retry is
+ * bounded by the counter advancing once per microsecond. */
+static uint64_t rp_timer_read_us(void)
+{
+    uint32_t hi1, lo, hi2;
+
+    do {
+        hi1 = mmio_read32(TIMERAWH);
+        lo  = mmio_read32(TIMERAWL);
+        hi2 = mmio_read32(TIMERAWH);
+    } while (hi1 != hi2);
+    return ((uint64_t)hi1 << 32) | lo;
+}
 
 void plat_timer_init(uint32_t hz)
 {
@@ -1652,6 +1699,7 @@ void plat_timer_init(uint32_t hz)
     if (g_reload == 0)
         g_reload = 1;
     g_ticks = 0;
+    g_timer_zero = rp_timer_read_us();
 
     mmio_write32(ARM_SYSTICK_LOAD, g_reload - 1u);
     mmio_write32(ARM_SYSTICK_VAL, 0);
@@ -1672,20 +1720,22 @@ uint32_t plat_tick_hz(void)
 
 uint32_t plat_uptime_ms(void)
 {
-    return (uint32_t)((g_ticks * 1000u) / (uint64_t)plat_tick_hz());
+    /* Wall clock, not the scheduler tick: core 0's SysTick stops during the
+     * RAM park for a flash write (issue #80).  TIMER counts microseconds, so
+     * convert before truncating to keep the uint32_t ms counter's 49-day
+     * wrap; a raw us truncation would wrap every 71.6 minutes. */
+    return (uint32_t)((rp_timer_read_us() - g_timer_zero) / 1000u);
 }
 
 uint64_t plat_now_ns(void)
 {
     static uint64_t last_ns;
-    uint32_t load = g_reload;
-    uint32_t val  = mmio_read32(ARM_SYSTICK_VAL) & 0xFFFFFFu;
-    uint32_t into = (load > val) ? (load - val) : 0u;
-    uint64_t cycles = g_ticks * (uint64_t)load + into;
-    uint64_t ns = (cycles / (uint64_t)g_clk_hz) * 1000000000ull
-                + ((cycles % (uint64_t)g_clk_hz) * 1000000000ull)
-                  / (uint64_t)g_clk_hz;
+    uint64_t ns = (rp_timer_read_us() - g_timer_zero) * 1000ull;
 
+    /* A free-running 1 MHz counter keeps advancing with interrupts masked,
+     * independent of g_ticks.  No 64-bit divide on this hot path (the old
+     * SysTick version had one), so -Os needs no new libgcc helper.  Keep the
+     * existing monotonic clamp. */
     if (ns < last_ns)
         ns = last_ns;
     last_ns = ns;
@@ -2220,7 +2270,12 @@ void plat_board_early(void)
     /* Release the peripherals the early output needs before using them:
      * IO_BANK0, PADS_BANK0 and UART0 are all held in reset on RP2350, and
      * touching them while they are costs an AHB stall, not a fault. */
-    unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0);
+    /* TIMER0 is the 64-bit microsecond counter behind TIMERAWL.  A flash
+     * boot leaves it running, but a RUN reset can leave it held in reset with
+     * the counter frozen; issue #80's wall clock now depends on it.  Clear
+     * just that bit before clk_ref is used to program its tick. */
+    unreset(RESET_IO_BANK0 | RESET_PADS_BANK0 | RESET_UART0 | RESET_TIMER0);
+    ticks_init();
 
     /* Measure clk_sys before the first byte goes out and derive the UART
      * divider from the measurement, never from a guess.  The PL011 divider
