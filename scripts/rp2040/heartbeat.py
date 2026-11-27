@@ -98,7 +98,7 @@ def main():
               if delta is not None else "no uptime line")
 
         ls = con.cmd("ls /bin")
-        check("3 filesystem read", bool(re.search(r"\bmsh\b", ls)), "ls /bin")
+        check("3 filesystem read", bool(re.search(r"\bsh\b", ls)), "ls /bin")
 
         hello = con.cmd("hello")
         check("4 user program", "hello from ring 3!" in hello, "hello")

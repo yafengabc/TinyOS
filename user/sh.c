@@ -748,9 +748,6 @@ static int run_command(char *s)
         }
         last_status = 0;
         return 0;
-    } else if (!strcmp(args[0], "reboot")) {
-        puts("rebooting...\n");
-        reboot();           /* does not return */
     } else if (!strcmp(args[0], "source")) {
         /* In this process on purpose: the C3 has three task windows in
          * total.  The name is copied because the nested script uses the

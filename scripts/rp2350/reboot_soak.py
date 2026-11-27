@@ -51,7 +51,7 @@ def command(port, text, window, tries=2, want=None):
     """Send a line, return (answered, text received).
 
     Retried once on no answer.  The first command written immediately after a
-    boot's prompt is occasionally swallowed - the prompt is printed by msh
+    boot's prompt is occasionally swallowed - the prompt is printed by sh
     before its first getline(), so a byte that lands in between is echoed by
     the tty layer and then discarded.  That is a race in the harness, not a
     board fault, and one retry separates the two: a machine that is really

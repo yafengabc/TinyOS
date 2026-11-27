@@ -1680,6 +1680,14 @@ func (b *Builder) buildUser() ([]string, error) {
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() {
+			/* msh is frozen: sh is the shell (kernel/main.c starts it) and
+			 * keeping a second implementation in the image only costs a
+			 * 16 KiB window plus drift (help/incr already diverged).  The
+			 * source stays as the size record for the small window class;
+			 * no image packs it any more. */
+			if name == "msh" {
+				continue
+			}
 			if b.UserExclude[name] {
 				continue
 			}

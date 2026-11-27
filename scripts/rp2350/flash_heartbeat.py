@@ -103,7 +103,7 @@ def main():
           delta is not None and abs(delta - wall) <= 0.1,
           'delta=%.3f wall=%.3f' % (delta, wall) if delta is not None else 'no uptime')
 
-    check('3 filesystem read', bool(re.search(r'\bmsh\b', cmd(s, 'ls /bin'))), 'ls /bin')
+    check('3 filesystem read', bool(re.search(r'\bsh\b', cmd(s, 'ls /bin'))), 'ls /bin')
     check('4 user program', 'hello from ring 3!' in cmd(s, 'hello'), 'hello')
 
     cmd(s, 'wfile hb.tmp x')

@@ -148,7 +148,7 @@ void kmain(void)
 #endif
 
 #if TOS_BOOT_TRACE
-    kprintf("\nstarting /bin/msh ...\n\n");
+    kprintf("\nstarting /bin/sh ...\n\n");
 #endif
     plat_boot_stage(11u);
     /* Boards start their own kernel threads here: the scheduler and every
@@ -159,6 +159,8 @@ void kmain(void)
 #ifdef TOS_KTASK_TEST
     process_ktask_selftest();
 #endif
-    process_start_shell("/bin/msh");
+    /* sh is the shell.  msh is frozen: its source stays for the size record,
+     * but the default configs no longer pack it and nothing here starts it. */
+    process_start_shell("/bin/sh");
     panic("shell returned");
 }

@@ -137,15 +137,15 @@ def cover_lines(text, echo):
             if l and not l.startswith("tos>") and not l.startswith("result=")]
 
 
-def msh_wink(ps_text):
-    """`wink` from the msh row.
+def shell_wink(ps_text):
+    """`wink` from the shell row.
 
     Columns: pid tid ppid prio state c cpu% cpums wink stk/sz name.  Read
     from the end, so a column inserted before wink does not move it.
     """
     for line in ps_text.splitlines():
         t = line.split()
-        if len(t) >= 4 and t[-1] == "msh":
+        if len(t) >= 4 and t[-1] == "sh":
             return t[-3]
     return None
 
@@ -220,9 +220,9 @@ def run_checks(con, image, results, opts, boot_text):
           want=(str(df_want),))
 
     # --- 33.1/33.2: windows, isolation, stack ---
-    wink = msh_wink(con.cmd("ps"))
-    check(results, "C ps lists msh", "msh wink %s" % wink if wink else "",
-          want=("msh wink",), note=("msh wink %s" % wink) if wink else
+    wink = shell_wink(con.cmd("ps"))
+    check(results, "C ps lists sh", "sh wink %s" % wink if wink else "",
+          want=("sh wink",), note=("sh wink %s" % wink) if wink else
           "could not parse ps")
 
     # RV32 survives two of the four by design, not by oversight: rodata shares
@@ -337,9 +337,9 @@ def replay_checks(text, image, results):
 
     check(results, "B no fs-grow warning", text, avoid=("fs grow",))
     check(results, "B df total 3670016", text, want=("3670016",))
-    wink = msh_wink(text)
-    check(results, "C ps lists msh", "msh wink %s" % wink if wink else "",
-          want=("msh wink",))
+    wink = shell_wink(text)
+    check(results, "C ps lists sh", "sh wink %s" % wink if wink else "",
+          want=("sh wink",))
     # Same two things as the live path: the fault wording differs per arch, and
     # RV32 cannot deny rodata or address zero, so only three of the five fault.
     fault_mark = "access fault" if run_checks_replay["rv"] else "MemManage"

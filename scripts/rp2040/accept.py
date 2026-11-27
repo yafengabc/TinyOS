@@ -327,7 +327,8 @@ def main():
               "kernel heap free=%s" % m.group(3) if m else "no kernel heap line")
 
         ls = b.cmd("ls /bin")
-        check("filesystem read: ls /bin", "msh" in ls and "sh" in ls, "msh + sh")
+        check("filesystem read: ls /bin", "sh" in ls and "msh" not in ls,
+              "sh, msh frozen out")
 
         hello = b.cmd("hello")
         check("exec a user program", "hello from ring 3!" in hello, "hello")

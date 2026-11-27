@@ -71,12 +71,15 @@ jobs:
       # The build drives clang for every target and ld.lld directly for
       # linking; mklfs is a normal host C program compiled by the same clang.
       #
-      # The version matters more than it looks: user/msh/msh.c sits 60 bytes
-      # under its 8 KiB budget at -Oz with clang 23, and the distro's clang 18
-      # produces a 12 KiB image, which turns msh's window from 16 KiB into
-      # 32 KiB and trips TOS_ONE_GRAIN().  So install the newest LLVM the
-      # Ubuntu release has a package for, and fall back to the distro one only
-      # if apt.llvm.org is unreachable (then the size check will tell us).
+      # The version matters more than it looks: an older clang emits larger
+      # code, and a program that crosses its span boundary changes the whole
+      # task window (the C3 and both RP2350 ISAs link every user program into
+      # one of four 4 KiB span classes).  msh used to be the canary - 60 bytes
+      # under its 8 KiB budget at clang 23, 12 KiB with clang 18 - but it is
+      # frozen and no longer packed; the size check on `sh` is the canary now.
+      # Install the newest LLVM the Ubuntu release packages, and fall back to
+      # the distro one only if apt.llvm.org is unreachable (then the size
+      # check will tell us).
       - name: Install LLVM
         run: |
           set -euo pipefail
@@ -124,7 +127,7 @@ jobs:
 
       - name: Report image sizes
         run: |
-          wc -c build/user/bin/msh build/user/bin/sh 2>/dev/null || true
+          wc -c build/user/bin/sh build/user/bin/help build/user/bin/tools 2>/dev/null || true
 
       - name: Collect images
         shell: bash

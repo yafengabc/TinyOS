@@ -1,4 +1,9 @@
 /* msh - a shell that fits one 16 KiB task window.
+ * FROZEN (2026-11-28): sh is the shell.  kernel/main.c starts /bin/sh, the
+ * default images do not pack this program (internal/build skips it), and
+ * nothing here is maintained any more - it stays only as the record of the
+ * smallest shell this tree ever fit into one task window.  Help and reboot
+ * live in /bin as ordinary programs now.
  *
  * A window is image + stack + heap + guard, and the stack and guard have a
  * floor of one page each on every board with a protection unit, so the image
