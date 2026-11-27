@@ -68,11 +68,26 @@ static void locker(void *arg)
     kthread_exit(0);
 }
 
+/* The last word of the 32-bit space: unmapped on every port this OS runs on.
+ *
+ * Address 0 is NOT a usable probe everywhere.  On RP2350's Hazard3 the bootrom
+ * leaves hardwired RWX PMP entries over the ROM region (pmp_map.h: "8..10 are
+ * hardwired by the bootrom ... writing those is a no-op"), so a store to 0 is
+ * legal there - measured: `prot dev 0x0` and `prot null` both survive in U
+ * mode while `prot heap`, `prot stack` and an unmapped address all fault.  On
+ * top of that this probe runs as a kthread, and arch/rv32/platform.c returns
+ * ktasks to M mode on mret, where PMP does not apply at all.
+ *
+ * A word in the top page is outside every map, so the access faults for the
+ * reason this case is about - a thread dies while holding a mutex - instead of
+ * depending on what a particular bootrom happened to leave in PMP. */
+#define FAULT_PROBE_ADDR 0xFFFFFFF0u
+
 static void die_holding(void *arg)
 {
     (void)arg;
     kmutex_lock(&deadmutex);
-    *(volatile int *)0 = 1;             /* fault while holding the word */
+    *(volatile int *)FAULT_PROBE_ADDR = 1;   /* fault holding the word */
 }
 
 /* Concurrent malloc/free from four threads.  The free list is shared, and
@@ -412,8 +427,8 @@ static int probe_double_join(void)
 }
 
 /* /proc/cpuinfo says whether this port enforces user-memory protection.  The
- * fault probe below writes to address 0 and expects the thread to die with
- * 139; on a port with no MPU (RP2040) that store is allowed, so the probe
+ * fault probe below writes to FAULT_PROBE_ADDR and expects the thread to die
+ * with 139; on a port with no MPU (RP2040) that store is allowed, so the probe
  * would test an assumption the platform cannot satisfy.  Read the capability
  * instead of guessing - and answer "on" when the file or the line is missing,
  * so an unknown port keeps the strict check. */
@@ -723,13 +738,13 @@ int main(int argc, char *argv[])
             ok(kthread_join(tid, &code) == 0 && code == 139,
                "the holder died on its fault");
         } else {
-            /* No MPU/PMP here: the store to address 0 is not a fault, so the
-             * thread exits normally.  Say so instead of pretending the probe
-             * ran; the half that matters on this port - a thread that goes
-             * away while holding a mutex must not pin it - is checked below
-             * and is not weakened. */
+            /* No MPU/PMP here: the store to the dead address is not a fault,
+             * so the thread exits normally.  Say so instead of pretending the
+             * probe ran; the half that matters on this port - a thread that
+             * goes away while holding a mutex must not pin it - is checked
+             * below and is not weakened. */
             ok(kthread_join(tid, &code) == 0,
-               "join the thread that wrote to address 0 (memprot: off)");
+               "join the thread that wrote to a dead address (memprot: off)");
             printf("kthreadtest: N/A the holder died on its fault (memprot: off)\n");
         }
         ok(kmutex_try(&deadmutex) == 1, "a dead holder released the mutex");
