@@ -16,7 +16,7 @@ RISC-V 一侧的同一层是 [`rp2350rv-generic/`](../rp2350rv-generic/README.md
 | SRAM | 520 KiB @ `0x20000000`：前 128 KiB 内核 `.data/.bss/栈`，其后 384 KiB 任务窗口 |
 | Flash | **不声明**（`fs_backing = embedded`）：内核照样从 flash 里 XIP，但文件系统不落在上面 |
 | 启动 | ROM 自己配 XIP，扫前 4 KiB 找 **PICOBIN IMAGE_DEF**（`image_def.S`），再从 flash 偏移 0 的向量表取 MSP/PC；没有第二级加载器 |
-| UF2 | family `0xe48bff59`（ARM Secure EXE），产物 `build/tinyos-rp2350-generic.uf2`（约 912 KiB（934,400 B）） |
+| UF2 | family `0xe48bff59`（ARM Secure EXE），产物 `build/tinyos-rp2350-generic.uf2`（约 865 KiB / 885,248 B） |
 | 文件系统 | RAM disk，300 KiB（75 块 / 600 扇区），掉电即失 |
 | 任务窗口 | 4 KiB 粒度，384 KiB 分出 96 个窗口；栈 4 KiB、栈下护栏 4 KiB |
 | 内存保护 | **有**：PMSAv8 MPU（`TOS_ARM_MPU_V8`），代码 RO+X、数据/堆 RW、栈 RW、栈下护栏；第一次任务切换时打开 |
@@ -52,8 +52,11 @@ go run ./cmd/tos build -target rp2350-generic
 go run ./cmd/tos build all          # 连同其它目标一起构建，不在源码树外改配置
 ```
 
-默认外设特性 `pio`；`board.conf` 的 `[user] exclude` 去掉了 WiFi/网络和面板程序
-（`screen`/`lcdconsole`/`splash`/`fb`），因为基线没有这些硬件。
+`board.conf` 的 `features = pio, kthreads, usb_pump`：PIO 用户态汇编器、用户线程，
+以及把 USB 状态机放进一个 prio 0、固定在 core 0 的内核线程（`usb_pump`）。泵线程
+创建失败直接 panic；`usb_pump_fallback = true` 才退回旧的 idle/PendSV 钩子。
+`[user] exclude` 去掉了 WiFi/网络、面板程序（`screen`/`lcdconsole`/`splash`/`fb`）和
+线程测试程序（`kthreadtest`/`threadbench`/`prodcons`）——基线镜像不带它们。
 
 ## 烧写与看日志
 
@@ -131,7 +134,7 @@ drivers = drivers/gpio/rp2350, drivers/spi/rp2350, drivers/usb/rp2350, drivers/p
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| 构建 + UF2（PICOBIN / IMAGE_DEF / family） | ✅ | `tos build all` 全目标通过（18/18）；产物约 912 KiB（934,400 B）；构建期校验 IMAGE_DEF 魔数、MSP、reset 的 Thumb 位 |
+| 构建 + UF2（PICOBIN / IMAGE_DEF / family） | ✅ | `tos build all` 全目标通过（18/18）；产物约 865 KiB（885,248 B）；构建期校验 IMAGE_DEF 魔数、MSP、reset 的 Thumb 位 |
 | 冷启动到 shell | ◐ | 本 target 没有独立验收卡；同一份 `platform.c` 在 ATK（W25Q32）与 Pico 2（W25Q64）上都到过 shell |
 | USB CDC + UART0 双控制台 | ◐ | 同上，控制台代码是这块板定义的，两块具体板实测 |
 | littlefs on RAM disk | ◐ | 同一 `ramdisk_init()` 路径在 QEMU 与嵌入式镜像上覆盖；本镜像未单独跑 `dd` |

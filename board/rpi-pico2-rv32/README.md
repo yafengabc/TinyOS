@@ -43,6 +43,9 @@ go run ./cmd/tos build -config configs/rpi-pico2-rv32-quiet.conf        # 双 ha
 go run ./cmd/tos build -config configs/rpi-pico2-rv32-rir.conf          # 板上工具链
 ```
 
+优化级别与 ARM 侧同源：`opt = -Os`（内核）、`user_opt = -O2`（用户程序），
+`features = pio, rir, kthreads, usb_pump`。
+
 构建日志里出现下面几行是**正常的**（`rvc = auto` 在为跨页的程序换编码）：
 
 ```text

@@ -55,6 +55,9 @@ go run ./cmd/tos build -target rp2350rv-generic
 # -> build/tinyos-rp2350rv-generic.uf2
 ```
 
+`features = pio, kthreads, usb_pump`（同 ARM 基线）。RV32 侧的 USB 泵也是一条
+prio 0 的内核线程，而内核线程跑在 M 态，PMP 不约束它。
+
 构建日志里可能有若干行：
 
 ```text

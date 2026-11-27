@@ -56,6 +56,11 @@ go run ./cmd/tos build -target rpi-pico2-smp        # 双核
 go run ./cmd/tos build -target rpi-pico2 -config configs/rpi-pico2-quiet.conf   # 去掉 [A]..[E]
 ```
 
+每个 target 的优化级别是分开的：`opt = -Os` 给内核（比 `-O2` 小 30%，CoreMark
+487 vs 478、`smpbench` 2.00–2.05x），`user_opt = -O2` 留给用户程序——`TOS_OPT`
+同时压用户程序时 CoreMark 会从 478 掉到 289。`board.conf` 默认
+`features = pio, rir, kthreads, usb_pump`。
+
 `configs/rpi-pico2-rir.conf` 是板上自带工具链（`csc` + `rvm` + `rcc`）的镜像，
 `configs/rpi-pico2-quiet.conf` 关掉启动探针（**只在板上已经通过带 trace 的镜像之后用**，
 `accept33.py` 要读 `[A]..[E]`）。
