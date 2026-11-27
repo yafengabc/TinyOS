@@ -517,7 +517,7 @@ trap 落进内核态（例如 syscall 执行中）时不会切换——`plat_fau
 
 ### 6.5 命令文件：一个解析器，两个输入源
 
-`source <file>` 与 `run sh <file>` 都在 `user/sh.c`，共用同一个 `split()` 和
+`source <file>` 与 `run sh <file>` 都在 `user/sh/sh.c`，共用同一个 `split()` 和
 `run_command()`，区别只在输入源和要不要 `exec`：
 
 - `source` 把文件当成**当前进程**的输入源，递归调 `run_script()`。不占任务窗口。
