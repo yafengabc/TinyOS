@@ -190,6 +190,10 @@ int  ttyraw(int on);
 int  hist_count(void);
 int  hist_get(int newest_index, char *buf, int cap);
 int  getpid(void);
+/* Send signal `sig` to the task with that pid.  SIGKILL terminates it,
+ * SIGSTOP parks it until SIGCONT; the same call ^C uses.  Returns 0, or -1
+ * when no such task (or the signal is not one of those three). */
+int  kill(int pid, int sig);
 int  sleep(int ms);
 int  uptime(void);
 

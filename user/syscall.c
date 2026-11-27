@@ -117,6 +117,11 @@ int getpid(void)
     return tos_sys0(SYS_GETPID);
 }
 
+int kill(int pid, int sig)
+{
+    return tos_sys2(SYS_SIGNAL, pid, sig);
+}
+
 int sleep(int ms)
 {
     return tos_sys1(SYS_SLEEP, ms);
