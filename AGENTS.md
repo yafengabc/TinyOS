@@ -60,6 +60,10 @@ Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
   is RP2350-specific still closes on the Pico 2 images alone.
 - Images are board-specific: never present an ATK run as Pico 2 evidence or
   the reverse. The same silicon is not the same board (LED/pins/flash).
+- **Soak budget.** T4 is `-m 10` per image for a routine release; the
+  30-minute `-m 30` run is the scheduler/kernel generation gate (SMP images,
+  once after a scheduler, lock, console or memory/flash rewrite), not a
+  per-release cost.  A 10-minute run that reboots or fails escalates to 30.
 
 ## Hard rules for agents
 
