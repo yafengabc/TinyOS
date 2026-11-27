@@ -10,7 +10,7 @@
 
 #define TOS_APPLETS(X) \
     X(cat) X(cp) X(dd) X(df) X(du) X(echo) X(flashinfo) X(free) X(grep) \
-    X(head) X(kill) X(mkdir) X(rmdir) X(stat) X(tail) X(tee) X(uptime) \
-    X(wc) X(wfile)
+    X(head) X(help) X(kill) X(mkdir) X(rmdir) X(stat) X(tail) X(tee) \
+    X(uptime) X(wc) X(wfile)
 
 #endif

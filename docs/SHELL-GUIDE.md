@@ -6,57 +6,55 @@
 
 ```
 tos> help
-TinyOS shell commands:
-  ls [dir|file]      list a directory, or show a file
-  cd [dir]           change directory (default /)
-  pwd                print the working directory
-  cat <file>         print a file
-  edit <file>        full screen editor (^S save, ^X exit)
-  echo [args...]     print arguments (builtin)
-  hello              demo program
-  mem                heap / sbrk demo
-  crash              run an illegal instruction (kills that process)
-  uptime             real time since boot (hardware clock)
-  sleep <ms>         wait without using the CPU (builtin in scripts)
-  gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)
-  adc [chan] [n]     sample the analog inputs
-  smp                run one worker per CPU, in parallel
-  reboot             reset the machine and boot again
-  df                 filesystem usage
-  dd of=f bs=n count=n  write n blocks of a test pattern; with
-                     if=f instead of of= read back and verify
+TinyOS help
+
+Shell builtins (sh and msh):
+  cd [dir]           change directory (default /); pwd prints it
+  echo [args...]     print arguments
+  history            list recent commands (up/down recalls them)
+  ps                 list tasks (also /proc/ps, /proc/mem, /proc/uptime)
+  sleep <ms>         wait without using the CPU
   rm <file>...       remove files
-  free               RAM map and kernel heap usage
-  ps                 list tasks
-  cat /proc/ps       the same table as a file (also /proc/mem,
-                     /proc/uptime) - `ps > f` writes it to f
+  run <prog> [args] [&]   run a program (cwd, /bin, then /bin/tools)
+  nice <n> <prog> .. run at priority n (0 high, 2 low)
+  prio <pid> <n>     move a running task to priority n
+  source <file>      run a script in this shell
+  true / false       set $? to 0 / 1
+  exit [code]        shut TinyOS down (end the script, in a script)
+
+Tools in /bin/tools (also `tools <name>`):
+  cat cp dd df du echo flashinfo free grep head help kill mkdir rmdir stat tail tee uptime wc wfile
+
+Programs in /bin:
+  ls edit reboot gpio adc spi i2c pwm uart fb screen splash
+  lcdconsole smp ping host net http dhcp wificonn wifiscan ...
+
+Files, devices and pipes:
+  cat /proc/ps       the task table as a file
   echo 1 > /dev/gpio4  pins and ADC channels are files: write to
                      drive, cat to read, `gpio dev` for ioctl
   cmd > file         send stdout to a file or a device
   A | B              send A's stdout to B's stdin
-  run <prog> [args]  run a program (cwd first, then /bin)
-  run <prog> ... &   run it in the background
   run sh <file>      run a script as a task
-  source <file>      run a script in this shell
-  nice <n> <prog> .. run it at priority n (0 high, 2 low)
-  prio <pid> <n>     move a running task to priority n
-Script syntax (in a script file; see docs/SHELL-GUIDE.md):
+
+Script syntax (sh only; msh runs programs, pipes and variables):
   name=text          set a variable (also `name=$(prog args)`)
   incr name [n]      add n (default 1) to an integer variable
   $name  ${name}  $? text substitution; $(prog) captures stdout
-  if <a> == <b>     also != -eq -ne -lt -gt -le -ge, -n a, -z a
-  else / fi         optional else branch / end of if
-  while <cond>      loop while the condition holds
-  done / break      end of loop / leave the innermost loop
-  true / false      set $? to 0 / 1
-  help               this text
-  exit [code]        shut TinyOS down (end the script, in a script)
+  if <a> == <b>      also != -eq -ne -lt -gt -le -ge, -n a, -z a
+  else / fi          optional else branch / end of if
+  while <cond> ... done   loop; break leaves the innermost loop
+
+Line editing: ^A/^E home/end, ^U kill line, ^K kill to end,
+  ^W kill word, arrows move/history, Backspace, Delete, Tab=space.
 ```
 
-命令分三类：**内建**（`help`、`cd`、`pwd`、`rm`、`ps`、`exit`、`reboot`、
-`source`、`run`、`nice`、`prio`，以及脚本用的 `incr`、`true`、`false`）、
-**脚本内内建 + 控制台/后台程序**（`echo`、`sleep`）和**程序**（`bin/` 下的每个
-ELF：`ls`、`cat`、`uptime`……）。
+命令分三类：**内建**（`cd`、`pwd`、`rm`、`ps`、`exit`、`source`、`run`、
+`nice`、`prio`，以及脚本用的 `incr`、`true`、`false`）、**脚本内内建 +
+控制台/后台程序**（`echo`、`sleep`）和**程序**（`bin/` 下的每个 ELF，以及
+`/bin/tools` 里的 applet：`ls`、`cat`、`uptime`……）。`help` 也是 applet，
+两个 shell 共用同一份文本，所以 `msh` 下同样可用，`help > f` 也照常工作。
+`incr` 是唯一必须留在 shell 里的命令：它改的是调用者的变量，子进程改不了。
 
 名字怎么变成路径，由 `exec()` 决定，和 `open()`/`stat()` 同一套规则：
 
@@ -64,11 +62,14 @@ ELF：`ls`、`cat`、`uptime`……）。
    当前目录（`cd` 改的就是它）；
 2. 不带 `/` 的先看当前目录，没有才去 `/bin`。所以你在放了新程序的目录里敲
    `hello` 就跑那个，换个目录再敲 `hello` 仍然是 `/bin/hello`；`./hello` 与
-   `hello` 在这个目录下等价。
+   `hello` 在这个目录下等价；
+3. 前两步都没有时，shell 用原名（`argv[0]` 不变）再 exec `/bin/tools`，由它
+   按名字分派 applet。这一步在 shell 里，内核只解析前两步，不认识 applet 的约定。
 
-shell 自己不再拼 `/bin`（`msh` 和 `sh` 都直接 `exec(argv[0])`），所以 `run`、
-脚本行和程序里的 `exec("名字")` 看到的顺序完全一致；名字找不到时内核报的是
-`/bin/<名字>`，那是它最后尝试的位置。
+前两步由内核的 `exec()` 完成，`run`、脚本行和程序里的 `exec("名字")` 看到的
+顺序完全一致；只有裸名的第 3 步在 shell 的 `spawn()` 里，所以内核的
+`exec: ... not found` 只对显式路径（含 `/`）打印，裸名失败是静默的，重试不会
+先喊一声。
 
 **为什么 `sleep` 有两条路径**：脚本里每毫秒采样一次时，为一次 `sleep 1`
 付一次 exec + ELF 重定位是不可接受的。但内建会停住 shell 自己，而内核**明确拒绝

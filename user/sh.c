@@ -189,65 +189,6 @@ static void cannot_open(const char *path)
     puts("\n");
 }
 
-/* ---- command help ----------------------------------------------------- */
-
-static void cmd_help(void)
-{
-    puts("TinyOS shell commands:\n");
-    puts("  Line editing: ^A/^E home/end, ^U kill line, ^K kill to end,\n");
-    puts("  ^W kill word, arrows move/history, Backspace, Delete, Tab=space.\n");
-    puts("  history            list recent commands (up/down recalls them)\n");
-    puts("  ls [dir|file]      list a directory, or show a file\n");
-    puts("  cd [dir]           change directory (default /)\n");
-    puts("  pwd                print the working directory\n");
-    puts("  cat <file>         print a file\n");
-    puts("  edit <file>        full screen editor (^S save, ^X exit)\n");
-    puts("  echo [args...]     print arguments (builtin)\n");
-    puts("  hello              demo program\n");
-    puts("  mem                heap / sbrk demo\n");
-    puts("  crash              run an illegal instruction (kills that process)\n");
-    puts("  uptime             real time since boot (hardware clock)\n");
-    puts("  sleep <ms>         wait without using the CPU (builtin in scripts)\n");
-    puts("  gpio <pin> [0|1]   read or drive a pin (gpio blink <pin>)\n");
-    puts("  screen             draw a status card on the board's panel\n");
-    puts("  screen dev         the device table, on the panel\n");
-    puts("  screen text <s>    write text; screen mirror on|off\n");
-    puts("  splash             ASCII title card; 'splash off' restores it\n");
-    puts("  lcdconsole on|off  toggle the panel's copy of console output\n");
-    puts("  fb [demo|bars|info|clear|rect]  draw RGB565 pixels on /dev/fb0\n");
-    puts("  adc [chan] [n]     sample the analog inputs\n");
-    puts("  smp                run one worker per CPU, in parallel\n");
-    puts("  reboot             reset the machine and boot again\n");
-    puts("  df                 filesystem usage\n");
-    puts("  dd of=f bs=n count=n  write n blocks of a test pattern; with\n");
-    puts("                     if=f instead of of= read back and verify\n");
-    puts("  rm <file>...       remove files\n");
-    puts("  free               RAM map and kernel heap usage\n");
-    puts("  ps                 list tasks\n");
-    puts("  cat /proc/ps       the same table as a file (also /proc/mem,\n");
-    puts("                     /proc/uptime) - `ps > f` writes it to f\n");
-    puts("  echo 1 > /dev/gpio4  pins and ADC channels are files: write to\n");
-    puts("                     drive, cat to read, `gpio dev` for ioctl\n");
-    puts("  cmd > file         send stdout to a file or a device\n");
-    puts("  A | B              send A's stdout to B's stdin\n");
-    puts("  run <prog> [args]  run a program from /bin\n");
-    puts("  run <prog> ... &   run it in the background\n");
-    puts("  run sh <file>      run a script as a task\n");
-    puts("  source <file>      run a script in this shell\n");
-    puts("  nice <n> <prog> .. run it at priority n (0 high, 2 low)\n");
-    puts("  prio <pid> <n>     move a running task to priority n\n");
-    puts("Script syntax (in a script file; see docs/SHELL-GUIDE.md):\n");
-    puts("  name=text          set a variable (also `name=$(prog args)`)\n");
-    puts("  incr name [n]      add n (default 1) to an integer variable\n");
-    puts("  $name  ${name}  $? text substitution; $(prog) captures stdout\n");
-    puts("  if <a> == <b>     also != -eq -ne -lt -gt -le -ge, -n a, -z a\n");
-    puts("  else / fi         optional else branch / end of if\n");
-    puts("  while <cond>      loop while the condition holds\n");
-    puts("  done / break      end of loop / leave the innermost loop\n");
-    puts("  true / false      set $? to 0 / 1\n");
-    puts("  help               this text\n");
-    puts("  exit [code]        shut TinyOS down (end the script, in a script)\n");
-}
 
 /* The prompt shows the working directory when it is not the root, so a `cd`
  * is visible; it always ends in "tos> " so scripts and the test harness can
@@ -737,10 +678,7 @@ static int run_command(char *s)
         ac--;
     }
 
-    if (!strcmp(args[0], "help")) {
-        cmd_help();
-        last_status = 0;
-    } else if (!strcmp(args[0], "cd")) {
+    if (!strcmp(args[0], "cd")) {
         /* A builtin, not a program: cwd is per process, so a child that
          * changed directory would take the change with it when it exits. */
         const char *dst = ac > 1 ? args[1] : "/";

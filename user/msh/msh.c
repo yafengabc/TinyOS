@@ -24,8 +24,11 @@
  * in-process (nests two deep), exit, run, echo, true/false, history,
  * cd/pwd/rm/ps/sleep/prio/nice.
  * What it drops: if/while/else/fi/done/break, $(...), append (`>` truncates
- * only), `|` chains longer than two stages, incr and the long help.  Those are
- * the 8 KiB of text the full shell's script engine accounts for.
+ * only), `|` chains longer than two stages and incr.  Those are the 8 KiB of
+ * text the full shell's script engine accounts for.  `incr` is the one
+ * command that cannot move out of a shell: it changes the caller's variable,
+ * which a child process cannot do.  `help` is not here either - it is an
+ * applet in /bin/tools, so both shells share it and neither carries the text.
  *
  * history costs no storage here: the pool lives in the line discipline
  * (kernel/tty.c, 512 B of kernel .bss), which is also what makes the arrow
