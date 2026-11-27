@@ -80,6 +80,7 @@
 #define RESET_PLL_SYS (1u << 12)   /* bit 14 is PWM, not PLL_SYS */
 #define RESET_PWM     (1u << 14)
 #define RESET_ADC     (1u << 0)
+#define RESET_TIMER   (1u << 21)   /* 1 MHz wall clock (issue #80) */
 
 /* ---- Clocks -------------------------------------------------------------
  * A normal flash boot leaves XOSC DISABLED: clk_ref (and therefore clk_sys,
@@ -145,6 +146,17 @@
 #define ARM_SYSTICK_CTRL ARM_SYSTICK_CSR
 
 #define ARM_SYSTICK_CLK  RP2040_SYS_CLK_HZ
+
+/* 1 MHz TIMER (issue #80). _clk_ref_ is 12 MHz after clocks_init(), and the
+ * block divides it to 1 MHz.  TIMERAWH/TIMERAWL are raw reads with no
+ * latching side effect, so a 64-bit read must sample the high word on both
+ * sides of the low word - the exact order pico-sdk's timer_time_us_64() uses.
+ * TIMEHW/TIMELW (writes, at +0x00/+0x04) are deliberately not used: we only
+ * subtract a boot-time zero, so the counter's phase is never disturbed. */
+#define RP_TIMER_BASE    0x40054000u
+#define RP_TIMERAWH      (RP_TIMER_BASE + 0x24u)
+#define RP_TIMERAWL      (RP_TIMER_BASE + 0x28u)
+#define RP_TIMER_HZ      1000000u
 
 /* Cortex-M0+ vector table offset register.  The stage-2 leaves VTOR pointing
  * at the boot ROM (0x00000000); we must repoint it at our own vector table at

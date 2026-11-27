@@ -23,6 +23,10 @@ static uint32_t g_cpu_hz = 12000000u;
 static uint32_t g_tick_hz = 1000u;
 static volatile uint64_t g_ticks;
 static uint32_t g_reload;
+/* Wall clock (issue #80): g_ticks stops while a core is parked in the RAM
+ * loop for a flash write, the 1 MHz TIMER does not.  Count at boot is saved
+ * here so uptime still starts at zero without writing the timer hardware. */
+static uint64_t g_timer_zero;
 
 /* Board: Raspberry Pi RP2040 (dual Cortex-M0+, ARMv6-M).
  *
@@ -621,6 +625,23 @@ int plat_console_getchar(void)
 
 /* ---- SysTick ----------------------------------------------------------- */
 
+/* 1 MHz TIMER read for the wall clock (issue #80).  TIMERAWH/TIMERAWL have
+ * no latch, so a wrap between the two halves must be detected by reading
+ * the high word twice - the same order pico-sdk uses.  This runs with
+ * interrupts masked from the tick and from user code; the retry is bounded
+ * by the timer incrementing only once per microsecond. */
+static uint64_t rp_timer_read_us(void)
+{
+    uint32_t hi1, lo, hi2;
+
+    do {
+        hi1 = mmio_read32(RP_TIMERAWH);
+        lo  = mmio_read32(RP_TIMERAWL);
+        hi2 = mmio_read32(RP_TIMERAWH);
+    } while (hi1 != hi2);
+    return ((uint64_t)hi1 << 32) | lo;
+}
+
 /* clocks_init() leaves clk_sys (and therefore the SysTick input) on PLL_SYS
  * at 125 MHz, so a reload of CLK/hz gives `hz` ticks per second.  The
  * counter is started here with the interrupt masked; plat_irq_enable() later
@@ -632,6 +653,7 @@ void plat_timer_init(uint32_t hz)
     g_tick_hz = hz;
     g_reload = g_cpu_hz / hz;
     g_ticks = 0;
+    g_timer_zero = rp_timer_read_us();
 
     mmio_write32(ARM_SYSTICK_LOAD, g_reload - 1u);
     mmio_write32(ARM_SYSTICK_VAL, 0);
@@ -654,25 +676,21 @@ uint32_t plat_tick_hz(void)
 
 uint32_t plat_uptime_ms(void)
 {
-    return (uint32_t)((g_ticks * 1000u) / (uint64_t)plat_tick_hz());
+    /* Wall clock, not the scheduler tick: core 0's SysTick stops during the
+     * RAM park for a flash write (issue #80).  TIMER counts microseconds, so
+     * convert to ms before truncating - keeping the old 49-day wrap of a
+     * uint32_t millisecond counter (a raw us truncation would wrap in 71 min). */
+    return (uint32_t)((rp_timer_read_us() - g_timer_zero) / 1000u);
 }
 
-/* Clock: the tick gives whole periods, SysTick's live down-counter gives
- * the position inside the current one, so resolution is 1/125 MHz (8 ns)
- * rather than 1 ms.  Clamped against the wrap that happens between the
- * reload and the tick interrupt. */
+/* Clock from the free-running 1 MHz TIMER, so it keeps advancing with
+ * interrupts masked (flash park) and independent of g_ticks.  Resolution is
+ * 1 us instead of the old SysTick's 8 ns; no 64-bit divide on this path, so
+ * -Os does not need a new libgcc helper.  Keep the monotonic clamp. */
 uint64_t plat_now_ns(void)
 {
     static uint64_t last_ns;
-    uint32_t load = g_reload;
-    uint32_t val  = mmio_read32(ARM_SYSTICK_VAL) & 0xFFFFFFu;
-    uint32_t into = (load > val) ? (load - val) : 0u;
-    uint64_t cycles = g_ticks * (uint64_t)load + into;
-    /* Work in thousandths: ns = cycles * 1000000 / CLK, split to avoid
-     * overflow on 32-bit arithmetic. */
-    uint64_t per_ms = g_cpu_hz / 1000u;
-    uint64_t ns = (cycles / per_ms) * 1000000ull
-                + ((cycles % per_ms) * 1000000ull) / per_ms;
+    uint64_t ns = (rp_timer_read_us() - g_timer_zero) * 1000ull;
 
     if (ns < last_ns)
         ns = last_ns;
@@ -1400,6 +1418,20 @@ void plat_board_early(void)
      * this before the handover does not move us away from the reset state. */
     clocks_init();
     g_panic_poll = bootsel_poll_uart;
+
+    /* The ROM normally leaves the 1 MHz TIMER running, but a path that
+     * skips it (e.g. a RUN reset) can leave the block held in reset.  Clear
+     * only that bit and wait for RESET_DONE, before plat_timer_init() takes
+     * the boot-time count.  clk_ref is already final at this point. */
+    {
+        uint32_t rst = mmio_read32(RESETS_BASE + RESETS_RESET_OFFSET);
+        if (rst & RESET_TIMER) {
+            mmio_write32(RESETS_BASE + RESETS_RESET_OFFSET, rst & ~RESET_TIMER);
+            for (uint32_t spins = 0; spins < plat_pre_tick_spins(1000000u); spins++)
+                if (mmio_read32(RESETS_BASE + RESETS_RESET_DONE_OFFSET) & RESET_TIMER)
+                    break;
+        }
+    }
 
     /* UART0 on GPIO0/1 is the bring-up console.  It also proves the RESETS
      * bits and the pad mux before USB is even attempted.  The GP0 square
