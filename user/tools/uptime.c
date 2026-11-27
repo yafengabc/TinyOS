@@ -3,8 +3,10 @@
 /* Time since boot, from the real clock rather than the scheduler tick: the
  * millisecond field is meaningful because plat_now_ns() reads a free-running
  * hardware counter. */
-int main(void)
+int applet_uptime(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     struct clockinfo c;
     uint32_t ms, frac;
 

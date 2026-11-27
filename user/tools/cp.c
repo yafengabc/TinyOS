@@ -7,7 +7,7 @@
  */
 #include "lib.h"
 
-int main(int argc, char **argv)
+int applet_cp(int argc, char **argv)
 {
     char buf[256];
     int in, out, n, rc = 0;

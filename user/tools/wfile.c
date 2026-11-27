@@ -3,7 +3,7 @@
 /* Create a file and write the remaining arguments to it (space separated).
    Proves the ATA write path is reachable from user space. */
 
-int main(int argc, char *argv[])
+int applet_wfile(int argc, char **argv)
 {
     if (argc < 2) {
         puts("usage: wfile <path> [text...]\n");

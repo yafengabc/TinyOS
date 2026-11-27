@@ -1,4 +1,5 @@
 #include "lib.h"
+#include "tools/applets.h"
 
 /* One entry in long form: a type letter, the name (with a trailing slash for
  * directories), padded out to a fixed column, then the size, or "<dir>" /
@@ -97,6 +98,22 @@ int main(int argc, char **argv)
         else
             print_name(name, es.type == TOS_FTYPE_DIR);
     }
+
+    /* The small commands are applets in /bin/tools; the long listing shows
+     * them as aliases so `ls -l /bin` still answers "where is du".  The
+     * default listing stays the raw directory: scripts count those names, and
+     * `cp -> tools` would change every count. */
+    if (long_mode && stat("tools", &es) == 0 && es.type == TOS_FTYPE_REG) {
+        static const char *const applets[] = {
+#define APPLET_NAME(n) #n,
+            TOS_APPLETS(APPLET_NAME)
+#undef APPLET_NAME
+            NULL
+        };
+        for (int i = 0; applets[i]; i++)
+            printf("l  %s -> tools\n", applets[i]);
+    }
+
     if (!long_mode && column != 0)
         putchar('\n');
     return 0;

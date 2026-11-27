@@ -11,7 +11,7 @@
 
 #define TAIL_MAX 100
 
-int main(int argc, char **argv)
+int applet_tail(int argc, char **argv)
 {
     int lines = 10;
     int i = 1;

@@ -4,8 +4,10 @@
  * the filesystem ended up.  The detection (plat_flash_detected_bytes) is the
  * port's job: ROM FLASH_DEVINFO on RP2350, the boot loader's JEDEC record on
  * the C3, and a configured fallback where the port cannot tell. */
-int main(void)
+int applet_flashinfo(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     int fd = open("/proc/flash");
     char buf[256];
     int n;

@@ -10,7 +10,7 @@
 
 #define TEE_MAX 8
 
-int main(int argc, char **argv)
+int applet_tee(int argc, char **argv)
 {
     int append = 0;
     int i = 1, nf = 0;

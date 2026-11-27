@@ -28,7 +28,7 @@ static int signal_named(const char *s, int *sig)
     return -1;
 }
 
-int main(int argc, char **argv)
+int applet_kill(int argc, char **argv)
 {
     int sig = SIGKILL;
     int i = 1;

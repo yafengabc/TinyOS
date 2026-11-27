@@ -207,6 +207,17 @@ static regs_t *do_exec(regs_t *r, const syscall_t *sc)
             if (path_stat(rpath, &size, &type) != 0)
                 strcpy(rpath, alt);
         }
+        /* Third place: the multi-call tools binary.  A bare name that is
+         * neither here nor in /bin runs /bin/tools with argv[0] unchanged, so
+         * the binary dispatches on it.  A typo reaches its "unknown applet"
+         * message rather than "not found"; keeping the lookup here means the
+         * shells stay small enough for the 16 KiB window on RP2040. */
+        if (path_stat(rpath, &size, &type) != 0) {
+            static const char tools[] = "/bin/tools";
+
+            if (path_stat(tools, &size, &type) == 0)
+                strcpy(rpath, tools);
+        }
     }
 
     if (argc > 0) {

@@ -73,7 +73,7 @@ static int grep_fd(int fd, const char *pat, int ci, int num, int invert,
     return n < 0 ? 1 : 0;
 }
 
-int main(int argc, char **argv)
+int applet_grep(int argc, char **argv)
 {
     int ci = 0, num = 0, invert = 0;
     int i = 1, rc = 0;

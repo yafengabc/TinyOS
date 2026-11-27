@@ -40,7 +40,7 @@ static uint32_t pattern_fill(uint8_t *dst, uint32_t *state, int len)
     return sum;
 }
 
-int main(int argc, char **argv)
+int applet_dd(int argc, char **argv)
 {
     const char *iff = 0, *off = 0;
     int bs = 512, count = 1;

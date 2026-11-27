@@ -3,8 +3,10 @@
 /* `df` reports littlefs partition usage: total bytes, bytes consumed,
  * bytes available and the percentage used.  The numbers come from the
  * SYS_DF syscall, which asks the kernel's ramdisk layer (lfs_fs_size). */
-int main(void)
+int applet_df(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     struct dfinfo d;
     if (dfinfo(&d) != 0) {
         puts("df: filesystem info unavailable\n");

@@ -33,7 +33,7 @@ static int head_fd(int fd, int lines)
     return n < 0 ? -1 : 0;
 }
 
-int main(int argc, char **argv)
+int applet_head(int argc, char **argv)
 {
     int lines = 10;
     int i = 1;

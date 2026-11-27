@@ -1,6 +1,6 @@
 #include "lib.h"
 
-int main(int argc, char *argv[])
+int applet_cat(int argc, char **argv)
 {
     if (argc < 2) {
         puts("usage: cat <file>\n");

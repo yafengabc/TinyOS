@@ -46,7 +46,7 @@ static unsigned long du_path(const char *path, int depth)
     return total;
 }
 
-int main(int argc, char **argv)
+int applet_du(int argc, char **argv)
 {
     if (argc < 2) {
         unsigned long total = du_path(".", 0);

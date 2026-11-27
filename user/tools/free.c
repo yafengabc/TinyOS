@@ -30,8 +30,10 @@ static void map_row(const char *name, uint32_t bytes)
     printf("%9u %9u\n", bytes, bytes / 1024);
 }
 
-int main(void)
+int applet_free(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     struct meminfo m;
     if (meminfo(&m) != 0) {
         puts("free: meminfo unavailable\n");

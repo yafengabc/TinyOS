@@ -52,7 +52,7 @@ static void report(const char *name, const struct counts *c)
         printf("%d %d %d\n", (int)c->lines, (int)c->words, (int)c->bytes);
 }
 
-int main(int argc, char *argv[])
+int applet_wc(int argc, char **argv)
 {
     struct counts c, total;
 

@@ -7,7 +7,7 @@
  */
 #include "lib.h"
 
-int main(int argc, char **argv)
+int applet_stat(int argc, char **argv)
 {
     int rc = 0;
 
@@ -17,7 +17,6 @@ int main(int argc, char **argv)
     }
     for (int i = 1; i < argc; i++) {
         struct stat st;
-        const char *kind;
 
         if (stat(argv[i], &st) < 0) {
             printf("stat: %s: no such file\n", argv[i]);
@@ -25,12 +24,11 @@ int main(int argc, char **argv)
             continue;
         }
         if (st.type == TOS_FTYPE_DIR)
-            kind = "directory";
+            printf("%s: directory\n", argv[i]);
         else if (st.type == TOS_FTYPE_CHR)
-            kind = "device";
+            printf("%s: device\n", argv[i]);
         else
-            kind = "file";
-        printf("%s: %s, %u bytes\n", argv[i], kind, st.size);
+            printf("%s: file, %u bytes\n", argv[i], st.size);
     }
     return rc;
 }
