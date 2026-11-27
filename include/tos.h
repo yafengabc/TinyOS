@@ -85,6 +85,11 @@
 #define SYS_MUTEX_TRY     54 /* mutex_try(int *word) -> 1/0/-1          */
 #define SYS_MUTEX_UNLOCK  55 /* mutex_unlock(int *word) -> 0/-1         */
 #define SYS_MUTEX_LOCK    56 /* kmutex_lock(int *word) -> 0/-1          */
+/* Directory creation and removal.  rmdir is empty-only and refuses a path
+ * that contains the caller's cwd; littlefs' lfs_remove is recursive, which
+ * is why unlink() still refuses directories. */
+#define SYS_MKDIR         57 /* mkdir(path) -> 0 or -1                  */
+#define SYS_RMDIR         58 /* rmdir(path) -> 0 or -1 (empty only)     */
 
 /* Longest path the kernel accepts in one syscall, including the NUL.
  *

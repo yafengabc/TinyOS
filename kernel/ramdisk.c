@@ -700,6 +700,50 @@ static int unlink_locked(const char *path)
 }
 #endif
 
+#ifndef TOS_LFS_RO
+/* A directory is empty when the only entries littlefs reports are "." and
+ * "..".  rmdir must not lean on lfs_remove: on littlefs that deletes a
+ * directory recursively, which is exactly why unlink() refuses one. */
+static int dir_empty_locked(const char *path)
+{
+    lfs_dir_t dir;
+    struct lfs_info info;
+    int n;
+
+    if (lfs_dir_open(&lfs, &dir, path) < 0)
+        return -1;
+    while ((n = lfs_dir_read(&lfs, &dir, &info)) > 0)
+        if (strcmp(info.name, ".") && strcmp(info.name, "..")) {
+            lfs_dir_close(&lfs, &dir);
+            return 0;
+        }
+    lfs_dir_close(&lfs, &dir);
+    return n < 0 ? -1 : 1;
+}
+
+static int mkdir_locked(const char *path)
+{
+    if (!ok)
+        return -1;
+    dent_drop();
+    return lfs_mkdir(&lfs, path) < 0 ? -1 : 0;
+}
+
+static int rmdir_locked(const char *path)
+{
+    struct lfs_info info;
+
+    if (!ok)
+        return -1;
+    if (lfs_stat(&lfs, path, &info) < 0 || info.type != LFS_TYPE_DIR)
+        return -1;
+    if (dir_empty_locked(path) != 1)
+        return -1;
+    dent_drop();
+    return lfs_remove(&lfs, path) < 0 ? -1 : 0;
+}
+#endif
+
 /* Report littlefs partition usage.  `total` is the effective volume size
    (the measured part when the port can measure it, otherwise the board's
    configured size); `used` is what littlefs has actually consumed.  Note
@@ -945,6 +989,36 @@ int ramdisk_unlink(const char *path)
 
     spin_lock(&fs_lock);
     r = unlink_locked(path);
+    spin_unlock(&fs_lock);
+    return r;
+#endif
+}
+
+int ramdisk_mkdir(const char *path)
+{
+#ifdef TOS_LFS_RO
+    (void)path;
+    return -1;
+#else
+    int r;
+
+    spin_lock(&fs_lock);
+    r = mkdir_locked(path);
+    spin_unlock(&fs_lock);
+    return r;
+#endif
+}
+
+int ramdisk_rmdir(const char *path)
+{
+#ifdef TOS_LFS_RO
+    (void)path;
+    return -1;
+#else
+    int r;
+
+    spin_lock(&fs_lock);
+    r = rmdir_locked(path);
     spin_unlock(&fs_lock);
     return r;
 #endif

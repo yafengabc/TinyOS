@@ -455,6 +455,45 @@ static regs_t *dispatch(regs_t *r)
         return r;
     }
 
+    case SYS_MKDIR: {
+        char upath[TOS_PATH_MAX];
+        char path[TOS_PATH_MAX];
+
+        if (!copy_user_string(upath, sc.a0, sizeof(upath)) ||
+            resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)ramdisk_mkdir(path));
+        return r;
+    }
+
+    case SYS_RMDIR: {
+        char upath[TOS_PATH_MAX];
+        char path[TOS_PATH_MAX];
+        const char *cwd;
+        size_t n;
+
+        if (!copy_user_string(upath, sc.a0, sizeof(upath)) ||
+            resolve_path(upath, path, sizeof(path)) < 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        /* Device directories/nodes are not files, and removing a directory
+         * that is (or contains) the caller's cwd leaves every later relative
+         * path dangling. */
+        cwd = process_cwd_str();
+        n = strlen(path);
+        if (devfs_dir_count(path) >= 0 || devfs_lookup(path) ||
+            !strcmp(cwd, path) ||
+            (strncmp(cwd, path, n) == 0 && cwd[n] == '/')) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        plat_frame_set_ret(r, (uint32_t)ramdisk_rmdir(path));
+        return r;
+    }
+
     case SYS_CLOSE:
         process_fd_close((int)sc.a0);
         plat_frame_set_ret(r, 0);

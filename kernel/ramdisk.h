@@ -25,6 +25,9 @@ int      ramdisk_stat(const char *path, uint32_t *size, uint8_t *type);
  * second syscall (rmdir) to mean anything, and nothing in the system creates
  * one at runtime. */
 int      ramdisk_unlink(const char *path);
+/* Directory creation/removal.  rmdir refuses a non-empty directory. */
+int      ramdisk_mkdir(const char *path);
+int      ramdisk_rmdir(const char *path);
 int      ramdisk_df(uint32_t *total, uint32_t *used);
 
 /* Block-device call counters, exposed through /proc/lfs.  Profiling aid:

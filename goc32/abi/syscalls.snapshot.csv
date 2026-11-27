@@ -5,8 +5,8 @@
 # When both trees are present, internal/build/syscallsnapshot_test.go compares
 # the two and fails if they differ.
 #
-#   tinyos_commit: 0fc2ea4d876ca774864abf422753e6290ddbe9ac
-#   tinyos_csv_sha256: 20e19358cb9f551dd756292c501b4cf1f940bfc6956d454a4c3720d467c90058
+#   tinyos_commit: f0853c197797f9bddb606c1398800c0c8ceb0f4a
+#   tinyos_csv_sha256: 4bded8208419eb2a8229439af0dcc8fa6d63ab56246def15facb3f286f6764c2
 #
 # Regenerate after changing abi/syscalls.csv:
 #   python scripts/syscalls-snapshot.py
@@ -67,3 +67,5 @@ SYS_REMOTE_TEST,53
 SYS_MUTEX_TRY,54
 SYS_MUTEX_UNLOCK,55
 SYS_MUTEX_LOCK,56
+SYS_MKDIR,57
+SYS_RMDIR,58

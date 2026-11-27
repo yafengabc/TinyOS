@@ -117,6 +117,10 @@ int  read(int fd, void *buf, int len);
 int  exec(const char *path, char *const argv[], int argc);
 int  open(const char *path);
 int  create(const char *path);
+/* Make/remove a directory.  rmdir is empty-only; the kernel refuses one that
+ * contains the caller's cwd.  Returns 0 or -1. */
+int  mkdir(const char *path);
+int  rmdir(const char *path);
 /* Remove a file.  Fails if it is a directory, a device node, or open
  * somewhere (see unlink_locked in kernel/ramdisk.c). */
 int  unlink(const char *path);

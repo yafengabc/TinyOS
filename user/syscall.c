@@ -30,6 +30,16 @@ int create(const char *path)
     return tos_sys1(SYS_CREATE, (int)path);
 }
 
+int mkdir(const char *path)
+{
+    return tos_sys1(SYS_MKDIR, (int)path);
+}
+
+int rmdir(const char *path)
+{
+    return tos_sys1(SYS_RMDIR, (int)path);
+}
+
 int close(int fd)
 {
     return tos_sys1(SYS_CLOSE, fd);
