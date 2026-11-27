@@ -191,6 +191,10 @@ def image_programs(con):
 def run_checks(con, image, results, opts, boot_text):
     """The body of section 33, in the order the list asks for it."""
     spec = IMAGES[image]
+    # A Pico 2 image also runs on an ATK board (same RP2350) and the kernel
+    # sizes littlefs from the flash it actually finds, so the expected total
+    # has to follow the board, not the image.  --df overrides it.
+    df_want = getattr(opts, "df", 0) or spec["df"]
     have = image_programs(con)
 
     # --- 33.4: what the ROM handed over, and the clock tree that followed ---
@@ -209,8 +213,8 @@ def run_checks(con, image, results, opts, boot_text):
 
     # --- 33.0: 3.5 MiB partition, grown without a warning ---
     check(results, "B no fs-grow warning", boot_text, avoid=("fs grow",))
-    check(results, "B df total %d" % spec["df"], con.cmd("df"),
-          want=(str(spec["df"]),))
+    check(results, "B df total %d" % df_want, con.cmd("df"),
+          want=(str(df_want),))
 
     # --- 33.1/33.2: windows, isolation, stack ---
     wink = msh_wink(con.cmd("ps"))
@@ -382,6 +386,10 @@ def main():
     ap.add_argument("--dd-rounds", type=int, default=0)
     ap.add_argument("--replay", help="check a saved console log instead")
     ap.add_argument("--log", help="where to save the raw console log")
+    ap.add_argument("--df", type=int, default=0,
+                    help="expected littlefs total in bytes; default is the "
+                         "image's own capacity.  Pass the board's when a "
+                         "Pico 2 image runs on another RP2350 board.")
     args = ap.parse_args()
 
     results = []
