@@ -1731,10 +1731,12 @@ void plat_timer_tick(void)
          * at the 49.7-day wrap (and g_ticks is reset by plat_timer_init).
          *
          * The cast is repeated at each site rather than held in a uint32_t
-         * shadow across the function: a shadow that stays live over the
-         * tick's calls costs 1.2% of -O2 CoreMark (10,576 ms vs 10,450 ms
-         * for 5000 iterations, three runs each), while the per-site cast
-         * is free. */
+         * shadow across the function.  A shadow measured 1.2% slower at -O2
+         * (10,576 ms vs 10,450 ms per 5000 CoreMark iterations), but its own
+         * work is one store/load, and the two images also differ by 34 B of
+         * .text - part of that is likely placement.  The per-site form is not
+         * slower at -Oz and keeps no value live across calls, which is
+         * reason enough on its own. */
         /* Feed the watchdog often enough that a busy tick cannot starve it,
          * but rarely enough not to sit on the bus: 50 ms is far below the
          * count-down and well above the worst-case gap between ticks. */

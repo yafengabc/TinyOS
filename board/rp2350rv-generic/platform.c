@@ -1168,7 +1168,6 @@ uint64_t plat_now_ns(void)
 
 void plat_timer_tick(void)
 {
-
 #if TOS_DIAG
     g_tk[(uint32_t)plat_cpu_id() & 1u]++;      /* tick actually delivered */
     g_site[(uint32_t)plat_cpu_id() & 1u] = 1;
