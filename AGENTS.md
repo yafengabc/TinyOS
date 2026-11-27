@@ -60,11 +60,15 @@ Definitions of T0–T4 and the exact commands are in `docs/TESTING.md`.
   is RP2350-specific still closes on the Pico 2 images alone.
 - Images are board-specific: never present an ATK run as Pico 2 evidence or
   the reverse. The same silicon is not the same board (LED/pins/flash).
-- **Soak budget.** T4 runs only on the SMP image of each ISA (`rpi-pico2-smp`,
-  `rpi-pico2-rv32-smp`, `rpi-pico-smp`): 10 minutes per release, 30 minutes
-  once for the scheduler/kernel generation gate.  Single-core images are
-  covered by the T3 accept (dd/rm, windows, segments), not by T4.  A
-  10-minute run that reboots or fails escalates to 30.
+  The one exception is a soak whose load touches no board peripheral
+  (scheduler, windows, pipe, heap): either RP2350 board may stand in, and
+  the card must say which one ran.
+- **Soak budget.** T4 runs only on the SMP image of each ISA: one RP2350 ARM
+  (`rpi-pico2-smp` or `atk-dnr2350am-smp`), one RP2350 RV32 (`-rv32-smp`,
+  either board), one RP2040 (`rpi-pico-smp`).  10 minutes per release, 30
+  minutes once for the scheduler/kernel generation gate.  Single-core
+  images are covered by the T3 accept (dd/rm, windows, segments), not by
+  T4.  A 10-minute run that reboots or fails escalates to 30.
 
 ## Hard rules for agents
 

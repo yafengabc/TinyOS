@@ -395,8 +395,12 @@ python scripts/rp2350/reboot_soak.py --uart COM19 -n 20
 
 ## 6. T4：压力
 
-RP2350 与 RP2040 的 T4 **只跑 SMP 镜像**：Pico 2 的 `rpi-pico2-smp`（ARM）
-和 `rpi-pico2-rv32-smp`（Hazard3），RP2040 的 `rpi-pico-smp`。单核镜像
+RP2350 与 RP2040 的 T4 **只跑 SMP 镜像**，而且**按 SoC 选板，不按板名**：
+调度器/窗口/管道/堆这条负载不碰外设，同一 SoC 的任意一块板都等价。RP2350 的
+ARM SMP 用 `rpi-pico2-smp` 或 `atk-dnr2350am-smp`，RV32 SMP 用
+`rpi-pico2-rv32-smp` 或 `atk-dnr2350am-rv32-smp`（二选一）；RP2040 只有
+`rpi-pico-smp`。板级外设（LCD/TF/引脚/flash 接线）不在这条负载里，那些改动
+仍然要在对应板上验。单核镜像
 （`rpi-pico2`、`rpi-pico2-rv32`、`rpi-pico`）不做 T4：同一 ISA 的代码路径由
 SMP 镜像覆盖，T3 的 `accept33` 已经跑过 dd/rm、窗口和段表检查。想额外看一眼
 单核，跑一次 `accept33` 就够，不要 30 分钟 soak。
@@ -420,7 +424,9 @@ LCD/TF/flash/引脚时才跑 `atk-dnr2350am-smp` 一个镜像（常规 10、代�
 `dd_stress`（soak 的 cycle 是 `deep/mem/wheap/piperace/...`，不含 dd）。
 
 ```sh
-# 常规回归：三个 SMP 镜像，各 10 分钟；Pico 2 与 RP2040 可以并行
+# 常规回归：三个 SMP 镜像，各 10 分钟；Pico 2 与 RP2040 可以并行。
+# RP2350 的这两个也可以换成 atk-dnr2350am-smp / atk-dnr2350am-rv32-smp
+# （同一 SoC，调度器负载不碰外设，二选一）。
 for img in rpi-pico2-smp rpi-pico2-rv32-smp; do
   python scripts/rp2350/soak_board.py -p COM19 -m 10 --image "$img"
 done
