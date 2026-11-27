@@ -1168,6 +1168,8 @@ uint64_t plat_now_ns(void)
 
 void plat_timer_tick(void)
 {
+    uint32_t tick32 = 0;
+
 #if TOS_DIAG
     g_tk[(uint32_t)plat_cpu_id() & 1u]++;      /* tick actually delivered */
     g_site[(uint32_t)plat_cpu_id() & 1u] = 1;
@@ -1183,7 +1185,12 @@ void plat_timer_tick(void)
      * is written this way so an SMP build would not run the clock at 2x. */
     if (plat_cpu_id() == 0) {
         g_ticks++;
-        if ((g_ticks % 50u) == 0u)
+        /* 32-bit shadow: -Oz expands `g_ticks % 50u` on a 64-bit counter to
+         * __umoddi3 instead of a multiply, ~3k cycles per call on the M33
+         * side of this port; the same hazard exists here.  See the matching
+         * note in board/rp2350-generic/platform.c. */
+        tick32 = (uint32_t)g_ticks;
+        if ((tick32 % 50u) == 0u)
             wdt_feed();          /* see the watchdog note above */
         /* Keep the CDC FIFO fed from the ring.  tuD's state machine stays in
          * thread context; this only moves bytes, which is safe here. */
@@ -1192,7 +1199,7 @@ void plat_timer_tick(void)
     }
     mtime_set_cmp(mtime_read() + g_interval);
 
-    if (plat_cpu_id() == 0 && (g_ticks % 1000u) == 0u && !plat_led_owned())
+    if (plat_cpu_id() == 0 && (tick32 % 1000u) == 0u && !plat_led_owned())
         led_toggle();
 }
 

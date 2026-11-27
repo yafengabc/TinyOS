@@ -1709,6 +1709,7 @@ void plat_timer_tick(void)
      * running even when it is idle, so this stays a true wall clock.
      * (Same rule as board/qemu-virt.) */
     int id = plat_cpu_id();
+    uint32_t tick32 = 0;
 
 #if TOS_DIAG
     /* Before anything else in the tick: if the other core has stopped
@@ -1722,10 +1723,18 @@ void plat_timer_tick(void)
 
     if (id == 0) {
         g_ticks++;              /* SysTick reloads itself */
+        /* The cadences below are computed on a 32-bit shadow of g_ticks.
+         * g_ticks is 64-bit, and at -Oz clang expands `g_ticks % 50u` into a
+         * __aeabi_uldivmod call instead of the multiply-and-shift -O2 emits:
+         * four of them per tick measured at ~12.5k cycles on the 150 MHz
+         * core 0, which is the whole -Oz SMP loss in #73.  All the periods
+         * here are 10..1000 ticks, so the truncation only shifts their phase
+         * at the 49.7-day wrap (and g_ticks is reset by plat_timer_init). */
+        tick32 = (uint32_t)g_ticks;
         /* Feed the watchdog often enough that a busy tick cannot starve it,
          * but rarely enough not to sit on the bus: 50 ms is far below the
          * count-down and well above the worst-case gap between ticks. */
-        if ((g_ticks % 50u) == 0u)
+        if ((tick32 % 50u) == 0u)
             wdt_feed();
     }
 
@@ -1751,8 +1760,8 @@ void plat_timer_tick(void)
      * SET_CONFIGURATION has been processed and the CDC port exists on the
      * host side; anything else is still in flight. */
 #if TOS_BOOT_TRACE
-    if (!tty_line_taken() && g_usb_ready && g_ticks <= 120000u &&
-        (g_ticks % 500u) == 0u) {
+    if (!tty_line_taken() && g_usb_ready && tick32 <= 120000u &&
+        (tick32 % 500u) == 0u) {
         int cfg = usb_cdc_configured();
         if (cfg != g_last_cfg) {
             g_last_cfg = cfg;
@@ -1771,7 +1780,7 @@ void plat_timer_tick(void)
      * wiring: solid LED = the kernel died before the timer started, a
      * blinking LED = the kernel is alive and the shell should be up, no
      * matter whether USB CDC or the UART adapter ever enumerates. */
-    if ((g_ticks % 1000u) == 0u && !plat_led_owned())
+    if ((tick32 % 1000u) == 0u && !plat_led_owned())
         led_toggle();
 
     /* Escape hatch for a kernel that hangs before the shell exists.  The
@@ -1781,7 +1790,7 @@ void plat_timer_tick(void)
      * peeks at the RX FIFO itself; the moment plat_console_getchar() is first
      * called the claim is recorded and this stops for good, so no keystroke
      * is ever stolen from a running shell. */
-    if (!g_console_claimed && (g_ticks % 10u) == 0u &&
+    if (!g_console_claimed && (tick32 % 10u) == 0u &&
         !(mmio_read32(RP_UART_FR) & RP_UART_FR_RXFE)) {
         if ((mmio_read32(RP_UART_DR) & 0xffu) == BOOTSEL_MAGIC_CHAR)
             rom_enter_bootsel();
