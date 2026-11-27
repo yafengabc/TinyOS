@@ -51,6 +51,13 @@ flash park；每 30 s 配对采样主机 `time.monotonic()` 与板载 `uptime`�
 `proc` 一致性：各镜像压力结束时的 `uptime` 与 `cat /proc/uptime` 差值
 均为命令间隔的 80–124 ms，没有 1000 倍放大或丢时。
 
+另用仓库标准工具 `scripts/rp2350/dd_stress.py` 在 `rpi-pico-smp` 上补跑：
+`DD OK 600/600`，压力前 `uptime 1712.146 s`、压力后 `4053.384 s`
+（差值 2341.238 s），主机墙钟 39 分 03 秒（约 2343 s），相差约 1.8 s；
+pid 1467→2668 且 uptime 连续，无 reboot。这满足 issue 的
+「10-minute dd/soak ... within 1-2 s, no reboot」判据（这次因工具速度降到
+0.3 轮/s，实际墙钟约 39 分钟，覆盖 10 分钟要求）。
+
 ## 已知干扰
 
 - RP2040 单核空闲测试在第 240 s 时 Pico 的 USB CDC（COM29）整体消失，
