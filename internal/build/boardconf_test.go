@@ -81,10 +81,19 @@ func TestBoardUserExcludes(t *testing.T) {
 	// test programs no longer fit there; the board images have room and keep
 	// them.
 	baseline := append(append([]string{}, generic...), "kthreadtest", "threadbench", "prodcons")
+	// The same embedded filesystem now also carries the common tools
+	// (cp/head/tail/grep/tee/stat/du/kill), so the demos and probes move to
+	// the board images, which are the ones users flash.  Keep this list in
+	// sync with board/rp2350*-generic/board.conf.
+	demos := []string{"hello", "hello_printf", "coremark", "smp", "smpbench",
+		"piperace", "floattest", "rawsink", "samp", "spin", "swcost",
+		"rselftest", "reloc", "cpuprobe", "crash", "hold", "prot", "stk",
+		"bench", "deep", "wheap", "mem"}
+	baseline = append(baseline, demos...)
 	want := map[string][]string{
 		"rpi-pico":           append(append([]string{}, wifi...), "prot"),
 		"rp2350-generic":     baseline,
-		"rp2350rv-generic":   generic,
+		"rp2350rv-generic":   append(append([]string{}, generic...), demos...),
 		"atk-dnr2350am":      wifi,
 		"atk-dnr2350am-rv32": wifi,
 		"rpi-pico2":          generic,
