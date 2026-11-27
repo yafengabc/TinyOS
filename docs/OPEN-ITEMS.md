@@ -30,8 +30,14 @@
 --target rpi-pico2`），`flash.py --smoke` 7/7。细节见 `docs/PICO2-VS-ATK-BOOT.md`、
 `docs/acceptance/2026-11-18-pico2-boot-rp2350-cff442f.md`、`TESTING.md` §5.4。
 
-仍未做：Pico 2 的 SMP / RV32 镜像真机验证；GP25 上的 1 Hz 心跳不亮（`led_set()` 仍
-硬编码 GP3，见 issue #27）；`accept33.py` 的 24 项表原先只覆盖 ATK 四个镜像，2026-11-25 起也带 Pico 2 四镜像（littlefs 总量按各自 board.conf 取、镜像里没有的程序记 skipped）；两条镜像都还没用新参数在板上跑过，第一次结果要回填这一节。。
+后续：Pico 2 的四张镜像（ARM / RV32 × 单核 / 双核）已全部通过 T3，见
+`docs/acceptance/2026-11-23-pico2-matrix-f91db82.md` 与
+`2026-11-24-pico2-matrix-05a0e18.md`；RV32 SMP 的 30 分钟 T4 于 2026-11-27 补跑
+（1800/1800 轮），见 `2026-11-27-t4-rv32smp-30min-3f07c44.md`。
+
+仍开着：**GP25 上的 1 Hz 心跳不亮**。心跳走的是 `platform.c` 里写死的
+`RP_LED_GPIO`=3（ATK 的 LED、低电平有效），和 `/dev/led0` 的设备表是两条路；
+板级设备表只影响后者（issue #27）。
 
 ## 2. PIO 的"眼睛两项"（已关闭 2026-11-17）
 

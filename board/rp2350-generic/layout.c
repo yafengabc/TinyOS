@@ -9,8 +9,10 @@
  *
  * The chip has 520 KiB of SRAM at 0x20000000.  The first 128 KiB holds the
  * kernel's .data/.bss/stack, and the striped banks up to 0x20080000 (512 KiB)
- * are task windows: 384 KiB at a 16 KiB grain is 24 windows, three times the
- * RP2040's eight.  The two 4 KiB scratch banks at 0x20080000 are left alone.
+ * are task windows: 384 KiB at a 4 KiB grain is 96 windows, twelve times the
+ * RP2040's eight.  The MPU path has no reason to want a coarse grain - PMSAv8
+ * regions are described by base+limit - so the ARM half keeps pages.  The two
+ * 4 KiB scratch banks at 0x20080000 are left alone.
  *
  * The M33 has ARMv8-M's PMSAv8 MPU, and the port uses it (TOS_ARM_MPU_V8):
  * arch/arm/platform.c programs PRBAR/PRLAR instead of RBAR/RASR, so a task
