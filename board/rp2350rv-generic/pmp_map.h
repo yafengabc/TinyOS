@@ -26,7 +26,20 @@
  * boundary win_alloc handed out, so half the boots failed.  pmp_map()
  * therefore walks a ladder of policies, giving up the least protection that
  * makes the map fit, and reports which one it used so the port can say so
- * once. */
+ * once.
+ *
+ * Two consequences worth knowing before "fixing" them (issue 78/79,
+ * docs/OPEN-ITEMS.md 29):
+ *
+ *   - User mode can read and write the low 64 KiB, because entries 8..10 say
+ *     RWX there and cannot be rewritten.  That region is bootrom ROM and the
+ *     hardware ignores stores to it (measured: writing 0xDEADBEEF over
+ *     0xF0000000 leaves 0xF0000000), so nothing is gained by spending entry 0
+ *     to deny it - doing so drops rcc's 112 KiB window from SPLIT to SNAP.
+ *   - An image whose .text, .rodata and .data share one 4 KiB page gets a RWX
+ *     page, so `prot rodata` survives on small programs.  A page has one
+ *     attribute and cannot be cut.  Once .rodata gets its own page the write
+ *     faults (verified by padding the probe with an 8 KiB const array). */
 #ifndef TOS_BOARD_RP2350RV_PMP_MAP_H
 #define TOS_BOARD_RP2350RV_PMP_MAP_H
 

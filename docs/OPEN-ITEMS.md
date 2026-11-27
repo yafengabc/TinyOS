@@ -1291,3 +1291,53 @@ Raspberry Pi 官方的 Pico 2 焊的是 W25Q32，**4 MB**，与 ATK 相同。
 的产物**逐字节相同**（`925328b1…`，2,097,664 B），因为该值只作 littlefs 上限和构建期
 校验，不进镜像。所以“官方 Pico 2 的 4 MB 上能跑”在软件与 flash 条件上已经验证，
 板上 `df` = 3,670,016 也印证 lfs 被裁到 4 MiB − 512 KiB。
+
+## 29. RV32 Hazard3：低 64 KiB「可不保护」，`.rodata` 可写是页粒度（2026-11-27）
+
+两条平台事实，来自 #78 / #79 的实测（Pico 2，`rpi-pico2-rv32-smp`，`d258735`）。
+此前 `pmp_map.h` 与几份验收卡引用的 "OPEN-ITEMS 31.0" 指的就是本条。
+
+### 29.1 低 64 KiB 对 U 态可读写，但**不需要**保护
+
+```text
+$ prot null            -> survived        # 读 0
+$ prot dev 0x0         -> survived        # 写 0
+$ prot dev 0x4000      -> survived
+$ prot m               -> rom: [0] before=4026531840 after=4026531840 write ignored
+```
+
+`0xF0000000` 被写成 `0xDEADBEEF` 后读回仍是 `0xF0000000`：**bootrom ROM 物理上忽略
+写入**。所以「U 态能写这一页」不会改坏任何东西，也不构成可利用的提权面——它是一块
+只读存储器，只是没有 fault 而已。真正被拒的（`prot heap`/`prot stack`/UART0/未映射）
+都照常 fault，说明保护本身是好的。
+
+原因仍是 PMP 8..10 被 bootrom 硬连成 RWX 且写入是 no-op。可以用条目 0（编号更小，
+优先级更高）把它盖成「无权限」，实测也有效（`prot null` 变成 `load access fault`），
+但代价明确：
+
+| 程序 | 窗口 | rung（无条目 0） | rung（有条目 0） |
+|---|---|---|---|
+| `prot` | 16 KiB | SPLIT，2 块 | SPLIT，2 块 |
+| `threadbench` / `coremark` | 48 KiB | SPLIT，5 块 | SPLIT，4–5 块 |
+| `rcc` | 112 KiB | **SPLIT，7 块（用满预算）** | **SNAP，4 块** |
+
+即：为了拒绝访问一块本来也写不动的 ROM，`rcc` 这类大窗口程序要从 SPLIT 掉到 SNAP
+（最多一个 grain 的 `.text` 变成可写）。**不值得，所以不启用条目 0**，代码保持现状。
+若将来出现「低地址真的可写」的芯片，再按 `PMP_LOW_ENTRY` 的思路加，并重跑上表的 rung。
+
+### 29.2 小程序写 `.rodata` 不 fault：4 KiB 页粒度，不是 IMAGE 降级
+
+`prot rodata` 在小镜像上 survive，曾被怀疑是 `pmp_map()` 降级到了 `IMAGE`（整镜像
+RWX，丢 RX）。实测否掉了这个猜测：
+
+- 该窗口的 rung 是 **SPLIT**（`mode=0`），只用 2 个块、16 KiB，离降级很远；
+- `prot` 的段布局是 `.text 0x0..0x1b2`、`.rodata 0x1c0..0x30b`、`.data 0x320..0x360`，
+  **全落在第一个 4 KiB 页内**；一页只能有一种属性，含数据就是 RWX（`pmp_page_attrs`）。
+
+反过来验证：给 `prot` 加一个 8 KiB 的 `const` 数组把 `.rodata` 撑到第二页后，
+写 `.rodata` **立即 `store access fault`**。所以这是页粒度的必然结果，程序一旦大到
+让 `.rodata` 独占页就正常。`pmp_map.h` 的注释（"that RWX page is the known
+limitation"）说的就是这件事，不是 bug。
+
+结论：`prot rodata` 在 RV32 上的结果取决于**程序大小与段布局**，不能当作「RX 失效」的
+判据；要验证 RX，得用 `.rodata` 独立成页的镜像。
