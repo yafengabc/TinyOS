@@ -3469,6 +3469,10 @@ static void retire_and_reap(thread_t *p, int code)
 #endif
     woke = reap_into_parent_locked(p, code);
     proc_retire_locked(p);
+    /* The slot is reusable by another core the moment the lock drops; this
+     * CPU must not still be reported as running it.  Cleared under the lock
+     * so a tick cannot see the half-retired task either. */
+    current = NULL;
     plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     if (woke)
@@ -3538,11 +3542,16 @@ regs_t *process_exit(regs_t *r, int code)
      * sibling may be running on the other core at this instant. */
     if (p->proc && p->proc->live_threads > 0) {
         uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+        int pid = thread_pid(p);
 
         begin_group_exit_locked(p, code);
+        /* The last worker may retire this slot as soon as it sees
+         * live_threads reach zero; this CPU must not go on using it.  Clear
+         * it under the lock and carry the pid out instead of p. */
+        current = NULL;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
 
-        mailbox_drop(thread_pid(p));
+        mailbox_drop(pid);
         return sched_switch(r);
     }
 #endif
@@ -3573,6 +3582,7 @@ regs_t *process_exit(regs_t *r, int code)
 #endif
         woke = reap_into_parent_locked(p, code);
         proc_retire_locked(p);
+        current = NULL;
         plat_spin_unlock_irqrestore(&proc_lock, irq);
 
         if (woke)
@@ -4041,15 +4051,18 @@ regs_t *process_thread_exit(regs_t *r, int code)
 {
     thread_t *p = current;
     thread_t *main;
+    proc_t *pr;
     thread_t *woke = NULL;
     thread_t *woke_main = NULL;
     thread_t *woke_mutex = NULL;
     uint32_t irq;
+    int finishing;
 
     if (!p || !p->proc || thread_is_main(p))
         return process_exit(r, code);
 
     main = p->proc->main;
+    pr = p->proc;
     irq = plat_spin_lock_irqsave(&proc_lock);
     p->exit_code = code;
     /* A thread that dies holding a user mutex (the heap lock is the one this
@@ -4063,6 +4076,14 @@ regs_t *process_thread_exit(regs_t *r, int code)
     }
     p->wmutex = NULL;
     woke = wake_joiner_locked(p, code);
+
+    /* Account the group before the slot can be reused.  On SMP the woken
+     * joiner is on the other core: it can create a new thread as soon as the
+     * wake-up lands, and then p is no longer ours. */
+    if (pr->live_threads > 0)
+        pr->live_threads--;
+    finishing = (main && main->state == ST_DYING && pr->live_threads == 0);
+
     if (woke) {
         /* The waiter has the code in its frame and its user buffer, so the
          * slot can go right away. */
@@ -4076,11 +4097,19 @@ regs_t *process_thread_exit(regs_t *r, int code)
         p->cpu = -1;
     }
 
-    if (p->proc->live_threads > 0)
-        p->proc->live_threads--;
-    int finishing = (main && main->state == ST_DYING &&
-                     p->proc->live_threads == 0);
-
+    if (woke_mutex)
+        preempt_if_higher(woke_mutex);
+    if (woke)
+        preempt_if_higher(woke);
+    /* The slot may already belong to a new thread on the other core (the
+     * joiner was woken and can create one before this core reaches the
+     * scheduler).  Do not let this CPU's scheduler treat the reused slot as
+     * the outgoing task: the main-thread exit does the same, and it is what
+     * keeps a reused slot from being claimed by the wrong core with a
+     * kernel-stack pointer built for another one.  Nothing below may touch
+     * p.  Clearing it under the lock also keeps a tick from seeing the
+     * half-retired task between here and the unlock. */
+    current = NULL;
     plat_spin_unlock_irqrestore(&proc_lock, irq);
 
     if (finishing) {
@@ -4088,7 +4117,8 @@ regs_t *process_thread_exit(regs_t *r, int code)
          * which takes proc_lock again - so it happens out here, the same
          * order process_exit() uses.  Nothing can reuse the process or the
          * main thread while we are out here: the entry is PROC_DYING and the
-         * main thread is ST_DYING, and this worker still holds its slot. */
+         * main thread is ST_DYING.  The worker's own slot may already be
+         * gone, so this path uses main only. */
         task_release(main);
 
         irq = plat_spin_lock_irqsave(&proc_lock);
@@ -4098,10 +4128,6 @@ regs_t *process_thread_exit(regs_t *r, int code)
 
     if (woke_main)
         preempt_if_higher(woke_main);
-    if (woke_mutex)
-        preempt_if_higher(woke_mutex);
-    if (woke)
-        preempt_if_higher(woke);
     return sched_switch(r);
 }
 
