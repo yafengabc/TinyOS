@@ -35,7 +35,7 @@ int main(void)
     TOS_APPLETS(X)
 #undef X
     puts("\n\nPrograms in /bin:\n");
-    puts("  ls edit help reboot gpio adc spi i2c pwm uart fb screen splash\n");
+    puts("  ls edit help top reboot gpio adc spi i2c pwm uart fb screen splash\n");
     puts("  lcdconsole smp ping host net http dhcp wificonn wifiscan ...\n");
     puts("  msh is frozen and not in a default image (sh is the shell)\n");
     puts("\nFiles, devices and pipes:\n");

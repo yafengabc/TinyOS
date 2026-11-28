@@ -26,7 +26,7 @@ Tools in /bin/tools (also `tools <name>`):
   cat cp dd df du echo flashinfo free grep head kill mkdir rmdir stat tail tee uptime wc wfile
 
 Programs in /bin:
-  ls edit help reboot gpio adc spi i2c pwm uart fb screen splash
+  ls edit help top reboot gpio adc spi i2c pwm uart fb screen splash
   lcdconsole smp ping host net http dhcp wificonn wifiscan ...
   msh is frozen and not in a default image (sh is the shell)
 
