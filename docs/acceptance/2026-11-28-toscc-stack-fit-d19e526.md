@@ -64,4 +64,5 @@ build/frames8k-tos.tos: 785 -> 512 bytes (LZ4TOS, hint 4096/16384/0)
 - **VLA**（`char buf[n]`）是动态帧，静态检查看不见；已由
   [`3353b0f`](2026-11-28-no-vla-3353b0f.md) 整体拒绝（toscc 报错、
   clang 加 `-Wvla -Werror=vla`）；
-- clang 路径（`-fstack-usage` 构建审计）和 `rcc` 的断言还没做。
+- clang 路径和 `rcc` 的断言已由
+  [`748d94a`](2026-11-28-build-frame-audit-748d94a.md) 补上。
