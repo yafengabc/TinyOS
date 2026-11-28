@@ -22,22 +22,21 @@
 
 #define MAX_BS 4096
 
+/* One buffer, not two: the read side regenerates the expected byte as it
+ * walks the block (the LCG step is the same on both sides), so there is no
+ * second 4 KiB array.  That array was a third of the multi-call span: with
+ * it the image needed 20 KiB on rv32 / 24 KiB on ARM, one span class above
+ * what the code itself needs. */
 static uint8_t buf[MAX_BS];
-static uint8_t want[MAX_BS];
 
-/* Fill dst with the pattern continuing from *state; returns the block's
- * 32-bit checksum.  The state carries across calls so consecutive blocks
- * are all different. */
-static uint32_t pattern_fill(uint8_t *dst, uint32_t *state, int len)
+/* Fill dst with the pattern continuing from *state.  The state carries
+ * across calls so consecutive blocks are all different. */
+static void pattern_fill(uint8_t *dst, uint32_t *state, int len)
 {
-    uint32_t sum = 0;
-
     for (int i = 0; i < len; i++) {
         *state = *state * 1664525u + 1013904223u;
         dst[i] = (uint8_t)(*state >> 24);
-        sum = sum * 31u + dst[i];
     }
-    return sum;
 }
 
 int applet_dd(int argc, char **argv)
@@ -107,13 +106,14 @@ int applet_dd(int argc, char **argv)
             close(fd);
             return 1;
         }
-        pattern_fill(want, &state, n);
-        for (int i = 0; i < n; i++)
-            if (buf[i] != want[i]) {
+        for (int i = 0; i < n; i++) {
+            state = state * 1664525u + 1013904223u;
+            if (buf[i] != (uint8_t)(state >> 24)) {
                 printf("dd: data mismatch at block %d byte %d\n", b, i);
                 bad = 1;
                 break;
             }
+        }
     }
     close(fd);
     if (!bad)
