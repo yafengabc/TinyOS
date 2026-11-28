@@ -4,11 +4,14 @@
  *
  *   top [-d ms] [-n count]
  *
- * The console has no escape-sequence parser (kernel/tty.c), so there is no
- * cursor addressing: every refresh prints a header and the table again and
- * the terminal scrolls.  -n stops after that many refreshes (useful in a
- * script or when the output goes to a file); without it top runs until ^C,
- * which the kernel delivers as SIGKILL to the foreground task.
+ * The kernel tty passes CSI sequences through without interpreting them
+ * (edit draws its screen the same way), so on a console top clears and
+ * homes before each refresh and erases the rest of the screen after the
+ * table.  When stdout is a file the escapes would be garbage, so fstat
+ * decides: only a character device gets them, `top -n 1 > f` stays a
+ * plain snapshot.  -n stops after that many refreshes; without it top
+ * runs until ^C, which the kernel delivers as SIGKILL to the foreground
+ * task.
  *
  * The table is /proc/ps, the same bytes `ps` writes, so this stays correct
  * when stdout is redirected.  It is a separate program rather than an applet
@@ -17,6 +20,15 @@
  * that window anyway.
  */
 TOS_STACK(4 * 1024);
+
+/* Whether stdout is the console rather than a file: the escapes are for a
+ * terminal, and a redirected snapshot must stay plain text. */
+static int on_console(void)
+{
+    struct stat st;
+
+    return fstat(1, &st) == 0 && st.type == TOS_FTYPE_CHR;
+}
 
 static void dump_ps(void)
 {
@@ -54,12 +66,20 @@ int main(int argc, char **argv)
     if (interval > 3600000)
         interval = 3600000;
 
+    int tty = on_console();
+
     for (int round = 0; count <= 0 || round < count; round++) {
         int ms = uptime();
 
-        printf("\n# top %d.%03d s  pid %d  refresh %d ms  ^C to stop\n",
+        if (tty)
+            puts("\x1b[2J\x1b[H");
+        else
+            putchar('\n');
+        printf("# top %d.%03d s  pid %d  refresh %d ms  ^C to stop\n",
                ms / 1000, ms % 1000, getpid(), interval);
         dump_ps();
+        if (tty)
+            puts("\x1b[J");
         if (count > 0 && round + 1 >= count)
             break;
         sleep(interval);
