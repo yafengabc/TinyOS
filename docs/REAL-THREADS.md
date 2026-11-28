@@ -157,6 +157,10 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
 - **回收**：`thread_join`、`thread_exit` 和进程退出都走 `proc_retire_locked()`
   归还栈块；最下面的 16 KiB 全空时栈区缩回初始大小。`kthreadtest` 的
   14 个 4 KiB 槽、200 次 churn 和重复 `threadbench` 都验证了复用。
+- **观测**：`SYS_STACKINFO`（`struct stackarea`）给出 reserved/live/peak 和
+  活动块数；`free` 用它在内存表里加一行 `stack area`（没有栈区的板子不打印）。
+  `kthreadtest` 的 1000 次 4K/16K 混合 create/join 用这组数字检查
+  `live` 和 `reserved` 回到基线（C3 1.3 s，peak 32 KiB）。
 
 QEMU rv32 早期版本（3×300k）：19103 ms vs 21751 ms。C3 真机上先看到的是 171%，
 但那是**基准程序的编译器差异**，不是线程开销。把两个相位改成调用同一个 `noinline`

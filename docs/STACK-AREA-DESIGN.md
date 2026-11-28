@@ -120,7 +120,8 @@ stack       当前线程的栈窗
 ## 8. 代价与风险
 
 - 每个进程从 1 个窗口变成 2 个：已实现为“数据窗 + 栈块”，`ps` 的 `wink`
-  只显示数据窗；`free` 还没有把栈区单独列出来（数据窗总和仍是用户区）；
+  只显示数据窗；`free` 用 `SYS_STACKINFO` 单独列出栈区的 reserved/live/peak，
+  不再需要从 `tasks` 行里猜；
 - 栈区碎片与地址空间上限（`MAX_THREADS=32 × 4 KiB = 128 KiB`）：buddy 分配
   只允许 2 的幂的块，混合 4/8/16 KiB 请求也不会产生 first-fit 那种不可用碎片；
   上限仍由配置决定；
@@ -139,9 +140,11 @@ stack       当前线程的栈窗
 3. **部分**：`ps` 的 `wink`/`stk/sz` 与本文第 7 节一致（`sh` 16+4，`stk` 4+16）；
 4. **已做**：故意下溢立即 fault（不是下一次 syscall 的 canary），shell 继续；
 5. **已做**：栈窗耗尽时 `thread_create` 干净地失败，进程表/窗口不泄漏；
-6. **部分**：200 次 create/join 与 churn 阶段复用正常；1000 次混合 4K/16K 的
-   长跑和 `free` 的栈区单独数字**还没做**（见 §8）；不 join 的线程随进程退出
-   一并归还已覆盖；
+6. **已做**：`SYS_STACKINFO`（`struct stackarea`）把 reserved/live/peak 交给
+   用户态；`free` 多一行 `stack area`（没有栈区的板子不打印）。`kthreadtest`
+   的 1000 次 4K/16K 混合 create/join 在 C3 上 1.3 s 跑完，`live` 和
+   `reserved` 回到基线；没有栈区的板子打印 `N/A`。不 join 的线程随进程退出
+   一并归还也已覆盖；
 7. T1/T2 全过；RP2040/Pico 2 的 T3 是 `NOT RUN`（未接板），见验收卡片。
 
 ## 10. 明确不做

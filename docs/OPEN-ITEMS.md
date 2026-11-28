@@ -1391,9 +1391,9 @@ x86/RP2040 保留 canary 但只能尽力而为（大帧仍可跳进邻栈），�
 状态：**C3 已实现并实机验收**（`PLAT_STACK_AREA = 16 KiB`，按 16 KiB 增长/收缩；
 主线程 + kthread 栈；`ps` 的 `wink` 是数据窗）。C3 默认镜像 `accept.py` 42/42，
 kthreads 镜像 `kthreadtest`/`prodcons`/`threadbench` 全过；ARM QEMU 的无栈区回退、
-rv32/rv32smp QEMU kthreads 也全过。仍缺：
+rv32/rv32smp QEMU kthreads 也全过。`SYS_STACKINFO` + `free` 的 `stack area`
+行给出 reserved/live/peak；`kthreadtest` 的 1000 次 4K/16K 混合 create/join
+在 C3 上回到基线。仍缺：
 
-- `free` 的栈区单独计数（目前 `tasks` 仍是整个用户区）；
-- 1000 次 4K/16K 混合 create/join 的长跑；
 - RP2040/Pico 2 的栈区与 T3/T4（未接板，`NOT RUN`）；
 - ARM 的 landing 删除与 MPU 形状（目前 `PLAT_STACK_AREA = 0`，走旧路）。
