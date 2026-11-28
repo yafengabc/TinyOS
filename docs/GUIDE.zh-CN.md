@@ -102,12 +102,11 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - **控制台就是下载线**：`tools/tosput`（Windows GUI / CLI）把宿主文件经串口
   传进 littlefs，板上 `bin/rx` 接收，停等 ACK + 板端 CRC32 校验，零内核改动；
   详见 `docs/FILE-TRANSFER.md`
-- **爆栈不是死刑**：栈和堆在窗口里共用一块区，程序踩出栈底时内核看堆还剩多少，
-  有 8 KiB 空档就把栈翻倍（8→16 KiB）、把堆的尾巴让给它、重试那条指令，打一行
-  `[pid N] stack grown to 16 KiB`；堆先吃满就照旧 fault 杀任务。PMP 仍 4 条规则
-  （NAPOT 只能描述 2 的幂，所以是翻倍而不是任意长）。`deep 6` 是这个机制的自测；
-  输不起的程序继续用 `TOS_STACK(n)` 显式声明，那条 note 会被 `exec` 读到并决定
-  窗口大小
+- **爆栈是死刑，但要报得清楚**：栈和堆在窗口里共用一块区，隐式增长已在 2026-11-28
+  移除。程序踩出栈底时，guard 洞（rv32/PMP）或每次 syscall 的 `sp` 检查（ARM/software
+  guard）发现越界，内核打印 `declare TOS_STACK() for the depth you need` 后杀掉任务，
+  不再翻倍。需要深栈的程序用 `TOS_STACK(n)` 显式声明，那条 note 会被 `exec` 读到并
+  决定窗口大小；`deep 6` 现在验证的就是这条 kill 路径，`stk` 验证声明本身
 - `stk`：`stk 4 3000 &` 递归四层、每层 2 KiB 局部存储然后睡住，专门用来验证
   上面那个测量本身是对的（`ps` 里必须读到 8.x KiB）
 - 输出同时走 VGA 文本模式和 COM1，可用 `-headless` 直接在终端里玩

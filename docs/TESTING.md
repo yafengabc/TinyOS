@@ -104,7 +104,7 @@ for t in rv32 rv32smp arm; do
 done
 ```
 
-预期：每个目标最后输出 `SMOKE TEST OK`；`piperace` 有 `piperace: ok`；`prot stack` 打印保护错误但内核继续；`deep 3` 完成。
+预期：每个目标最后输出 `SMOKE TEST OK`；`piperace` 有 `piperace: ok`；`prot stack` 打印保护错误但内核继续；`deep 3` 被 guard 杀掉（`declare TOS_STACK` 与 `killing`），shell 继续。
 
 ### 4.2 Soak（内核/内存/窗口/锁改动必跑）
 
@@ -155,7 +155,7 @@ go run ./cmd/tostest smoke -target rv32 -commands "rt-bigcode" -commandwait-ms 2
 - 板上 `rcc`：RIR2 ≤ 40 KiB（约 2000 IR，按 4 KiB 分块读）、4096 个标签、
   text ≤ 48 KiB；C3/rv32 的窗口是 88 KiB。`tests/bigir.c`（1436 IR / 2062 标签）是这套
   上限的回归用例，`tests/hugeir.c`（2948 IR）只在宿主跑。
-- `bloop3` / `sieve3` / `deep 3` 在 TCG 下超过 10 s，`-commandwait-ms` 要给够。
+- `bloop3` / `sieve3` 在 TCG 下超过 10 s，`-commandwait-ms` 要给够。
 
 ### 4.5 ARM Thumb-2 后端（实验，改 `thumb2.inc` 时）
 
@@ -340,6 +340,8 @@ python scripts/rp2350/pio_accept.py --image rpi-pico-smp --uf2 build/tinyos-rpi-
   的文件系统。
 - 历史基线：2026-11-17 的人工核对（`HISTORY.md` §43：`wink=16`、`deep 3` 增长、
   `deep 6` kill）与 `heartbeat.py` 6/6 仍然有效；心跳是最低线，`accept.py` 是板级全项。
+  2026-11-28 起隐式栈增长已移除，`deep 3` 现在是被 guard 杀掉（见
+  `docs/acceptance/2026-11-28-no-grow-*.md`），上面的历史数字只作当时记录。
 
 ### 5.4 Pico 2（RP2350 验收门槛）
 

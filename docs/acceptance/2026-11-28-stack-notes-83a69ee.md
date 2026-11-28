@@ -50,8 +50,9 @@ tos> sh etc/demo.sh     -> 全部标记通过（if/while/incr/break/$(...)/管�
 tos> accept.py -p COM4  -> 42/42 passed
 ```
 
-`deep 3` 仍然能增长，说明没有声明的程序（包括将来新写的）行为没变；这五个
-程序溢出时改成在 guard 处被杀并打印 `stack overflow ... killing`，不会再翻倍。
+`deep 3` 当时仍然能增长（2026-11-28 晚些时候隐式增长被整体移除，见
+[no grow](2026-11-28-no-grow-60cee31.md)；现在它被杀）。这五个程序溢出时
+在 guard 处被杀并打印 `stack overflow ... killing`。
 
 ## 没有做的
 
