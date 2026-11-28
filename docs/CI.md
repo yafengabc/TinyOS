@@ -102,7 +102,7 @@ TinyOS。
   到 19）+ Go stable。**编译器版本是有意义的**：老编译器生成的代码更大，跨过 span
   边界就整个任务窗口换档（C3 和两个 RP2350 ISA 都是 4 KiB span 类别）。`msh` 以前
   是这条线的哨兵（clang 23 的 `-Oz` 下离 8 KiB 预算 60 B，clang 18 编出 12 KiB）；
-  它已冻结、不再进镜像，现在的哨兵是 `sh`（`-Oz` 16 KiB span / 28 KiB 窗口）。
+  它已冻结、不再进镜像，现在的哨兵是 `sh`（`-Oz` 16 KiB span / 24 KiB 窗口）。
   镜像要是"硬件上量过的那一份"，就得用同一档编译器；装不上时 workflow 会
   打 `::warning::` 并退回流发行版 clang，失败点会落在体积检查上。
 - 每个 job 结束前会打印 `wc -c build/user/bin/sh`（以及 `help`、`tools`），编译器
