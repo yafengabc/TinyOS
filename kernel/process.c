@@ -269,7 +269,7 @@ typedef struct thread {
     /* The process's glock lives in struct proc (t->proc->glock). */
 #ifdef TOS_KTHREADS
     /* User-mutex state.  `held_mutex` is the word this thread owns through
-     * kmutex_lock()/try(); it is what a dying thread hands on. */
+     * thread_mutex_lock()/try(); it is what a dying thread hands on. */
     volatile int *held_mutex;
     volatile int *wmutex;
 #endif
@@ -3801,7 +3801,7 @@ static spin_t user_mutex_guard = SPIN_INIT;
 
 /* Give `word` to the first thread sleeping on it, or release it.  Called
  * with proc_lock held.  Ownership moves with the word (it stays 1), so the
- * woken thread returns from kmutex_lock() already holding it - no race with
+ * woken thread returns from thread_mutex_lock() already holding it - no race with
  * a third thread that would otherwise grab it between wake and retry. */
 static thread_t *mutex_handoff_locked(volatile int *word, const thread_t *dead)
 {
@@ -3979,6 +3979,17 @@ int process_stack_guard(const regs_t *r)
      * check and it runs on every port. */
     if (thread_is_main(p) && !plat_user_stack_guard())
         return 1;
+#ifdef TOS_THREADS
+    /* Cooperative threads multiplex the main kernel thread with their
+     * stacks in the process heap; a worker's sp at a syscall is outside
+     * the main stack by design and cannot be told from a real overrun.
+     * A threads image therefore trades this check for working
+     * cooperative threads - the config is opt-in and documented as not
+     * recommended (user/lib.h).  Worker kernel threads are not main and
+     * keep their own check. */
+    if (thread_is_main(p))
+        return 1;
+#endif
 
     low = p->stack_top - p->stack_size;
     sp = r ? plat_frame_get_user_sp(r) : low;

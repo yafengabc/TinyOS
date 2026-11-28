@@ -375,17 +375,17 @@ int schedstat(struct schedstat *st)
 }
 
 #ifdef TOS_KTHREADS
-int kmutex_lock(int *word)
+int thread_mutex_lock(int *word)
 {
     return tos_sys1(SYS_MUTEX_LOCK, (int)word);
 }
 
-int kmutex_try(int *word)
+int thread_mutex_try(int *word)
 {
     return tos_sys1(SYS_MUTEX_TRY, (int)word);
 }
 
-int kmutex_unlock(int *word)
+int thread_mutex_unlock(int *word)
 {
     return tos_sys1(SYS_MUTEX_UNLOCK, (int)word);
 }

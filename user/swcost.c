@@ -31,7 +31,7 @@ static void spinner(void *arg)
 {
     (void)arg;
     for (uint32_t i = 0; i < t_iters; i++)
-        thread_yield();
+        co_yield();
 }
 #endif
 
@@ -64,15 +64,15 @@ int main(int argc, char *argv[])
         uint32_t half = n / 2;
 
         t_iters = half;
-        a = thread_create(spinner, 0, 4096);
+        a = co_create(spinner, 0, 4096);
         if (a < 0) {
-            puts("swcost: thread_create failed (heap/stacks?)\n");
+            puts("swcost: co_create failed (heap/stacks?)\n");
             return 1;
         }
         t0 = clock_ns();
         for (uint32_t i = 0; i < half; i++)
-            thread_yield();
-        thread_join(a, &code);
+            co_yield();
+        co_join(a, &code);
         t1 = clock_ns();
         printf("swcost: thread  %u ns/op\n",
                (unsigned)((uint32_t)(t1 - t0) / (2u * half)));

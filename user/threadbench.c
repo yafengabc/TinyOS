@@ -67,14 +67,14 @@ static unsigned run_threads(int nthreads, unsigned iters, struct schedstat *d)
     schedstat(&a);
     t0 = clock_ms();
     for (int i = 0; i < nthreads; i++) {
-        tid[i] = kthread_create(worker, (void *)i, 4096);
+        tid[i] = thread_create(worker, (void *)i, 4096);
         if (tid[i] < 0) {
-            printf("threadbench: kthread_create %d failed\n", i);
+            printf("threadbench: thread_create %d failed\n", i);
             return 0;
         }
     }
     for (int i = 0; i < nthreads; i++) {
-        if (kthread_join(tid[i], &code) < 0) {
+        if (thread_join(tid[i], &code) < 0) {
             printf("threadbench: join %d failed\n", i);
             return 0;
         }
@@ -139,10 +139,10 @@ int main(void)
         int t, code;
 
         iters_goal = 0;                 /* sibling exits immediately */
-        t = kthread_create(worker, (void *)9, 4096);
+        t = thread_create(worker, (void *)9, 4096);
         if (t >= 0) {
             sleep(200);
-            kthread_join(t, &code);
+            thread_join(t, &code);
             puts("threadbench: sleep() in main, sibling kept running\n");
         }
     }

@@ -287,32 +287,40 @@ int msg_recv(void *buf, int len);      /* blocks until one arrives */
 
 #ifdef TOS_THREADS
 /* Cooperative user-space threads (menuconfig: Kernel -> Threads).  One
- * process runs one thread at a time; switching happens at thread_yield(),
- * thread_read() and mutex waits.  Four threads total, main included, and
- * each stack comes from the program's heap (TOS_HEAP). */
-typedef struct { int locked; } mutex_t;
+ * process runs one thread at a time; switching happens at co_yield(),
+ * co_read() and mutex waits.  Four threads total, main included, and
+ * each stack comes from the program's heap (TOS_HEAP).
+ *
+ * NOT RECOMMENDED for new code: use thread_create() (TOS_KTHREADS),
+ * which the kernel schedules and whose stack it knows.  A cooperative
+ * thread's stack is invisible to the kernel, so on the ports whose only
+ * stack guard is the syscall check (x86, RP2040, RP2350-ARM) enabling
+ * this feature also switches that check off for the main thread: a real
+ * overrun in the image is no longer caught at a syscall.  What is left
+ * is the library's own guard - 32 B canary + sp at each yield. */
+typedef struct { int locked; } co_mutex_t;
 
-int  thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
-void thread_exit(int code) __attribute__((noreturn));
-int  thread_join(int tid, int *code);
-int  thread_self(void);
-int  thread_yield(void);                 /* 1 if it switched */
-int  thread_read(int fd, void *buf, int len); /* poll + yield, then read */
-void mutex_init(mutex_t *m);
-void mutex_lock(mutex_t *m);
-void mutex_unlock(mutex_t *m);
+int  co_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
+void co_exit(int code) __attribute__((noreturn));
+int  co_join(int tid, int *code);
+int  co_self(void);
+int  co_yield(void);                 /* 1 if it switched */
+int  co_read(int fd, void *buf, int len); /* poll + yield, then read */
+void co_mutex_init(co_mutex_t *m);
+void co_mutex_lock(co_mutex_t *m);
+void co_mutex_unlock(co_mutex_t *m);
 #endif
 
 #ifdef TOS_KTHREADS
 /* Kernel threads (experimental, menuconfig: Kernel -> Kernel threads).  The
  * kernel schedules them like tasks, so the tick preempts them and a blocking
  * read()/sleep() parks only the calling thread.  They share the caller's
- * window and heap; kthread_create() carves the stack out of the program heap
+ * window and heap; thread_create() carves the stack out of the program heap
  * with sbrk().  tid is a pid. */
-int  kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
-int  kthread_join(int tid, int *code);
-void kthread_exit(int code) __attribute__((noreturn));
-/* Blocking mutex for these threads (distinct from the cooperative mutex_t
+int  thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
+int  thread_join(int tid, int *code);
+void thread_exit(int code) __attribute__((noreturn));
+/* Blocking mutex for these threads (distinct from the cooperative co_mutex_t
  * above).  `word` is one int initialised to 0; lock sleeps in the kernel
  * while it is taken, and unlock hands ownership to the first waiter.  Try is
  * the non-blocking form: 1 acquired, 0 busy, -1 bad pointer.
@@ -320,9 +328,9 @@ void kthread_exit(int code) __attribute__((noreturn));
  * The kernel tracks one held word per thread, which is what the heap lock
  * needs; a thread that locks a second word before unlocking the first is not
  * covered by the release-on-death path, and nesting can deadlock. */
-int  kmutex_lock(int *word);
-int  kmutex_unlock(int *word);
-int  kmutex_try(int *word);
+int  thread_mutex_lock(int *word);
+int  thread_mutex_unlock(int *word);
+int  thread_mutex_try(int *word);
 #endif
 int  wait(int pid);
 int  yield(void);

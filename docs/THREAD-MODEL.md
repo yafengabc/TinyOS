@@ -134,7 +134,7 @@ leader 关闭后线程看到关闭）；soak rv32+arm 2/2。
 - `process_thread_create(entry, arg, top, size)` 校验：`top` 16 字节对齐、`size`
   非 0 且 4 字节对齐、`[top-size-4, top)` 整个落在组窗口内。然后：
   `p->stack_size = size`；把 `[top-size, top)` 刷成 `0xCC`（`ps` 的高水位扫描）；
-  在 `top-size-4` 写 `USER_STACK_GUARD`（调用方为此保留 4 字节，`kthread_create()`
+  在 `top-size-4` 写 `USER_STACK_GUARD`（调用方为此保留 4 字节，`thread_create()`
   实际留了 32 字节）。
 - `process_stack_guard()`：窗口判断改成 `PROC_GROUP(p)->win_size`；**线程的 canary
   在所有端口都检查**——MPU/PMP 无法把线程栈和它周围的堆分开，canary 是唯一能发现
@@ -187,10 +187,10 @@ soak rv32+arm 2/2；`kthreadtest` 在 ARM MPU 与 RV32 PMP 上新增：
 
 新用例先失败，再修：
 
-- **泄漏**：`kthread_create()` 从进程堆里 `malloc` 栈（`bytes + 32`）和 start
-  record，`kthread_join()` 从来没还过；创建失败（槽耗尽、用户指针校验失败）也直接
+- **泄漏**：`thread_create()` 从进程堆里 `malloc` 栈（`bytes + 32`）和 start
+  record，`thread_join()` 从来没还过；创建失败（槽耗尽、用户指针校验失败）也直接
   return，两个块一起漏。`kthreadtest` 的 200 次 create/join 用例在 96 KiB 窗口里
-  第 2 次左右就 `kthread_create` 失败，随后 yield 用例也建不出线程：
+  第 2 次左右就 `thread_create` 失败，随后 yield 用例也建不出线程：
   `heap ... -> ... (stopped early)` + `FAILED (6 failure(s))`。
 - **修法**（`user/kthread.c`）：一张 `KT_TRACK 24` 的表记录 `{tid, base, rec}`；
   `join` 返回 0 后 `free(rec)`、`free(base)`（内核在返回前已经退休槽，栈上不会再有人
@@ -262,8 +262,8 @@ soak 2/2；`configs/rv32-kthreads.conf` 与 `configs/arm-kthreads.conf` 上
   返回 0，被占就置 `ST_WAIT_MUTEX`、`wmutex = word`，然后走 `block_locked()` 睡下。
   `SYS_MUTEX_UNLOCK` 把所有权**直接交给**第一个等待者（字保持 1，唤醒时把它的返回
   值写成 0），没有“唤醒后再抢”的窗口。没有等待者才清零。
-- `SYS_MUTEX_TRY`/`UNLOCK` 保留：TRY 是非阻塞形式（`kmutex_try`），堆锁现在用
-  `kmutex_lock`。
+- `SYS_MUTEX_TRY`/`UNLOCK` 保留：TRY 是非阻塞形式（`thread_mutex_try`），堆锁现在用
+  `thread_mutex_lock`。
 - 持有者死亡：每个线程记录一个 `held_mutex`；线程在 `process_thread_exit()` 里
   把字交给等待者（组长正在解散时不交，整组都要走）。这样一次 fault 在 malloc 里
   不会把同进程其他线程永久卡住。

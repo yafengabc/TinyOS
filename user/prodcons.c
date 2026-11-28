@@ -40,7 +40,7 @@ static void consumer(void *arg)
     }
     got_bytes = total;
     got_sum = sum;
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 int main(int argc, char *argv[])
@@ -61,9 +61,9 @@ int main(int argc, char *argv[])
 
     got_bytes = 0;
     got_sum = 0;
-    tid = kthread_create(consumer, 0, 4096);
+    tid = thread_create(consumer, 0, 4096);
     if (tid < 0) {
-        puts("prodcons: kthread_create failed\n");
+        puts("prodcons: thread_create failed\n");
         return 1;
     }
 
@@ -82,7 +82,7 @@ int main(int argc, char *argv[])
     }
     close(pfd[1]);                  /* the consumer reads EOF after draining */
 
-    if (kthread_join(tid, &code) < 0) {
+    if (thread_join(tid, &code) < 0) {
         puts("prodcons: join failed\n");
         return 1;
     }

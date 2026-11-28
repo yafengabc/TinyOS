@@ -22,7 +22,7 @@ void *sbrk(int bytes);
  *
  * Not thread-safe.  kthreads share the group's window, so two threads calling
  * malloc at the same time race here exactly as they raced on the bump pointer
- * this replaces.  kthread_create() itself only allocates before the thread
+ * this replaces.  thread_create() itself only allocates before the thread
  * runs, which is safe in the same way the old "create threads first" rule was.
  */
 
@@ -36,9 +36,11 @@ struct heap_blk {
 };
 
 /* The payload must stay 8-aligned: the header is the only thing between the
- * block address and what malloc returns. */
-typedef char heap_hdr_align_check[
-    (sizeof(struct heap_blk) % HEAP_ALIGN) ? -1 : 1];
+ * block address and what malloc returns.  A C11 static assert rather than the
+ * "array with a ternary size" idiom: toscc parses this and the old form was
+ * the one construct it could not. */
+_Static_assert(sizeof(struct heap_blk) % HEAP_ALIGN == 0,
+               "heap block header must stay 8-aligned");
 
 #define HEAP_HDR ((uint32_t)sizeof(struct heap_blk))
 #define HEAP_FREE 1u
@@ -52,19 +54,19 @@ static struct heap_blk *heap_tail;
  * on one core.  A waiter sleeps in the kernel instead of spinning, and the
  * kernel hands ownership to the first waiter on unlock.  It is compiled only
  * when threads are possible, so single-threaded programs pay nothing. */
-int kmutex_lock(int *word);
-int kmutex_unlock(int *word);
+int thread_mutex_lock(int *word);
+int thread_mutex_unlock(int *word);
 
 static int heap_lock;
 
 static void heap_lock_take(void)
 {
-    kmutex_lock(&heap_lock);
+    thread_mutex_lock(&heap_lock);
 }
 
 static void heap_unlock(void)
 {
-    kmutex_unlock(&heap_lock);
+    thread_mutex_unlock(&heap_lock);
 }
 #else
 #define heap_lock_take()   ((void)0)

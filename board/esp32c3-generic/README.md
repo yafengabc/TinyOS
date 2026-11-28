@@ -171,7 +171,7 @@ prodcons: 32768 bytes through a 512-byte pipe in 25 ms
 ```
 
 线程由内核调度：tick 可以抢占，一个线程 `read()/sleep()` 只挂起它自己；它们共享
-进程的窗口和堆（栈由 `kthread_create()` 用 `sbrk` 从堆里切）。C3 是单核，所以
+进程的窗口和堆（栈由 `thread_create()` 用 `sbrk` 从堆里切）。C3 是单核，所以
 `threadbench` 的期望结果是**总时间与单线程串行相近**（ratio ≈ 100%），但三个线程
 都完成、`join` 正常回收、阻塞按线程生效——这三点才是"真线程"与协作线程的分界。
 fd 表是进程级共享的（一个线程 `open/close` 对全组可见），信号/`^C` 也按组生效；

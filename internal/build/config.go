@@ -539,6 +539,12 @@ func (b *Builder) abs(p string) string {
 // featureDefines turns [features] into -DTOS_<NAME> flags.
 func (b *Builder) featureDefines() []string {
 	var defs []string
+	// Cooperative threads change the kernel's stack-guard policy (the
+	// main thread is skipped in process_stack_guard), so the flag has to
+	// reach process.c as well as the programs.
+	if b.Threads {
+		defs = append(defs, "-DTOS_THREADS")
+	}
 	for name, on := range b.Features {
 		if !on {
 			continue
@@ -575,9 +581,6 @@ func rccArchLabel(arch string) string {
 
 func (b *Builder) userDefines() []string {
 	defs := append([]string{}, b.featureDefines()...)
-	if b.Threads {
-		defs = append(defs, "-DTOS_THREADS")
-	}
 	if b.Mailbox {
 		defs = append(defs, "-DTOS_MAILBOX=1")
 	}

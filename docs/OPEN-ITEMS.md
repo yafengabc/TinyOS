@@ -807,7 +807,7 @@ RP2040 刷写走 BOOTSEL；仓库里没有自动化 UF2 流程，`scripts/rp2040
   堆尾。这样 `sbrk` 只增不减，和 `kthread`、`deep` 的栈增长路径都不冲突。
 - **没有 `realloc` / `calloc`**；需要时在 `heap.c` 上补。
 - **不是线程安全的**：kthreads 共享组窗口，两个线程同时 malloc 会竞争；和原来的
-  bump 指针一样。`kthread_create` 只在创建时分配，运行中的线程各自 malloc 才需要
+  bump 指针一样。`thread_create` 只在创建时分配，运行中的线程各自 malloc 才需要
   锁。
 - 块头 16 字节（32 位目标），所以 `TOS_HEAP(n)` + 一次 malloc(n) 需要 n+16 的区域；
   `bench`/`wheap`/`mem` 已各留 64 字节。声明多个块时每块再占一个头。
@@ -990,7 +990,7 @@ release 屏障里写 0。`user/heap.c` 只在 `TOS_KTHREADS` 下取这把锁，�
 - arm（单核）10 次全过，说明这是**概率**窗口，不是只在 SMP 上才有。
 
 失败率不定，所以这条用例没有留在默认 `kthreadtest` 里；`heap.c` 的注释本来就写着
-"Not thread-safe"。`kthread_create()` 自己也会 malloc（栈 + start record），因此
+"Not thread-safe"。`thread_create()` 自己也会 malloc（栈 + start record），因此
 "线程里不要 malloc" 不是可接受的契约。
 
 修法选项：
@@ -1003,7 +1003,7 @@ release 屏障里写 0。`user/heap.c` 只在 `TOS_KTHREADS` 下取这把锁，�
    加屏障）。
 2. **每线程堆**：线程只用自己的 free list，`TOS_HEAP` 的区域要切分，跨线程 free 需要
    归还给所有者；语义更复杂，但 malloc 不付系统调用。
-3. 不修、写进契约：不能接受，`kthread_create` 本身就在 malloc。
+3. 不修、写进契约：不能接受，`thread_create` 本身就在 malloc。
 
 已排除的快速方案：`__atomic_exchange_n` 加锁在 RP2040（M0+）和 ESP32-C3 上链接失败
 （`undefined symbol: __atomic_exchange_4` / `__atomic_store_4`），这两个目标没有 A
@@ -1370,3 +1370,11 @@ limitation"）说的就是这件事，不是 bug。
 `base/top`，退出时注销），`process_stack_guard()` 命中任一区间就放行，越界仍按该
 区间判断。这同时能把合作线程的守卫从“库内下次 yield 检查”升级为“syscall 时检查”，
 但它是 ABI 变更（`abi/syscalls.csv` + goc32 快照），需要 C3 与板测。
+
+**2026-11-28 处理（配置级放行）**：编译 `TOS_THREADS` 时，`process_stack_guard()`
+对主线程直接放行（`thread_is_main(p)` 分支），合作线程的 syscall 不再被误杀；
+kthread worker 不是主线程，检查保留。代价是该镜像失去主线程的 syscall 栈检查：
+x86/RP2040 上这是唯一的栈边界，所以 `user/lib.h` 与 `configs/x86-threads.conf` 都
+注明了“合作线程不推荐，新代码用 thread_create()”。x86-threads 下 `threadtest`
+已通过（worker 的 `printf` 正常）。按进程注册栈区间的完整方案仍未做——只有将来
+合作线程要在有软件守卫的板子上正式使用时才需要。

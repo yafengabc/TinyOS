@@ -64,9 +64,9 @@
  * kernel writes a guard word just below the stack and checks it at every
  * syscall, because the heap around a thread stack is writable to the whole
  * process.  tid is a pid; join stores the exit code through the user pointer. */
-#define SYS_THREAD_CREATE 48 /* kthread_create(entry, arg, &stack) -> tid */
-#define SYS_THREAD_EXIT   49 /* kthread_exit(code) -> no return        */
-#define SYS_THREAD_JOIN   50 /* kthread_join(tid, &code) -> 0 or -1    */
+#define SYS_THREAD_CREATE 48 /* thread_create(entry, arg, &stack) -> tid */
+#define SYS_THREAD_EXIT   49 /* thread_exit(code) -> no return        */
+#define SYS_THREAD_JOIN   50 /* thread_join(tid, &code) -> 0 or -1    */
 /* Scheduler counters, for benchmarks: schedstat(&st) fills four u32
  * (switches to another task, scheduler runs that kept the same task, timer
  * ticks, protection units actually programmed). */
@@ -84,7 +84,7 @@
  * is taken, -1 on a bad pointer.  UNLOCK writes 0 with the release barrier. */
 #define SYS_MUTEX_TRY     54 /* mutex_try(int *word) -> 1/0/-1          */
 #define SYS_MUTEX_UNLOCK  55 /* mutex_unlock(int *word) -> 0/-1         */
-#define SYS_MUTEX_LOCK    56 /* kmutex_lock(int *word) -> 0/-1          */
+#define SYS_MUTEX_LOCK    56 /* thread_mutex_lock(int *word) -> 0/-1          */
 /* Directory creation and removal.  rmdir is empty-only and refuses a path
  * that contains the caller's cwd; littlefs' lfs_remove is recursive, which
  * is why unlink() still refuses directories. */

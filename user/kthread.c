@@ -3,7 +3,7 @@
 /* Kernel-thread library (experimental).
  *
  * The kernel side is a process-table slot that shares the caller's window:
- * kthread_create() hands the kernel an entry point, one argument and the top
+ * thread_create() hands the kernel an entry point, one argument and the top
  * of a stack, and the scheduler treats the thread like any other task, so it
  * is preempted by the 1 ms tick and a blocking read() parks only that thread.
  *
@@ -30,7 +30,7 @@ struct kstart {
  * joins keeps its entry and its stack until the process exits - the same
  * lifetime its kernel slot has.
  *
- * Not thread-safe: two threads calling kthread_create()/join() at the same
+ * Not thread-safe: two threads calling thread_create()/join() at the same
  * time race on this table, like the rest of the user-space library. */
 #define KT_TRACK 40
 
@@ -49,10 +49,10 @@ static void kthread_trampoline(struct kstart *s)
     void *arg = s->arg;
 
     fn(arg);
-    kthread_exit(0);
+    thread_exit(0);
 }
 
-int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
+int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
 {
     unsigned bytes, top;
     struct kstart *s;
@@ -114,7 +114,7 @@ int kthread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     return tid;
 }
 
-int kthread_join(int tid, int *code)
+int thread_join(int tid, int *code)
 {
     int rc = tos_sys2(SYS_THREAD_JOIN, tid, (int)code);
 
@@ -134,7 +134,7 @@ int kthread_join(int tid, int *code)
     return rc;
 }
 
-void kthread_exit(int code)
+void thread_exit(int code)
 {
     tos_sys1(SYS_THREAD_EXIT, code);
     for (;;)

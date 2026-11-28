@@ -4,13 +4,13 @@
  * pushed by thread_switch.S, and the kernel does not know threads exist.
  * That buys the natural shape - "do this, then wait here" - without
  * touching the scheduler, at the price of one rule: a plain read()/sleep()
- * parks the whole process, so a thread that waits must use thread_read()
+ * parks the whole process, so a thread that waits must use co_read()
  * (poll + yield) or yield itself.  Timer preemption still switches
- * processes, never two threads of one process, which is why mutex_lock is
+ * processes, never two threads of one process, which is why co_mutex_lock is
  * a plain flag and not an atomic.
  *
  * Four threads total, main included.  Stacks come from the program's heap
- * (TOS_HEAP), so a program that never calls thread_create() pays neither
+ * (TOS_HEAP), so a program that never calls co_create() pays neither
  * the stacks nor the code: the build only links this file when the config
  * has threads = 1, and --gc-sections drops it from programs that do not
  * call it. */
@@ -156,10 +156,10 @@ static void thread_entry(void)
     int me = current_tid;
 
     th[me].fn(th[me].arg);
-    thread_exit(0);                  /* a thread that falls off is done */
+    co_exit(0);                  /* a thread that falls off is done */
 }
 
-int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
+int co_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
 {
     int id;
     unsigned char *base;
@@ -193,7 +193,7 @@ int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     return id;
 }
 
-void thread_exit(int code)
+void co_exit(int code)
 {
     int me, next;
 
@@ -213,7 +213,7 @@ void thread_exit(int code)
     exit(code);                      /* a finished thread never resumes */
 }
 
-int thread_join(int tid, int *code)
+int co_join(int tid, int *code)
 {
     thread_init();
     if (tid <= 0 || tid >= THREAD_MAX || tid == current_tid)
@@ -222,7 +222,7 @@ int thread_join(int tid, int *code)
         return -1;
 
     while (th[tid].state != T_DONE) {
-        if (!thread_yield())
+        if (!co_yield())
             return -1;               /* cannot make progress */
     }
     if (code)
@@ -231,13 +231,13 @@ int thread_join(int tid, int *code)
     return 0;
 }
 
-int thread_self(void)
+int co_self(void)
 {
     thread_init();
     return current_tid;
 }
 
-int thread_yield(void)
+int co_yield(void)
 {
     int prev, next;
 
@@ -259,7 +259,7 @@ int thread_yield(void)
 
 /* The thread-friendly read: waiting is poll() plus yield, so the other
  * threads keep running.  A plain read() would park the process. */
-int thread_read(int fd, void *buf, int len)
+int co_read(int fd, void *buf, int len)
 {
     struct pollfd p;
 
@@ -269,7 +269,7 @@ int thread_read(int fd, void *buf, int len)
         p.revents = 0;
         if (poll(&p, 1, 0) > 0)
             break;
-        if (!thread_yield())
+        if (!co_yield())
             sleep(1);                /* nobody else: park for a tick */
     }
     return read(fd, buf, len);
@@ -277,19 +277,19 @@ int thread_read(int fd, void *buf, int len)
 
 /* Cooperative, so no atomics: two threads of one process are never on a CPU
  * at the same time. */
-void mutex_init(mutex_t *m)
+void co_mutex_init(co_mutex_t *m)
 {
     m->locked = 0;
 }
 
-void mutex_lock(mutex_t *m)
+void co_mutex_lock(co_mutex_t *m)
 {
     while (m->locked)
-        thread_yield();
+        co_yield();
     m->locked = 1;
 }
 
-void mutex_unlock(mutex_t *m)
+void co_mutex_unlock(co_mutex_t *m)
 {
     m->locked = 0;
 }

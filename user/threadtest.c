@@ -11,7 +11,7 @@
 TOS_HEAP(16 * 1024);
 TOS_STACK(4 * 1024);
 
-static mutex_t mx;
+static co_mutex_t mx;
 static int counter;
 
 static void worker(void *arg)
@@ -19,11 +19,11 @@ static void worker(void *arg)
     int me = (int)arg;
 
     for (int i = 0; i < 3; i++) {
-        mutex_lock(&mx);
+        co_mutex_lock(&mx);
         counter++;
         printf("worker %d: %d\n", me, counter);
-        mutex_unlock(&mx);
-        thread_yield();
+        co_mutex_unlock(&mx);
+        co_yield();
     }
 }
 
@@ -31,16 +31,16 @@ int main(void)
 {
     int a, b, code;
 
-    mutex_init(&mx);
-    a = thread_create(worker, (void *)1, 4096);
-    b = thread_create(worker, (void *)2, 4096);
+    co_mutex_init(&mx);
+    a = co_create(worker, (void *)1, 4096);
+    b = co_create(worker, (void *)2, 4096);
     if (a < 0 || b < 0) {
-        puts("thread_create failed (heap/stacks?)\n");
+        puts("co_create failed (heap/stacks?)\n");
         return 1;
     }
 
-    thread_join(a, &code);
-    thread_join(b, &code);
+    co_join(a, &code);
+    co_join(b, &code);
     printf("done, counter=%d\n", counter);
     return 0;
 }

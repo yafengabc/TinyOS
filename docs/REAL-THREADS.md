@@ -12,13 +12,13 @@
 - 纯用户态：一个线程 = 一段栈 + 保存的 `sp`，切换靠 `thread_switch.S` 压/弹
   callee-saved 寄存器；**内核完全不知道线程存在**。
 - 上限 4 个（含 main），栈由程序自己的堆（`TOS_HEAP`）提供，默认每次
-  `thread_create` 再从堆里切 4 KiB。
-- 切换只发生在 `thread_yield()` / `thread_read()`；普通 `read()`、`sleep()` 会把
+  `co_create` 再从堆里切 2 KiB。
+- 切换只发生在 `co_yield()` / `co_read()`；普通 `read()`、`sleep()` 会把
   **整个进程**挂起。
-- `mutex_lock` 是普通标志，不是原子操作——因为同进程线程不会同时跑。
+- `co_mutex_lock` 是普通标志，不是原子操作——因为同进程线程不会同时跑。
 - 一个进程永远只在一个 CPU 上：SMP 目标上两个线程也无法并行。
 
-代价：内核 0 B；每个用到的程序 +约 1 KiB 代码；每线程 4 KiB 栈（+ 堆里的管理结构）。
+代价：内核 0 B；每个用到的程序 +约 1 KiB 代码；每线程 2 KiB 栈（+ 堆里的管理结构）。
 
 ## 2. "真多线程"要满足的条件
 
@@ -107,7 +107,7 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
 - **栈**：用户库 `user/kthread.c` 用 `sbrk()` 从组堆里切一块，栈顶传给内核；
   因为堆边界是共享的（`process_sbrk()` 改的是组首的 `brk`），所有线程的
   PMP data 区域自动覆盖这些栈。
-- **入口**：用户侧 `kthread_trampoline(fn, arg)` 调完用户函数后 `kthread_exit(0)`；
+- **入口**：用户侧 `kthread_trampoline(fn, arg)` 调完用户函数后 `thread_exit(0)`；
   内核只需要 `plat_prepare_user_frame(entry, sp)` + `a0 = arg`。
 - **退出/join**：线程退出时把自己的 code 记在槽里（`ST_THREAD_ZOMBIE`）。有 joiner
   在 `ST_WAIT_THREAD` 等就当场把 code 写进它的帧和用户指针，然后回收槽；没人等就
@@ -123,7 +123,7 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
   组长退出是**延迟**的：组长进 `ST_DYING`、记 `live_threads`，兄弟线程被
   `kill_pending`（阻塞中的会被唤醒返回 -1），最后一个线程负责关 fd、回收组长。
   还剩两个已知边界：`sbrk` 只重编程**当前核**的 PMP（所以在 spawn 线程前分配堆，
-  `kthread_create` 本身就是这样做的）；`close()` 撞上正在阻塞的 `read/write`
+  `thread_create` 本身就是这样做的）；`close()` 撞上正在阻塞的 `read/write`
   还没有引用计数保护（单核时代就存在的语义边界）。
 - **ARM**：Cortex-M 上入口同样走 `plat_prepare_user_frame()` + `plat_frame_set_arg()`
   （先写 `regs_t.r0`，再写硬件异常帧 `hw[0]`）。M 核会把 32 B 硬件帧压在初始 sp

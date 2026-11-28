@@ -52,10 +52,12 @@ ARM : qemu-system-arm -machine mps2-an385 -> 向量表 @0（Cortex-M3）
 - 系统调用（x86 `int 0x80` / RV32 `ecall`）：
   `write/read/exec/open/close/readdir/getpid/sleep/uptime/sbrk/exit/create/wait/yield/ps/signal/reboot`
   外加 `clock/getcpu/gpio/adc/pipe/dup2/lseek/fstat/dup/readdir_at/poll/ioctl`
-- **可选协作线程**（menuconfig `Kernel → Threads`，`threads = 1`）：
-  `thread_create/join`、每线程一个从用户堆分配的栈、`mutex_*`；切换只发生在
-  `thread_yield/thread_read`，普通 `read` 仍会挂起整个进程。关闭时 API 不参与编译；
-  开启后不调用它的程序也不变大（`--gc-sections`），内核则完全不变
+- **可选协作线程**（menuconfig `Kernel → Threads`，`threads = 1`，**不推荐**，
+  新代码用内核线程 `thread_create()`）：
+  `co_create/co_join`、每线程一个从用户堆分配的栈、`co_mutex_*`；切换只发生在
+  `co_yield/co_read`，普通 `read` 仍会挂起整个进程。开启这个特性会关掉主线程的
+  syscall 栈检查（见 `user/lib.h`）。关闭时 API 不参与编译；开启后不调用它的程序
+  也不变大（`--gc-sections`），内核只多这条策略
 - **消息邮箱**（menuconfig `Kernel → Mailbox`，`mailbox = 1`）：全局 4×256 B 池，
   `msg_send` 不阻塞、`msg_recv` 睡眠 1 ms 重试；每任务零缓冲，不做共享内存。
   关闭时池不分配（C3 实测 text +468 B、bss +1,088 B）

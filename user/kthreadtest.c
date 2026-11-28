@@ -20,7 +20,7 @@
 
 /* 18 threads x (4112 B stack + 8 B start record) = 74,160 B, plus ~8 KiB
  * of startup malloc.  At a 16 KiB window grain 72 KiB leaves only ~3.6 KiB
- * for the last thread, so kthread_create() silently returns -1 on real
+ * for the last thread, so thread_create() silently returns -1 on real
  * hardware.  QEMU's 64 KiB grain rounds the window up and masks it. */
 TOS_HEAP(96 * 1024);
 TOS_STACK(4 * 1024);
@@ -41,12 +41,12 @@ static void ok(int cond, const char *what)
 static void give42(void *arg)
 {
     (void)arg;
-    kthread_exit(42);
+    thread_exit(42);
 }
 
 static void give(void *arg)
 {
-    kthread_exit(*(int *)arg);
+    thread_exit(*(int *)arg);
 }
 
 static volatile int woke;
@@ -61,11 +61,11 @@ static volatile int locker_got;
 static void locker(void *arg)
 {
     (void)arg;
-    kmutex_lock(&tmutex);
+    thread_mutex_lock(&tmutex);
     locker_got = 1;
     sleep(20);
-    kmutex_unlock(&tmutex);
-    kthread_exit(0);
+    thread_mutex_unlock(&tmutex);
+    thread_exit(0);
 }
 
 /* The last word of the 32-bit space: unmapped on every port this OS runs on.
@@ -86,7 +86,7 @@ static void locker(void *arg)
 static void die_holding(void *arg)
 {
     (void)arg;
-    kmutex_lock(&deadmutex);
+    thread_mutex_lock(&deadmutex);
     *(volatile int *)FAULT_PROBE_ADDR = 1;   /* fault holding the word */
 }
 
@@ -109,7 +109,7 @@ static void heaper(void *arg)
 
         if (!a || !b) {
             heap_bad[id] = 1;
-            kthread_exit(1);
+            thread_exit(1);
         }
         for (unsigned j = 0; j < n; j++) {
             a[j] = (char)(j ^ (unsigned)id);
@@ -125,9 +125,9 @@ static void heaper(void *arg)
         free((void *)a);
         free((void *)b);
         if (heap_bad[id])
-            kthread_exit(2);
+            thread_exit(2);
     }
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 /* Set from the sleeping thread so the compiler has to materialise its 768-byte
@@ -147,9 +147,9 @@ static void slow(void *arg)
     pad[sizeof(pad) - 1] = 2;
     sleep(200);
     if (slow_frame[0] == 0x7f || slow_frame[sizeof(pad) - 1] == 0x7f)
-        kthread_exit(9);                /* never: keeps the frame live */
+        thread_exit(9);                /* never: keeps the frame live */
     woke = 1;
-    kthread_exit(*(int *)arg);
+    thread_exit(*(int *)arg);
 }
 
 #define YTHREADS 4
@@ -177,7 +177,7 @@ static void smp_sbrk(void *arg)
     uint32_t sum = 0;
 
     /* The baseline is taken by the leader after this thread's stack has been
-     * allocated.  kthread_create() gets the stack from malloc, and malloc
+     * allocated.  thread_create() gets the stack from malloc, and malloc
      * asks sbrk() for a new arena when the free list has nothing big enough;
      * letting that happen inside the measured window counted the allocator's
      * growth as if the threads had asked for those bytes. */
@@ -189,12 +189,12 @@ static void smp_sbrk(void *arg)
 
         if ((uint32_t)p < smp_base) {
             smp_err[id] = 1;
-            kthread_exit(1);
+            thread_exit(1);
         }
         sum += ((uint32_t)p - smp_base) / SMP_STEP;
     }
     smp_sum[id] = sum;
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 /* cwd is process state: a thread must see the directory the leader set, and
@@ -205,10 +205,10 @@ static void cwduser(void *arg)
 
     (void)arg;
     if (getcwd(buf, sizeof(buf)) < 0 || strcmp(buf, "/bin") != 0)
-        kthread_exit(1);
+        thread_exit(1);
     if (chdir("/") != 0)
-        kthread_exit(2);
-    kthread_exit(0);
+        thread_exit(2);
+    thread_exit(0);
 }
 
 /* A thread stack lives inside the process heap, so no protection region can
@@ -224,7 +224,7 @@ static void overflow(void *arg)
     yield();
     overflow((void *)(depth + 1));
     if (pad[0] == 0x7f)                 /* keep the array live */
-        kthread_exit(1);
+        thread_exit(1);
 }
 
 /* Two threads of one process taking turns: every yield is a real switch, but
@@ -240,7 +240,7 @@ static void yielder(void *arg)
         yield();
         yran[id]++;
     }
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 static volatile int fd_read_result = -2;
@@ -257,7 +257,7 @@ static void fduser(void *arg)
      * margin: the test is about a shared fd table, not a race. */
     sleep(200);                         /* the leader closes it now */
     fd_read_result = read(fd, &b, 1);   /* must be -1: shared table */
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 static void forever(void *arg)
@@ -293,7 +293,7 @@ static void pipe_blocked(void *arg)
     char b;
 
     (void)read(fd, &b, 1);          /* sleeps on the empty pipe */
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 static int probe_pipes(void)
@@ -305,7 +305,7 @@ static int probe_pipes(void)
         printf("kthreadtest: FAIL pipe()\n");
         return 1;
     }
-    tid = kthread_create(pipe_blocked, &fds[0], 4096);
+    tid = thread_create(pipe_blocked, &fds[0], 4096);
     if (tid <= 0) {
         printf("kthreadtest: FAIL create the blocked reader\n");
         return 1;
@@ -329,7 +329,7 @@ static void churn_born(void *arg)
      * and then reads some other program's pid. */
     if (getpid() != *(int *)arg)
         churn_bad = 3;
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 static void churn_worker(void *arg)
@@ -339,16 +339,16 @@ static void churn_worker(void *arg)
 
     (void)arg;
     while (churn_go) {
-        tid = kthread_create(churn_born, &me, 512);
+        tid = thread_create(churn_born, &me, 512);
         if (tid <= 0)
             break;                  /* slots gone: the end, not a defect */
-        if (kthread_join(tid, 0) != 0)
+        if (thread_join(tid, 0) != 0)
             churn_bad = 1;
         if (getpid() != me)
             churn_bad = 2;          /* our own slot was recycled under us */
         churn_n++;
     }
-    kthread_exit(churn_bad);
+    thread_exit(churn_bad);
 }
 
 static int probe_create_exit(void)
@@ -356,7 +356,7 @@ static int probe_create_exit(void)
     int tid, i;
 
     churn_go = 1;
-    tid = kthread_create(churn_worker, 0, 4096);
+    tid = thread_create(churn_worker, 0, 4096);
     if (tid <= 0) {
         printf("kthreadtest: FAIL create the churn thread\n");
         return 1;
@@ -379,35 +379,35 @@ static void dj_victim(void *arg)
 {
     (void)arg;
     sleep(50);
-    kthread_exit(42);
+    thread_exit(42);
 }
 
 static void dj_joiner_first(void *arg)
 {
     int code = -1;
-    int rc = kthread_join(dj_tid, &code);
+    int rc = thread_join(dj_tid, &code);
 
     (void)arg;
     dj_first = rc == 0 ? code : rc;
-    kthread_exit(0);
+    thread_exit(0);
 }
 
 static void dj_joiner_second(void *arg)
 {
     (void)arg;
-    dj_second = kthread_join(dj_tid, 0);
-    kthread_exit(0);
+    dj_second = thread_join(dj_tid, 0);
+    thread_exit(0);
 }
 
 static int probe_double_join(void)
 {
     int t1, t2, i;
 
-    dj_tid = kthread_create(dj_victim, 0, 4096);
+    dj_tid = thread_create(dj_victim, 0, 4096);
     ok(dj_tid > 0, "create the thread both siblings will join");
-    t1 = kthread_create(dj_joiner_first, 0, 4096);
+    t1 = thread_create(dj_joiner_first, 0, 4096);
     sleep(10);                      /* the first is parked before the second */
-    t2 = kthread_create(dj_joiner_second, 0, 4096);
+    t2 = thread_create(dj_joiner_second, 0, 4096);
     if (t1 <= 0 || t2 <= 0) {
         printf("kthreadtest: FAIL create the joiners\n");
         return 1;
@@ -463,7 +463,7 @@ int main(int argc, char *argv[])
     int tids[40];
 
     if (argc > 1 && !strcmp(argv[1], "leave")) {
-        tid = kthread_create(forever, 0, 4096);
+        tid = thread_create(forever, 0, 4096);
         printf("kthreadtest: leader exits, thread %d still alive\n", tid);
         return 0;
     }
@@ -475,20 +475,20 @@ int main(int argc, char *argv[])
         return probe_double_join();
 
     code = -1;
-    tid = kthread_create(give42, 0, 4096);
+    tid = thread_create(give42, 0, 4096);
     ok(tid > 0, "create");
-    ok(kthread_join(tid, &code) == 0 && code == 42,
+    ok(thread_join(tid, &code) == 0 && code == 42,
        "join returns the exit code");
 
-    ok(kthread_join(tid, &code) == -1, "second join fails");
+    ok(thread_join(tid, &code) == -1, "second join fails");
 
     code = -1;
-    tid = kthread_create(give42, 0, 4096);
+    tid = thread_create(give42, 0, 4096);
     sleep(100);                 /* let it exit: the slot becomes a zombie */
-    ok(kthread_join(tid, &code) == 0 && code == 42,
+    ok(thread_join(tid, &code) == 0 && code == 42,
        "join after exit (zombie slot)");
 
-    ok(kthread_join(9999, &code) == -1, "join unknown tid fails");
+    ok(thread_join(9999, &code) == -1, "join unknown tid fails");
 
     /* Exhaustion: threads exit immediately but hold their slot until joined,
      * exactly like an unwaited child.  What runs out is table slots, not
@@ -498,7 +498,7 @@ int main(int argc, char *argv[])
     n = 0;
     for (i = 0; i < 40; i++) {
         codes[i] = i + 1;
-        tid = kthread_create(give, &codes[i], 512);
+        tid = thread_create(give, &codes[i], 512);
         if (tid < 0)
             break;
         tids[n++] = tid;
@@ -511,24 +511,26 @@ int main(int argc, char *argv[])
      * slot is the one that ran out (PROC_NEW -> PROC_FREE).  Without this the
      * process table fills with ghosts and every later exec fails on a machine
      * with no processes on it. */
-    ok(exec("/bin/echo", NULL, 0) < 0, "exec fails when the thread table is full");
+    ok(exec("/bin/ls", NULL, 0) < 0, "exec fails when the thread table is full");
 
     for (i = 0; i < n; i++) {
         code = -1;
-        if (kthread_join(tids[i], &code) != 0 || code != i + 1) {
+        if (thread_join(tids[i], &code) != 0 || code != i + 1) {
             fails++;
             printf("kthreadtest: FAIL churn join %d (code %d)\n", i, code);
         }
     }
 
-    tid = kthread_create(give42, 0, 4096);
+    tid = thread_create(give42, 0, 4096);
     ok(tid > 0, "create works again after joining everything");
 
     /* The other half of the same seam: after draining the table, exec() must
      * work again, which it cannot if the failed attempts above left a process
-     * entry claimed.  echo with no arguments prints one empty line. */
+     * entry claimed.  ls is a program of its own on every image; echo moved
+     * into /bin/tools with the multi-call merge, so /bin/echo no longer
+     * exists. */
     {
-        int child = exec("/bin/echo", NULL, 0);
+        int child = exec("/bin/ls", NULL, 0);
 
         ok(child > 0, "exec works again after the table drains");
         if (child > 0)
@@ -536,7 +538,7 @@ int main(int argc, char *argv[])
     }
 
     code = -1;
-    ok(kthread_join(tid, &code) == 0 && code == 42, "churn join code");
+    ok(thread_join(tid, &code) == 0 && code == 42, "churn join code");
 
     {
         uint32_t t0, t1;
@@ -548,7 +550,7 @@ int main(int argc, char *argv[])
          * could not observe woke == 0. */
         woke = 0;
         t0 = clock_ms();
-        tid = kthread_create(slow, &v, 4096);
+        tid = thread_create(slow, &v, 4096);
         sleep(50);
         ok(woke == 0, "leader ran while the thread was still asleep");
         /* The thread slot now has its own stack range (S3b): ps must show a
@@ -556,7 +558,7 @@ int main(int argc, char *argv[])
         printf("kthreadtest: ps while the thread sleeps:\n");
         ps();
         code = -1;
-        ok(kthread_join(tid, &code) == 0 && code == 7, "join sleeping thread");
+        ok(thread_join(tid, &code) == 0 && code == 7, "join sleeping thread");
         ok(woke == 1, "thread finished before join returned");
         t1 = clock_ms();
         printf("kthreadtest: overlapped sleep %u ms (wall clock)\n", t1 - t0);
@@ -570,12 +572,12 @@ int main(int argc, char *argv[])
 
         ok(fd >= 0, "open readme.txt in the leader");
         fd_read_result = -2;
-        tid = kthread_create(fduser, &fd, 4096);
+        tid = thread_create(fduser, &fd, 4096);
         sleep(20);
         ok(fd_read_result == 1, "thread read through the shared fd table");
         close(fd);
         code = -1;
-        ok(kthread_join(tid, &code) == 0, "join the fd thread");
+        ok(thread_join(tid, &code) == 0, "join the fd thread");
         ok(fd_read_result == -1, "leader close() closed it for the thread");
         (void)junk;
     }
@@ -586,10 +588,10 @@ int main(int argc, char *argv[])
     {
         int code = 0;
 
-        tid = kthread_create(overflow, (void *)0, 4096);
+        tid = thread_create(overflow, (void *)0, 4096);
         ok(tid > 0, "create an overflowing thread");
         code = -1;
-        ok(kthread_join(tid, &code) == 0 && code == 139,
+        ok(thread_join(tid, &code) == 0 && code == 139,
            "thread stack overflow killed only the thread");
         ok(1, "leader survived the thread stack overflow");
     }
@@ -600,8 +602,8 @@ int main(int argc, char *argv[])
         int code = -1;
 
         ok(chdir("/bin") == 0, "leader chdir(/bin)");
-        tid = kthread_create(cwduser, 0, 4096);
-        ok(kthread_join(tid, &code) == 0 && code == 0,
+        tid = thread_create(cwduser, 0, 4096);
+        ok(thread_join(tid, &code) == 0 && code == 0,
            "thread saw the leader's cwd and moved it");
         ok(getcwd(buf, sizeof(buf)) > 0 && strcmp(buf, "/") == 0,
            "thread chdir moved the whole process");
@@ -615,13 +617,13 @@ int main(int argc, char *argv[])
         int i, code = 0, failed = 0;
 
         for (i = 0; i < 200; i++) {
-            tid = kthread_create(give42, 0, 4096);
+            tid = thread_create(give42, 0, 4096);
             if (tid < 0) {
                 failed = i ? i : -1;
                 break;
             }
             code = -1;
-            if (kthread_join(tid, &code) != 0 || code != 42) {
+            if (thread_join(tid, &code) != 0 || code != 42) {
                 failed = 1000 + i;
                 break;
             }
@@ -648,7 +650,7 @@ int main(int argc, char *argv[])
         for (i = 0; i < SMP_THREADS; i++) {
             smp_sum[i] = 0;
             smp_err[i] = 0;
-            tids[i] = kthread_create(smp_sbrk, (void *)i, 4096);
+            tids[i] = thread_create(smp_sbrk, (void *)i, 4096);
             bad |= tids[i] <= 0;
         }
         /* Every stack exists now, so nothing but the sbrk() calls below can
@@ -657,7 +659,7 @@ int main(int argc, char *argv[])
         smp_go = 1;
         for (i = 0; i < SMP_THREADS; i++) {
             code = -1;
-            if (tids[i] > 0 && kthread_join(tids[i], &code) != 0)
+            if (tids[i] > 0 && thread_join(tids[i], &code) != 0)
                 bad = 1;
             if (code != 0)
                 bad = 1;
@@ -684,14 +686,14 @@ int main(int argc, char *argv[])
 
         for (i = 0; i < YTHREADS; i++) {
             yran[i] = 0;
-            ids[i] = kthread_create(yielder, (void *)i, 4096);
+            ids[i] = thread_create(yielder, (void *)i, 4096);
             bad |= ids[i] <= 0;
         }
         ok(!bad, "create yielding threads");
         schedstat(&a);
         for (i = 0; i < YTHREADS; i++) {
             code = -1;
-            if (ids[i] > 0 && kthread_join(ids[i], &code) != 0)
+            if (ids[i] > 0 && thread_join(ids[i], &code) != 0)
                 bad = 1;
             if (code != 0)
                 bad = 1;
@@ -713,18 +715,18 @@ int main(int argc, char *argv[])
 
         tmutex = 0;
         locker_got = 0;
-        ok(kmutex_lock(&tmutex) == 0, "leader took the test mutex");
-        tid = kthread_create(locker, 0, 4096);
+        ok(thread_mutex_lock(&tmutex) == 0, "leader took the test mutex");
+        tid = thread_create(locker, 0, 4096);
         sleep(50);
         ok(locker_got == 0, "the waiter is blocked, not spinning");
         printf("kthreadtest: ps with a mutex waiter:\n");
         ps();
-        ok(kmutex_unlock(&tmutex) == 0, "leader released the test mutex");
-        ok(kthread_join(tid, &code) == 0 && code == 0,
+        ok(thread_mutex_unlock(&tmutex) == 0, "leader released the test mutex");
+        ok(thread_join(tid, &code) == 0 && code == 0,
            "the blocked thread ran after the handoff");
         ok(locker_got == 1, "the waiter saw its critical section");
-        ok(kmutex_try(&tmutex) == 1, "mutex is free after the waiter exited");
-        kmutex_unlock(&tmutex);
+        ok(thread_mutex_try(&tmutex) == 1, "mutex is free after the waiter exited");
+        thread_mutex_unlock(&tmutex);
     }
 
     {
@@ -732,10 +734,10 @@ int main(int argc, char *argv[])
         int prot = memprot_on();
 
         deadmutex = 0;
-        tid = kthread_create(die_holding, 0, 4096);
+        tid = thread_create(die_holding, 0, 4096);
         ok(tid > 0, "create a thread that dies holding a mutex");
         if (prot) {
-            ok(kthread_join(tid, &code) == 0 && code == 139,
+            ok(thread_join(tid, &code) == 0 && code == 139,
                "the holder died on its fault");
         } else {
             /* No MPU/PMP here: the store to the dead address is not a fault,
@@ -743,12 +745,12 @@ int main(int argc, char *argv[])
              * probe ran; the half that matters on this port - a thread that
              * goes away while holding a mutex must not pin it - is checked
              * below and is not weakened. */
-            ok(kthread_join(tid, &code) == 0,
+            ok(thread_join(tid, &code) == 0,
                "join the thread that wrote to a dead address (memprot: off)");
             printf("kthreadtest: N/A the holder died on its fault (memprot: off)\n");
         }
-        ok(kmutex_try(&deadmutex) == 1, "a dead holder released the mutex");
-        kmutex_unlock(&deadmutex);
+        ok(thread_mutex_try(&deadmutex) == 1, "a dead holder released the mutex");
+        thread_mutex_unlock(&deadmutex);
     }
 
     /* The user heap is shared by the process's threads; the kernel mutex in
@@ -759,12 +761,12 @@ int main(int argc, char *argv[])
 
         for (i = 0; i < HEAP_THREADS; i++) {
             heap_bad[i] = 0;
-            tids[i] = kthread_create(heaper, (void *)i, 4096);
+            tids[i] = thread_create(heaper, (void *)i, 4096);
             bad |= tids[i] <= 0;
         }
         for (i = 0; i < HEAP_THREADS; i++) {
             code = -1;
-            if (tids[i] > 0 && kthread_join(tids[i], &code) != 0)
+            if (tids[i] > 0 && thread_join(tids[i], &code) != 0)
                 bad = 1;
             if (code != 0)
                 bad = 1;
