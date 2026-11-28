@@ -25,10 +25,10 @@ import sys
 
 # Per target: how many protection faults one cycle must produce.
 #
-# Stack *growth* is not asserted here: every QEMU board gives tasks a 32 KiB
-# stack and `deep` allocates its frames from a 12 KiB kernel heap, so it stops
-# at 6 levels before the stack is anywhere near full.  Growth is covered on
-# hardware instead (C3 accept.py, RP2350 accept33.py `deep 3`).
+# Stack *overflow* is not asserted here: every QEMU board gives tasks a
+# 32 KiB stack and `deep` stops at 6 levels (12 KiB) before anywhere near
+# full, so there is nothing to kill.  The kill path is covered on hardware
+# instead (RP2350 accept33.py `deep 3`).
 TARGETS = {
     "x86":     dict(faults=0),   # no paging: prot survives by design
     "rv32":    dict(faults=2),   # prot stack + prot null must fault

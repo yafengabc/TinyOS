@@ -1619,19 +1619,15 @@ uint32_t plat_cpu_hz(void)
 }
 
 /* No MPU and no MMU: a stack overflow is a silent write into the same window,
- * not a fault.  Two things stand in for the missing protection:
+ * not a fault.  plat_user_stack_guard() is the substitute: a canary word
+ * under the stack plus the sp in the syscall frame, checked on every
+ * syscall, so an overflow is detected and the task killed with a message.
  *
- *   - plat_user_stack_guard(): a canary word under the stack, checked on every
- *     syscall, so an overflow is detected and either grown into the heap's
- *     tail or turned into a kill with a message;
- *   - the reserve below: one 4 KiB step for a task that did not declare its
- *     stack, which is what that growth consumes.
- *
- * A window can therefore be the same shape as the C3's - 4 KiB steps, 4 KiB
- * default stack - without losing the growth path. */
+ * No reserve: a deeper stack is declared with TOS_STACK, and there is no
+ * implicit growth to spend one on. */
 uint32_t plat_window_grow_reserve(void)
 {
-    return PLAT_STACK_BYTES;
+    return 0;
 }
 
 int plat_user_stack_guard(void)

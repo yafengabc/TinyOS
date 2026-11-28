@@ -246,8 +246,8 @@ def run_checks(con, image, results, opts, boot_text):
             check(results, "D " + line, out, want=(fault_mark,))
 
     out = con.cmd("deep 3", timeout=25.0)
-    check(results, "E deep 3 grows the stack", out, want=("stack grown",))
-    check(results, "E deep 3 journal intact", out, want=("journal intact",))
+    check(results, "E deep 3 is killed at the guard", out,
+          want=("declare TOS_STACK", "killing"))
 
     # stk asks for its own 16 KiB stack through TOS_STACK.  On a board whose
     # port puts the stack in its own aligned region (stack_align = 1, the
@@ -347,8 +347,8 @@ def replay_checks(text, image, results):
     want_faults = 3 if run_checks_replay["rv"] else 5
     check_ok(results, "D prot cases fault", faults >= want_faults,
              "%d/%d" % (faults, want_faults))
-    check(results, "E deep 3 grows the stack", text, want=("stack grown",))
-    check(results, "E deep 3 journal intact", text, want=("journal intact",))
+    check(results, "E deep 3 is killed at the guard", text,
+          want=("declare TOS_STACK", "killing"))
     if IMAGES[image]["cpus"] > 1:
         m = re.search(r"speedup:\s*(\d+)\.(\d+)x", text)
         ratio = (int(m.group(1)) * 100 + int(m.group(2))) if m else 0

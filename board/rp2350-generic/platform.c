@@ -2511,13 +2511,16 @@ uint32_t plat_cpu_hz(void)
 
 /* PMSAv8 describes a region with a base and an inclusive limit at 32-byte
  * granularity - no power-of-two rule - so the window can follow the C3's
- * shape: 4 KiB steps, 4 KiB default stack, and one 4 KiB of reserve for the
- * first stack doubling.  arch/arm/platform.c rounds wx and brk to 32 bytes and
- * emits code / data / stack as three separate areas, so .rodata stays RX and
- * the guard hole between brk and the stack stays uncovered. */
+ * shape: 4 KiB steps and a 4 KiB default stack.  arch/arm/platform.c
+ * rounds wx and brk to 32 bytes and emits code / data / stack as three
+ * separate areas, so .rodata stays RX and the guard hole between brk and
+ * the stack stays uncovered.
+ *
+ * No reserve: a deeper stack is declared with TOS_STACK, and an overflow
+ * is killed at the guard. */
 uint32_t plat_window_grow_reserve(void)
 {
-    return PLAT_STACK_BYTES;
+    return 0;
 }
 
 int plat_window_needs_stack_alignment(void)

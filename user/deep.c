@@ -1,43 +1,24 @@
 #include "lib.h"
 
-/* Recursion deeper than the default stack, on purpose, without asking for a
- * bigger one.
+/* Recursion past the stack, on purpose, to prove the kill path.
  *
- *   deep [levels] [ms] [heap KiB]
+ *   deep [levels] [ms]
  *
- * `stk` proves a program can *declare* the stack it needs; this one proves
- * the other half.  Nothing is declared here, so the task starts with the
- * board default (8 KiB on the C3) and runs off the bottom of it.  Instead of
- * killing it, the kernel doubles the stack into the heap's unused tail and
- * retries the instruction that faulted - `ps` then shows 12.x/16 for this
- * task, and the line printed at the fault says what the heap gave up.
+ * `stk` is the other half of the stack story: it declares TOS_STACK(16 * 1024)
+ * and stays inside it.  This one declares nothing, so the task gets the board
+ * default (4 KiB on the 4 KiB-grain boards) and runs off the bottom.  Since
+ * 2026-11-28 there is no implicit growth: the guard fault (or the software
+ * guard's sp check, on the ports that have one) reaches process_stack_grow(),
+ * which finds no reserve, prints "declare TOS_STACK() for the depth you need"
+ * and the task is killed.
  *
- * Growth needs somewhere to grow into: a window is sized from the image, so a
- * program with nothing in it gets 16 KiB and no slack at all.  The journal
- * below is what makes this one hold 32 KiB - the same way a real program with
- * real data would - and it doubles as a check that the deeper stack stayed
- * where it belongs.  If the doubling had run into the heap, the journal would
- * be the first casualty.
- *
- * Depth is the first argument.  One growth step is what an undeclared stack
- * gets (plat_window_grow_reserve), so on the C3 - 4 KiB default - `deep 3`
- * (6 KiB) is the run that grows, 4 -> 8 KiB, and `deep 6` (12 KiB) shows the
- * other side: a second step has nowhere to come from and the task is killed.
- * A program that knows it goes deeper should say so with TOS_STACK (`stk`
- * does) instead of relying on steps.
- * A third argument takes the slack first - `deep 6 0 8` mallocs 8 KiB, which
- * is what the stack would have grown into, and the overflow then kills the
- * task as it always did.  That is the other side of sharing one region: the
- * heap gets there first, and the stack has to say so up front (TOS_STACK) if
- * it cannot afford to lose.
+ * The run therefore ends with the kernel's kill message, not with a print from
+ * this program: a killed task cannot report its journal.  `deep 6` (12 KiB)
+ * exercises the same path two levels further down.
  */
 
 #define LEVELS       6
 #define FRAME_BYTES  2048
-
-/* One byte per level, a KiB apart, so a stack that reached this block would
- * land between two slots instead of on one and be visible as damage. */
-static char journal[LEVELS * 1024];
 
 static int recurse(int level, int ms)
 {
@@ -49,18 +30,16 @@ static int recurse(int level, int ms)
 
     frame[0] = (char)level;
     frame[FRAME_BYTES - 1] = (char)level;
-    journal[(level - 1) * 1024] = (char)level;
 
     if (level > 1)
         recurse(level - 1, ms);
     if (level == 1)
-        sleep(ms);          /* parked in the deepest frame: ps reads it live.
-                             * sleep(0) still enters the syscall, which is what
-                             * lets the software guard see `deep 6 0 8`; without
-                             * it the run silently writes past the stack. */
+        sleep(ms);          /* parked in the deepest frame, so a software guard
+                             * sees sp outside the stack at a syscall instead of
+                             * the write having gone unnoticed */
 
-    /* Touch the frame again on the way out, so the high-water mark is the
-       deepest frame rather than whatever the last level happened to write. */
+    /* Touch the frame on the way out, so the high-water mark is the deepest
+       frame rather than whatever the last level happened to write. */
     return frame[0] ^ frame[FRAME_BYTES - 1];
 }
 
@@ -68,33 +47,14 @@ int main(int argc, char **argv)
 {
     int levels = (argc > 1) ? atoi(argv[1]) : LEVELS;
     int ms = (argc > 2) ? atoi(argv[2]) : 3000;
-    int kib = (argc > 3) ? atoi(argv[3]) : 0;
-    int bad = 0;
-
-    /* Take the heap's slack before recursing, so the stack has nowhere to
-       grow: malloc() moves the break, and that is the number the growth
-       check compares against. */
-    for (int i = 0; i < kib; i++) {
-        if (!malloc(1024)) {
-            printf("deep: malloc stopped after %d KiB\n", i);
-            break;
-        }
-    }
 
     if (levels < 1)
         levels = LEVELS;
     if (levels > LEVELS)
-        levels = LEVELS;        /* one journal slot per level */
+        levels = LEVELS;
     if (ms < 0)
         ms = 0;
 
     recurse(levels, ms);
-
-    for (int i = 0; i < levels; i++) {
-        if (journal[i * 1024] != (char)(i + 1))
-            bad++;
-    }
-
-    printf("deep: %d levels, journal %s\n", levels, bad ? "damaged" : "intact");
-    return bad ? 1 : 0;
+    return 0;
 }

@@ -233,7 +233,8 @@ elif rows[0] != rows[-1]:
     problems.append("free drifted %s -> %s" % (rows[0], rows[-1]))
 ran = c if deadline is not None else CYCLES
 if deep_present and deep_ok < ran:
-    problems.append("deep 3 grew the stack %d/%d times" % (deep_ok, ran))
+    problems.append("deep 3 was not killed at the guard %d/%d times"
+                    % (deep_ok, ran))
 if race_present and race_ok < ran:
     problems.append("piperace ok %d/%d" % (race_ok, ran))
 

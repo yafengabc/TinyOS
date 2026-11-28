@@ -1753,19 +1753,19 @@ static void pmp_program(const uint32_t *addr, const uint32_t *cfg)
     __asm__ volatile("csrw pmpcfg1, %0" : : "r"(w[1]));
 }
 
-/* A window that grows gets one extra stack-sized step of room, because the
- * stack itself is the thing that usually grows.
- *
- * Page alignment is a hard requirement here after all: the regions this board
- * can program are page-granular (see pmp_map.h - sub-page NAPOT blocks are
+/* Page alignment is a hard requirement here: the regions this board can
+ * program are page-granular (see pmp_map.h - sub-page NAPOT blocks are
  * exactly what broke the first attempt at 4 KiB windows), and an unaligned
- * stack_top would leave the stack region unrepresentable, i.e. the task would
- * start with its own stack denied.  Asking the kernel to keep stack_top
- * aligned is cheaper than silently rounding the region out into the guard
- * hole, which is the one thing the guard exists to catch. */
+ * stack_top would leave the stack region unrepresentable, i.e. the task
+ * would start with its own stack denied.  Asking the kernel to keep
+ * stack_top aligned is cheaper than silently rounding the region out into
+ * the guard hole, which is the one thing the guard exists to catch.
+ *
+ * No reserve: a deeper stack is declared with TOS_STACK, and an overflow
+ * is killed at the guard. */
 uint32_t plat_window_grow_reserve(void)
 {
-    return PLAT_STACK_BYTES;
+    return 0;
 }
 
 int plat_window_needs_stack_alignment(void)

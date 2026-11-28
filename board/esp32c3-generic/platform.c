@@ -1090,9 +1090,11 @@ int plat_window_needs_stack_alignment(void)
     return 0;
 }
 
-/* 4 KiB grain: the rounding can never leave a 4 KiB step behind, so a task
- * that did not declare a stack gets one explicitly (see process.c). */
+/* No implicit growth: a program that needs a deeper stack declares it
+ * with TOS_STACK (stk is the witness), and one that runs past the guard
+ * is killed with a message.  The reserve existed to let an undeclared
+ * stack double once; the build-time frame check made it dead weight. */
 uint32_t plat_window_grow_reserve(void)
 {
-    return PLAT_STACK_BYTES;
+    return 0;
 }

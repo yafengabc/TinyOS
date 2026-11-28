@@ -2313,24 +2313,18 @@ __attribute__((weak)) int plat_user_stack_guard(void)
     return 0;
 }
 
-/* Slack reserved under the stack of a task that did not declare one, so the
- * first unexpected recursion can double the stack instead of dying.
+/* Slack reserved under the stack of a task that did not declare one.
  *
- * A task that carries TOS_STACK() has said how deep it goes: its window is
- * then exact, which is what keeps a resident program (the shell) at one grain
- * instead of paying for a step it will never take.
+ * Zero everywhere since 2026-11-28: a program that needs a deeper stack
+ * declares it with TOS_STACK, and the build refuses a frame that does not
+ * fit.  An overflow is killed at the guard with "declare TOS_STACK() for
+ * the depth you need" - the same model FreeRTOS and Zephyr use - instead
+ * of being grown into a step the program never asked for.
  *
- * A board with no faulting protection unit has nothing to grow from - the
- * overflow is a silent write through the heap instead of a fault - so it
- * answers 0 and keeps the windows tight. */
+ * The hook stays because a port that ever wants a step can answer non-zero
+ * here without touching the exec path; today no board does. */
 __attribute__((weak)) uint32_t plat_window_grow_reserve(void)
 {
-    /* Opt-in, because on a coarse grain the reserve is not free: with a 16 KiB
-     * step, a program whose need is an exact multiple of it (hello world:
-     * 4 image + 4 guard + 8 stack) jumps a whole grain the moment anything is
-     * added.  Boards whose rounding already leaves a stack of slack therefore
-     * keep 0 and grow opportunistically; the 4 KiB-step boards, where the
-     * rounding can never leave 4 KiB, override this with their stack size. */
     return 0;
 }
 

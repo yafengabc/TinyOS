@@ -32,8 +32,10 @@ import serial
 ROOT = Path(__file__).resolve().parents[2]
 MARK = b"tos> "
 
-# Tokens that mean the kernel or the workload broke.  "stack grown" is not
-# here on purpose: `deep` growing its stack is the feature working.
+# Tokens that mean the kernel or the workload broke.  The stack-overflow
+# kill lines are not here on purpose: `deep` running off its stack and
+# being killed with "declare TOS_STACK()" is the designed outcome since
+# the implicit growth reserve was removed.
 BAD = (
     "KERNEL PANIC",
     "System halted",
