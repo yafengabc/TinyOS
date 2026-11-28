@@ -65,6 +65,14 @@ Diagnostics: `-S` (assembly), `-ir` (gocl IR), `-E` (preprocessed C), `-keep`,
 `-I`, `-D`. `GOC32_MAP=1` prints every live section and its address while
 linking.
 
+Stack guard: `-stack-guard N` (default 4096, `0` disables) refuses a function
+whose frame reaches N bytes.  A frame that large crosses the kernel's guard
+hole in one `sub sp, sp, #N`, so the first store lands in the writable image
+below it and the page fault that normally kills an overflow never fires.
+Move such an array to `.bss`/`static` or the heap, or split the function.
+The default is the 4 KiB hole of every 4 KiB-grain board; `-stack-guard 16384`
+matches the PC/QEMU boards.
+
 Feature defines follow the build. `goc32` reads
 `build/build-config-<target>.txt` (or the shared `build-config.txt`) written by
 `tos build` and applies the same user-program macros: `TOS_THREADS`,

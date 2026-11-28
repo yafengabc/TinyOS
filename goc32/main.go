@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"goc/common"
@@ -71,6 +72,7 @@ type options struct {
 	out         string
 	incs        []string
 	defs        []string
+	stackGuard  int
 	asmOnly     bool
 	irOnly      bool
 	preOnly     bool
@@ -90,7 +92,7 @@ func main() {
 	if len(os.Args) > 0 {
 		prog = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	}
-	o := options{target: "rv32"}
+	o := options{target: "rv32", stackGuard: 4096}
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -112,6 +114,12 @@ func main() {
 			o.incs = append(o.incs, val())
 		case "-D":
 			o.defs = append(o.defs, val())
+		case "-stack-guard":
+			n, err := strconv.Atoi(val())
+			if err != nil || n < 0 {
+				fatalf("-stack-guard takes a byte count (0 disables)")
+			}
+			o.stackGuard = n
 		case "-S":
 			o.asmOnly = true
 		case "-ir":
@@ -151,6 +159,8 @@ func usage() {
   -o FILE        output .tos / .s / .ll / .i (default: <base>.tos)
   -I DIR         extra include directory (repeatable)
   -D NAME[=VAL]  extra preprocessor define (repeatable)
+  -stack-guard N reject a function frame of N bytes or more (default 4096,
+                 the guard hole on a 4 KiB-grain board; 0 disables)
   -S             emit assembly only
   -ir            emit the gocl IR only
   -E             preprocess only
@@ -202,12 +212,7 @@ func run(o options) error {
 		if err != nil {
 			return fmt.Errorf("%s: IR parse: %w", o.inputs[0], err)
 		}
-		var asmText string
-		if t.Arch == "arm" {
-			asmText, err = native32.EmitARM(m, t.CPU)
-		} else {
-			asmText, err = native32.EmitRV32(m)
-		}
+		asmText, err := emitModule(m, t, o.stackGuard)
 		if err != nil {
 			return err
 		}
@@ -647,17 +652,36 @@ func compileOne(src string, t target, incs, defs []string, o options, inlineLimi
 	if inlineLimit > 0 {
 		native32.InlineSmall(m, inlineLimit)
 	}
-	var asmText string
-	if t.Arch == "rv32" {
-		asmText, err = native32.EmitRV32(m)
-	} else {
-		asmText, err = native32.EmitARM(m, t.CPU)
-	}
+	asmText, err := emitModule(m, t, o.stackGuard)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", src, err)
 	}
 	if len(fileAsm) > 0 {
 		asmText += "\n" + strings.Join(fileAsm, "\n") + "\n"
+	}
+	return asmText, nil
+}
+
+// emitModule runs the back end with the stack-guard check the command line
+// asked for.  A frame at or above the guard can jump the hole in one
+// `sub sp, sp, #N`, and the first store then lands in the writable image
+// below: no page fault, no kill.  Refuse it at compile time instead.
+func emitModule(m *native32.Module, t target, guard int) (string, error) {
+	native32.StackGuard = guard
+	var (
+		asmText string
+		err     error
+	)
+	if t.Arch == "arm" {
+		asmText, err = native32.EmitARM(m, t.CPU)
+	} else {
+		asmText, err = native32.EmitRV32(m)
+	}
+	if err != nil {
+		return "", err
+	}
+	if native32.FrameError != "" {
+		return "", fmt.Errorf("%s", native32.FrameError)
 	}
 	return asmText, nil
 }

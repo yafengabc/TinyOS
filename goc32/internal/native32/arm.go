@@ -52,6 +52,7 @@ type armBranch struct {
 }
 
 func EmitARM(m *Module, cpu string) (string, error) {
+	FrameError = ""
 	e := &arm{m: m}
 	// ARMv6-M has no MOVW/MOVT and only a 1 KiB PC-relative literal-load
 	// range, so a huge basic block can put the next pool out of reach. Take
@@ -302,6 +303,7 @@ func (e *arm) emitFunc(f *Func) error {
 	if e.frame < 8 {
 		e.frame = 8
 	}
+	checkFrame(f.Name, e.frame)
 
 	e.b.WriteString("\t.section .text." + sanitize(f.Name) + ",\"ax\",%progbits\n")
 	if !f.Private && !strings.HasPrefix(f.Name, ".") {
