@@ -65,13 +65,22 @@ Diagnostics: `-S` (assembly), `-ir` (gocl IR), `-E` (preprocessed C), `-keep`,
 `-I`, `-D`. `GOC32_MAP=1` prints every live section and its address while
 linking.
 
-Stack guard: `-stack-guard N` (default 4096, `0` disables) refuses a function
-whose frame reaches N bytes.  A frame that large crosses the kernel's guard
-hole in one `sub sp, sp, #N`, so the first store lands in the writable image
-below it and the page fault that normally kills an overflow never fires.
-Move such an array to `.bss`/`static` or the heap, or split the function.
-The default is the 4 KiB hole of every 4 KiB-grain board; `-stack-guard 16384`
-matches the PC/QEMU boards.
+Stack check: after the link, the largest function frame is compared with the
+stack the program asks for (`TOS_STACK`), or with `-stack-default N` (default
+4096 bytes) when it asks for none.  A frame that does not fit is reported
+with the size to declare:
+
+```
+goc32: build/frames8k.c: function "main" needs a 8208-byte stack frame; this
+program gets 4096 bytes (no TOS_STACK); add TOS_STACK(16384), or move the
+array to .bss or the heap
+```
+
+An 8 KiB local array is fine once the program declares a 16 KiB stack: what
+must not happen is a frame bigger than the stack, because `sub sp, sp, #N`
+crosses the guard hole in one step and the first store lands in the writable
+image below it.  Deep call chains are not this check's business - the
+kernel's guard kills those.
 
 Feature defines follow the build. `goc32` reads
 `build/build-config-<target>.txt` (or the shared `build-config.txt`) written by

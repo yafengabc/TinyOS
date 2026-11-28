@@ -44,7 +44,6 @@ type rv32 struct {
 type loopCtx struct{ brk, cont string }
 
 func EmitRV32(m *Module) (string, error) {
-	FrameError = ""
 	// s0-s7 are the allocas that can stay in registers; forwarding must not
 	// take their loads away.
 	forwardDirectLoads(m, 8, 4)
@@ -299,7 +298,7 @@ func (e *rv32) emitFunc(f *Func) error {
 	if e.frame < 16 {
 		e.frame = 16
 	}
-	checkFrame(f.Name, e.frame)
+	noteFrame(f.Name, e.frame)
 	// ra lives below the vararg save area, so keep the save area at the top
 	// and contiguous with the caller's stack arguments.
 	e.b.WriteString("\t.section .text." + sanitize(f.Name) + ",\"ax\",@progbits\n")

@@ -67,21 +67,21 @@ func asmArch(t target) as.Arch {
 }
 
 type options struct {
-	target      string
-	tos         string
-	out         string
-	incs        []string
-	defs        []string
-	stackGuard  int
-	asmOnly     bool
-	irOnly      bool
-	preOnly     bool
-	packOnly    bool
-	fromIR      bool
-	keep        bool
-	verbose     bool
-	noBuildDefs bool
-	inputs      []string
+	target       string
+	tos          string
+	out          string
+	incs         []string
+	defs         []string
+	stackDefault int
+	asmOnly      bool
+	irOnly       bool
+	preOnly      bool
+	packOnly     bool
+	fromIR       bool
+	keep         bool
+	verbose      bool
+	noBuildDefs  bool
+	inputs       []string
 }
 
 // prog is the name the usage and error messages use.  It follows argv[0], so
@@ -92,7 +92,7 @@ func main() {
 	if len(os.Args) > 0 {
 		prog = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	}
-	o := options{target: "rv32", stackGuard: 4096}
+	o := options{target: "rv32", stackDefault: 4096}
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -114,12 +114,12 @@ func main() {
 			o.incs = append(o.incs, val())
 		case "-D":
 			o.defs = append(o.defs, val())
-		case "-stack-guard":
+		case "-stack-default":
 			n, err := strconv.Atoi(val())
 			if err != nil || n < 0 {
-				fatalf("-stack-guard takes a byte count (0 disables)")
+				fatalf("-stack-default takes a byte count")
 			}
-			o.stackGuard = n
+			o.stackDefault = n
 		case "-S":
 			o.asmOnly = true
 		case "-ir":
@@ -159,8 +159,8 @@ func usage() {
   -o FILE        output .tos / .s / .ll / .i (default: <base>.tos)
   -I DIR         extra include directory (repeatable)
   -D NAME[=VAL]  extra preprocessor define (repeatable)
-  -stack-guard N reject a function frame of N bytes or more (default 4096,
-                 the guard hole on a 4 KiB-grain board; 0 disables)
+  -stack-default N  stack a program gets when it declares no TOS_STACK
+                 (default 4096, the board default; the frame check uses it)
   -S             emit assembly only
   -ir            emit the gocl IR only
   -E             preprocess only
@@ -187,6 +187,7 @@ func run(o options) error {
 	if !ok {
 		return fmt.Errorf("unknown target %q", o.target)
 	}
+	native32.ResetFrames()
 	if o.packOnly {
 		if len(o.inputs) != 1 {
 			return fmt.Errorf("-pack takes exactly one ELF")
@@ -212,7 +213,7 @@ func run(o options) error {
 		if err != nil {
 			return fmt.Errorf("%s: IR parse: %w", o.inputs[0], err)
 		}
-		asmText, err := emitModule(m, t, o.stackGuard)
+		asmText, err := emitModule(m, t)
 		if err != nil {
 			return err
 		}
@@ -354,6 +355,14 @@ func run(o options) error {
 	}
 	image, err := ld.Link(objs, ld.Options{Machine: machine, Thumb: t.Arch == "arm", Entry: "_start"})
 	if err != nil {
+		return err
+	}
+	hint, err := lz4tos.WindowHint(image)
+	if err != nil {
+		return err
+	}
+	if err := checkStackFit(native32.MaxFrameFunc, native32.MaxFrame,
+		int(hint.StackAsk), o.stackDefault); err != nil {
 		return err
 	}
 	elf := filepath.Join(tmp, "prog.elf")
@@ -652,7 +661,7 @@ func compileOne(src string, t target, incs, defs []string, o options, inlineLimi
 	if inlineLimit > 0 {
 		native32.InlineSmall(m, inlineLimit)
 	}
-	asmText, err := emitModule(m, t, o.stackGuard)
+	asmText, err := emitModule(m, t)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", src, err)
 	}
@@ -662,28 +671,60 @@ func compileOne(src string, t target, incs, defs []string, o options, inlineLimi
 	return asmText, nil
 }
 
-// emitModule runs the back end with the stack-guard check the command line
-// asked for.  A frame at or above the guard can jump the hole in one
-// `sub sp, sp, #N`, and the first store then lands in the writable image
-// below: no page fault, no kill.  Refuse it at compile time instead.
-func emitModule(m *native32.Module, t target, guard int) (string, error) {
-	native32.StackGuard = guard
-	var (
-		asmText string
-		err     error
-	)
+// stackMargin is what the check leaves for what the compiler does not see:
+// the argv block and the return addresses below the deepest frame.
+const stackMargin = 512
+
+// nextStack rounds up to the power-of-two stack the kernel accepts
+// (stack_request_ok: a power of two, at least one page).
+func nextStack(n int) int {
+	want := 4096
+	for want < n {
+		want <<= 1
+	}
+	return want
+}
+
+// checkStackFit compares the largest frame with the stack the program
+// asks for (TOS_STACK) or the board default.  A frame that does not fit
+// crosses the guard hole in one `sub sp, sp, #N`: the first store lands
+// in the writable image below, no page fault fires, and the overflow is
+// silent.  The error names the size to declare instead of rejecting the
+// array: an 8 KiB local is fine once the program asks for a 16 KiB
+// stack.
+func checkStackFit(fn string, frame, declared, fallback int) error {
+	if frame == 0 {
+		return nil
+	}
+	limit, how := declared, fmt.Sprintf("declares TOS_STACK(%d)", declared)
+	if limit == 0 {
+		limit = fallback
+		how = fmt.Sprintf("gets %d bytes (no TOS_STACK)", fallback)
+	}
+	if frame+stackMargin <= limit {
+		return nil
+	}
+	if fn == "" {
+		fn = "?"
+	}
+	if declared == 0 {
+		return fmt.Errorf("function %q needs a %d-byte stack frame; this program %s; "+
+			"add TOS_STACK(%d), or move the array to .bss or the heap",
+			fn, frame, how, nextStack(frame+stackMargin))
+	}
+	return fmt.Errorf("function %q needs a %d-byte stack frame; this program %s; "+
+		"raise it to TOS_STACK(%d), or move the array to .bss or the heap",
+		fn, frame, how, nextStack(frame+stackMargin))
+}
+
+// emitModule runs the back end for one translation unit.  The frames it
+// records feed the stack-size check after the link, where the program's
+// own TOS_STACK (if any) is known.
+func emitModule(m *native32.Module, t target) (string, error) {
 	if t.Arch == "arm" {
-		asmText, err = native32.EmitARM(m, t.CPU)
-	} else {
-		asmText, err = native32.EmitRV32(m)
+		return native32.EmitARM(m, t.CPU)
 	}
-	if err != nil {
-		return "", err
-	}
-	if native32.FrameError != "" {
-		return "", fmt.Errorf("%s", native32.FrameError)
-	}
-	return asmText, nil
+	return native32.EmitRV32(m)
 }
 
 func extractShim(dir string) (string, error) {
