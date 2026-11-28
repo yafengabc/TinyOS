@@ -22,13 +22,13 @@ const (
 	// KernelSectors / RamdiskSectors must match boot/stage1.S and the
 	// kernel layout.  The kernel image on disk only holds .text/.rodata/
 	// .data; .bss is zeroed by kernel/entry.S.
-	KernelSectors = 200 // 100 KiB, loaded at 0x10000
+	KernelSectors = 202 // 101 KiB, loaded at 0x10000
 	BootSectors   = 1
 
 	// The littlefs partition starts right after the kernel image.  This
 	// LBA is what the kernel's ATA driver mounts; keep it in sync with
-	// LFS_PARTITION_LBA in kernel/ramdisk.h.
-	LFSPartitionLBA = BootSectors + KernelSectors // = 201
+	// PLAT_LFS_LBA in board/pc/layout.c.
+	LFSPartitionLBA = BootSectors + KernelSectors // = 203
 
 	// Sanity bound: the kernel (image + .bss, including the heap arena) must
 	// end below 0x400000.  There is no frame allocator any more, so this is

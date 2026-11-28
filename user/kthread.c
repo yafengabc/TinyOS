@@ -7,11 +7,13 @@
  * of a stack, and the scheduler treats the thread like any other task, so it
  * is preempted by the 1 ms tick and a blocking read() parks only that thread.
  *
- * The stack comes from the program heap (malloc), i.e. from inside the
- * group's window, which is what makes it visible to the shared protection
- * regions.  It uses the same free list as the program's own allocations, so
- * there is no ordering rule between thread creation and malloc: a stack is
- * just a block that nobody frees while the thread runs.
+ * On a board with a stack area the kernel owns the stack: thread_create()
+ * asks with top == 0, the block comes from the area at the top of the user
+ * region, and join/exit returns it.  On a board without one the kernel
+ * answers -2 and the stack comes from the program heap (malloc), from inside
+ * the group's window, where the shared protection regions cover it.  Either
+ * way it is just a block that nobody frees while the thread runs, so there
+ * is no ordering rule between thread creation and malloc.
  */
 
 #include "lib.h"
@@ -54,7 +56,7 @@ static void kthread_trampoline(struct kstart *s)
 
 int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
 {
-    unsigned bytes, top = 0;
+    unsigned bytes, kbytes, top = 0;
     struct kstart *s;
     struct tos_thread_stack st;
     char *base = 0;
@@ -63,6 +65,11 @@ int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     if (stack_bytes < 512)
         stack_bytes = 512;
     bytes = (stack_bytes + 31u) & ~15u;
+    /* The kernel's stack area hands out power-of-two blocks, so ask for the
+     * smallest one that covers the request.  The heap fallback below keeps
+     * `bytes` and its 16 bytes of slack. */
+    for (kbytes = 512; kbytes < stack_bytes; kbytes <<= 1)
+        ;
 
     /* The start record lives in the heap, not on the new stack: ARM pushes a
      * 32-byte hardware exception frame just below the initial sp, so anything
@@ -86,7 +93,7 @@ int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
      * heap for data.  -2 means the board has no area and the heap path below
      * is the only option. */
     st.top = 0;
-    st.size = bytes;
+    st.size = kbytes;
     tid = tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s,
                    (int)&st);
     if (tid == -2) {

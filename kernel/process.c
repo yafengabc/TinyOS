@@ -65,67 +65,6 @@
  * guard; exec() checks each request against the same rules. */
 #define DEFAULT_STACK PLAT_STACK_BYTES
 
-/* Optional stack area at the bottom of the user region, for kernel-allocated
- * thread stacks.  Zero on boards that do not opt in (weak default; a board
- * overrides it in layout.c).  The area is reserved address space: data
- * windows start above it, and only the current thread's stack block is mapped
- * while it runs.  The buddy bitmap below therefore never overlaps win_alloc's
- * scan. */
-__attribute__((weak)) const uint32_t PLAT_STACK_AREA = 0;
-
-#define STACK_AREA_UNIT 4096u
-#define STACK_AREA_MAX_BLOCKS 32u        /* 128 KiB cap for the bitmap */
-
-/* One bit per 4 KiB unit, set while the unit belongs to a live stack.  Sizes
- * are powers of two (TOS_STACK's rule), so an aligned run of 1/2/4/8 units is
- * a valid stack and freeing it clears exactly those bits: no high-water mark,
- * no sbrk-style monotonic growth.  Callers hold proc_lock. */
-static uint32_t stack_area_map;
-
-static uint32_t stack_area_alloc_locked(uint32_t size)
-{
-    uint32_t total = PLAT_STACK_AREA / STACK_AREA_UNIT;
-    uint32_t blocks = size / STACK_AREA_UNIT;
-
-    if (PLAT_STACK_AREA == 0 || size < STACK_AREA_UNIT ||
-        (size & (size - 1u)) != 0 || size > PLAT_STACK_AREA)
-        return 0;
-    if (blocks == 0 || blocks > STACK_AREA_MAX_BLOCKS ||
-        total > STACK_AREA_MAX_BLOCKS)
-        return 0;
-    for (uint32_t start = 0; start + blocks <= total; start += blocks) {
-        uint32_t mask = ((1u << blocks) - 1u) << start;
-
-        if ((stack_area_map & mask) == 0) {
-            stack_area_map |= mask;
-            return PLAT_APP_BASE + start * STACK_AREA_UNIT;
-        }
-    }
-    return 0;
-}
-
-static void stack_area_free_locked(uint32_t base, uint32_t size)
-{
-    uint32_t total = PLAT_STACK_AREA / STACK_AREA_UNIT;
-    uint32_t blocks;
-
-    if (PLAT_STACK_AREA == 0 || size == 0 || (size & (size - 1u)) != 0 ||
-        base < PLAT_APP_BASE)
-        return;
-    base -= PLAT_APP_BASE;
-    blocks = size / STACK_AREA_UNIT;
-    if ((base % size) != 0 || base / STACK_AREA_UNIT + blocks > total ||
-        blocks > STACK_AREA_MAX_BLOCKS)
-        return;
-    stack_area_map &= ~(((1u << blocks) - 1u) << (base / STACK_AREA_UNIT));
-}
-
-static int stack_in_area(uint32_t base, uint32_t size)
-{
-    return PLAT_STACK_AREA != 0 && size != 0 &&
-        base >= PLAT_APP_BASE && base + size <= PLAT_APP_BASE + PLAT_STACK_AREA;
-}
-
 /* Byte written over a new task's stack, and the value stack_used() looks for.
  * 0xCC is the usual x86 int3 fill; any constant works, the only requirement
  * being that a program is unlikely to write it as its first stack byte (which
@@ -450,6 +389,172 @@ static int next_pid = 1;
 /* 1000 / tick_hz, computed once: the tick rate is fixed after boot and the
  * old expression did a 32-bit division on every tick (__udivsi3 on RV32). */
 static uint32_t ms_per_tick;
+
+/* ---- stack area -------------------------------------------------------
+ *
+ * Optional area at the top of the user region.  Zero on boards that do not
+ * opt in (weak default; a board overrides it in layout.c).  The value is the
+ * *initial* reservation: the area grows downward in 16 KiB steps when a new
+ * stack does not fit and shrinks back when a whole step is idle, so a board
+ * does not pay for stacks it never creates.  Data windows live below the
+ * area, separated by one 4 KiB unmapped gap.
+ *
+ * The top of the user region is fixed, and every block is counted down from
+ * it: unit 0 is [MAX-4K, MAX), unit 1 is [MAX-8K, MAX-4K), and so on.  A
+ * 4/8/16 KiB stack is an aligned run of units, which is what makes its
+ * region naturally aligned for NAPOT/MPU.  No address is ever handed out
+ * twice: growth asks the live window table first (stack_area_grow_locked).
+ */
+__attribute__((weak)) const uint32_t PLAT_STACK_AREA = 0;
+
+#define STACK_AREA_UNIT   4096u
+#define STACK_AREA_STEP   (4u * STACK_AREA_UNIT)   /* 16 KiB grow/shrink step */
+#define STACK_AREA_MAX_BLOCKS 32u                  /* 128 KiB bitmap ceiling */
+
+/* Units currently reserved, counted down from PLAT_APP_MAX; and one bit per
+ * unit, set while it belongs to a live stack.  Both change only under
+ * proc_lock. */
+static uint32_t stack_area_blocks;
+static uint32_t stack_area_min_blocks;   /* the initial reservation */
+static uint32_t stack_area_map;
+
+static uint32_t stack_area_mask(uint32_t blocks)
+{
+    return blocks >= 32u ? 0xFFFFFFFFu : ((1u << blocks) - 1u);
+}
+
+static uint32_t stack_area_low_locked(void)
+{
+    return PLAT_APP_MAX - stack_area_blocks * STACK_AREA_UNIT;
+}
+
+static void stack_area_init(void)
+{
+    uint32_t init = PLAT_STACK_AREA / STACK_AREA_UNIT;
+
+    stack_area_map = 0;
+    stack_area_blocks = 0;
+    stack_area_min_blocks = 0;
+    if (PLAT_STACK_AREA == 0)
+        return;
+    /* layout_check() has already rejected a size that is not a whole
+     * number of steps, so this is exact. */
+    stack_area_min_blocks = init;
+    stack_area_blocks = init;
+}
+
+/* Is `base..base+size` a live block of the reserved area?  Used to decide
+ * whether a retiring thread owns its stack; a heap stack is below the area
+ * and answers no.  Caller holds proc_lock (or is the sole owner). */
+static int stack_in_area(uint32_t base, uint32_t size)
+{
+    if (PLAT_STACK_AREA == 0 || size == 0 || base + size > PLAT_APP_MAX ||
+        base + size < base)
+        return 0;
+    return base >= stack_area_low_locked();
+}
+
+/* Give the area one more 16 KiB step, if the step is free of data windows
+ * and still inside the user region.  The caller holds proc_lock, so the
+ * window scan and the update cannot race an exec. */
+static int stack_area_grow_locked(void)
+{
+    uint32_t want = stack_area_blocks + STACK_AREA_STEP / STACK_AREA_UNIT;
+    uint32_t bottom, ceiling = 0;
+
+    if (want > STACK_AREA_MAX_BLOCKS)
+        return 0;
+    bottom = PLAT_APP_MAX - want * STACK_AREA_UNIT;
+    if (bottom < PLAT_APP_BASE)
+        return 0;
+    for (int i = 0; i < MAX_PROCS; i++) {
+        uint32_t end = procs[i].win_base + procs[i].win_size;
+
+        if (procs[i].win_size && end > ceiling)
+            ceiling = end;
+    }
+    /* The 4 KiB hole is what turns the lowest stack's underflow into a fault
+     * instead of a write into the data window. */
+    if (bottom < ceiling + STACK_AREA_UNIT)
+        return 0;
+    stack_area_blocks = want;
+    return 1;
+}
+
+/* Allocate `size` bytes (a power of two, at least one unit) and return the
+ * block's base, or 0.  Growing is part of the search: a board starts with a
+ * few blocks and pays for more only when a live stack needs them. */
+static uint32_t stack_area_alloc_locked(uint32_t size)
+{
+    uint32_t blocks, start;
+
+    if (PLAT_STACK_AREA == 0 || size < STACK_AREA_UNIT ||
+        (size & (size - 1u)) != 0)
+        return 0;
+    blocks = size / STACK_AREA_UNIT;
+    if (blocks == 0 || blocks > STACK_AREA_MAX_BLOCKS)
+        return 0;
+
+    for (;;) {
+        uint32_t mask = stack_area_mask(blocks);
+
+        for (start = 0; start + blocks <= stack_area_blocks;
+             start += blocks) {
+            if ((stack_area_map & (mask << start)) == 0) {
+                stack_area_map |= mask << start;
+                return PLAT_APP_MAX - (start + blocks) * STACK_AREA_UNIT;
+            }
+        }
+        if (!stack_area_grow_locked())
+            return 0;
+    }
+}
+
+static void stack_area_free_locked(uint32_t base, uint32_t size)
+{
+    uint32_t blocks, idx;
+
+    if (!stack_in_area(base, size))
+        return;
+    blocks = size / STACK_AREA_UNIT;
+    if (blocks == 0 || blocks > STACK_AREA_MAX_BLOCKS ||
+        (size & (size - 1u)) != 0)
+        return;
+    /* Bit 0 is the unit just below the top, so a block's first unit is
+     * counted from its own top: base is the low end of the run. */
+    idx = (PLAT_APP_MAX - (base + size)) / STACK_AREA_UNIT;
+    if (idx + blocks > stack_area_blocks || (idx % blocks) != 0)
+        return;
+    stack_area_map &= ~(stack_area_mask(blocks) << idx);
+
+    /* One 16 KiB step at a time: only a step at the bottom of the area can
+     * be returned, because the bitmap is anchored at the top. */
+    while (stack_area_blocks > stack_area_min_blocks) {
+        uint32_t first = stack_area_blocks - STACK_AREA_STEP / STACK_AREA_UNIT;
+
+        if (stack_area_map &
+            (stack_area_mask(STACK_AREA_STEP / STACK_AREA_UNIT) << first))
+            break;
+        stack_area_blocks = first;
+    }
+}
+
+/* First address a data window may not reach: the area has to keep its 4 KiB
+ * hole.  Caller holds proc_lock. */
+static uint32_t win_data_end_locked(const struct mem_domain *dom)
+{
+    uint32_t end = dom->base + dom->size;
+
+    if (PLAT_STACK_AREA != 0) {
+        uint32_t low = stack_area_low_locked();
+
+        if (low <= end && low >= dom->base + STACK_AREA_UNIT)
+            end = low - STACK_AREA_UNIT;
+        else
+            end = dom->base;
+    }
+    return end;
+}
 
 /* Trap entry cannot trust mstatus.MPP to tell it where it came from: mret
  * always writes MPP=U, so a kernel thread entered through a trap frame would
@@ -920,9 +1025,10 @@ static void sched_idle(void)
 
 /* A process is one or more threads that share a window.  The main thread
  * owns it and a worker has none of its own, so the protection unit is
- * programmed for the main thread.  Thread stacks live inside the process's
- * heap/data range (the thread library allocates them with sbrk), so they are
- * covered by the same data region and need no fourth PMP/MPU entry.
+ * programmed from the group for the window and break - but from the *current
+ * thread* for the stack.  On a stack-area board every thread has its own
+ * region at the top of the user area; on a board without one the worker's
+ * stack sits in the heap and is covered by the data range.
  *
  * PROC_GROUP() answers "which thread speaks for the process"; a kernel
  * thread answers itself and owns nothing. */
@@ -990,20 +1096,25 @@ static void apply_protection(thread_t *p)
 
     win_base = g->proc->win_base;
     win_end = win_base + g->proc->win_size;
-    stack_top = g->stack_top;
-    stack_low = stack_top - g->stack_size;
+    /* A stack-area block is the thread's own region above the window.  Any
+     * other stack (a worker's heap stack on a board without an area) is
+     * inside the data range, so the window-top stack of the group is what
+     * the port needs for its stack region and guard hole. */
+    int own_stack = p->stack_size && p->stack_top > win_end;
+    stack_top = own_stack ? p->stack_top : g->stack_top;
+    stack_low = stack_top - (own_stack ? p->stack_size : g->stack_size);
     brk = g->proc->brk;
 
-    /* The regions describe the process, not the thread: two threads of one
-     * group have the same window, break and stack, so a switch between them
-     * has nothing to program.  The comparison is over the inputs themselves,
-     * so a moved break or a grown stack is still programmed; see cpu_t.prot
-     * for why that is stronger than a generation counter. */
+    /* The window and break describe the process; the stack describes the
+     * thread when it has a region of its own (a stack area), otherwise it is
+     * the group's.  The comparison is over the inputs themselves, so a moved
+     * break or a different stack is still programmed; see cpu_t.prot for why
+     * that is stronger than a generation counter. */
     if (c->prot_valid &&
         c->prot.win_base == win_base && c->prot.win_size == PROC_RES(g)->win_size &&
         c->prot.wx_start == PROC_RES(g)->wx_start && c->prot.brk == brk &&
-        c->prot.stack_top == g->stack_top &&
-        c->prot.stack_size == g->stack_size)
+        c->prot.stack_top == stack_top &&
+        c->prot.stack_size == (own_stack ? p->stack_size : g->stack_size))
         return;
 
     /* Three pieces, in address order, and any of them may be empty.  The gap
@@ -1033,8 +1144,9 @@ static void apply_protection(thread_t *p)
         n++;
     }
 
-    /* A stack-area thread's stack is below the data window, so the pieces
-     * are not in address order; TOR programming needs them sorted. */
+    /* A stack-area thread's stack is outside the data window (above it),
+     * so the pieces are not in address order; TOR programming needs them
+     * sorted. */
     for (int i = 1; i < n; i++) {
         plat_seg_t s = segs[i];
         int j = i - 1;
@@ -1052,8 +1164,8 @@ static void apply_protection(thread_t *p)
     c->prot.win_size = PROC_RES(g)->win_size;
     c->prot.wx_start = PROC_RES(g)->wx_start;
     c->prot.brk = brk;
-    c->prot.stack_top = g->stack_top;
-    c->prot.stack_size = g->stack_size;
+    c->prot.stack_top = stack_top;
+    c->prot.stack_size = own_stack ? p->stack_size : g->stack_size;
     c->prot_valid = 1;
 #ifdef TOS_KTHREADS
     sched_prot++;
@@ -1560,6 +1672,27 @@ static void layout_check(void)
     if (min_win > area)
         panic("task layout: a %u KiB window needs %u KiB of user area, and there "
               "are only %u KiB", grain / 1024u, min_win / 1024u, area / 1024u);
+
+    /* The stack area is anchored at the top and counted down in 4 KiB
+     * units, so both its starting size and the end of the user region must
+     * divide the growth step.  A misaligned top would silently hand out a
+     * 16 KiB stack that NAPOT cannot describe. */
+    if (PLAT_STACK_AREA != 0) {
+        if (PLAT_STACK_AREA < STACK_AREA_STEP ||
+            PLAT_STACK_AREA % STACK_AREA_STEP != 0)
+            panic("task layout: stack area starts at %u bytes, not a multiple of %u KiB",
+                  PLAT_STACK_AREA, STACK_AREA_STEP / 1024u);
+        if (PLAT_APP_MAX % STACK_AREA_STEP != 0)
+            panic("task layout: user area ends at 0x%x, not on a %u KiB boundary",
+                  PLAT_APP_MAX, STACK_AREA_STEP / 1024u);
+        if (PLAT_STACK_AREA > STACK_AREA_MAX_BLOCKS * STACK_AREA_UNIT)
+            panic("task layout: a %u KiB stack area exceeds the %u KiB bitmap",
+                  PLAT_STACK_AREA / 1024u,
+                  (STACK_AREA_MAX_BLOCKS * STACK_AREA_UNIT) / 1024u);
+        if (PLAT_STACK_AREA > area)
+            panic("task layout: a %u KiB stack area does not fit the %u KiB user area",
+                  PLAT_STACK_AREA / 1024u, area / 1024u);
+    }
 }
 
 void process_init(void)
@@ -1583,6 +1716,7 @@ void process_init(void)
      * page that is writable, every exec refused as "does not fit".  Check the
      * combination once, here, where it costs nothing. */
     layout_check();
+    stack_area_init();
 
     plat_set_kernel_stack(KSTACK_TOP);
 }
@@ -1755,14 +1889,17 @@ static int win_alloc(thread_t *p, const struct mem_domain *dom, uint32_t bytes)
         return -1;
     if (dom->size == 0 || dom->base + dom->size < dom->base)
         return -1;
-    /* The stack area, if the board has one, sits at the bottom of the user
-     * region and belongs to thread stacks, not to data windows. */
-    cand = dom->base + PLAT_STACK_AREA;
-    end = dom->base + dom->size;
-    if (cand < dom->base || cand > end)
-        return -1;
+    /* Data windows start at the bottom of the user region; the stack area,
+     * if the board has one, is at the top and the scan stops one hole below
+     * its current lower edge. */
+    cand = dom->base;
 
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+    end = win_data_end_locked(dom);
+    if (cand > end) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return -1;
+    }
     for (;;) {
         uint32_t next = end;
 
@@ -1814,9 +1951,13 @@ static uint32_t win_largest_free(const struct mem_domain *dom)
     if (!dom || dom->size == 0 || dom->base + dom->size < dom->base)
         return 0;
     cand = dom->base;
-    end = dom->base + dom->size;
 
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
+    end = win_data_end_locked(dom);
+    if (cand > end) {
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        return 0;
+    }
     for (;;) {
         uint32_t next = end;
 
@@ -1918,6 +2059,12 @@ static void proc_retire_locked(thread_t *p)
     p->wmutex = NULL;
 #endif
     p->cpu = -1;
+    /* A stack-area block belongs to the thread, whether it is the main thread
+     * or a worker: join, exit and a process teardown all end here, and a
+     * heap-provided stack fails the range test and is left to its owner. */
+    if (p->stack_size && p->stack_top >= p->stack_size &&
+        stack_in_area(p->stack_top - p->stack_size, p->stack_size))
+        stack_area_free_locked(p->stack_top - p->stack_size, p->stack_size);
     /* A thread slot owns no window.  The process's resources are freed when
      * its main thread retires; a worker retired by join must not touch them. */
     if (is_main) {
@@ -1926,11 +2073,6 @@ static void proc_retire_locked(thread_t *p)
         p->proc->win_size = 0;
         proc_entry_set_state(p->proc, PROC_FREE);
         p->proc = NULL;
-    } else if (p->stack_size && p->stack_top >= p->stack_size &&
-               stack_in_area(p->stack_top - p->stack_size, p->stack_size)) {
-        /* A kernel-owned thread stack returns to the buddy here: join, exit
-         * and a process teardown all end in this function. */
-        stack_area_free_locked(p->stack_top - p->stack_size, p->stack_size);
     }
 }
 
@@ -2430,6 +2572,10 @@ static int stack_request_ok(uint32_t v)
 {
     if ((v & (v - 1u)) != 0 || v < PLAT_PAGE_SIZE)
         return 0;
+    /* The stack area has a bitmap ceiling, and it is the only place a task
+     * stack can come from on an area board. */
+    if (PLAT_STACK_AREA != 0)
+        return v <= STACK_AREA_MAX_BLOCKS * STACK_AREA_UNIT;
     /* Where the stack is its own TOR region it does not have to divide the
      * grain; it only has to be able to fit in a window. */
     if (!plat_window_needs_stack_alignment())
@@ -2743,10 +2889,19 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
     uint32_t win_need = img;
     uint32_t app_total = dom->size;
     uint32_t grow = hint.stack_ask ? 0 : plat_window_grow_reserve();
-    if (add_u32_ok(win_need, stk, &win_need) < 0 ||
-        add_u32_ok(win_need, grow, &win_need) < 0 ||
-        add_u32_ok(win_need, hint.heap_ask, &win_need) < 0 ||
-        add_u32_ok(win_need, HEAP_GUARD, &win_need) < 0) {
+    if (PLAT_STACK_AREA != 0) {
+        /* The stack is its own region at the top of the user area, so the
+         * window only holds the image and the heap.  The hole between the
+         * two regions replaces HEAP_GUARD. */
+        if (add_u32_ok(win_need, hint.heap_ask, &win_need) < 0) {
+            kprintf("exec: '%s' window size overflows\n", path);
+            proc_retire(p);
+            return NULL;
+        }
+    } else if (add_u32_ok(win_need, stk, &win_need) < 0 ||
+               add_u32_ok(win_need, grow, &win_need) < 0 ||
+               add_u32_ok(win_need, hint.heap_ask, &win_need) < 0 ||
+               add_u32_ok(win_need, HEAP_GUARD, &win_need) < 0) {
         kprintf("exec: '%s' window size overflows\n", path);
         proc_retire(p);
         return NULL;
@@ -2772,6 +2927,25 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
         return NULL;
     }
     uint32_t base = PROC_RES(p)->win_base;
+
+    if (PLAT_STACK_AREA != 0) {
+        /* Claim the stack now, while the window is already recorded: growth
+         * scans the window table, and proc_retire() below gives the block
+         * back on any failure from here on. */
+        uint32_t low, sirq;
+
+        sirq = plat_spin_lock_irqsave(&proc_lock);
+        low = stack_area_alloc_locked(stk);
+        plat_spin_unlock_irqrestore(&proc_lock, sirq);
+        if (!low) {
+            kprintf("exec: '%s' needs a %u KiB stack; the stack area is full\n",
+                    path, stk / 1024u);
+            proc_retire(p);
+            return NULL;
+        }
+        p->stack_top = low + stk;
+        p->stack_size = stk;
+    }
 
     /* The decompressor is given raw_size, so prove the destination really
      * has that many bytes before letting it write. */
@@ -2829,10 +3003,17 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
         return NULL;
     }
     win_elf = span;
-    if (add_u32_ok(win_elf, stk, &win_elf) < 0 ||
-        add_u32_ok(win_elf, asked_heap, &win_elf) < 0 ||
-        add_u32_ok(win_elf, HEAP_GUARD, &win_elf) < 0 ||
-        align_up_ok(win_elf, dom->grain, &win_elf) < 0) {
+    if (PLAT_STACK_AREA != 0) {
+        if (add_u32_ok(win_elf, asked_heap, &win_elf) < 0 ||
+            align_up_ok(win_elf, dom->grain, &win_elf) < 0) {
+            kprintf("exec: '%s' ELF window overflows\n", path);
+            proc_retire(p);
+            return NULL;
+        }
+    } else if (add_u32_ok(win_elf, stk, &win_elf) < 0 ||
+               add_u32_ok(win_elf, asked_heap, &win_elf) < 0 ||
+               add_u32_ok(win_elf, HEAP_GUARD, &win_elf) < 0 ||
+               align_up_ok(win_elf, dom->grain, &win_elf) < 0) {
         kprintf("exec: '%s' ELF window overflows\n", path);
         proc_retire(p);
         return NULL;
@@ -2918,16 +3099,24 @@ static thread_t *proc_create_claim(const char *path, char *const argv[], int arg
     /* win_base/win_size were recorded by win_alloc() - under the lock, so
        nobody else can be handed this range while the image loads. */
     PROC_RES(p)->wx_start = base + (link_wx - link_lo);
-    /* The stack occupies the very top of the window, so that its region is
-       naturally aligned; the initial frame starts a little below.  Its size
-       is this task's own now, and every later use - protection, the argv
-       block, the poison fill, the high-water scan - goes through
-       stack_size so the four cannot drift apart. */
-    p->stack_top = base + win;
-    p->stack_size = stk;
+    /* On a stack-area board the block was claimed above; elsewhere the stack
+       occupies the very top of the window, so that its region is naturally
+       aligned.  The initial frame starts a little below.  Its size is this
+       task's own now, and every later use - protection, the argv block, the
+       poison fill, the high-water scan - goes through stack_size so the four
+       cannot drift apart. */
+    if (PLAT_STACK_AREA == 0) {
+        p->stack_top = base + win;
+        p->stack_size = stk;
+    }
     PROC_RES(p)->heap_base = base + span;
-    PROC_RES(p)->heap_end = p->stack_top - stk - HEAP_GUARD;
-    if (plat_user_stack_guard())
+    /* With a separate stack region the heap owns the whole window and the
+       hole above it is the guard; without one the stack's bottom is the
+       ceiling and HEAP_GUARD keeps the two apart. */
+    PROC_RES(p)->heap_end = PLAT_STACK_AREA != 0
+                            ? base + win
+                            : p->stack_top - stk - HEAP_GUARD;
+    if (PLAT_STACK_AREA == 0 && plat_user_stack_guard())
         *((uint32_t *)(p->stack_top - stk) - 1) = USER_STACK_GUARD;
 
     /* Fill the stack with a poison byte before anything uses it, so the
@@ -3598,7 +3787,7 @@ regs_t *process_block_read(regs_t *r, uint32_t ubuf, uint32_t len)
 /* User pointers are checked against the *group* window: a thread slot has no
  * window of its own, so process_user_ok(current, ...) would reject every
  * address the thread legitimately owns. */
-static int group_user_ok(thread_t *g, uint32_t addr, uint32_t len)
+static int group_user_ok(thread_t *p, uint32_t addr, uint32_t len)
 {
     uint32_t end;
 
@@ -3607,7 +3796,13 @@ static int group_user_ok(thread_t *g, uint32_t addr, uint32_t len)
     end = addr + len;
     if (end < addr)
         return 0;
-    return addr >= PROC_RES(g)->win_base && end <= PROC_RES(g)->win_base + PROC_RES(g)->win_size;
+    if (addr >= PROC_RES(p)->win_base &&
+        end <= PROC_RES(p)->win_base + PROC_RES(p)->win_size)
+        return 1;
+    /* Since the stack area, a thread's variables may live outside the data
+     * window; a join() exit-code pointer is the common case. */
+    return p->stack_size && addr >= p->stack_top - p->stack_size &&
+           end <= p->stack_top;
 }
 
 /* Called with proc_lock held.  Hands `code` to a sibling blocked in join()
@@ -3620,7 +3815,7 @@ static thread_t *wake_joiner_locked(thread_t *tid_task, int code)
 
         if (q->state != ST_WAIT_THREAD || q->join_tid != tid_task->tid)
             continue;
-        if (q->wbuf && group_user_ok(PROC_GROUP(q), q->wbuf, sizeof(int)))
+        if (q->wbuf && group_user_ok(q, q->wbuf, sizeof(int)))
             *(int *)q->wbuf = code;
         plat_frame_set_ret(&q->saved, 0);
         proc_set_state(q, ST_READY);
@@ -3651,14 +3846,23 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     if (entry == 0 || usize == 0 || (usize & 3u))
         return -1;
     if (ustack == 0) {
-        /* The caller asks the kernel to own the stack: allocate it from the
-         * stack area at the bottom of the user region.  Anything the area
-         * cannot serve (no area, sub-page or non-power-of-two size) answers
-         * -2, and the library falls back to a heap stack. */
-        if (PLAT_STACK_AREA == 0 ||
-            usize < PLAT_PAGE_SIZE || (usize & (usize - 1u)) != 0 ||
-            usize > PLAT_STACK_AREA)
+        /* The caller asks the kernel to own the stack.  The area hands out
+         * power-of-two blocks, so round the request up rather than refusing
+         * it: a 5 KiB request gets an 8 KiB block, which is still at least
+         * what was asked for.  Anything the area cannot serve at all (no
+         * area, a sub-page request) answers -2 and the library falls back to
+         * a heap stack. */
+        uint32_t want;
+
+        if (PLAT_STACK_AREA == 0 || usize < PLAT_PAGE_SIZE)
             return -2;
+        for (want = PLAT_PAGE_SIZE;
+             want < usize && want <= STACK_AREA_MAX_BLOCKS * STACK_AREA_UNIT / 2u;
+             want <<= 1)
+            ;
+        if (want < usize)
+            return -1;
+        usize = want;
         irq = plat_spin_lock_irqsave(&proc_lock);
         low = stack_area_alloc_locked(usize);
         plat_spin_unlock_irqrestore(&proc_lock, irq);
@@ -3871,7 +4075,7 @@ regs_t *process_thread_join(regs_t *r, int tid, uint32_t codeptr)
     uint32_t irq;
     int code;
 
-    if (!g || (codeptr && !group_user_ok(g, codeptr, sizeof(int))))
+    if (!g || (codeptr && !group_user_ok(me, codeptr, sizeof(int))))
         return done(r, -1);
 
     irq = plat_spin_lock_irqsave(&proc_lock);
@@ -4098,6 +4302,11 @@ int process_stack_guard(const regs_t *r)
 
     if (!p || !p->proc || p->proc->win_size == 0 || p->stack_size == 0)
         return 1;
+    /* A stack-area block is fenced by the port's protection unit, and the
+     * bytes below it belong to the buddy, so there is no canary to read. */
+    if (p->stack_top >= p->stack_size &&
+        stack_in_area(p->stack_top - p->stack_size, p->stack_size))
+        return 1;
     /* A process stack is covered by the port's own mechanism when it has
      * one (an MPU/PMP rule plus, on some boards, the same canary).  A
      * worker's stack is inside the process's writable data region, where no
@@ -4160,6 +4369,12 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     uint32_t old, want, low, poison_end;
 
     if (!p || !p->proc || p->proc->win_size == 0 || p->stack_size == 0)
+        return 0;
+    /* A stack-area block is fixed: the bytes below it are another block, a
+     * free unit or the 4 KiB hole, never this task's heap.  The fault is an
+     * overflow, and killing the task is the whole answer. */
+    if (p->stack_top >= p->stack_size &&
+        stack_in_area(p->stack_top - p->stack_size, p->stack_size))
         return 0;
 #ifdef TOS_KTHREADS
     /* A worker's stack is a block inside the process heap: the bytes below

@@ -23,8 +23,8 @@ const uint32_t PLAT_HEAP_GUARD  = 16u * 1024u;
 
 
 /* The boot sector loads the kernel from LBA 1 and the filesystem follows
- * it (BootSectors + KernelSectors = 201, see internal/build). */
-const uint32_t PLAT_LFS_LBA = 201;
+ * it (BootSectors + KernelSectors = 203, see internal/build). */
+const uint32_t PLAT_LFS_LBA = 203;
 const uint32_t PLAT_LFS_BLOCKS = 113;  /* 452 KiB: the 300 KiB image no longer
                                          * fits the default user set */
 

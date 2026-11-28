@@ -315,8 +315,15 @@ void co_mutex_unlock(co_mutex_t *m);
 /* Kernel threads (experimental, menuconfig: Kernel -> Kernel threads).  The
  * kernel schedules them like tasks, so the tick preempts them and a blocking
  * read()/sleep() parks only the calling thread.  They share the caller's
- * window and heap; thread_create() carves the stack out of the program heap
- * with sbrk().  tid is a pid. */
+ * window and heap.  The stack comes from a stack area at the top of the user
+ * region when the board has one (C3 today); otherwise it is carved out of
+ * the program heap with sbrk().  tid is a pid.
+ *
+ * A thread's stack is private: shared state must be global/static.  Passing
+ * the address of a stack variable to another thread and reading it there
+ * faults on a board with per-thread stack regions - that is the model, not
+ * undefined behaviour.  Small values can travel as the `arg` integer
+ * (`(void *)code`), which is what threadbench/kthreadtest do. */
 int  thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes);
 int  thread_join(int tid, int *code);
 void thread_exit(int code) __attribute__((noreturn));

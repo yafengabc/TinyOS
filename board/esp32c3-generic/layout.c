@@ -67,21 +67,19 @@ const uint32_t PLAT_APP_GRAIN  = 0x00001000;   /* 4 KiB per step  */
  * that runs off its bottom - the hole is simply not covered by any PMP
  * entry, so any store into it faults, and the write that overflows lands
  * there first unless a single frame is larger than the hole. */
-/* 4 KiB stack and 4 KiB guard per window; no implicit growth step (removed
- * 2026-11-28: a program declares TOS_STACK if it needs more).  The shell and
- * sh declare 4 KiB, so they sit at image + 8 KiB. */
+/* 4 KiB stack and 4 KiB guard per window on boards without a stack area.
+ * No implicit growth step (removed 2026-11-28: a program declares TOS_STACK
+ * if it needs more). */
 const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
-/* Bottom 64 KiB of the user region: kernel-owned thread stacks (buddy blocks
- * of 4/8/16 KiB).  Data windows start above it, and only the current
- * thread's block is mapped while it runs - default-deny is its guard.  This
- * is the C3 prototype of docs/STACK-AREA-DESIGN.md; main-thread stacks still
- * live in the data window.  Only an image that can create threads pays for
- * it; the weak default is 0. */
-#ifdef TOS_KTHREADS
-const uint32_t PLAT_STACK_AREA = 64u * 1024u;
-#endif
+/* Top of the user region: the first 16 KiB of task stacks, growing downward
+ * in 16 KiB steps when a live stack needs more and shrinking back when a
+ * whole step is idle (docs/STACK-AREA-DESIGN.md).  Main-thread stacks live
+ * here too, so every image uses it, not only the kthread one.  Only the
+ * current thread's block is mapped while it runs; the 4 KiB hole below the
+ * area keeps its underflow out of the data window. */
+const uint32_t PLAT_STACK_AREA = 16u * 1024u;
 
 
 /* The littlefs partition lives on SPI flash at offset 0x80000 (the
