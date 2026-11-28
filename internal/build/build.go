@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"debug/elf"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -1584,6 +1587,109 @@ func (b *Builder) buildMklfs() error {
 	return nil
 }
 
+// userStackMargin is what the frame check leaves for what the compiler does
+// not see: the argv block and the return addresses below the deepest frame.
+// toscc uses the same number.
+const userStackMargin = 512
+
+// stackUse is one line of clang's -fstack-usage output.
+type stackUse struct {
+	fn    string
+	bytes int
+	kind  string // static, dynamic or bounded
+}
+
+// readStackUsage parses the .su that clang leaves next to an object.  The
+// second result is false when the object has no .su (assembly, or a toolchain
+// that does not emit them); the caller then has nothing to check.
+func readStackUsage(obj string) ([]stackUse, bool, error) {
+	path := strings.TrimSuffix(obj, ".o") + ".su"
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var out []stackUse
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return nil, true, fmt.Errorf("%s: bad stack-usage line %q", path, line)
+		}
+		fn := parts[0]
+		if i := strings.LastIndex(fn, ":"); i >= 0 {
+			fn = fn[i+1:]
+		}
+		out = append(out, stackUse{fn: fn, bytes: n, kind: strings.TrimSpace(parts[2])})
+	}
+	return out, true, nil
+}
+
+// checkUserStack compares the largest function frame with the stack the
+// program will get: its TOS_STACK note, or the board's default when it has
+// none.  A frame bigger than the stack crosses the guard hole in one
+// `sub sp, sp, #N`, and the first store then lands in the writable image
+// below it, where no page fault stops it.  Refusing here is the only place
+// the number is known before the board runs the program.
+func (b *Builder) checkUserStack(name, elfPath string, objs []string) error {
+	maxFrame, maxFn := 0, ""
+	for _, obj := range objs {
+		uses, ok, err := readStackUsage(obj)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		for _, u := range uses {
+			if u.kind != "static" {
+				return fmt.Errorf("bin/%s: %s has a %s stack frame; a frame whose size is only known at run time cannot be checked", name, u.fn, u.kind)
+			}
+			if u.bytes > maxFrame {
+				maxFrame, maxFn = u.bytes, u.fn
+			}
+		}
+	}
+	if maxFrame == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(elfPath)
+	if err != nil {
+		return err
+	}
+	w, ok := windowNote(data)
+	if !ok {
+		return nil
+	}
+	stack := int(w.stack)
+	_, defStack, _ := b.Target.WindowGeometry()
+	if stack == 0 {
+		stack = defStack
+	}
+	if maxFrame+userStackMargin <= stack {
+		return nil
+	}
+	want := 4096
+	for want < maxFrame+userStackMargin {
+		want <<= 1
+	}
+	if w.stack == 0 {
+		return fmt.Errorf("bin/%s: %s has a %d-byte stack frame; the program gets the board default %d bytes; add TOS_STACK(%d), or move the array to .bss or the heap",
+			name, maxFn, maxFrame, stack, want)
+	}
+	return fmt.Errorf("bin/%s: %s has a %d-byte stack frame; the program declares TOS_STACK(%d); raise it to TOS_STACK(%d), or move the array to .bss or the heap",
+		name, maxFn, maxFrame, stack, want)
+}
+
 func (b *Builder) buildUser() ([]string, error) {
 	b.logf("user programs\n")
 	udir := filepath.Join(b.Root, "user")
@@ -1621,6 +1727,12 @@ func (b *Builder) buildUser() ([]string, error) {
 		userPIEFlags = append(userPIEFlags, isaNoC...)
 	}
 	userCFlags := append([]string{}, userPIEFlags...)
+	// clang's -fstack-usage leaves a .su next to every object and
+	// checkUserStack() reads it after the link.  zig cc does not promise
+	// those files; the check skips an object that has none.
+	if !strings.Contains(strings.ToLower(filepath.Base(b.TC.CC[0])), "zig") {
+		userCFlags = append(userCFlags, "-fstack-usage")
+	}
 	// A VLA's frame is only known at run time, so the compiler cannot check
 	// it against the stack the program gets - and a VLA bigger than the stack
 	// crosses the guard hole in one `sub sp, sp, #N`.  Refuse the declaration
@@ -1792,8 +1904,11 @@ func (b *Builder) buildUser() ([]string, error) {
 			continue // a program directory with no sources in this build
 		}
 		out := filepath.Join(b.BuildDir, "user", "bin", name)
-		if err := b.linkPIE(append(append([]string{}, commonA...), progsA[name]...),
-			filepath.Join(udir, "user.ld"), out); err != nil {
+		objs := append(append([]string{}, commonA...), progsA[name]...)
+		if err := b.linkPIE(objs, filepath.Join(udir, "user.ld"), out); err != nil {
+			return nil, err
+		}
+		if err := b.checkUserStack(name, out, objs); err != nil {
 			return nil, err
 		}
 		if autoRVC && imageStraddles(out) {
@@ -1822,8 +1937,11 @@ func (b *Builder) buildUser() ([]string, error) {
 		}
 		for _, name := range straddlers {
 			out := filepath.Join(b.BuildDir, "user", "bin", name)
-			if err := b.linkPIE(append(append([]string{}, commonB...), progsB[name]...),
-				filepath.Join(udir, "user.ld"), out); err != nil {
+			objs := append(append([]string{}, commonB...), progsB[name]...)
+			if err := b.linkPIE(objs, filepath.Join(udir, "user.ld"), out); err != nil {
+				return nil, err
+			}
+			if err := b.checkUserStack(name, out, objs); err != nil {
 				return nil, err
 			}
 			if imageStraddles(out) {

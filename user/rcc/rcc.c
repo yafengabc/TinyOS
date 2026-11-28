@@ -277,7 +277,15 @@ static int frame_for(int fid)
     frame = 20 + RIR_SLOT_BYTES + 4 * (maxslot + 1);
     if (frame < 64)
         frame = 64;
-    return (frame + 15) & ~15;
+    frame = (frame + 15) & ~15;
+    /* One `sub sp, #N` with N at or above the guard hole crosses it and the
+     * first store lands in the writable image below, where no page fault
+     * stops it.  csc's spill slots keep real frames near 1 KiB (VREG_MAX),
+     * so this never fires today; it is here so a future slot-count change
+     * cannot turn into a silent stack overflow. */
+    if (frame >= 4096)
+        die("function frame is at or above the 4 KiB stack guard; split it");
+    return frame;
 }
 
 #if defined(__riscv) || defined(RCC_ARCH_RV32)
