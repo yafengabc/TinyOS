@@ -65,6 +65,67 @@
  * guard; exec() checks each request against the same rules. */
 #define DEFAULT_STACK PLAT_STACK_BYTES
 
+/* Optional stack area at the bottom of the user region, for kernel-allocated
+ * thread stacks.  Zero on boards that do not opt in (weak default; a board
+ * overrides it in layout.c).  The area is reserved address space: data
+ * windows start above it, and only the current thread's stack block is mapped
+ * while it runs.  The buddy bitmap below therefore never overlaps win_alloc's
+ * scan. */
+__attribute__((weak)) const uint32_t PLAT_STACK_AREA = 0;
+
+#define STACK_AREA_UNIT 4096u
+#define STACK_AREA_MAX_BLOCKS 32u        /* 128 KiB cap for the bitmap */
+
+/* One bit per 4 KiB unit, set while the unit belongs to a live stack.  Sizes
+ * are powers of two (TOS_STACK's rule), so an aligned run of 1/2/4/8 units is
+ * a valid stack and freeing it clears exactly those bits: no high-water mark,
+ * no sbrk-style monotonic growth.  Callers hold proc_lock. */
+static uint32_t stack_area_map;
+
+static uint32_t stack_area_alloc_locked(uint32_t size)
+{
+    uint32_t total = PLAT_STACK_AREA / STACK_AREA_UNIT;
+    uint32_t blocks = size / STACK_AREA_UNIT;
+
+    if (PLAT_STACK_AREA == 0 || size < STACK_AREA_UNIT ||
+        (size & (size - 1u)) != 0 || size > PLAT_STACK_AREA)
+        return 0;
+    if (blocks == 0 || blocks > STACK_AREA_MAX_BLOCKS ||
+        total > STACK_AREA_MAX_BLOCKS)
+        return 0;
+    for (uint32_t start = 0; start + blocks <= total; start += blocks) {
+        uint32_t mask = ((1u << blocks) - 1u) << start;
+
+        if ((stack_area_map & mask) == 0) {
+            stack_area_map |= mask;
+            return PLAT_APP_BASE + start * STACK_AREA_UNIT;
+        }
+    }
+    return 0;
+}
+
+static void stack_area_free_locked(uint32_t base, uint32_t size)
+{
+    uint32_t total = PLAT_STACK_AREA / STACK_AREA_UNIT;
+    uint32_t blocks;
+
+    if (PLAT_STACK_AREA == 0 || size == 0 || (size & (size - 1u)) != 0 ||
+        base < PLAT_APP_BASE)
+        return;
+    base -= PLAT_APP_BASE;
+    blocks = size / STACK_AREA_UNIT;
+    if ((base % size) != 0 || base / STACK_AREA_UNIT + blocks > total ||
+        blocks > STACK_AREA_MAX_BLOCKS)
+        return;
+    stack_area_map &= ~(((1u << blocks) - 1u) << (base / STACK_AREA_UNIT));
+}
+
+static int stack_in_area(uint32_t base, uint32_t size)
+{
+    return PLAT_STACK_AREA != 0 && size != 0 &&
+        base >= PLAT_APP_BASE && base + size <= PLAT_APP_BASE + PLAT_STACK_AREA;
+}
+
 /* Byte written over a new task's stack, and the value stack_used() looks for.
  * 0xCC is the usual x86 int3 fill; any constant works, the only requirement
  * being that a program is unlikely to write it as its first stack byte (which
@@ -918,7 +979,7 @@ static void apply_protection(thread_t *p)
     thread_t *g = PROC_GROUP(p);
     cpu_t *c = cpu_self();
     plat_seg_t segs[PLAT_SEG_MAX];
-    uint32_t win_base, win_end, stack_low, brk;
+    uint32_t win_base, win_end, stack_low, stack_top, brk;
     int n = 0;
 
     /* Kernel threads own no address space: there is nothing to program, and
@@ -929,7 +990,8 @@ static void apply_protection(thread_t *p)
 
     win_base = g->proc->win_base;
     win_end = win_base + g->proc->win_size;
-    stack_low = g->stack_top - g->stack_size;
+    stack_top = g->stack_top;
+    stack_low = stack_top - g->stack_size;
     brk = g->proc->brk;
 
     /* The regions describe the process, not the thread: two threads of one
@@ -954,7 +1016,9 @@ static void apply_protection(thread_t *p)
         segs[n].attr = PLAT_SEG_CODE;
         n++;
     }
-    if (brk > stack_low)
+    /* Only clamp the break when the stack actually lives in this window; a
+     * stack-area thread has its stack far below win_base. */
+    if (stack_low >= win_base && stack_top <= win_end && brk > stack_low)
         brk = stack_low;                /* stale break: never overlap the stack */
     if (brk > PROC_RES(g)->wx_start) {
         segs[n].base = PROC_RES(g)->wx_start;
@@ -962,11 +1026,24 @@ static void apply_protection(thread_t *p)
         segs[n].attr = PLAT_SEG_DATA;
         n++;
     }
-    if (stack_low < win_end) {
+    if (stack_top > stack_low) {
         segs[n].base = stack_low;
-        segs[n].top  = win_end;         /* stack_top: they are the same value */
+        segs[n].top  = stack_top;
         segs[n].attr = PLAT_SEG_DATA;
         n++;
+    }
+
+    /* A stack-area thread's stack is below the data window, so the pieces
+     * are not in address order; TOR programming needs them sorted. */
+    for (int i = 1; i < n; i++) {
+        plat_seg_t s = segs[i];
+        int j = i - 1;
+
+        while (j >= 0 && segs[j].base > s.base) {
+            segs[j + 1] = segs[j];
+            j--;
+        }
+        segs[j + 1] = s;
     }
 
     plat_task_protect(segs, n);
@@ -1620,6 +1697,8 @@ int process_ctrl_target(void)
  * MMU this is a range check, not a security boundary: see PLATFORM-DESIGN. */
 int process_user_ok(uint32_t addr, uint32_t len)
 {
+    uint32_t end;
+
     if (!current)
         return 0;
     if (len == 0)
@@ -1630,11 +1709,21 @@ int process_user_ok(uint32_t addr, uint32_t len)
     thread_t *g = PROC_GROUP(current);
     if (!g->proc)
         return 0;
-    if (addr < g->proc->win_base)
+    end = addr + len;
+    if (end < addr)
         return 0;
-    if (addr + len < addr)
-        return 0;
-    return addr + len <= g->proc->win_base + g->proc->win_size;
+    if (addr >= g->proc->win_base &&
+        end <= g->proc->win_base + g->proc->win_size)
+        return 1;
+    /* A thread stack may live in the stack area, outside the data window;
+     * buffers on it are just as valid as the rest of the thread's memory. */
+    if (current->stack_size) {
+        uint32_t low = current->stack_top - current->stack_size;
+
+        if (addr >= low && end <= current->stack_top)
+            return 1;
+    }
+    return 0;
 }
 
 /* ---- windows ---------------------------------------------------------
@@ -1666,8 +1755,12 @@ static int win_alloc(thread_t *p, const struct mem_domain *dom, uint32_t bytes)
         return -1;
     if (dom->size == 0 || dom->base + dom->size < dom->base)
         return -1;
-    cand = dom->base;
+    /* The stack area, if the board has one, sits at the bottom of the user
+     * region and belongs to thread stacks, not to data windows. */
+    cand = dom->base + PLAT_STACK_AREA;
     end = dom->base + dom->size;
+    if (cand < dom->base || cand > end)
+        return -1;
 
     uint32_t irq = plat_spin_lock_irqsave(&proc_lock);
     for (;;) {
@@ -1833,6 +1926,11 @@ static void proc_retire_locked(thread_t *p)
         p->proc->win_size = 0;
         proc_entry_set_state(p->proc, PROC_FREE);
         p->proc = NULL;
+    } else if (p->stack_size && p->stack_top >= p->stack_size &&
+               stack_in_area(p->stack_top - p->stack_size, p->stack_size)) {
+        /* A kernel-owned thread stack returns to the buddy here: join, exit
+         * and a process teardown all end in this function. */
+        stack_area_free_locked(p->stack_top - p->stack_size, p->stack_size);
     }
 }
 
@@ -3540,6 +3638,7 @@ int process_thread_create(uint32_t entry, uint32_t arg,
     uint32_t low;
     uint32_t irq;
     int tid;
+    int owned = 0;
 
     if (!main || !main->proc || PROC_RES(main)->win_size == 0)
         return -1;
@@ -3549,38 +3648,65 @@ int process_thread_create(uint32_t entry, uint32_t arg,
      * start leaving while this one is being built. */
     if (main->proc->state != PROC_LIVE || main->state == ST_DYING)
         return -1;
-    if (entry == 0 || (ustack & 15u) || usize == 0 || (usize & 3u))
+    if (entry == 0 || usize == 0 || (usize & 3u))
         return -1;
-    if (ustack <= PROC_RES(main)->win_base ||
-        ustack > PROC_RES(main)->win_base + PROC_RES(main)->win_size)
-        return -1;
-    low = ustack - usize;
-    /* The 4 bytes below the stack hold the guard word; the caller promises
-     * them (struct tos_thread_stack).  Everything must still be inside the
-     * process's window, or the canary write itself would be a wild store. */
-    if (low < PROC_RES(main)->win_base + 8u ||
-        low - 4u < PROC_RES(main)->win_base ||
-        low > ustack)
-        return -1;
+    if (ustack == 0) {
+        /* The caller asks the kernel to own the stack: allocate it from the
+         * stack area at the bottom of the user region.  Anything the area
+         * cannot serve (no area, sub-page or non-power-of-two size) answers
+         * -2, and the library falls back to a heap stack. */
+        if (PLAT_STACK_AREA == 0 ||
+            usize < PLAT_PAGE_SIZE || (usize & (usize - 1u)) != 0 ||
+            usize > PLAT_STACK_AREA)
+            return -2;
+        irq = plat_spin_lock_irqsave(&proc_lock);
+        low = stack_area_alloc_locked(usize);
+        plat_spin_unlock_irqrestore(&proc_lock, irq);
+        if (!low)
+            return -1;
+        ustack = low + usize;
+        owned = 1;
+    } else {
+        if ((ustack & 15u) || usize == 0)
+            return -1;
+        if (ustack <= PROC_RES(main)->win_base ||
+            ustack > PROC_RES(main)->win_base + PROC_RES(main)->win_size)
+            return -1;
+        low = ustack - usize;
+        /* The 4 bytes below the stack hold the guard word; the caller
+         * promises them (struct tos_thread_stack).  Everything must still be
+         * inside the process's window, or the canary write would itself be a
+         * wild store. */
+        if (low < PROC_RES(main)->win_base + 8u ||
+            low - 4u < PROC_RES(main)->win_base ||
+            low > ustack)
+            return -1;
+    }
 
     p = proc_alloc();
-    if (!p)
+    if (!p) {
+        if (owned) {
+            irq = plat_spin_lock_irqsave(&proc_lock);
+            stack_area_free_locked(low, usize);
+            plat_spin_unlock_irqrestore(&proc_lock, irq);
+        }
         return -1;
+    }
 
     p->proc = main->proc;
     p->prio = current->prio;
     p->stack_top = ustack;
-    /* A thread's stack now has a name and a size: the group's protection
-     * cannot separate it from the heap around it (both are the same writable
-     * data region), so this range is what the software guard checks.  It is
-     * not growable - the bytes below belong to the allocator. */
+    /* A thread's stack now has a name and a size.  In the stack area it is
+     * its own PMP/MPU region; a caller-provided one still lives in the heap
+     * and is what the software guard checks.  Neither is growable. */
     p->stack_size = usize;
     /* Poison it before the first instruction, like exec() does, so ps's
      * stk/sz column means the same thing for a thread as for a process. */
     memset((void *)low, STACK_POISON, usize);
-    /* Guard word just below the stack: stack_guard() reads it on every syscall
-     * and a runaway push has to clobber it on the way down. */
-    *((uint32_t *)low - 1) = USER_STACK_GUARD;
+    /* The canary only makes sense for a caller-provided stack: the 4 bytes
+     * below a stack-area block belong to the buddy, not to this thread. */
+    if (!owned)
+        *((uint32_t *)low - 1) = USER_STACK_GUARD;
     /* cwd, fds, heap and break are the process's, so there is nothing to
      * copy into the worker's slot: it reaches all of it through proc. */
     p->start_ns = plat_now_ns();

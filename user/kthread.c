@@ -54,35 +54,23 @@ static void kthread_trampoline(struct kstart *s)
 
 int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
 {
-    unsigned bytes, top;
+    unsigned bytes, top = 0;
     struct kstart *s;
     struct tos_thread_stack st;
-    char *base;
+    char *base = 0;
     int tid, slot = -1;
 
     if (stack_bytes < 512)
         stack_bytes = 512;
     bytes = (stack_bytes + 31u) & ~15u;
 
-    /* 32 bytes of slack below the usable stack: the kernel writes the guard
-     * word at top-size-4 and checks it on every syscall.  malloc only
-     * promises 8-byte alignment, so the top is aligned here and the slack
-     * keeps the guard word inside the block. */
-    base = malloc(bytes + 32u);
-    if (!base)
-        return -1;
-
     /* The start record lives in the heap, not on the new stack: ARM pushes a
      * 32-byte hardware exception frame just below the initial sp, so anything
      * parked at the top of the stack would be overwritten before the first
      * instruction runs. */
     s = (struct kstart *)malloc(sizeof(*s));
-    if (!s) {
-        free(base);
+    if (!s)
         return -1;
-    }
-
-    top = ((unsigned)base + bytes + 32u) & ~15u;
     s->fn = fn;
     s->arg = arg;
 
@@ -93,10 +81,28 @@ int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
         }
     }
 
-    st.top = top;
+    /* Ask the kernel to own the stack first: on a board with a stack area it
+     * comes from there (a separate window, PMP-protected), which keeps the
+     * heap for data.  -2 means the board has no area and the heap path below
+     * is the only option. */
+    st.top = 0;
     st.size = bytes;
     tid = tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s,
                    (int)&st);
+    if (tid == -2) {
+        /* 32 bytes of slack below the usable stack: the kernel writes the
+         * guard word at top-size-4 and checks it on every syscall. */
+        base = malloc(bytes + 32u);
+        if (!base) {
+            free(s);
+            return -1;
+        }
+        top = ((unsigned)base + bytes + 32u) & ~15u;
+        st.top = top;
+        st.size = bytes;
+        tid = tos_sys3(SYS_THREAD_CREATE, (int)kthread_trampoline, (int)s,
+                       (int)&st);
+    }
     if (tid <= 0) {
         /* No slot, no table entry, bad stack: the kernel did not take the
          * blocks, so they are ours to return. */
@@ -106,7 +112,7 @@ int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     }
     if (slot >= 0) {
         kt[slot].tid = tid;
-        kt[slot].base = base;
+        kt[slot].base = base;       /* 0 when the kernel owns the stack */
         kt[slot].rec = s;
     }
     /* else: more threads than KT_TRACK.  Creation itself succeeded, so the
@@ -125,7 +131,8 @@ int thread_join(int tid, int *code)
         for (int i = 0; i < KT_TRACK; i++) {
             if (kt[i].tid == tid) {
                 free(kt[i].rec);
-                free(kt[i].base);
+                if (kt[i].base)
+                    free(kt[i].base);   /* kernel-owned stacks are already back */
                 kt[i].tid = 0;
                 break;
             }

@@ -67,15 +67,21 @@ const uint32_t PLAT_APP_GRAIN  = 0x00001000;   /* 4 KiB per step  */
  * that runs off its bottom - the hole is simply not covered by any PMP
  * entry, so any store into it faults, and the write that overflows lands
  * there first unless a single frame is larger than the hole. */
-/* 4 KiB, not 8.  With a 4 KiB grain a window is image + 4 guard + 4 stack
- * (+ one 4 KiB growth step for a task that did not declare a stack), so a
- * small tool stays at 16 KiB - the same as before - while the growth reserve
- * is a 4 KiB step instead of an 8 KiB doubling.  That is what makes the
- * reserve affordable: two steps cover what the old 8 KiB default did, one
- * fault at a time, and only for programs that need it.  The shell already
- * declares 4 KiB (user/msh/msh.c) and `sh` the same, so neither is affected. */
+/* 4 KiB stack and 4 KiB guard per window; no implicit growth step (removed
+ * 2026-11-28: a program declares TOS_STACK if it needs more).  The shell and
+ * sh declare 4 KiB, so they sit at image + 8 KiB. */
 const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
+
+/* Bottom 64 KiB of the user region: kernel-owned thread stacks (buddy blocks
+ * of 4/8/16 KiB).  Data windows start above it, and only the current
+ * thread's block is mapped while it runs - default-deny is its guard.  This
+ * is the C3 prototype of docs/STACK-AREA-DESIGN.md; main-thread stacks still
+ * live in the data window.  Only an image that can create threads pays for
+ * it; the weak default is 0. */
+#ifdef TOS_KTHREADS
+const uint32_t PLAT_STACK_AREA = 64u * 1024u;
+#endif
 
 
 /* The littlefs partition lives on SPI flash at offset 0x80000 (the
