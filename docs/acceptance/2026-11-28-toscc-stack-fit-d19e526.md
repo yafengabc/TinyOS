@@ -61,5 +61,7 @@ build/frames8k-tos.tos: 785 -> 512 bytes (LZ4TOS, hint 4096/16384/0)
 
 - **深调用链**：只比较单个最大帧。链深导致的溢出仍是 guard 的正常工作
   （fault → grow 或 kill），不是这个检查的目标；
-- **VLA**（`char buf[n]`）是动态帧，静态检查看不见；
+- **VLA**（`char buf[n]`）是动态帧，静态检查看不见；已由
+  [`3353b0f`](2026-11-28-no-vla-3353b0f.md) 整体拒绝（toscc 报错、
+  clang 加 `-Wvla -Werror=vla`）；
 - clang 路径（`-fstack-usage` 构建审计）和 `rcc` 的断言还没做。
