@@ -190,6 +190,15 @@ func (c *checker) checkStmt(st Stmt, fn *FuncDecl) {
 				c.put(n.Name, n.Typ, n.Line)
 				return
 			}
+			// Single-dimension VLAs parse, but the toolchain refuses them: a
+			// VLA's frame is only known at run time, so the compiler cannot
+			// compare it with the stack the program will get - and a VLA
+			// bigger than the stack crosses the guard hole in one `sub sp`
+			// while the first store lands in the writable image below it.
+			// A fixed buffer or TOS_HEAP + malloc keeps the frame visible.
+			c.errf(n.Line, "variable-length array %q is not supported: its frame is only known at run time, so the stack check cannot see it; use a fixed-size buffer, or TOS_HEAP + malloc", n.Name)
+			c.put(n.Name, n.Typ, n.Line)
+			return
 		}
 		// ("auto x = expr;"). The declared type is the type of the initialiser
 		// after lvalue/array-to-pointer/function-to-pointer decay -- exactly

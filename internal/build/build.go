@@ -1621,6 +1621,12 @@ func (b *Builder) buildUser() ([]string, error) {
 		userPIEFlags = append(userPIEFlags, isaNoC...)
 	}
 	userCFlags := append([]string{}, userPIEFlags...)
+	// A VLA's frame is only known at run time, so the compiler cannot check
+	// it against the stack the program gets - and a VLA bigger than the stack
+	// crosses the guard hole in one `sub sp, sp, #N`.  Refuse the declaration
+	// in the C front end (toscc does the same).  A fixed buffer or
+	// TOS_HEAP + malloc keeps the frame visible.
+	userCFlags = append(userCFlags, "-Wvla", "-Werror=vla")
 	// The kernel opt is in ccFlags() for every C file, so a user-level
 	// override has to come after it.  A per-program user/<name>/opt file is
 	// appended even later and still wins (that is what msh/py rely on).

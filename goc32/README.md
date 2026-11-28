@@ -82,6 +82,11 @@ crosses the guard hole in one step and the first store lands in the writable
 image below it.  Deep call chains are not this check's business - the
 kernel's guard kills those.
 
+Variable-length arrays (`char buf[n]`) are refused: their frame is a run-time
+value, so the check above cannot see it.  The clang side of the tree applies
+the same rule with `-Wvla -Werror=vla`.  Use a fixed-size buffer, or
+`TOS_HEAP` + `malloc` when the size really is dynamic.
+
 Feature defines follow the build. `goc32` reads
 `build/build-config-<target>.txt` (or the shared `build-config.txt`) written by
 `tos build` and applies the same user-program macros: `TOS_THREADS`,

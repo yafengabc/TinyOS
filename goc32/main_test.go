@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"goc/common"
+	"goc/frontend"
 )
 
 func TestNextStack(t *testing.T) {
@@ -54,5 +57,47 @@ func TestCheckStackFit(t *testing.T) {
 	// largest single frame is compared.
 	if err := checkStackFit("main", 1024, 0, 4096); err != nil {
 		t.Fatalf("1 KiB frame refused: %v", err)
+	}
+}
+
+// checkSource parses and type-checks one translation unit, the way compileOne
+// does before the back end runs.
+func checkSource(t *testing.T, src string) []string {
+	t.Helper()
+	toks, err := common.PreprocessTarget(src, "sample.c", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prog, err := frontend.Parse(toks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range frontend.CheckUnit(prog) {
+		out = append(out, e.Error())
+	}
+	return out
+}
+
+// A VLA's frame is only known at run time, so the frame check cannot see it.
+// The front end refuses the declaration instead of letting a big one cross
+// the guard hole silently.
+func TestVariableLengthArrayRejected(t *testing.T) {
+	errs := checkSource(t, "int main(void) { int n = 4; char b[n]; b[0] = 1; return b[0]; }\n")
+	for _, e := range errs {
+		if strings.Contains(e, "variable-length array") &&
+			strings.Contains(e, "not supported") {
+			return
+		}
+	}
+	t.Fatalf("VLA accepted, errors: %v", errs)
+}
+
+func TestFixedArrayAccepted(t *testing.T) {
+	errs := checkSource(t, "int main(void) { char b[16]; b[0] = 1; return b[0]; }\n")
+	for _, e := range errs {
+		if strings.Contains(e, "variable-length") {
+			t.Fatalf("fixed array reported as a VLA: %v", errs)
+		}
 	}
 }
