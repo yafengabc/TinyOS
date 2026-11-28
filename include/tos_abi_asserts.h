@@ -33,4 +33,9 @@ _Static_assert(offsetof(struct clockinfo, ms) == 12, "clockinfo.ms ABI");
 _Static_assert(offsetof(struct clockinfo, tick_hz) == 16, "clockinfo.tick_hz ABI");
 _Static_assert(offsetof(struct clockinfo, cpus) == 20, "clockinfo.cpus ABI");
 
+_Static_assert(offsetof(struct stackarea, reserved) == 0, "stackarea.reserved ABI");
+_Static_assert(offsetof(struct stackarea, live) == 4, "stackarea.live ABI");
+_Static_assert(offsetof(struct stackarea, peak) == 8, "stackarea.peak ABI");
+_Static_assert(offsetof(struct stackarea, blocks) == 12, "stackarea.blocks ABI");
+
 #endif

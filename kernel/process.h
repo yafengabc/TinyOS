@@ -208,6 +208,10 @@ uint32_t process_threads_text(char *buf, uint32_t cap);
  * rule as above. */
 uint32_t process_execfmt_text(char *buf, uint32_t cap);
 
+/* SYS_STACKINFO: the stack area's reserved/live/peak bytes (tos_abi.h). */
+struct stackarea;
+int process_stack_area_info(struct stackarea *out);
+
 /* Deepest stack any task has ever used, in bytes, and (in `name`, copied and
  * NUL terminated) which task reached it.  The record survives the task, so a
  * program that has already exited still answers "was 16 KiB of stack the

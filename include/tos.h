@@ -90,6 +90,10 @@
  * is why unlink() still refuses directories. */
 #define SYS_MKDIR         57 /* mkdir(path) -> 0 or -1                  */
 #define SYS_RMDIR         58 /* rmdir(path) -> 0 or -1 (empty only)     */
+/* Stack-area accounting: fills a struct stackarea (tos_abi.h).  A board
+ * without an area answers zeroes, which is what `free` uses to decide
+ * whether to print the row at all. */
+#define SYS_STACKINFO     59 /* stackinfo(&s) -> 0 or -1                */
 
 /* Longest path the kernel accepts in one syscall, including the NUL.
  *

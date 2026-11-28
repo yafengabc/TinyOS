@@ -177,6 +177,10 @@ int  dup(int fd);
 /* Kernel heap statistics returned by meminfo(); struct meminfo is in
  * include/tos_abi.h (single ABI source, with size/offset asserts). */
 int  meminfo(struct meminfo *m);
+/* Stack-area accounting (struct stackarea in tos_abi.h): reserved address
+ * space, live blocks, high-water, and the live block count.  All zero on a
+ * board that has no stack area. */
+int  stackinfo(struct stackarea *s);
 
 /* littlefs usage returned by dfinfo(); struct dfinfo is in tos_abi.h. */
 int  dfinfo(struct dfinfo *d);

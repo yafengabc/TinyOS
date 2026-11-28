@@ -17,6 +17,7 @@
 #include "platform.h"
 #include "cpu.h"
 #include "tos.h"
+#include "tos_abi.h"
 #include "u32math.h"
 #include "win_layout.h"
 
@@ -416,6 +417,7 @@ __attribute__((weak)) const uint32_t PLAT_STACK_AREA = 0;
  * proc_lock. */
 static uint32_t stack_area_blocks;
 static uint32_t stack_area_min_blocks;   /* the initial reservation */
+static uint32_t stack_area_peak_blocks;  /* high-water since boot */
 static uint32_t stack_area_map;
 
 static uint32_t stack_area_mask(uint32_t blocks)
@@ -435,12 +437,14 @@ static void stack_area_init(void)
     stack_area_map = 0;
     stack_area_blocks = 0;
     stack_area_min_blocks = 0;
+    stack_area_peak_blocks = 0;
     if (PLAT_STACK_AREA == 0)
         return;
     /* layout_check() has already rejected a size that is not a whole
      * number of steps, so this is exact. */
     stack_area_min_blocks = init;
     stack_area_blocks = init;
+    stack_area_peak_blocks = init;
 }
 
 /* Is `base..base+size` a live block of the reserved area?  Used to decide
@@ -478,6 +482,8 @@ static int stack_area_grow_locked(void)
     if (bottom < ceiling + STACK_AREA_UNIT)
         return 0;
     stack_area_blocks = want;
+    if (want > stack_area_peak_blocks)
+        stack_area_peak_blocks = want;
     return 1;
 }
 
@@ -3281,6 +3287,30 @@ uint32_t process_stack_peak(char *name, uint32_t cap)
         name[i] = '\0';
     }
     return bytes;
+}
+
+/* SYS_STACKINFO: reserved/live/peak of the stack area, in bytes.  A board
+ * without one answers zeroes, so `free` can omit the row instead of printing
+ * a misleading 0.  `live` is the sum of the live blocks, which is exactly
+ * the popcount of the bitmap times one unit: every bit is one 4 KiB unit. */
+int process_stack_area_info(struct stackarea *out)
+{
+    uint32_t bits, block_bits;
+    uint32_t irq;
+
+    if (!out)
+        return -1;
+    irq = plat_spin_lock_irqsave(&proc_lock);
+    bits = stack_area_map;
+    block_bits = 0;
+    for (uint32_t m = bits; m; m &= m - 1u)
+        block_bits++;
+    out->reserved = PLAT_STACK_AREA ? stack_area_blocks * STACK_AREA_UNIT : 0;
+    out->live = block_bits * STACK_AREA_UNIT;
+    out->peak = PLAT_STACK_AREA ? stack_area_peak_blocks * STACK_AREA_UNIT : 0;
+    out->blocks = block_bits;
+    plat_spin_unlock_irqrestore(&proc_lock, irq);
+    return 0;
 }
 
 /* Close a task's files and give back its window.  Shared by process_exit()

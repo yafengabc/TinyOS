@@ -683,6 +683,20 @@ static regs_t *dispatch(regs_t *r)
         return r;
     }
 
+    case SYS_STACKINFO: {
+        uint32_t ptr = sc.a0;          /* struct stackarea * in user space */
+        struct stackarea s;
+
+        if (!process_user_ok(ptr, sizeof(s)) ||
+            process_stack_area_info(&s) != 0) {
+            plat_frame_set_ret(r, (uint32_t)-1);
+            return r;
+        }
+        memcpy((void *)ptr, &s, sizeof(s));
+        plat_frame_set_ret(r, 0);
+        return r;
+    }
+
     case SYS_DF: {
         uint32_t ptr = sc.a0;          /* struct dfinfo * in user space */
         uint32_t total = 0, used = 0;

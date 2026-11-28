@@ -91,6 +91,11 @@ int meminfo(struct meminfo *m)
     return tos_sys1(SYS_MEMINFO, (int)m);
 }
 
+int stackinfo(struct stackarea *s)
+{
+    return tos_sys1(SYS_STACKINFO, (int)s);
+}
+
 int dfinfo(struct dfinfo *d)
 {
     return tos_sys1(SYS_DF, (int)d);

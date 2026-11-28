@@ -35,6 +35,8 @@ int applet_free(int argc, char **argv)
     (void)argc;
     (void)argv;
     struct meminfo m;
+    struct stackarea s;
+
     if (meminfo(&m) != 0) {
         puts("free: meminfo unavailable\n");
         return 1;
@@ -48,6 +50,16 @@ int applet_free(int argc, char **argv)
     map_row("SRAM",    m.ram_total);
     map_row("kernel",  m.kernel_used);
     map_row("tasks",   m.app_total);
+    /* The stack area is part of the task region, but it is the one part a
+     * program cannot get back just by asking: it grows in 16 KiB steps and
+     * shrinks when free.  Live is what thread stacks hold right now; peak
+     * is the largest the area ever grew.  A board without one prints no
+     * row - 0 would read as "full", not "not configured". */
+    if (stackinfo(&s) == 0 && s.reserved != 0) {
+        label("stack area", 10);
+        printf("%9u %9u  (live %u, peak %u)\n",
+               s.reserved, s.reserved / 1024u, s.live, s.peak);
+    }
     map_row("unused",  m.ram_unused);
     return 0;
 }

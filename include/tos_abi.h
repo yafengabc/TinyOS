@@ -53,6 +53,17 @@ struct dfinfo {
     uint32_t used;    /* bytes consumed by littlefs        */
 };
 
+/* SYS_STACKINFO: the stack area (docs/STACK-AREA-DESIGN.md), for `free` and
+ * for the reclaim test.  `reserved` is the address space currently committed
+ * (0 on a board without an area); `live` is the part held by live thread
+ * stacks; `peak` is the high-water of `reserved` since boot.  All in bytes. */
+struct stackarea {
+    uint32_t reserved;
+    uint32_t live;
+    uint32_t peak;
+    uint32_t blocks;   /* live blocks (4 KiB units)              */
+};
+
 struct clockinfo {
     uint64_t ns;       /* monotonic nanoseconds since boot */
     uint32_t us;       /* same instant, microseconds (low 32 bits) */
@@ -67,6 +78,7 @@ struct clockinfo {
  * only.  Both files are generated from the same struct definitions, so a
  * field reorder still fails the kernel build. */
 _Static_assert(sizeof(struct stat) == 8, "struct stat ABI size");
+_Static_assert(sizeof(struct stackarea) == 16, "struct stackarea ABI size");
 _Static_assert(sizeof(struct meminfo) == 32, "struct meminfo ABI size");
 _Static_assert(sizeof(struct dfinfo) == 8, "struct dfinfo ABI size");
 _Static_assert(sizeof(struct clockinfo) == 24, "struct clockinfo ABI size");
