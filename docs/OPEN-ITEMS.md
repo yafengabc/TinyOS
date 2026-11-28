@@ -1348,3 +1348,25 @@ limitation"）说的就是这件事，不是 bug。
 
 结论：`prot rodata` 在 RV32 上的结果取决于**程序大小与段布局**，不能当作「RX 失效」的
 判据；要验证 RX，得用 `.rodata` 独立成页的镜像。
+
+## 30. 合作线程在 software-guard 端口的 syscall 会被主线程守卫误杀（2026-11-28，pre-existing）
+
+`thread.c` 的合作线程栈在程序的堆里，内核看不见。x86 和 RP2040 的
+`plat_user_stack_guard()` 返回 1，`process_stack_guard()` 在每次 syscall 拿当前
+`sp` 去比**主线程**的栈区；合作线程调用 `printf`/`poll` 时 `sp` 在堆里，于是被当成
+主线程爆栈：
+
+```
+[pid 2] stack overflow (sp 0x00112fd0, stack 0x0011f000..0x00120000)
+[pid 2] no room to grow it; killing
+```
+
+复现：`tos build -config configs/x86-threads.conf` 后跑 `threadtest`（worker 里有
+`printf`）。用**未修改**的 `thread.c` 也一样，所以是既有问题，不是 2026-11-28 加的
+线程守卫引入的。rv32/ARM 的 `plat_user_stack_guard()` 返回 0，`process_stack_guard`
+对主线程直接放行，所以那边合作线程正常。
+
+修法（未做）：让内核知道合作线程的栈区间——加一个注册 syscall（创建时登记
+`base/top`，退出时注销），`process_stack_guard()` 命中任一区间就放行，越界仍按该
+区间判断。这同时能把合作线程的守卫从“库内下次 yield 检查”升级为“syscall 时检查”，
+但它是 ABI 变更（`abi/syscalls.csv` + goc32 快照），需要 C3 与板测。

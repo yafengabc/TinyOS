@@ -24,8 +24,18 @@
 #define T_RUN   2
 #define T_DONE  3
 
+/* 32 bytes of guard below every thread stack: a canary word at the very
+ * bottom and one byte of slack per push.  The kernel does not know these
+ * stacks exist (they live in the program heap), so the check is ours: at
+ * every switch point, sp must still be above the guard and the canary
+ * intact.  It is a next-yield check like the RP2040 canary, not a fault:
+ * bytes written between the overflow and the yield are already gone. */
+#define THREAD_GUARD  32u
+#define THREAD_CANARY 0x54484452u       /* "THDR" */
+
 struct thread {
     uint32_t sp;             /* saved stack pointer while off-CPU */
+    uint32_t base;           /* malloc block; canary at [base, base+4) */
     void   (*fn)(void *);
     void    *arg;
     int      ret;
@@ -40,6 +50,49 @@ static int current_tid = -1;
 void thread_switch(uint32_t *save_sp, uint32_t new_sp);
 
 static void thread_entry(void);
+
+/* The stack pointer of the running thread.  Zero when this file is built
+ * by a host compiler we have no asm for; the check then does nothing. */
+static uint32_t stack_pointer(void)
+{
+#if defined(__riscv)
+    uint32_t sp;
+
+    __asm__ volatile("mv %0, sp" : "=r"(sp));
+    return sp;
+#elif defined(__arm__)
+    uint32_t sp;
+
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    return sp;
+#elif defined(__i386__)
+    uint32_t sp;
+
+    __asm__ volatile("movl %%esp, %0" : "=r"(sp));
+    return sp;
+#else
+    return 0;
+#endif
+}
+
+/* Called before every switch (and again when a switch returns): a thread
+ * that ran past its guard is killed rather than left corrupting the heap. */
+static void stack_check(void)
+{
+    struct thread *t = &th[current_tid];
+    uint32_t sp;
+
+    if (current_tid <= 0 || t->base == 0)
+        return;                  /* the main thread is the kernel's */
+    sp = stack_pointer();
+    if (sp == 0)
+        return;
+    if (sp < t->base + THREAD_GUARD ||
+        *(volatile uint32_t *)t->base != THREAD_CANARY) {
+        puts("thread: stack overflow, killing the process\n");
+        exit(139);
+    }
+}
 
 static void thread_init(void)
 {
@@ -121,15 +174,17 @@ int thread_create(void (*fn)(void *), void *arg, unsigned stack_bytes)
     if (id == THREAD_MAX)
         return -1;
     if (stack_bytes == 0)
-        stack_bytes = 4096;
+        stack_bytes = 2048;
     if (stack_bytes < 512)
         stack_bytes = 512;
 
-    base = malloc(stack_bytes);
+    base = malloc(stack_bytes + THREAD_GUARD);
     if (!base)
         return -1;                   /* no heap: TOS_HEAP is the answer */
+    *(uint32_t *)base = THREAD_CANARY;
 
-    top = ((uint32_t)base + stack_bytes) & ~15u;
+    top = ((uint32_t)base + THREAD_GUARD + stack_bytes) & ~15u;
+    th[id].base = (uint32_t)base;
     th[id].fn = fn;
     th[id].arg = arg;
     th[id].ret = 0;
@@ -144,6 +199,7 @@ void thread_exit(int code)
 
     thread_init();
     me = current_tid;
+    stack_check();
     th[me].ret = code;
     th[me].state = T_DONE;
 
@@ -186,6 +242,7 @@ int thread_yield(void)
     int prev, next;
 
     thread_init();
+    stack_check();
     prev = current_tid;
     next = pick_next(prev);
     if (next < 0)
@@ -195,6 +252,8 @@ int thread_yield(void)
     th[next].state = T_RUN;
     current_tid = next;
     thread_switch(&th[prev].sp, th[next].sp);
+    stack_check();               /* us again: the switch push may have
+                                  * been the write that crossed */
     return 1;
 }
 
