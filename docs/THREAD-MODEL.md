@@ -141,6 +141,12 @@ leader 关闭后线程看到关闭）；soak rv32+arm 2/2。
   越界的东西；进程栈仍由板子的 `plat_user_stack_guard()` 决定。
 - `process_stack_grow()`：线程直接返回 0（栈下面是堆里的另一块分配），溢出即杀线程，
   消息为 `thread stack overflow ... a thread stack cannot grow in place; killing`。
+- **栈区（P2，2026-11-28，C3）**：`top == 0` 表示内核拥有栈；内核从用户区顶部的
+  栈区取一个 2 的幂块（请求向上取整），`join`/`exit`/进程退出时 `proc_retire_locked()`
+  归还。此时没有 canary：`process_stack_guard()` 对栈区块直接放行，
+  `process_stack_grow()` 直接拒绝，边界由 PMP 的默认拒绝提供。
+  `apply_protection()` 用**当前线程**的 `stack_top/size`（不是组长的），
+  窗口/brk 仍取组。线程栈因此是私有的；跨线程栈指针会 fault。
 - 两个边界细节：新线程的 sp 初始值正好等于 `stack_top`，第一次系统调用时原来的
   `sp < top` 会把它误判成溢出，改成 `sp <= top`；`stack_used()` 的窗口检查也必须用组
   （线程自己的 `win_size` 是 0，否则 `ps` 的分子恒为 0）。

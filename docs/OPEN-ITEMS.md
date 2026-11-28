@@ -1379,7 +1379,7 @@ x86/RP2040 上这是唯一的栈边界，所以 `user/lib.h` 与 `configs/x86-th
 已通过（worker 的 `printf` 正常）。按进程注册栈区间的完整方案仍未做——只有将来
 合作线程要在有软件守卫的板子上正式使用时才需要。
 
-## 31. 栈区方案：每线程独立栈窗、删除 guard（2026-11-28，提议未实现）
+## 31. 栈区方案：每线程独立栈窗、删除 guard（2026-11-28，C3 原型 2 已实现）
 
 设计见 [`STACK-AREA-DESIGN.md`](STACK-AREA-DESIGN.md)：线程栈（含主线程）从用户区
 顶部向下分配，每栈一个 4/8/16 KiB 窗口，靠默认拒绝提供边界；栈区与数据区之间只
@@ -1388,4 +1388,12 @@ x86/RP2040 上这是唯一的栈边界，所以 `user/lib.h` 与 `configs/x86-th
 x86/RP2040 保留 canary 但只能尽力而为（大帧仍可跳进邻栈），且线程栈指针不再
 能跨线程传递。
 
-未实现；C3 原型与窗口对比是第一步，RP2040/Pico 2 的 T3 需要板子。
+状态：**C3 已实现并实机验收**（`PLAT_STACK_AREA = 16 KiB`，按 16 KiB 增长/收缩；
+主线程 + kthread 栈；`ps` 的 `wink` 是数据窗）。C3 默认镜像 `accept.py` 42/42，
+kthreads 镜像 `kthreadtest`/`prodcons`/`threadbench` 全过；ARM QEMU 的无栈区回退、
+rv32/rv32smp QEMU kthreads 也全过。仍缺：
+
+- `free` 的栈区单独计数（目前 `tasks` 仍是整个用户区）；
+- 1000 次 4K/16K 混合 create/join 的长跑；
+- RP2040/Pico 2 的栈区与 T3/T4（未接板，`NOT RUN`）；
+- ARM 的 landing 删除与 MPU 形状（目前 `PLAT_STACK_AREA = 0`，走旧路）。
