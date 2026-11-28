@@ -1,5 +1,9 @@
 # toscc 增加栈帧检查：帧 ≥ guard 直接拒绝（2026-11-28）
 
+> 已被 [`d19e526`](2026-11-28-toscc-stack-fit-d19e526.md) 取代：判据改成
+> “帧 vs 程序声明的栈”，8 KiB 数组在 `TOS_STACK(16 KiB)` 下可以编译；
+> `-stack-guard` 改名为 `-stack-default`。本卡保留当时的实现与实测。
+
 ```text
 commit:            b088b73  toscc: refuse a function frame that reaches the
                             stack guard
