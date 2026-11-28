@@ -16,18 +16,21 @@
  * territory) and prove the blocks read back.
  *
  * There is no seek syscall yet, so no skip=/seek=: everything is sequential
- * from the start of the file.  bs caps at 4096, one littlefs block, which
- * keeps the buffers out of the way of the 64 KiB task windows.
+ * from the start of the file.  bs caps at 4096 (one littlefs block), but
+ * the buffer is BUF_MAX and a block is written or verified in chunks:
+ * flash, not the syscall, is what a block costs (measured on the C3: 1 MiB
+ * written at bs=4096, 1024 and 512 all take ~9.3 s, and a read+verify
+ * 0.635 s at 4096 vs 0.650 s at 512).  A 512-byte buffer keeps the
+ * multi-call image one span class lower on both ISAs.
+ *
+ * One buffer, not two: the read side regenerates the expected byte as it
+ * walks the block (the LCG step is the same on both sides).
  */
 
-#define MAX_BS 4096
+#define MAX_BS  4096
+#define BUF_MAX 512
 
-/* One buffer, not two: the read side regenerates the expected byte as it
- * walks the block (the LCG step is the same on both sides), so there is no
- * second 4 KiB array.  That array was a third of the multi-call span: with
- * it the image needed 20 KiB on rv32 / 24 KiB on ARM, one span class above
- * what the code itself needs. */
-static uint8_t buf[MAX_BS];
+static uint8_t buf[BUF_MAX];
 
 /* Fill dst with the pattern continuing from *state.  The state carries
  * across calls so consecutive blocks are all different. */
@@ -75,12 +78,20 @@ int applet_dd(int argc, char **argv)
             return 1;
         }
         for (int b = 0; b < count; b++) {
-            pattern_fill(buf, &state, bs);
-            int n = write(fd, buf, bs);
-            if (n != bs) {
-                printf("dd: write error at block %d (%d)\n", b, n);
-                close(fd);
-                return 1;
+            int done = 0;
+
+            while (done < bs) {
+                int chunk = bs - done;
+                if (chunk > BUF_MAX)
+                    chunk = BUF_MAX;
+                pattern_fill(buf, &state, chunk);
+                int n = write(fd, buf, chunk);
+                if (n != chunk) {
+                    printf("dd: write error at block %d (%d)\n", b, n);
+                    close(fd);
+                    return 1;
+                }
+                done += chunk;
             }
         }
         close(fd);
@@ -100,19 +111,30 @@ int applet_dd(int argc, char **argv)
     int bad = 0;
 
     for (int b = 0; b < count && !bad; b++) {
-        int n = read(fd, buf, bs);
-        if (n <= 0) {
-            printf("dd: short read at block %d (%d)\n", b, n);
-            close(fd);
-            return 1;
-        }
-        for (int i = 0; i < n; i++) {
-            state = state * 1664525u + 1013904223u;
-            if (buf[i] != (uint8_t)(state >> 24)) {
-                printf("dd: data mismatch at block %d byte %d\n", b, i);
-                bad = 1;
-                break;
+        int done = 0;
+
+        while (done < bs) {
+            int chunk = bs - done;
+            if (chunk > BUF_MAX)
+                chunk = BUF_MAX;
+            int n = read(fd, buf, chunk);
+            if (n <= 0) {
+                printf("dd: short read at block %d (%d)\n", b, n);
+                close(fd);
+                return 1;
             }
+            for (int i = 0; i < n; i++) {
+                state = state * 1664525u + 1013904223u;
+                if (buf[i] != (uint8_t)(state >> 24)) {
+                    printf("dd: data mismatch at block %d byte %d\n",
+                           b, done + i);
+                    bad = 1;
+                    break;
+                }
+            }
+            if (bad)
+                break;
+            done += n;
         }
     }
     close(fd);
