@@ -71,12 +71,13 @@ def run(target, cycles, commandwait_ms):
     if "KERNEL PANIC" in text or "System halted" in text:
         problems.append("kernel panic")
 
-    grown = text.count("deep: ")
-    if grown < cycles:
-        problems.append("deep ran %d/%d times" % (grown, cycles))
-    intact = text.count("journal intact")
-    if intact < cycles:
-        problems.append("journal intact %d/%d" % (intact, cycles))
+    # deep no longer grows the stack or prints a journal (60cee31): a QEMU
+    # board gives it 32 KiB, so three levels complete silently.  Count the
+    # command echo (the prompt only comes back when it finished) and leave
+    # the kill assertion to the hardware runs; see accept33.py `deep 3`.
+    ran_deep = text.count("deep 3")
+    if ran_deep < cycles:
+        problems.append("deep ran %d/%d times" % (ran_deep, cycles))
 
     raced = text.count("piperace: ok")
     if raced < cycles:

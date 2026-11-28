@@ -20,7 +20,9 @@ toolchain:         go 1.27.3 windows/amd64；clang 23.1.4；LLD 23.1.4
 T0:                PASS（go test ./...、go vet；含 geometry/boardlayers/
                    syscall 表/快照/PMP host harness）
 T1:                PASS 18/18
-T2:                PASS smoke rv32 / rv32smp / arm / x86；compat rv32,arm PASS
+T2:                PASS smoke rv32 / rv32smp / arm / x86；soak 3/3
+                   （rv32/rv32smp/arm，`scripts/soak.py --cycles 3`）；
+                   compat rv32,arm PASS
 T3:                C3 PASS（默认镜像 accept 42/42；free 的 stack area、
                    deep 3 的 TOS_STACK 提示在板上确认）。
                    RP2350 M33 / Hazard3: **NOT RUN，等上板**。
