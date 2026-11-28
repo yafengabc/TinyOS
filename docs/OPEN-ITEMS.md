@@ -1388,14 +1388,50 @@ x86/RP2040 上这是唯一的栈边界，所以 `user/lib.h` 与 `configs/x86-th
 x86/RP2040 保留 canary 但只能尽力而为（大帧仍可跳进邻栈），且线程栈指针不再
 能跨线程传递。
 
-状态：**C3 已实机验收，RP2350 已移植待上板**（`PLAT_STACK_AREA` 是 chip/ISA
-baseline 的事实，初始 16 KiB，按 16 KiB 增长/收缩；具体板子 `base =` 继承）。
-C3 默认镜像 `accept.py` 42/42，kthreads 镜像
+状态：**C3 与 RP2350 四个 Pico 2 镜像已实机验收**（`PLAT_STACK_AREA` 是
+chip/ISA baseline 的事实，初始 16 KiB，按 16 KiB 增长/收缩；具体板子
+`base =` 继承）。C3 默认镜像 `accept.py` 42/42，kthreads 镜像
 `kthreadtest`/`prodcons`/`threadbench` 全过；`SYS_STACKINFO` + `free` 的
 `stack area` 行给出 reserved/live/peak；1000 次 4K/16K 混合 create/join 回到
-基线。RP2350 的 M33（PMSAv8）和 Hazard3（NAPOT）已构建，C3 的 PMP 映射和
-Host harness 已过；**RP2350 的 T3/T4 等用户上板**（`NOT RUN`）。仍缺：
+基线。RP2350 的 T3（2026-11-28，`21c90a8`）：`rpi-pico2` 19/19、
+`rpi-pico2-rv32` 20/20、`rpi-pico2-rv32-smp` 22/22，`deep 3` 四镜像全部按
+`declare TOS_STACK()` + `killing` 被杀；M33 SMP 的 `kthreadtest` 另有一个
+回收竞态，见 §32。仍缺：
 
+- M33 SMP 的退出回收竞态（§32）；
 - RP2040 的栈区与 T3/T4（按计划最后做；`PLAT_STACK_AREA = 0` 旧路）；
 - x86 的栈区（没有 MMU，canary 是当前模型，暂不打算开）；
-- RP2350 上板后 `deep 3`/`prot heap`/`prot stack`/`kthreadtest` 的实测记录。
+- 四个 RP2350 镜像的 T4（10/30 分钟长跑）。
+
+M33 的 landing 曾在代码里是 0xF00 字节（设计写的是 32 B），让 4 KiB 栈实际
+可写约 7.75 KiB，`deep 3` 因此跑完而不是被杀；`21c90a8` 收敛为一个异常帧，
+验收见 `acceptance/2026-11-28-stack-area-pico2-t3-21c90a8.md`。
+
+## 32. M33 栈区：SMP 上被杀线程的 slot/栈回收竞态（2026-11-28）
+
+`rpi-pico2-smp` 上 `kthreadtest` 在“线程栈溢出只杀该线程”之后失败：随后
+创建的 cwd 线程在第一个 SVC 处出异常（`psp=0x2007dfe0` 落在它自己的
+`2007d000..2007e000` 块内），两条 cwd 检查 FAIL；有时前台进程直接退出
+（`tos>` 返回）。M33 单核、Hazard3 单核/双核都通过。
+
+- 对照组 `6394cfe^`（M33 还没有栈区）：同一镜像 `kthreadtest` all ok，
+  所以是栈区移植（`6394cfe`）引入的；
+- 当前树把溢出用例临时 `#if 0` 掉：cwd 两项 PASS，触发点就是“溢出线程被杀”；
+- 把 `ARM_STACK_LANDING` 退回 `0xF00` 仍能复现，和 `21c90a8` 无关；
+- 诊断镜像显示归属正确：CPU1 上 `main=0` 的 worker，`psp=0x2007cfd0` 在
+  栈底下方 0x30，`cfsr=0x10`（MSTKERR），`process_thread_exit` 唤醒 joiner、
+  `finishing=0`；之后新线程复用同一块并在第一个 SVC 处异常。
+
+判断是**退出线程还在 `sched_switch()` 里，slot/栈块已经被另一核上的 joiner
+回收并重新分配**，新线程的初始帧/上下文被覆盖。修法要把“退出线程已离开
+CPU”作为回收 slot 与栈块的前置条件（退出侧只进 zombie，由 joiner 确认后再
+retire，或延迟回收链表），会影响所有 SMP 端口，需要单独一轮四镜像回归。
+
+复现（当前树，Pico 2）：
+
+```text
+python scripts/rp2350/accept33.py --image rpi-pico2-smp -p COM19 --uf2 build/tinyos-rpi-pico2-smp.uf2
+python scripts/rp2350/kthread_accept.py --uf2 build/tinyos-rpi-pico2-smp.uf2 --no-flash --port COM19
+```
+
+卡片：`acceptance/2026-11-28-stack-area-pico2-t3-21c90a8.md`。
