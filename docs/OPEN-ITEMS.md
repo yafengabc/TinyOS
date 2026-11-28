@@ -1378,3 +1378,13 @@ x86/RP2040 上这是唯一的栈边界，所以 `user/lib.h` 与 `configs/x86-th
 注明了“合作线程不推荐，新代码用 thread_create()”。x86-threads 下 `threadtest`
 已通过（worker 的 `printf` 正常）。按进程注册栈区间的完整方案仍未做——只有将来
 合作线程要在有软件守卫的板子上正式使用时才需要。
+
+## 31. 栈区方案：每线程独立栈窗、删除 guard（2026-11-28，提议未实现）
+
+设计见 [`STACK-AREA-DESIGN.md`](STACK-AREA-DESIGN.md)：线程栈（含主线程）从用户区
+顶部向下分配，每栈一个 4/8/16 KiB 窗口，靠默认拒绝提供边界；栈区与数据区之间只
+保留一个 4 KiB 空洞，删除所有 per-window guard。收益是每个带栈实体省 4 KiB、每任务
+少一条 PMP/MPU 区域、堆与栈分离；代价是每个进程两个窗口、ARM landing 消失、
+x86/RP2040 仍需 canary，且线程栈指针不再能跨线程传递。
+
+未实现；C3 原型与窗口对比是第一步，RP2040/Pico 2 的 T3 需要板子。
