@@ -644,6 +644,50 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* The stack area's own reclaim test: 1000 cycles alternating 4 KiB and
+     * 16 KiB.  `live` includes the leader and shell stacks, so it is
+     * compared with the value before the loop, not with zero; `reserved`
+     * must come back to the same size because the 16 KiB block is the step
+     * that growth added.  A board without an area prints N/A: there the
+     * 16 KiB stacks would come from sbrk, and 1000 of them would exhaust
+     * the heap for a reason this test is not about. */
+    {
+        struct stackarea a = {0, 0, 0, 0}, b = {0, 0, 0, 0};
+        int i, code, failed = 0;
+
+        if (stackinfo(&a) != 0) {
+            ok(0, "stackinfo");
+        } else if (a.reserved == 0) {
+            printf("kthreadtest: N/A 1000 mixed create/join (no stack area)\n");
+        } else {
+            for (i = 0; i < 1000; i++) {
+                unsigned bytes = (i & 1) ? 16u * 1024u : 4u * 1024u;
+
+                tid = thread_create(give42, 0, bytes);
+                if (tid < 0) {
+                    failed = i ? i : -1;
+                    break;
+                }
+                code = -1;
+                if (thread_join(tid, &code) != 0 || code != 42) {
+                    failed = 1000 + i;
+                    break;
+                }
+            }
+            if (stackinfo(&b) != 0)
+                failed = -2;
+            printf("kthreadtest: 1000 mixed 4K/16K create/join, live %u -> %u, "
+                   "reserved %u -> %u, peak %u%s\n",
+                   a.live, b.live, a.reserved, b.reserved, b.peak,
+                   failed ? " (stopped early)" : "");
+            ok(failed == 0, "1000 mixed create/join cycles complete");
+            ok(failed != 0 || b.live == a.live,
+               "every stack block was returned");
+            ok(failed != 0 || b.reserved == a.reserved,
+               "the stack area shrank back to its baseline");
+        }
+    }
+
     /* Two CPUs, one break: sbrk() must hand out disjoint blocks. */
     {
         int tids[SMP_THREADS];
