@@ -41,6 +41,9 @@ for (int i = 0; i < n; i++) {
 | ARM span | 24 KiB（hi 0x5470） | **20 KiB**（hi 0x4450） |
 | ARM 窗口 | 32 KiB | **28 KiB** |
 
+> 后续：[`e59fb29`](2026-11-28-dd-512-chunks-e59fb29.md) 把缓冲再降到
+> 512 B（块内分片），C3 12 KiB span / 20 KiB 窗口，ARM 16 / 24。
+
 打了个 class 的翻身仗：4 KiB 的 .bss 正好压在 20/24 KiB 那一档上。
 
 ## 验证
