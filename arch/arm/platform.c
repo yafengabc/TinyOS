@@ -123,9 +123,25 @@ regs_t *arm_handle_fault(regs_t *f)
             uint32_t cfsr = mmio_read32(ARM_CFSR);
             if (cfsr & (ARM_CFSR_MSTKERR | ARM_CFSR_MUNSTKERR)) {
                 kprintf("\n[pid %d] stack overflow (exception frame could not be stacked); "
-                        "no room to grow it; killing\n",
+                        "no room to grow it; declare TOS_STACK() for the depth "
+                        "you need; killing\n",
                         process_current_pid());
                 mmio_write32(ARM_CFSR, cfsr);
+                return process_exit(f, 139);
+            }
+        }
+        /* The same overflow with a usable frame: a store below stack_low
+         * hit the guard and the exception frame fitted in the landing
+         * slot.  Report it as a stack overflow with the fix, not as a
+         * register dump that looks like a wild pointer. */
+        {
+            uint32_t sp = plat_frame_get_user_sp(f);
+
+            if (process_stack_overflow_at(sp)) {
+                kprintf("\n[pid %d] stack overflow (sp 0x%08x left the stack); "
+                        "no room to grow it; declare TOS_STACK() for the depth "
+                        "you need; killing\n",
+                        process_current_pid(), (unsigned)sp);
                 return process_exit(f, 139);
             }
         }

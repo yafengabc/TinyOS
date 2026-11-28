@@ -30,6 +30,13 @@ const uint32_t PLAT_APP_GRAIN  = 0x00001000u;   /* 4 KiB, 96 windows       */
 const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
+/* Top of the user region: the first 16 KiB of task stacks, growing downward
+ * in 16 KiB steps (docs/STACK-AREA-DESIGN.md).  PMSAv8 describes an area by
+ * base+limit, so the 4/8/16 KiB blocks need no power-of-two alignment; the
+ * top of SRAM is 16 KiB aligned, which is all the growth step needs.  Every
+ * board built on this chip baseline inherits the value through `base =`. */
+const uint32_t PLAT_STACK_AREA = 16u * 1024u;
+
 /* littlefs starts 512 KiB into the flash (see rpLfsOffset in
  * internal/build/uf2.go) and runs to the end of the chip.  The ATK board's
  * W25Q32 is 4 MiB, measured by XIP address wrap-around (+2 MiB reads 0xFF,

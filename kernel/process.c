@@ -1698,6 +1698,14 @@ static void layout_check(void)
         if (PLAT_STACK_AREA > area)
             panic("task layout: a %u KiB stack area does not fit the %u KiB user area",
                   PLAT_STACK_AREA / 1024u, area / 1024u);
+        /* Keep room for the hole and at least the smallest data window:
+         * otherwise the board boots and then refuses every exec with "no
+         * room", which looks like a leak. */
+        if (PLAT_STACK_AREA + STACK_AREA_UNIT + min_win > area)
+            panic("task layout: stack area %u KiB + %u KiB hole + %u KiB window "
+                  "does not fit the %u KiB user area",
+                  PLAT_STACK_AREA / 1024u, STACK_AREA_UNIT / 1024u,
+                  min_win / 1024u, area / 1024u);
     }
 }
 
@@ -4401,11 +4409,19 @@ int process_stack_grow(uint32_t addr, uint32_t sp)
     if (!p || !p->proc || p->proc->win_size == 0 || p->stack_size == 0)
         return 0;
     /* A stack-area block is fixed: the bytes below it are another block, a
-     * free unit or the 4 KiB hole, never this task's heap.  The fault is an
-     * overflow, and killing the task is the whole answer. */
+     * free unit or the 4 KiB hole, never this task's heap.  Only a call
+     * whose sp actually left the block is an overflow; every other user
+     * fault (prot heap, prot null, a wild pointer with sp still inside)
+     * falls through quietly so the generic fault report stays the one
+     * message. */
     if (p->stack_top >= p->stack_size &&
-        stack_in_area(p->stack_top - p->stack_size, p->stack_size))
+        stack_in_area(p->stack_top - p->stack_size, p->stack_size)) {
+        if (sp < p->stack_top - p->stack_size)
+            kprintf("\n[pid %d] %u KiB stack and no room to grow it; "
+                    "declare TOS_STACK() for the depth you need\n",
+                    thread_pid(p), p->stack_size / 1024u);
         return 0;
+    }
 #ifdef TOS_KTHREADS
     /* A worker's stack is a block inside the process heap: the bytes below
      * it are another allocation, not a hole the stack may take.  Overflow is

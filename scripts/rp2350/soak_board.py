@@ -62,10 +62,15 @@ CYCLE = ["deep 3", "mem", "wheap", "piperace", "ls /bin | wc",
 BUILTINS = {"ls", "ps", "free", "mem", "uptime", "help", "cat", "echo",
             "df", "rm", "cd", "pwd", "run", "wheap"}
 
+# The stack-area row is optional (only boards with PLAT_STACK_AREA print it)
+# and deliberately not captured: its `peak` is a high-water mark, so a soak
+# that grew the area once would otherwise look like drift on every later run.
 FREE = re.compile(
     r"kernel heap\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+).*?"
     r"SRAM\s+(\d+)\s+(\d+)\s+kernel\s+(\d+)\s+(\d+)\s+"
-    r"tasks\s+(\d+)\s+(\d+)\s+unused\s+(\d+)\s+(\d+)", re.S)
+    r"tasks\s+(\d+)\s+(\d+)\s+"
+    r"(?:stack area\s+\d+\s+\d+[^\n]*\n\s*)?"
+    r"unused\s+(\d+)\s+(\d+)", re.S)
 
 out = io.open(LOG, "w", encoding="utf-8", errors="replace")
 T0 = time.time()
@@ -196,7 +201,9 @@ while True:
             break
         low = t.lower()
         if cmd == "deep 3":
-            if "stack grown" in low and "journal intact" in low:
+            # No implicit growth since 2026-11-28: the success condition is
+            # the kill with the TOS_STACK guidance, on both arches.
+            if "declare tos_stack" in low and "killing" in low:
                 deep_ok += 1
         elif cmd == "piperace":
             if "piperace: ok" in low:

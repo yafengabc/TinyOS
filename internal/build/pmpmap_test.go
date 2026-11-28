@@ -59,6 +59,8 @@ func TestRP2350PmpWindowMap(t *testing.T) {
 		"rcc: SPLIT does not fit, SNAP chosen",
 		"csc: SPLIT kept",
 		"tiny: SPLIT kept",
+		"area: SPLIT kept",
+		"rcc-area: ",
 		"oversized: refused",
 		"ok",
 	} {

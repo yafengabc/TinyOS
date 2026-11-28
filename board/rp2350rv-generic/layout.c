@@ -25,6 +25,13 @@ const uint32_t PLAT_APP_GRAIN  = 0x00004000u;   /* 16 KiB, 24 windows     */
 const uint32_t PLAT_STACK_BYTES = 4u * 1024u;
 const uint32_t PLAT_HEAP_GUARD  = 4u * 1024u;
 
+/* Top of the user region: 16 KiB of task stacks, growing in 16 KiB steps.
+ * Every block is a naturally aligned power of two, which is exactly what a
+ * NAPOT entry needs; the stack is no longer tied to the window grain because
+ * it is outside the window.  This overlays the ARM baseline's value; a board
+ * built on either baseline inherits it. */
+const uint32_t PLAT_STACK_AREA = 16u * 1024u;
+
 /* littlefs geometry, same contract as the ARM layout: the numbers come from
  * board.conf through board_config.h and board_config_check() compares them. */
 #if TOS_HAS_FLASH

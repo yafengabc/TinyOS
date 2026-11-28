@@ -269,6 +269,46 @@ int main(void)
             printf("tiny: SPLIT kept\n");
     }
 
+    /* The stack-area layout: a small data window at the bottom, a 16 KiB
+     * stack block at the top of the user region, and the hole between them
+     * is most of the map.  The mapper's win_end is the stack top (not the
+     * data window's end), which is what process.c passes after
+     * PLAT_STACK_AREA; SPLIT must still fit in seven blocks. */
+    {
+        struct win area = {
+            "area", base, 0x20080000u - base,
+            base + 12u * 1024u, base + 28u * 1024u,
+            0x20080000u - 16u * 1024u
+        };
+        int mode = check_window(&area, addr, cfg);
+
+        if (mode != PMP_MAP_SPLIT)
+            problem("area window did not keep the split map",
+                    (uint32_t)mode, 0);
+        else
+            printf("area: SPLIT kept\n");
+    }
+
+    /* rcc on the area layout: a 68 KiB image and 40 KiB data window at the
+     * bottom, the 16 KiB stack at the top.  The window no longer contains
+     * the stack, so the split is the same shape as the old map minus the
+     * stack/guard adjacency; WINDOW would cover the hole and break
+     * `prot heap`, so any of the first three policies is acceptable. */
+    {
+        struct win rcc_area = {
+            "rcc-area", base, 0x20080000u - base,
+            base + 28u * 1024u, base + 68u * 1024u,
+            0x20080000u - 16u * 1024u
+        };
+        int mode = check_window(&rcc_area, addr, cfg);
+
+        if (mode == PMP_MAP_WINDOW)
+            problem("rcc-area degraded to WINDOW (guard hole lost)",
+                    (uint32_t)mode, 0);
+        else
+            printf("rcc-area: %s kept\n", mode_name(mode));
+    }
+
     /* Sweep the real range of windows: 32..192 KiB, every page-granular
      * code/data split with at least the 4 KiB guard below the stack. */
     for (uint32_t size = 32u * 1024u; size <= 192u * 1024u;
