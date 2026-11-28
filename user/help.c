@@ -11,6 +11,9 @@
 #include "lib.h"
 #include "tools/applets.h"
 
+/* Prints strings and exits: no heap, no depth.  4 KiB, no grow reserve. */
+TOS_STACK(4 * 1024);
+
 int main(void)
 {
     puts("TinyOS help\n\n");

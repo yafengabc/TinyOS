@@ -1,6 +1,9 @@
 #include "lib.h"
 #include "tools/applets.h"
 
+/* Lists one directory level: no heap, no deep chain.  4 KiB, no grow. */
+TOS_STACK(4 * 1024);
+
 /* One entry in long form: a type letter, the name (with a trailing slash for
  * directories), padded out to a fixed column, then the size, or "<dir>" /
  * "<dev>" for things that have no byte count.  printf has no %Ns, so the

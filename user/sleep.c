@@ -21,6 +21,10 @@
 
 #define SLEEP_MAX_MS 3600000        /* the kernel's clamp, stated instead */
 
+/* A sleeper holds its window for the whole nap: 4 KiB stack, no grow, so
+ * a background sleep costs 12 KiB instead of 16. */
+TOS_STACK(4 * 1024);
+
 static int parse_ms(const char *s, int *out)
 {
     long v = 0;

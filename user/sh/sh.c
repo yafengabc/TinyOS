@@ -1,5 +1,11 @@
 #include "lib.h"
 
+/* The shell is resident and its depth is bounded: source nests four deep
+ * (MAX_SOURCE) and the parser never recurses, so 4 KiB is the whole stack.
+ * Declaring it removes the kernel's 4 KiB grow reserve - without the note
+ * the window carries slack the shell can never use (28 -> 24 KiB). */
+TOS_STACK(4 * 1024);
+
 #define MAX_ARGS   8
 #define LINE_MAX   256
 /* `source` nests in this process, so the only real limit is the stack. */

@@ -9,6 +9,11 @@
 #include "lib.h"
 #include "tools/applets.h"
 
+/* One note for the whole multi-call binary: no applet allocates and the
+ * big buffers are static, so 4 KiB covers the deepest chain.  No grow
+ * reserve - the window is exact. */
+TOS_STACK(4 * 1024);
+
 #define DECL(n) int applet_##n(int argc, char **argv);
 TOS_APPLETS(DECL)
 #undef DECL
