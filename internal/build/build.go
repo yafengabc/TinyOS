@@ -1690,6 +1690,115 @@ func (b *Builder) checkUserStack(name, elfPath string, objs []string) error {
 		name, maxFn, maxFrame, stack, want)
 }
 
+// defaultHeapAsk is the heap a program gets when it uses malloc/sbrk but
+// declares no TOS_HEAP.  A window is span + stack + heap + guard and every
+// term is a multiple of the grain, so without this a malloc user starts with
+// exactly zero heap and its first malloc returns NULL - the failure is
+// silent unless the program checks.  8 KiB is the floor that covers a couple
+// of cooperative thread stacks and a small buffer; anything bigger stays an
+// explicit TOS_HEAP.
+const defaultHeapAsk = 8 * 1024
+
+// heapAPI is what a program references when it needs a heap.  malloc/free's
+// allocator and the two thread creators (their stacks come from the heap)
+// are the only entry points; free alone needs nothing.
+var heapAPI = map[string]bool{
+	"malloc": true, "calloc": true, "realloc": true, "sbrk": true,
+	"thread_create": true, "co_create": true,
+}
+
+// heapUse reports whether any of a program's own objects references a heap
+// API, and whether one of them already carries a TOS_HEAP note (type 2 in
+// .note.tos).  Common objects are not scanned: lib.c defines malloc whether
+// or not the program calls it, and thread.c/kthread.c only allocate when the
+// program calls their create function, which its own object shows.
+func heapUse(objs []string) (uses, declares bool, err error) {
+	for _, path := range objs {
+		f, err := elf.Open(path)
+		if err != nil {
+			return false, false, err
+		}
+		if sec := f.Section(".note.tos"); sec != nil {
+			data, derr := sec.Data()
+			if derr == nil {
+				for off := 0; off+12 <= len(data); {
+					namesz := uint64(binary.LittleEndian.Uint32(data[off:]))
+					descsz := uint64(binary.LittleEndian.Uint32(data[off+4:]))
+					typ := binary.LittleEndian.Uint32(data[off+8:])
+					nameOff := uint64(off) + 12
+					if namesz > uint64(len(data))-nameOff {
+						break
+					}
+					namePad := (namesz + 3) &^ 3
+					descOff := nameOff + namePad
+					if descOff > uint64(len(data)) ||
+						descsz > uint64(len(data))-descOff {
+						break
+					}
+					if namesz >= 6 && descsz >= 4 &&
+						string(data[nameOff:nameOff+6]) == "TinyOS" && typ == 2 {
+						declares = true
+					}
+					off = int(descOff + ((descsz + 3) &^ 3))
+				}
+			}
+		}
+		syms, serr := f.Symbols()
+		if serr == nil {
+			for _, sym := range syms {
+				if sym.Section == elf.SHN_UNDEF && heapAPI[sym.Name] {
+					uses = true
+				}
+			}
+		}
+		f.Close()
+	}
+	return uses, declares, nil
+}
+
+// heapNoteObject assembles a 24-byte TOS_HEAP(8192) note object for a
+// program that uses the heap but declares no size.  The note macro lives in
+// user/lib.h; this is the same struct written out so the build can add it
+// without touching the source.
+func (b *Builder) heapNoteObject(name string, isa []string) (string, error) {
+	dir := filepath.Join(b.BuildDir, "user", "heapnote")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	src := filepath.Join(dir, name+".S")
+	obj := filepath.Join(dir, name+".o")
+	asm := "\t.section .note.tos,\"a\",@note\n" +
+		"\t.balign 4\n" +
+		"\t.word 7\n" +
+		"\t.word 4\n" +
+		"\t.word 2\n" +
+		"\t.ascii \"TinyOS\\0\"\n" +
+		"\t.balign 4\n" +
+		fmt.Sprintf("\t.word %d\n", defaultHeapAsk)
+	if err := os.WriteFile(src, []byte(asm), 0o644); err != nil {
+		return "", err
+	}
+	if err := b.compile(src, obj, nil, isa...); err != nil {
+		return "", err
+	}
+	return obj, nil
+}
+
+// defaultHeapNote returns the object to link for a program that uses the
+// heap but declares no TOS_HEAP, or "" when there is nothing to add.
+func (b *Builder) defaultHeapNote(name string, objs []string, flags []string) (string, error) {
+	uses, declares, err := heapUse(objs)
+	if err != nil {
+		return "", err
+	}
+	if !uses || declares {
+		return "", nil
+	}
+	b.logf("      HEAP bin/%s: no TOS_HEAP, default %d KiB\n",
+		name, defaultHeapAsk/1024)
+	return b.heapNoteObject(name, isaFrom(flags))
+}
+
 func (b *Builder) buildUser() ([]string, error) {
 	b.logf("user programs\n")
 	udir := filepath.Join(b.Root, "user")
@@ -1905,6 +2014,13 @@ func (b *Builder) buildUser() ([]string, error) {
 		}
 		out := filepath.Join(b.BuildDir, "user", "bin", name)
 		objs := append(append([]string{}, commonA...), progsA[name]...)
+		note, err := b.defaultHeapNote(name, progsA[name], userCFlags)
+		if err != nil {
+			return nil, err
+		}
+		if note != "" {
+			objs = append(objs, note)
+		}
 		if err := b.linkPIE(objs, filepath.Join(udir, "user.ld"), out); err != nil {
 			return nil, err
 		}
@@ -1938,6 +2054,13 @@ func (b *Builder) buildUser() ([]string, error) {
 		for _, name := range straddlers {
 			out := filepath.Join(b.BuildDir, "user", "bin", name)
 			objs := append(append([]string{}, commonB...), progsB[name]...)
+			note, err := b.defaultHeapNote(name, progsB[name], userCFlags)
+			if err != nil {
+				return nil, err
+			}
+			if note != "" {
+				objs = append(objs, note)
+			}
 			if err := b.linkPIE(objs, filepath.Join(udir, "user.ld"), out); err != nil {
 				return nil, err
 			}

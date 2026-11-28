@@ -188,6 +188,7 @@ func run(o options) error {
 		return fmt.Errorf("unknown target %q", o.target)
 	}
 	native32.ResetFrames()
+	heapUsed = false
 	if o.packOnly {
 		if len(o.inputs) != 1 {
 			return fmt.Errorf("-pack takes exactly one ELF")
@@ -304,6 +305,7 @@ func run(o options) error {
 	for _, src := range []string{
 		filepath.Join(tos, "user", "lib.c"),
 		filepath.Join(tos, "user", "syscall.c"),
+		filepath.Join(tos, "user", "heap.c"),
 	} {
 		if err := build(src, 0); err != nil {
 			return err
@@ -370,7 +372,11 @@ func run(o options) error {
 		return err
 	}
 	out := outputPath(o.out, inputs[0], ".tos")
-	res, err := lz4tos.Pack(elf, out)
+	heap := uint32(0)
+	if heapUsed {
+		heap = defaultHeapAsk
+	}
+	res, err := lz4tos.PackHeap(elf, out, heap)
 	if err != nil {
 		return err
 	}
@@ -661,6 +667,7 @@ func compileOne(src string, t target, incs, defs []string, o options, inlineLimi
 	if inlineLimit > 0 {
 		native32.InlineSmall(m, inlineLimit)
 	}
+	noteHeapUse(m)
 	asmText, err := emitModule(m, t)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", src, err)
@@ -720,6 +727,33 @@ func checkStackFit(fn string, frame, declared, fallback int) error {
 // emitModule runs the back end for one translation unit.  The frames it
 // records feed the stack-size check after the link, where the program's
 // own TOS_STACK (if any) is known.
+// defaultHeapAsk is what a toscc-built program gets when it calls a heap
+// API but declares no TOS_HEAP; the build (internal/build) uses the same
+// number for clang programs.  Without it the window leaves exactly zero
+// heap and the first malloc returns NULL.
+const defaultHeapAsk = 8 * 1024
+
+var heapAPI = map[string]bool{
+	"malloc": true, "calloc": true, "realloc": true, "sbrk": true,
+	"thread_create": true, "co_create": true,
+}
+
+// heapUsed is set by compileOne when an input module calls a heap API;
+// run() resets it before compiling.
+var heapUsed bool
+
+func noteHeapUse(m *native32.Module) {
+	for _, f := range m.Funcs {
+		for _, b := range f.Blocks {
+			for _, in := range b.Insts {
+				if in.Op == "call" && !in.Indirect && heapAPI[in.Callee] {
+					heapUsed = true
+				}
+			}
+		}
+	}
+}
+
 func emitModule(m *native32.Module, t target) (string, error) {
 	if t.Arch == "arm" {
 		return native32.EmitARM(m, t.CPU)

@@ -222,6 +222,14 @@ func WindowHint(raw []byte) (Hint, error) {
 
 // Pack compresses elfPath into the LZ4TOS envelope at outPath.
 func Pack(elfPath, outPath string) (Result, error) {
+	return PackHeap(elfPath, outPath, 0)
+}
+
+// PackHeap is Pack with a default heap for a program that carries no
+// TOS_HEAP note: a non-zero defaultHeap is written into the envelope
+// only when the ELF itself asks for none.  The kernel reads the hint
+// from this header, so the note inside the image is not touched.
+func PackHeap(elfPath, outPath string, defaultHeap uint32) (Result, error) {
 	raw, err := os.ReadFile(elfPath)
 	if err != nil {
 		return Result{}, err
@@ -232,6 +240,9 @@ func Pack(elfPath, outPath string) (Result, error) {
 	hint, err := WindowHint(raw)
 	if err != nil {
 		return Result{}, fmt.Errorf("window hint: %w", err)
+	}
+	if hint.HeapAsk == 0 {
+		hint.HeapAsk = defaultHeap
 	}
 	dst := make([]byte, lz4CompressBound(len(raw)))
 	clen := lz4CompressBlock(raw, dst)

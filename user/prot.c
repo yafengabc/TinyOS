@@ -1,5 +1,11 @@
 #include "lib.h"
 
+/* sbrk(0) is only a read of the current break, but the build sees the symbol
+ * and would give this program the default heap.  The zero-sized note says
+ * "heap used, none wanted": the heap probe must write into the uncovered
+ * region past brk, and a reserved heap would be the wrong test. */
+TOS_HEAP(0);
+
 /* Break the task's memory protection on purpose, one rule at a time.
  *
  * On a board with PMP each case dies with a trap naming the fault, and the
