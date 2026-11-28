@@ -18,10 +18,11 @@
 
 #ifdef TOS_KTHREADS
 
-/* 18 threads x (4112 B stack + 8 B start record) = 74,160 B, plus ~8 KiB
- * of startup malloc.  At a 16 KiB window grain 72 KiB leaves only ~3.6 KiB
- * for the last thread, so thread_create() silently returns -1 on real
- * hardware.  QEMU's 64 KiB grain rounds the window up and masks it. */
+/* The heap is malloc and the 512-byte fallback stacks of the exhaustion
+ * test, not the 4 KiB thread stacks: on a stack-area board (the C3) those
+ * come from the area at the top of the user region and cost no heap.  On a
+ * board without one, 18 x (4112 B + 8 B record) is ~74 KiB and the 96 KiB
+ * keeps the last thread from failing for want of a window. */
 TOS_HEAP(96 * 1024);
 TOS_STACK(4 * 1024);
 
@@ -149,7 +150,7 @@ static void slow(void *arg)
     if (slow_frame[0] == 0x7f || slow_frame[sizeof(pad) - 1] == 0x7f)
         thread_exit(9);                /* never: keeps the frame live */
     woke = 1;
-    thread_exit(*(int *)arg);
+    thread_exit((int)arg);
 }
 
 #define YTHREADS 4
@@ -177,10 +178,11 @@ static void smp_sbrk(void *arg)
     uint32_t sum = 0;
 
     /* The baseline is taken by the leader after this thread's stack has been
-     * allocated.  thread_create() gets the stack from malloc, and malloc
-     * asks sbrk() for a new arena when the free list has nothing big enough;
-     * letting that happen inside the measured window counted the allocator's
-     * growth as if the threads had asked for those bytes. */
+     * allocated.  On a board without a stack area thread_create() gets the
+     * stack from malloc, and malloc asks sbrk() for a new arena when the
+     * free list has nothing big enough; letting that happen inside the
+     * measured window counted the allocator's growth as if the threads had
+     * asked for those bytes. */
     while (!smp_go)
         ;
 
@@ -247,7 +249,7 @@ static volatile int fd_read_result = -2;
 
 static void fduser(void *arg)
 {
-    int fd = *(int *)arg;
+    int fd = (int)arg;
     char b;
 
     fd_read_result = read(fd, &b, 1);   /* 1 while the file is open */
@@ -289,7 +291,7 @@ static void forever(void *arg)
 
 static void pipe_blocked(void *arg)
 {
-    int fd = *(int *)arg;
+    int fd = (int)arg;
     char b;
 
     (void)read(fd, &b, 1);          /* sleeps on the empty pipe */
@@ -305,7 +307,7 @@ static int probe_pipes(void)
         printf("kthreadtest: FAIL pipe()\n");
         return 1;
     }
-    tid = thread_create(pipe_blocked, &fds[0], 4096);
+    tid = thread_create(pipe_blocked, (void *)fds[0], 4096);
     if (tid <= 0) {
         printf("kthreadtest: FAIL create the blocked reader\n");
         return 1;
@@ -327,7 +329,7 @@ static void churn_born(void *arg)
     /* The window this closes: created into a group that is exiting, the
      * new thread can be handed a proc slot that has already been recycled,
      * and then reads some other program's pid. */
-    if (getpid() != *(int *)arg)
+    if (getpid() != (int)arg)
         churn_bad = 3;
     thread_exit(0);
 }
@@ -339,7 +341,7 @@ static void churn_worker(void *arg)
 
     (void)arg;
     while (churn_go) {
-        tid = thread_create(churn_born, &me, 512);
+        tid = thread_create(churn_born, (void *)me, 512);
         if (tid <= 0)
             break;                  /* slots gone: the end, not a defect */
         if (thread_join(tid, 0) != 0)
@@ -542,15 +544,18 @@ int main(int argc, char *argv[])
 
     {
         uint32_t t0, t1;
-        int v = 7;
 
         /* Deterministic overlap test: the thread sleeps 200 ms and only then
          * sets `woke`; the leader sleeps 50 ms and looks.  If sleep() parked
          * the whole process (as the cooperative library does), the leader
-         * could not observe woke == 0. */
+         * could not observe woke == 0.
+         *
+         * The exit code travels as the integer argument: since thread stacks
+         * are private, a pointer to the leader's stack may fault in the
+         * thread (docs/REAL-THREADS.md). */
         woke = 0;
         t0 = clock_ms();
-        tid = thread_create(slow, &v, 4096);
+        tid = thread_create(slow, (void *)7, 4096);
         sleep(50);
         ok(woke == 0, "leader ran while the thread was still asleep");
         /* The thread slot now has its own stack range (S3b): ps must show a
@@ -572,7 +577,8 @@ int main(int argc, char *argv[])
 
         ok(fd >= 0, "open readme.txt in the leader");
         fd_read_result = -2;
-        tid = thread_create(fduser, &fd, 4096);
+        /* The fd, not a pointer to it: the thread has its own stack. */
+        tid = thread_create(fduser, (void *)fd, 4096);
         sleep(20);
         ok(fd_read_result == 1, "thread read through the shared fd table");
         close(fd);
@@ -676,12 +682,15 @@ int main(int argc, char *argv[])
            "concurrent sbrk returns each block once");
     }
 
-    /* The protection units describe the process, not the thread: a switch
-     * between two of its threads must reuse them.  If it did not, the count
-     * of programs below would grow with the number of yields. */
+    /* Since the stack area, each thread's stack is its own protection
+     * region, so a sibling switch programs the unit once - not more.  The
+     * count below is the check: at most one set per switch, which is what
+     * catches a per-syscall reprogram storm.  (Before the area the stacks
+     * shared the heap region and the expected delta was zero.) */
     {
         struct schedstat a, b;
         int ids[YTHREADS];
+        uint32_t sw;
         int i, code, bad = 0;
 
         for (i = 0; i < YTHREADS; i++) {
@@ -702,10 +711,11 @@ int main(int argc, char *argv[])
         for (i = 0; i < YTHREADS; i++)
             bad |= yran[i] != YROUNDS;
         ok(!bad, "join yielding threads and all rounds ran");
-        ok(b.prot - a.prot <= 2,
-           "sibling switches reused the protection regions");
+        sw = b.switches - a.switches;
+        ok(b.prot - a.prot <= sw + 2,
+           "sibling switches program the regions at most once each");
         printf("kthreadtest: %u sibling switch(es), %u region set(s)\n",
-               b.switches - a.switches, b.prot - a.prot);
+               sw, b.prot - a.prot);
     }
 
     /* Blocking mutex: sleep while taken, hand off on unlock, and release if
