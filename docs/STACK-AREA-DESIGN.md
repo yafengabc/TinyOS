@@ -1,11 +1,13 @@
 # 栈区设计：每线程独立栈窗，无 guard（草案，2026-11-28）
 
-状态：**原型 2 已实现（2026-11-28，仅 C3）**：栈区在用户区顶部，初始 16 KiB，
-按 16 KiB 步进向下增长、空闲时缩回；数据窗从底部向上分配，上界是
-`stack_area_low - 4 KiB`。主线程和 kthread 的栈都从栈区分配，`join`/`exit`/
-进程退出归还；C3 每窗口的 4 KiB guard 已删除，`ps` 的 `wink` 是数据窗、
-`stk/sz` 是栈窗。其它板子（`PLAT_STACK_AREA = 0`）仍走旧路径，x86/RP2040 的
-canary 保留。原型 1 的固定 64 KiB 已被替换。数字以 C3（rv32，4 KiB grain）为准。
+状态：**原型 2 已实现（2026-11-28：C3、RP2350 M33、RP2350 Hazard3）**：栈区在
+用户区顶部，初始 16 KiB，按 16 KiB 步进向下增长、空闲时缩回；数据窗从底部
+向上分配，上界是 `stack_area_low - 4 KiB`。主线程和 kthread 的栈都从栈区分配，
+`join`/`exit`/进程退出归还；每窗口的 4 KiB guard 已删除，`ps` 的 `wink` 是数据窗、
+`stk/sz` 是栈窗。`PLAT_STACK_AREA` 是 chip/ISA baseline 的事实（C3 16 KiB、
+RP2350 两个 baseline 各 16 KiB），具体板子通过 `base =` 继承。RP2040 和
+x86 仍是 `PLAT_STACK_AREA = 0` 的旧路径，canary 保留；RP2350 的 T3 等上板。
+数字以 C3（rv32，4 KiB grain）为准，RP2350 的 4/16 KiB grain 在验收卡里。
 
 ## 1. 目标
 
@@ -70,13 +72,12 @@ stack       当前线程的栈窗
   的 2 的幂（4/8/16 KiB，QEMU 板 32 KiB），申请时按需二分、释放时与伙伴合并。
   这样每次 create/join 都会回到空闲链，不会出现 sbrk 那种“只升不降”；
   混合大小也不会像 first-fit 那样把 16 KiB 洞切成碎片；
-- 计数器：`free` 和 `/proc/mem` 暴露栈区的 used / free / peak，测试用它判断
-  “1000 次 create/join 后回到基线”；
+- 计数器：`SYS_STACKINFO`（`struct stackarea`）暴露 reserved / live / peak，
+  `free` 和 `kthreadtest` 用它判断“1000 次 create/join 后回到基线”；
 - 耗尽：`thread_create` 返回 -1，不部分分配、不泄漏；
-- 数据窗沿用现有 `win_alloc`，但放置必须给栈区留出扩展空间：要么数据窗从
-  另一端（高地址）向下放，要么 `win_alloc` 的上界跟着栈区当前边界走并在
-  扩展时重算。前者更简单，代价是窗口放置策略和 `winlayout` 的既有断言要
-  一起改；后者需要一个固定 headroom，等于换一种固定预留。推荐前者；
+- 数据窗沿用现有 `win_alloc`，上界跟着栈区当前边界走（`area_low - 4 KiB`）
+  并在扩展时重算；没有改成“从高地址端向下放”，因为那会动 `winlayout` 的
+  既有断言。代价是扩展前必须扫描窗口表，确认新下沿高于最高数据窗 + 4 KiB；
 - 栈区扩展：容量按 16 KiB 步进；扩展前确认新范围没有被数据窗占用。收缩：
   当最外侧的 16 KiB 全部空闲时退回，释放的地址空间重新可被数据窗使用；
   这两个操作都在 `proc_lock` 下，和栈窗的分配/释放一起；
@@ -95,9 +96,10 @@ stack       当前线程的栈窗
 
 | 端口 | 行为 |
 |---|---|
-| rv32（C3、rp2350rv） | 默认拒绝；栈窗按页对齐（rp2350rv 要求页粒度） |
-| rp2350 ARM | 默认拒绝；删除 landing，MSTKERR 直接杀并报告 |
-| x86 / RP2040 | 无硬件边界：栈区布局照用，保留 `plat_user_stack_guard()`（canary + syscall 时的 `sp` 检查）。它只是检测：下一次 syscall 时发现 sp 在栈外或 canary 被踩，然后杀任务；**不能阻止**一次大帧（`sub sp, 16K`）直接跳过栈窗写进邻栈。构建期帧审计能拦住“单帧 ≥ 栈”，但拦不住“栈快满时再来一个中等帧”。所以这两个端口的栈隔离是**尽力而为**，不是保证；可以选配每栈 4 KiB 间隔来提高门槛，但那仍不是边界 |
+| C3（rv32 TOR） | 已启用；默认拒绝；栈块按 4 KiB 对齐，窗口外的栈段用 TOR 精确描述 |
+| RP2350 Hazard3（rv32 NAPOT） | 已启用；栈块是自然对齐的 2 的幂，一个 NAPOT 条目即可；`stack_align` 不再约束窗口顶 |
+| RP2350 M33（PMSAv8） | 已启用；栈块一个区域；保留 32 B landing（异常压栈失败时才有帧），guard 在块下；MSTKERR 现在也提 `declare TOS_STACK` |
+| x86 / RP2040 | 未启用（`PLAT_STACK_AREA = 0`）：栈仍在数据窗，保留 `plat_user_stack_guard()`（canary + syscall 时的 `sp` 检查）。它只是检测：下一次 syscall 时发现 sp 在栈外或 canary 被踩，然后杀任务；**不能阻止**一次大帧直接跳过栈窗写进邻栈。所以这两个端口的栈隔离是**尽力而为**，不是保证 |
 
 > x86/RP2040 的软件守卫与栈区方案并不冲突：即使栈不在堆里，分工仍是
 > “canary + sp 检查发现漂移，硬件不提供的事不做承诺”。

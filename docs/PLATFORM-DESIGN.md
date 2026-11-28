@@ -198,6 +198,13 @@ x86 关闭分页后：内核与用户共享 4 GiB 平坦空间，ring 3 仍能�
 
 ### 5.1 RV32 的 PMP 分段
 
+> **2026-11-28：C3 和 RP2350（ARM + RV32）的栈已搬到用户区顶部的栈区。**
+> 本节和 5.2 描述的是 `PLAT_STACK_AREA == 0` 的旧布局（栈在窗口顶端，
+> `heap_end = stack_low - guard`）。有栈区时，数据窗只含 image + heap，
+> 栈是窗口外的一个独立块，段列表按地址排序后是 code / data / stack；
+> PMP/MPU 的形状不变，只是 `stack_low` 来自栈区块而不是窗口顶。
+> 设计、增长/缩回和验收见 [`STACK-AREA-DESIGN.md`](STACK-AREA-DESIGN.md)。
+
 RISC-V 对每次 U 模式访问都查 PMP，M 模式在没置 lock 位时不受约束——所以内核仍然
 是那个平坦模型，只有用户侧被切开。`plat_task_protect()` 为**当前要跑的任务**写
 4 个条目（`pmpcfg0`），切换时重写、`sbrk` 时也跟着更新：

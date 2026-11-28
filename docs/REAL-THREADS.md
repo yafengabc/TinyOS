@@ -157,6 +157,11 @@ QEMU/TCG 的绝对值没有参考意义（`getpid` 7.5 µs 里绝大部分是 TC
 - **回收**：`thread_join`、`thread_exit` 和进程退出都走 `proc_retire_locked()`
   归还栈块；最下面的 16 KiB 全空时栈区缩回初始大小。`kthreadtest` 的
   14 个 4 KiB 槽、200 次 churn 和重复 `threadbench` 都验证了复用。
+- **RP2350**：`PLAT_STACK_AREA` 在 `rp2350-generic`（M33，PMSAv8）和
+  `rp2350rv-generic`（Hazard3，NAPOT）两个 ISA baseline 里都是 16 KiB，
+  具体板子（`rpi-pico2`、`atk-*`）通过 `base =` 继承，不在自己的
+  `board.conf` 里写。M33 保留 32 B landing 供异常压栈；Hazard3 的栈块
+  是一个自然对齐的 NAPOT 条目。C3 已实机，RP2350 待上板 T3。
 - **观测**：`SYS_STACKINFO`（`struct stackarea`）给出 reserved/live/peak 和
   活动块数；`free` 用它在内存表里加一行 `stack area`（没有栈区的板子不打印）。
   `kthreadtest` 的 1000 次 4K/16K 混合 create/join 用这组数字检查

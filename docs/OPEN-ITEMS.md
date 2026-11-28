@@ -1388,12 +1388,14 @@ x86/RP2040 上这是唯一的栈边界，所以 `user/lib.h` 与 `configs/x86-th
 x86/RP2040 保留 canary 但只能尽力而为（大帧仍可跳进邻栈），且线程栈指针不再
 能跨线程传递。
 
-状态：**C3 已实现并实机验收**（`PLAT_STACK_AREA = 16 KiB`，按 16 KiB 增长/收缩；
-主线程 + kthread 栈；`ps` 的 `wink` 是数据窗）。C3 默认镜像 `accept.py` 42/42，
-kthreads 镜像 `kthreadtest`/`prodcons`/`threadbench` 全过；ARM QEMU 的无栈区回退、
-rv32/rv32smp QEMU kthreads 也全过。`SYS_STACKINFO` + `free` 的 `stack area`
-行给出 reserved/live/peak；`kthreadtest` 的 1000 次 4K/16K 混合 create/join
-在 C3 上回到基线。仍缺：
+状态：**C3 已实机验收，RP2350 已移植待上板**（`PLAT_STACK_AREA` 是 chip/ISA
+baseline 的事实，初始 16 KiB，按 16 KiB 增长/收缩；具体板子 `base =` 继承）。
+C3 默认镜像 `accept.py` 42/42，kthreads 镜像
+`kthreadtest`/`prodcons`/`threadbench` 全过；`SYS_STACKINFO` + `free` 的
+`stack area` 行给出 reserved/live/peak；1000 次 4K/16K 混合 create/join 回到
+基线。RP2350 的 M33（PMSAv8）和 Hazard3（NAPOT）已构建，C3 的 PMP 映射和
+Host harness 已过；**RP2350 的 T3/T4 等用户上板**（`NOT RUN`）。仍缺：
 
-- RP2040/Pico 2 的栈区与 T3/T4（未接板，`NOT RUN`）；
-- ARM 的 landing 删除与 MPU 形状（目前 `PLAT_STACK_AREA = 0`，走旧路）。
+- RP2040 的栈区与 T3/T4（按计划最后做；`PLAT_STACK_AREA = 0` 旧路）；
+- x86 的栈区（没有 MMU，canary 是当前模型，暂不打算开）；
+- RP2350 上板后 `deep 3`/`prot heap`/`prot stack`/`kthreadtest` 的实测记录。
