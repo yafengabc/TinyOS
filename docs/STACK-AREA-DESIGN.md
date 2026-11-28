@@ -57,8 +57,10 @@ stack       当前线程的栈窗
 - 主线程的栈也在栈区，和 worker 一样，不再是“数据窗顶部”；
 - 线程切换：只重写 **stack 这一条**（数据/代码不变）；
 - 进程切换：整表重编程（和现在一样）；
-- 删除 guard 区域和 ARM 的 landing 条：异常压栈失败就是 MSTKERR，直接杀；
-  不再有“增长”，landing 没有存在意义。
+- **ARM 的 landing 只留硬件帧（32 B）**：异常压栈失败就是 MSTKERR，直接杀；
+  不再有“增长”，0xF00 的旧 strip 没有存在意义。栈区下这个 strip 会直接写进
+  下一块栈（M33 实测 `deep 4` 到 ~7.33 KiB 才被杀，邻栈已被踩），所以
+  `ARM_STACK_LANDING` 从 0xF00 缩到 `ARM_HW_SIZE`，其余 hole 全部是 guard。
 
 ## 4. 生命周期与回收
 
@@ -130,7 +132,8 @@ stack       当前线程的栈窗
 - **窗口放置策略**：实际实现选择了“`win_alloc` 的上界跟着栈区下沿走”
   （没有固定 headroom，也没有改成从高地址端向下放）。增长时扫描窗口表，
   只在新下沿仍高于最高数据窗 + 4 KiB 时扩；缩小后地址空间重新可被数据窗使用；
-- ARM 异常诊断变化（没有 landing 就没有故障帧）：还没做，只有 C3 启用；
+- ARM 异常诊断变化：RP2350 M33 已做。landing 从 0xF00 缩到 32 B（旧值在
+  栈区下会写穿相邻栈），MSTKERR 和普通 guard fault 都提 `TOS_STACK` 并杀；
 - x86/RP2040 需要两套策略，不能“删掉所有 guard”：还没做，`PLAT_STACK_AREA`
   仍为 0；
 - 属于窗口模型的大改；C3 实机已跑，RP2040/Pico 2 的 T3 未接板，是 `NOT RUN`。

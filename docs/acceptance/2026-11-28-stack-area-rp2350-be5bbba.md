@@ -111,6 +111,16 @@ python scripts/rp2350/accept33.py --image rpi-pico2-rv32-smp \
   `window map degraded`；M33 的 `[mpu]` 行 region 数不应变成 1（那表示
   退化到整窗 RWX）。
 
+## 上板反馈（2026-11-28，M33 单核）
+
+第一次 `rpi-pico2`（M33 UP）上板时 `deep 3` 没被拦到：旧的
+`ARM_STACK_LANDING = 0xF00` 是隐式增长时代的“栈下空洞可写条”，在栈区布局里
+它下面就是**下一块栈**。`deep 4` 写到约 **7.33 KiB** 才撞上 256 B 的 guard，
+此时相邻栈已经被踩。修复：landing 缩到 `ARM_HW_SIZE`（32 B，只够异常帧），
+其余全部是 guard；更深的越界走 MSTKERR，仍然带 `declare TOS_STACK` 杀。
+**单核和 SMP 的 T3 证据都要在修复后的 commit 上重跑**；本卡先前的
+“RP2350 NOT RUN” 不变，直到新证据进来。
+
 ## 没验证什么
 
 - RP2350 的 M33/Hazard3 **没有 QEMU 覆盖**（qemu mps2 是 M3，rv32 virt 是

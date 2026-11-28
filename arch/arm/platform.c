@@ -1028,17 +1028,20 @@ void plat_spin_release(volatile int *v)
 /* Top slice of the guard hole that user mode MAY write.  On Cortex-M an
  * exception pushes its frame onto PSP, so a stack that has run past its
  * bottom makes the exception entry itself fault (MSTKERR, cfsr=0x92) before
- * any fault handler can look at it - and with the push refused, there is no
- * frame to return to.  Letting the first few bytes below stack_low stay
- * writable means the push succeeds; the task then reaches its next syscall,
- * where process_stack_guard() sees sp outside the stack and grows it.
+ * any fault handler can look at it.  Letting the hardware frame (32 bytes)
+ * land below stack_low means a fault just past the bottom still reaches the
+ * handler with a usable frame; a deeper overrun gets MSTKERR and the
+ * dedicated kill path, which is fine now that there is no growth to give it
+ * a frame for.
  *
- * The strip is 0xF00 of the 4 KiB hole: deep's 2 KiB frame plus the exception
- * push needs more than the old 2.5 KiB when the second growth has nowhere to
- * come from.  The remaining 256 B at the bottom stays MPU_ATTR_GUARD, which
- * is what keeps prot heap (brk+64, near the bottom of the hole) and prot
- * stack faulting. */
-#define ARM_STACK_LANDING 0xF00u
+ * This used to be 0xF00: the old layout had the stack's whole 4 KiB hole
+ * below it, so the strip was free space the removed stack growth could use.
+ * With PLAT_STACK_AREA the bytes below a stack block belong to the next
+ * block (or the 4 KiB hole), and a 0xF00 strip let a 2 KiB frame write
+ * through it into a neighbour before the 256-byte guard stopped it (measured
+ * on the Pico 2 M33: deep 4 corrupted the adjacent stack at ~7.33 KiB).
+ * Keep only the frame, and let guard(7) cover the rest. */
+#define ARM_STACK_LANDING ARM_HW_SIZE
 
 static void mpu_region(uint32_t n, uint32_t base, uint32_t size, uint32_t attr)
 {
