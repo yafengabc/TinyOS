@@ -77,6 +77,44 @@ func TestBoardLayering(t *testing.T) {
 		t.Errorf("rpi-pico2 carries %v, want only board_data.c", got)
 	}
 
+	/* The stack area is silicon: PLAT_APP_MAX, the protection unit and the
+	 * RAM top decide it, so every board of that chip inherits it from the
+	 * baseline.  A concrete board that defines PLAT_STACK_AREA in layout.c,
+	 * or writes stack_area in its own board.conf, has started a per-board
+	 * fork again. */
+	boards, err := os.ReadDir(filepath.Join(root, "board"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range boards {
+		if !e.IsDir() {
+			continue
+		}
+		bc, err := LoadBoardConfig(root, e.Name())
+		if err != nil {
+			continue
+		}
+		/* Baselines have no base; an ISA overlay (rp2350rv-generic) keeps a
+		 * base but calls itself generic-* and owns the RISC-V layout.c.  A
+		 * concrete board is the one that must not carry silicon facts. */
+		if bc.Base == "" || strings.HasPrefix(bc.Variant, "generic-") {
+			continue
+		}
+		if data, err := os.ReadFile(filepath.Join(root, "board", e.Name(), "layout.c")); err == nil &&
+			strings.Contains(string(data), "PLAT_STACK_AREA") {
+			t.Errorf("board/%s/layout.c defines PLAT_STACK_AREA; it belongs to the chip/ISA baseline",
+				e.Name())
+		}
+		if data, err := os.ReadFile(filepath.Join(root, "board", e.Name(), "board.conf")); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "stack_area") {
+					t.Errorf("board/%s/board.conf sets stack_area; it belongs to the chip/ISA baseline",
+						e.Name())
+				}
+			}
+		}
+	}
+
 	// The chip baselines own the port: every non-data C file of the tree's
 	// RP2350 support must live in one of them.
 	for _, need := range []struct{ dir, file string }{

@@ -19,12 +19,14 @@ void board_config_check(void)
 
     if (PLAT_APP_GRAIN != TOS_APP_GRAIN ||
         PLAT_STACK_BYTES != TOS_APP_STACK ||
-        PLAT_HEAP_GUARD != TOS_APP_GUARD) {
-        panic("board_config.h (%s) disagrees with layout.c: grain %u/%u stack %u/%u guard %u/%u",
+        PLAT_HEAP_GUARD != TOS_APP_GUARD ||
+        PLAT_STACK_AREA != TOS_APP_STACK_AREA) {
+        panic("board_config.h (%s) disagrees with layout.c: grain %u/%u stack %u/%u guard %u/%u area %u/%u",
               TOS_BOARD_NAME,
               (unsigned)TOS_APP_GRAIN, (unsigned)PLAT_APP_GRAIN,
               (unsigned)TOS_APP_STACK, (unsigned)PLAT_STACK_BYTES,
-              (unsigned)TOS_APP_GUARD, (unsigned)PLAT_HEAP_GUARD);
+              (unsigned)TOS_APP_GUARD, (unsigned)PLAT_HEAP_GUARD,
+              (unsigned)TOS_APP_STACK_AREA, (unsigned)PLAT_STACK_AREA);
     }
     /* C4 seam: the allocator's domain is a view over the same layout. */
     if (!d || d->base != PLAT_APP_BASE ||

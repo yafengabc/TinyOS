@@ -1117,11 +1117,11 @@ RV32 内核（`.text` 26,564 + `.rodata` 2,500 = 29,064 B 代码/常量，`.bss`
 | LBA | 内容 |
 | --- | --- |
 | 0 | 引导扇区（512 字节） |
-| 1 – 202 | 内核镜像（最多 101 KiB） |
-| 203 – 782 | littlefs 分区（600 扇区 = 300 KiB） |
+| 1 – 203 | 内核镜像（最多 101.5 KiB） |
+| 204 – 1107 | littlefs 分区（904 扇区 = 452 KiB） |
 
 引导扇区只读内核（`int 13h`），**不再加载文件系统**；内核起来后由 ATA 驱动按需读盘。
-LBA 常量由板级提供（`board/pc/layout.c` 的 `PLAT_LFS_LBA = 203`），
+LBA 常量由板级提供（`board/pc/layout.c` 的 `PLAT_LFS_LBA = 204`），
 `boot/stage1.S` 与 `internal/build/build.go` 的 `KernelSectors` 需保持同步；
 构建时对内核镜像大小和 `.bss` 结尾都有检查。
 
@@ -1305,7 +1305,7 @@ QEMU 退出即丢失（真机换成 SPI flash 驱动即可持久化）。
   堆峰值只剩 littlefs 的缓存与临时缓冲区（C3 实测 768 B，跑完 `py` 1 024 B）。
 - 内核栈每 CPU 16 KiB（x86 32 KiB），栈底哨兵见「内核栈守卫」。
 - 没有浮点/SIMD（`-mno-sse -mno-80387`）。
-- 引导扇区固定读取 202 个扇区（`internal/build/build.go` 的 `KernelSectors`）。改内核大小时
+- 引导扇区固定读取 203 个扇区（`internal/build/build.go` 的 `KernelSectors`）。改内核大小时
   还要同步改 `boot/stage1.S` 的 `KERNEL_SECTORS` 和 `board/pc/layout.c` 的 `PLAT_LFS_LBA`——
   这两处 Go 代码看不见，所以每次构建都会去源码里读一遍做交叉校验（`internal/build/layout.go`），
   对不上直接报错而不是让镜像悄悄截断或让 littlefs 挂到内核尾巴上。

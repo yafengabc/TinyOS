@@ -22,13 +22,13 @@ const (
 	// KernelSectors / RamdiskSectors must match boot/stage1.S and the
 	// kernel layout.  The kernel image on disk only holds .text/.rodata/
 	// .data; .bss is zeroed by kernel/entry.S.
-	KernelSectors = 202 // 101 KiB, loaded at 0x10000
+	KernelSectors = 203 // 101.5 KiB, loaded at 0x10000
 	BootSectors   = 1
 
 	// The littlefs partition starts right after the kernel image.  This
 	// LBA is what the kernel's ATA driver mounts; keep it in sync with
 	// PLAT_LFS_LBA in board/pc/layout.c.
-	LFSPartitionLBA = BootSectors + KernelSectors // = 203
+	LFSPartitionLBA = BootSectors + KernelSectors // = 204
 
 	// Sanity bound: the kernel (image + .bss, including the heap arena) must
 	// end below 0x400000.  There is no frame allocator any more, so this is
@@ -129,9 +129,10 @@ type Target struct {
 	// Window geometry, filled from board.conf by applyBoard().  Keeping it
 	// out of the literals is what lets a new board touch only its conf and
 	// layout.c.
-	winGrain int
-	winStack int
-	winGuard int
+	winGrain     int
+	winStack     int
+	winGuard     int
+	winStackArea int   // PLAT_STACK_AREA; 0 = no area (old layout)
 
 	// CPUs is how many harts this target is built for.  0 and 1 mean the
 	// same thing - a uniprocessor, with no TOS_MAX_CPUS define at all, so
@@ -161,6 +162,13 @@ type Target struct {
 // Callers must let ensureBoardConfig() run first (Build does).
 func (t Target) WindowGeometry() (grain, stack, guard int) {
 	return t.winGrain, t.winStack, t.winGuard
+}
+
+// WindowStackArea is the chip baseline's PLAT_STACK_AREA (0 = the old layout
+// with the stack inside the window).  Like the other geometry values it is
+// checked against layout.c by geometry_test.go.
+func (t Target) WindowStackArea() int {
+	return t.winStackArea
 }
 
 // windowNotes is what windowNote() finds in a linked user ELF.
@@ -268,13 +276,23 @@ func (b *Builder) checkWindow(prog string, data []byte) error {
 	// The note fields come from an untrusted ELF.  Do the sum in uint64:
 	// uint32 addition here used to wrap and let an image with a near-4 GiB
 	// heap note pass the build-time check.
-	need := uint64(w.span) + uint64(w.stack) + uint64(w.heap) + uint64(guard)
+	//
+	// On a stack-area board the stack is its own region, so the data window
+	// is image + heap; the stack still has to fit the area at exec time.
+	need := uint64(w.span) + uint64(w.heap)
+	guardPart := uint64(0)
+	stackPart := uint64(0)
+	if b.Target.WindowStackArea() == 0 {
+		stackPart = uint64(w.stack)
+		guardPart = uint64(guard)
+		need += stackPart + guardPart
+	}
 	if need <= limit {
 		return nil
 	}
 	rounded := (need + uint64(grain) - 1) / uint64(grain) * uint64(grain)
 	return fmt.Errorf("%s: %s no longer fits: image %d + stack %d + heap %d + guard %d = %d bytes, so it would take a %d KiB window",
-		prog, what, w.span, w.stack, w.heap, guard, need, rounded/1024)
+		prog, what, w.span, stackPart, w.heap, guardPart, need, rounded/1024)
 }
 
 type Builder struct {
@@ -978,6 +996,7 @@ func (b *Builder) writeBuildConfig() error {
 		"check-grain " + fmt.Sprintf("%d bytes", grain),
 		"check-stack " + fmt.Sprintf("%d bytes", stack),
 		"check-guard " + fmt.Sprintf("%d bytes", guard),
+		"check-stack-area " + fmt.Sprintf("%d bytes", b.Target.WindowStackArea()),
 		"user_opt    " + userOpt,
 		"features    " + strings.Join(feats, ","),
 		"user-defines " + strings.Join(b.userDefines(), " "),

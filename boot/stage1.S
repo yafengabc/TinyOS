@@ -28,7 +28,7 @@
  * reads a fixed number of sectors and the rest of the image is zero padding.
  */
 #define KERNEL_LBA      1
-#define KERNEL_SECTORS  202            /* 101 KiB: 0x10000 .. 0x29400 */
+#define KERNEL_SECTORS  203            /* 101.5 KiB: 0x10000 .. 0x29600 */
 #define KERNEL_SEG      0x1000         /* 0x1000 << 4 == 0x10000 */
 
     .section .text.entry, "ax"

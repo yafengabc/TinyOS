@@ -59,6 +59,14 @@ type BoardConfig struct {
 	WindowGrain     int
 	WindowStack     int
 	WindowGuard     int
+	/* WindowStackArea is the chip baseline's optional PLAT_STACK_AREA: the
+	 * initial task-stack area in bytes, 0 when the port keeps the stack in
+	 * the data window.  It is a chip/ISA fact, so concrete boards inherit
+	 * it through Bases and must not write it in their own board.conf.
+	 * WindowStackAreaSet distinguishes an explicit `stack_area = 0` (an ISA
+	 * overlay that turns off an area its base has) from an absent key. */
+	WindowStackArea    int
+	WindowStackAreaSet bool
 	/* WindowStackAlign: the port puts the stack in its own aligned region, so
 	 * a requested stack must divide the grain (kernel stack_request_ok).
 	 * Declared here so the build can refuse an image the kernel would reject
@@ -281,6 +289,35 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 	if bc.WindowGuard, err = windowSize("guard"); err != nil {
 		return nil, err
 	}
+	/* stack_area is optional and may be 0 (no area).  It lives in the chip
+	 * baseline, not in a concrete board: the protection unit and the RAM
+	 * top decide it, and every board of that silicon inherits it through
+	 * this merge. */
+	if raw := strings.TrimSpace(w["stack_area"]); raw != "" {
+		v, perr := parseSize(raw)
+		if perr != nil || v < 0 {
+			return nil, fmt.Errorf("%s: invalid [window] stack_area %q",
+				relName(root, path), raw)
+		}
+		bc.WindowStackArea = v
+		bc.WindowStackAreaSet = true
+	} else {
+		/* Concrete boards carry only their wiring; the area is a chip/ISA
+		 * fact and comes from the nearest base that states it.  The chain
+		 * is nearest-first, so an ISA overlay (rp2350rv-generic) wins over
+		 * the chip baseline. */
+		for _, base := range bc.Bases {
+			b2, err := LoadBoardConfig(root, base)
+			if err != nil {
+				return nil, fmt.Errorf("%s: base = %q: %w",
+					relName(root, path), base, err)
+			}
+			if b2.WindowStackAreaSet {
+				bc.WindowStackArea = b2.WindowStackArea
+				break
+			}
+		}
+	}
 	if raw := strings.TrimSpace(w["stack_align"]); raw != "" {
 		v, perr := parseOnOff(raw)
 		if perr != nil {
@@ -308,6 +345,21 @@ func LoadBoardConfig(root, board string) (*BoardConfig, error) {
 		return nil, fmt.Errorf("%s: [window] grain %d is not a multiple of stack %d, "+
 			"and this board sets stack_align (the stack would drift off its own alignment)",
 			relName(root, path), bc.WindowGrain, bc.WindowStack)
+	}
+	/* Mirror layout_check()'s stack-area rules.  A wrong value used to be a
+	 * panic at boot, after a flash; the same numbers are cheap to check here
+	 * because they are compile-time facts. */
+	if bc.WindowStackArea != 0 {
+		const step = 4 * 4096
+		const max = 32 * 4096
+		if bc.WindowStackArea < step || bc.WindowStackArea%step != 0 {
+			return nil, fmt.Errorf("%s: [window] stack_area %d must be a multiple of %d bytes, at least %d",
+				relName(root, path), bc.WindowStackArea, step, step)
+		}
+		if bc.WindowStackArea > max {
+			return nil, fmt.Errorf("%s: [window] stack_area %d exceeds %d bytes (the buddy bitmap)",
+				relName(root, path), bc.WindowStackArea, max)
+		}
 	}
 	return bc, nil
 }
@@ -388,6 +440,7 @@ func (t *Target) applyBoard(bc *BoardConfig) error {
 	t.winGrain = bc.WindowGrain
 	t.winStack = bc.WindowStack
 	t.winGuard = bc.WindowGuard
+	t.winStackArea = bc.WindowStackArea
 	return nil
 }
 

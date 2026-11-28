@@ -88,7 +88,8 @@ var boardSchema = iniSchema{
 			"features": true, "flash_bytes": true, "lfs_offset": true,
 		},
 		"user":   {"exclude": true, "rvc": true},
-		"window": {"grain": true, "stack": true, "guard": true, "stack_align": true},
+		"window": {"grain": true, "stack": true, "guard": true,
+			"stack_align": true, "stack_area": true},
 	},
 }
 

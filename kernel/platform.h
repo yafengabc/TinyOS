@@ -31,6 +31,13 @@ extern uint8_t __app_base[];
 #define PLAT_APP_BASE ((uint32_t)__app_base)
 extern const uint32_t PLAT_APP_MAX;
 
+/* Optional initial task-stack area at the top of [APP_BASE, APP_MAX), in
+ * bytes; 0 means the stack lives inside each data window (the old layout).
+ * The weak default is 0 in kernel/process.c and a chip baseline overrides it
+ * in layout.c; board_config.h carries the same value for board_check.  The
+ * value is the *initial* reserve - the area grows in 16 KiB steps. */
+extern const uint32_t PLAT_STACK_AREA;
+
 /* Allocation granularity of task windows inside [APP_BASE, APP_MAX).
  *
  * A window is one task's slice of the flat address space: image at the
